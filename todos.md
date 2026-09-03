@@ -8,6 +8,8 @@ Planned, not started. One entry per feature; each gets its own design doc under
 - [x] **Static water** — done 2026-09-03 (`docs/superpowers/specs/2026-09-03-static-water-design.md`).
 - [x] **Spreading water** — done 2026-09-03 (`docs/superpowers/specs/2026-09-03-spreading-water-design.md`); one `WaterChunk` actor per chunk, pull-based levels, edge mirrors.
 
+- [x] **Hotbar + inventory + hold-to-break** — done 2026-09-03 (`docs/superpowers/specs/2026-09-03-hotbar-inventory-design.md`).
+
 ## Engine
 
 - [ ] **Main-thread pinning runtime patch** (GAPS.md G15) — chip spawned, in progress in a separate session.

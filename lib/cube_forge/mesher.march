@@ -32,8 +32,8 @@ mod CubeForge.Mesher do
       |> vert(x3, y3, z3, 0.0, 1.0, layer, shade)
   end
 
-  doc "Texture-array layer for a block id: water is layer 1, everything else layer 0."
-  fn layer_of(id : Int) : Float do if C.is_water(id) do 1.0 else 0.0 end end
+  doc "Texture-array layer for a block id (see Texture.layer_for)."
+  fn layer_of(id : Int) : Float do CubeForge.Texture.layer_for(id) end
 
   -- Opaque and water meshes of one chunk. A two-field variant, never a tuple (GAPS.md G29).
   type Meshes = Meshes(CubeForge.F32Buf.F32Buf, CubeForge.F32Buf.F32Buf)

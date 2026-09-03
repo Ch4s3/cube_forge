@@ -26,6 +26,7 @@ mod CubeForge do
   alias CubeForge.Outline as Outline
   alias CubeForge.Water as Water
   alias CubeForge.ChunkMesh as CM
+  alias CubeForge.Inventory as Inv
 
   fn ms(seconds : Float) : String do float_to_string(seconds *. 1000.0) ++ "ms" end
 
@@ -37,7 +38,32 @@ mod CubeForge do
   -- selected block id, water actor pids (Array, one per chunk), per-chunk "has dirty cells" flags
   -- `p` is the water-actor Pid type: Pid(state) cannot be written in an annotation (GAPS.md G45), so it is a parameter.
   -- ... and the per-chunk section meshes
-  type Scene(p) = Scene(CubeForge.World.World, NativeIntArr, CubeForge.F32Buf.F32Buf, CubeForge.Raycast.Hit, Int, Array.PVec(p), NativeIntArr, Array.PVec(CubeForge.ChunkMesh.ChunkMesh))
+  type Scene(p) = Scene(CubeForge.World.World, NativeIntArr, CubeForge.F32Buf.F32Buf, CubeForge.Raycast.Hit, Ui, Array.PVec(p), NativeIntArr, Array.PVec(CubeForge.ChunkMesh.ChunkMesh))
+  -- inventory + hotbar buffers (untextured, textured icons) + last built HUD key
+  type Ui = Ui(CubeForge.Inventory.Inv, CubeForge.F32Buf.F32Buf, CubeForge.F32Buf.F32Buf, Int)
+  fn ui_inv(u : Ui) : CubeForge.Inventory.Inv do match u do Ui(i, _, _, _) -> i end end
+  fn ui_with_inv(u : Ui, i : CubeForge.Inventory.Inv) : Ui do match u do Ui(_, a, b, k) -> Ui(i, a, b, k) end end
+
+  -- Rebuild + upload the hotbar buffers when the inventory's HUD key changed.
+  pfn refresh_hud(u : Ui) : Ui do
+    match u do
+      Ui(inv, hb, ic, key) ->
+        let k = Inv.hud_key(inv)
+        if k == key do u
+        else
+          let hb1 = Hud.build_hotbar(hb, Inv.sel(inv), Inv.count(inv, 1), Inv.count(inv, 2), Inv.count(inv, 3), Inv.progress(inv))
+          Win.gfx_upload(252, F32Buf.storage(hb1), F32Buf.len(hb1))
+          let ic1 = if key == -1 do
+            let i1 = Hud.build_icons(ic)
+            Win.gfx_upload(251, F32Buf.storage(i1), F32Buf.len(i1))
+            i1
+          else ic end
+          Ui(inv, hb1, ic1, k)
+        end
+    end
+  end
+  pfn hud_verts(u : Ui) : Int do match u do Ui(_, hb, _, _) -> F32Buf.len(hb) / 7 end end
+  pfn icon_verts(u : Ui) : Int do match u do Ui(_, _, ic, _) -> F32Buf.len(ic) / 7 end end
   fn water_slot_base() : Int do 64 end
   fn tick_period() : Int do 10 end
 
@@ -54,7 +80,7 @@ mod CubeForge do
   -- Tell the water actor about a player edit (and its neighbour when the cell is on a border).
   pfn notify_edit(sc, x : Int, y : Int, z : Int, id : Int) do
     match sc do
-      Scene(w, counts, outline, hit, sel, pids, flags, meshes) ->
+      Scene(w, counts, outline, hit, ui, pids, flags, meshes) ->
         let n = World.side(w)
         let cx = World.floor_div16(x)
         let cz = World.floor_div16(z)
@@ -67,7 +93,7 @@ mod CubeForge do
           let f1 = NativeArray.set_int(flags, ci, 1)
           -- mirrors in the 4 neighbours: an edge cell changed
           let f2 = edge_notify(w, pids, f1, cx, cz, lx, y, lz, id)
-          Scene(w, counts, outline, hit, sel, pids, f2, meshes)
+          Scene(w, counts, outline, hit, ui, pids, f2, meshes)
         end
     end
   end
@@ -357,7 +383,7 @@ mod CubeForge do
   -- culled against the neighbour, so the neighbour's mesh changes too).
   pfn edit_block(sc, x : Int, y : Int, z : Int, id : Int) do
     match sc do
-      Scene(world, counts, outline, hit, sel, pids, flags, meshes) ->
+      Scene(world, counts, outline, hit, ui, pids, flags, meshes) ->
         let t0 = Win.time()
         let world1 = World.set_block(world, x, y, z, id)
         match remesh_cell(world1, x, y, z, counts, meshes, Chunk.new()) do
@@ -365,7 +391,7 @@ mod CubeForge do
             let t1 = Win.time()
             println((if id == 0 do "broke" else "placed" end) ++ " block at " ++ int_to_string(x) ++ "," ++ int_to_string(y) ++ "," ++ int_to_string(z)
                     ++ " — edit + section remesh " ++ ms(t1 -. t0))
-            notify_edit(Scene(world1, c1, outline, hit, sel, pids, flags, m1), x, y, z, id)
+            notify_edit(Scene(world1, c1, outline, hit, ui, pids, flags, m1), x, y, z, id)
         end
     end
   end
@@ -403,29 +429,50 @@ mod CubeForge do
       && fz < pz +. Player.half_width() && fz +. 1.0 > pz -. Player.half_width()
   end
 
-  -- Per-frame: raycast from the eye, refresh the outline, apply click edits.
-  -- [place_id] < 0 means "the selected block"; a scripted edit passes an explicit id.
-  pfn interact(sc, p : CubeForge.Player.Player, break_now : Bool, place_now : Bool, place_id : Int, new_sel : Int) do
+  -- Per-frame: raycast from the eye, refresh the outline, apply the break-hold and placement.
+  -- [break_held] is the button level (or scripted), [place_now] an edge, [new_sel] a slot 1..4 or 0.
+  -- [place_id] > 0 forces a block id for scripted edits.
+  pfn interact(sc, p : CubeForge.Player.Player, break_held : Bool, place_now : Bool, place_id : Int, new_sel : Int, dt : Float) do
     match sc do
-      Scene(world, counts, outline, _, sel0, pids, flags, meshes) ->
-        let sel = if new_sel > 0 do new_sel else sel0 end
+      Scene(world, counts, outline, _, ui0, pids, flags, meshes) ->
+        let inv0 = if new_sel > 0 do Inv.select(ui_inv(ui0), new_sel) else ui_inv(ui0) end
         let e = Player.eye(p)
         let d = Player.forward(Player.yaw(p), Player.pitch(p))
         let hit = Ray.cast(world, V.x(e), V.y(e), V.z(e), V.x(d), V.y(d), V.z(d), reach())
         let outline1 = if Ray.is_hit(hit) do Outline.build(outline, Ray.bx(hit), Ray.by_(hit), Ray.bz(hit)) else F32Buf.clear(outline) end
         if Ray.is_hit(hit) do CubeForge.Ffi.Window.gfx_upload(254, F32Buf.storage(outline1), F32Buf.len(outline1)) else () end
-        let sc1 = Scene(world, counts, outline1, hit, sel, pids, flags, meshes)
-        if break_now && Ray.is_hit(hit) do
-          edit_block(sc1, Ray.bx(hit), Ray.by_(hit), Ray.bz(hit), 0)
+        -- breaking: hold accumulates on the same target; release or a miss resets
+        let inv1 = if break_held && Ray.is_hit(hit) do Inv.hold(inv0, Ray.bx(hit), Ray.by_(hit), Ray.bz(hit), dt) else Inv.release(inv0) end
+        let sc1 = Scene(world, counts, outline1, hit, ui_with_inv(ui0, inv1), pids, flags, meshes)
+        if Inv.is_complete(inv1) do
+          let id = World.block_at(world, Ray.bx(hit), Ray.by_(hit), Ray.bz(hit))
+          let sc2 = edit_block(sc1, Ray.bx(hit), Ray.by_(hit), Ray.bz(hit), 0)
+          set_inv(sc2, Inv.release(Inv.harvest(inv1, id)))
         else if place_now && Ray.is_hit(hit) do
           let px = Ray.bx(hit) + Ray.nx(hit)
           let py = Ray.by_(hit) + Ray.ny(hit)
           let pz = Ray.bz(hit) + Ray.nz(hit)
-          let id = if place_id > 0 do place_id else sel end
-          -- water may be placed into the player's own cell; solids may not
-          if id != Chunk.water() && overlaps_player(p, px, py, pz) do sc1 else edit_block(sc1, px, py, pz, id) end
+          let forced = place_id > 0
+          let id = if forced do place_id else Inv.selected_id(inv1) end
+          let allowed = forced || Inv.can_place(inv1)
+          if !allowed do sc1
+          else if id != Chunk.water() && overlaps_player(p, px, py, pz) do sc1
+          else
+            let sc2 = edit_block(sc1, px, py, pz, id)
+            if forced do sc2 else set_inv(sc2, Inv.consume(inv1)) end
+          end end
         else sc1 end end
     end
+  end
+
+  pfn set_inv(sc, inv : CubeForge.Inventory.Inv) do
+    match sc do Scene(w, c, o, h, u, p, f, m) -> Scene(w, c, o, h, ui_with_inv(u, inv), p, f, m) end
+  end
+  pfn scene_ui(sc) : Ui do match sc do Scene(_, _, _, _, u, _, _, _) -> u end end
+  pfn scene_with_ui(sc, u : Ui) do match sc do Scene(w, c, o, h, _, p, f, m) -> Scene(w, c, o, h, u, p, f, m) end end
+  fn inv_string(sc) : String do
+    let i = ui_inv(scene_ui(sc))
+    "inv grass=" ++ int_to_string(Inv.count(i, 1)) ++ " dirt=" ++ int_to_string(Inv.count(i, 2)) ++ " stone=" ++ int_to_string(Inv.count(i, 3)) ++ " sel=" ++ int_to_string(Inv.sel(i)) ++ " progress=" ++ float_to_string(Inv.progress(i))
   end
 
   pfn scene_counts(sc) : NativeIntArr do match sc do Scene(_, c, _, _, _, _, _, _) -> c end end
@@ -515,11 +562,12 @@ mod CubeForge do
           let view1 = write_view(player1, view)
           let vp1 = M.mul_into_f32(proj, view1, vp)
           -- CF_AUTOEDIT=<frame>: scripted break at that frame and place 60 frames later (headless verification)
-          let break_now = In.button_pressed(In.button_left()) || (autoedit >= 0 && frame == autoedit)
-          let place_now = In.button_pressed(In.button_right()) || (autoedit >= 0 && frame == autoedit + 60)
-          -- scripted third step: place water 120 frames after the break
-          let place_water = (autoedit >= 0 && frame == autoedit + 120) || (autoflow >= 0 && frame == autoflow)
-          let sc0 = interact(sc, player1, break_now, place_now || place_water, if place_water do Chunk.water() else -1 end, selected_key())
+          -- scripted: hold break for 60 frames from `autoedit`, place the harvested block at +120, water at +180
+          let scripted_hold = autoedit >= 0 && frame >= autoedit && frame < autoedit + 60
+          let scripted_place = autoedit >= 0 && frame == autoedit + 120
+          let place_water = (autoedit >= 0 && frame == autoedit + 180) || (autoflow >= 0 && frame == autoflow)
+          let sc0 = interact(sc, player1, In.button(In.button_left()) || scripted_hold, In.button_pressed(In.button_right()) || scripted_place || place_water,
+                             if place_water do Chunk.water() else -1 end, if scripted_place do 1 else selected_key() end, dt)
           -- CF_AUTOFLOW: break the source again 600 frames after placing it
           let sc0b = if autoflow >= 0 && frame == autoflow + 600 do break_sources_near(sc0, player1) else sc0 end
           -- water simulation tick
@@ -531,8 +579,8 @@ mod CubeForge do
                     ++ " chunk(" ++ int_to_string(cx - 1) ++ "," ++ int_to_string(cz) ++ ")=" ++ int_to_string(scene_water_count(sc1, cx - 1, cz))
                     ++ " chunk(" ++ int_to_string(cx) ++ "," ++ int_to_string(cz - 1) ++ ")=" ++ int_to_string(scene_water_count(sc1, cx, cz - 1)))
           else () end
-          if autoedit >= 0 && (frame == autoedit - 1 || frame == autoedit + 1 || frame == autoedit + 61 || frame == autoedit + 121) do
-            println("frame " ++ int_to_string(frame) ++ " looking at " ++ scene_hit_string(sc1) ++ "; block there = " ++ int_to_string(match sc1 do Scene(w, _, _, h, _, _, _, _) -> World.block_at(w, Ray.bx(h), Ray.by_(h), Ray.bz(h)) end))
+          if autoedit >= 0 && (frame == autoedit - 1 || frame == autoedit + 20 || frame == autoedit + 40 || frame == autoedit + 61 || frame == autoedit + 121 || frame == autoedit + 181) do
+            println("frame " ++ int_to_string(frame) ++ " looking at " ++ scene_hit_string(sc1) ++ "; block there = " ++ int_to_string(match sc1 do Scene(w, _, _, h, _, _, _, _) -> World.block_at(w, Ray.bx(h), Ray.by_(h), Ray.bz(h)) end) ++ "; " ++ inv_string(sc1))
           else () end
           if autoswim && frame % 20 == 0 && frame <= 400 do
             println("frame " ++ int_to_string(frame) ++ " y=" ++ float_to_string(V.y(Player.position(player1))) ++ " in_water=" ++ (if Player.in_water(player1, scene_world(sc1)) do "true" else "false" end) ++ " eye_in_water=" ++ (if Player.eye_in_water(player1, scene_world(sc1)) do "true" else "false" end))
@@ -545,6 +593,9 @@ mod CubeForge do
           if Player.eye_in_water(player1, scene_world(sc1)) do CubeForge.Ffi.Window.gfx_draw_hud(253, 6, true) else () end
           let fps1 = tick_fps(fps, now)
           Win.gfx_draw_hud(255, fps_hud_verts(fps1), false)
+          let sc2 = scene_with_ui(sc1, refresh_hud(scene_ui(sc1)))
+          Win.gfx_draw_hud(252, hud_verts(scene_ui(sc2)), false)
+          Win.gfx_draw_hud(251, icon_verts(scene_ui(sc2)), true)
           if frame == dump_frame do
             if dump_path != "" do
               if Win.gfx_dump_bmp(dump_path) == 0 do println("dump failed") else () end
@@ -560,7 +611,7 @@ mod CubeForge do
           if frame == 200 do
             println("live-object delta over frames 100..200: " ++ int_to_string(Win.live_allocs() - sample1) ++ " (" ++ int_to_string((Win.live_allocs() - sample1) / 100) ++ " per frame)")
           else () end
-          frame_loop(Frame(frame + 1, now, player1, sample1, view1, vp1), k, sc1, nchunks, proj, fps1)
+          frame_loop(Frame(frame + 1, now, player1, sample1, view1, vp1), k, sc2, nchunks, proj, fps1)
         end
         end
     end
@@ -741,7 +792,7 @@ mod CubeForge do
         let tw0 = Win.time()
         let pids = Array.from_list(spawn_water(n * n - 1, n, seed, Nil))
         println("spawned " ++ int_to_string(n * n) ++ " water actors in " ++ ms(Win.time() -. tw0) ++ " (loads run asynchronously)")
-        let scene = Scene(world, counts, F32Buf.new(256), Ray.miss(), 3, pids, NativeArray.make_int(n * n, 0), Array.from_list(meshes))
+        let scene = Scene(world, counts, F32Buf.new(256), Ray.miss(), Ui(Inv.new(), F32Buf.new(2048), F32Buf.new(256), -1), pids, NativeArray.make_int(n * n, 0), Array.from_list(meshes))
         let fps0 = Fps(t4, 0, 0, F32Buf.new(4096))
         match frame_loop(Frame(0, t4, player, 0, NativeArray.make_float(16, 0.0), NativeArray.make_f32(16, 0.0)), knobs, scene, n * n, proj, fps0) do
           Frame(frames, _, p, _, _, _) ->

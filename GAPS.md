@@ -720,3 +720,15 @@ order of value per line, each with a probe already in `probes/`:
 - **Would need:** a linear "borrow out / put back" API on `Array`, or a real
   uniquely-owned mutable buffer type that persistent containers can hold by
   move.
+
+---
+
+## Hotbar / inventory notes
+
+### G55. Nothing new broke — but every "small UI feature" repeats the same three tolls
+- The inventory is an 8-field variant with a hand-written accessor per field
+  (no records, G28; no field names on variants), the hotbar rebuild has to be
+  threaded through a `Ui` wrapper variant so the buffers stay uniquely owned
+  (G54), and a scripted test needs an env knob because there is no way to
+  drive input or read state from `forge test` (G49). None of it is hard; all
+  of it is boilerplate a record type and an inspectable actor would remove.

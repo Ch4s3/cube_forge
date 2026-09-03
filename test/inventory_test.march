@@ -1,0 +1,35 @@
+-- Inventory rules and break-hold progress.
+mod CubeForge.Test.Inventory do
+
+  needs IO.Spawn
+  needs IO.Console
+  import Test
+  alias CubeForge.Inventory as Inv
+  alias CubeForge.Chunk as C
+
+  describe "Inventory" do
+    test "starts empty with slot 1 selected and cannot place solids" do
+      let i = Inv.new()
+      Test.assert_eq_int(Inv.count(i, 1) + Inv.count(i, 2) + Inv.count(i, 3), 0, "empty")
+      Test.assert_false(Inv.can_place(i), "no grass to place")
+      Test.assert_true(Inv.can_place(Inv.select(i, 4)), "water is always placeable")
+    end
+    test "harvest adds, consume removes, water yields nothing" do
+      let i = Inv.harvest(Inv.harvest(Inv.harvest(Inv.new(), 3), 3), C.water())
+      Test.assert_eq_int(Inv.count(i, 3), 2, "two stone")
+      let j = Inv.consume(Inv.select(i, 3))
+      Test.assert_eq_int(Inv.count(j, 3), 1, "one left")
+      Test.assert_eq_int(Inv.count(Inv.consume(Inv.select(j, 4)), 3), 1, "consuming water touches nothing")
+    end
+    test "hold accumulates on one target and resets on another" do
+      let i = Inv.hold(Inv.hold(Inv.new(), 1, 2, 3, 0.2), 1, 2, 3, 0.1)
+      Test.assert_true(Inv.progress(i) > 0.74 && Inv.progress(i) < 0.76, "0.3 s of 0.4 s")
+      Test.assert_false(Inv.is_complete(i), "not done yet")
+      let j = Inv.hold(i, 9, 9, 9, 0.1)
+      Test.assert_true(Inv.progress(j) < 0.26, "new target restarts")
+      Test.assert_true(Inv.is_complete(Inv.hold(Inv.hold(j, 9, 9, 9, 0.2), 9, 9, 9, 0.2)), "completes at 1.0")
+      Test.assert_true(Inv.progress(Inv.release(j)) == 0.0, "release resets")
+    end
+  end
+
+end
