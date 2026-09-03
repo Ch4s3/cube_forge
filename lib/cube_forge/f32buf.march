@@ -1,0 +1,84 @@
+-- F32Buf — a uniquely-owned growable buffer of f32 with amortized O(1) push.
+--
+-- Stdlib candidate. NativeArray gives a fixed-length flat array whose `set`
+-- is FBIP in place at rc == 1 (runtime/march_runtime.c native_f32_arr_set), but
+-- nothing in the stdlib grows one. This wraps (storage, len) and doubles.
+--
+-- Representation note (measured, see GAPS.md): a single-constructor VARIANT is
+-- used rather than a record on purpose. `F32Buf(d, n) -> F32Buf(d', n + 1)`
+-- gets Perceus reuse (0 allocations per push); the equivalent record update
+-- `{ b with len: n + 1 }` allocated twice per push in the probe.
+mod CubeForge.F32Buf do
+
+  type F32Buf = F32Buf(NativeF32Arr, Int)
+
+  doc "A buffer with room for [cap] floats and length 0."
+  fn new(cap : {Int | _ >= 1}) : F32Buf do
+    F32Buf(NativeArray.make_f32(cap, 0.0), 0)
+  end
+
+  doc "Number of floats pushed so far."
+  fn len(b : F32Buf) : Int do
+    match b do
+      F32Buf(_, n) -> n
+    end
+  end
+
+  doc "Current capacity in floats."
+  fn capacity(b : F32Buf) : Int do
+    match b do
+      F32Buf(d, _) -> NativeArray.length_f32(d)
+    end
+  end
+
+  doc "The backing NativeF32Arr (only the first `len` floats are meaningful)."
+  fn storage(b : F32Buf) : NativeF32Arr do
+    match b do
+      F32Buf(d, _) -> d
+    end
+  end
+
+  doc "Float at index [i]. Panics if out of range."
+  fn get(b : F32Buf, i : Int) : Float do
+    match b do
+      F32Buf(d, n) -> if i < 0 || i >= n do panic("F32Buf.get: out of range") else NativeArray.get_f32(d, i) end
+    end
+  end
+
+  -- Copy [n] floats from src into dst (dst must be unique for in-place set).
+  pfn copy_into(src : NativeF32Arr, dst : NativeF32Arr, i : Int, n : Int) : NativeF32Arr do
+    if i >= n do dst
+    else copy_into(src, NativeArray.set_f32(dst, i, NativeArray.get_f32(src, i)), i + 1, n) end
+  end
+
+  pfn grow(d : NativeF32Arr, n : Int) : NativeF32Arr do
+    let cap = NativeArray.length_f32(d)
+    let new_cap = if cap < 16 do 32 else cap * 2 end
+    copy_into(d, NativeArray.make_f32(new_cap, 0.0), 0, n)
+  end
+
+  doc "Append one float. Amortized O(1); in place when the buffer is uniquely owned."
+  fn push(b : F32Buf, v : Float) : F32Buf do
+    match b do
+      F32Buf(d, n) ->
+        if n < NativeArray.length_f32(d) do
+          F32Buf(NativeArray.set_f32(d, n, v), n + 1)
+        else
+          F32Buf(NativeArray.set_f32(grow(d, n), n, v), n + 1)
+        end
+    end
+  end
+
+  doc "Append three floats."
+  fn push3(b : F32Buf, x : Float, y : Float, z : Float) : F32Buf do
+    push(push(push(b, x), y), z)
+  end
+
+  doc "Reset length to 0, keeping the storage."
+  fn clear(b : F32Buf) : F32Buf do
+    match b do
+      F32Buf(d, _) -> F32Buf(d, 0)
+    end
+  end
+
+end

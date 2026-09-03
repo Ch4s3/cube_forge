@@ -1,0 +1,70 @@
+mod Probe1 do
+  needs IO.Console
+  needs Ffi
+  needs IO.Foreign
+
+  extern "probe" : Cap(Ffi) do
+    fn live_allocs(): Int = "march_live_allocs"
+  end
+
+  type Buf = { data: NativeF32Arr, len: Int }
+  type Buf2 = Buf2(NativeF32Arr, Int)
+
+  -- A: field-projection record update
+  fn push_a(b: Buf, v: Float): Buf do
+    let d = NativeArray.set_f32(b.data, b.len, v)
+    { data: d, len: b.len + 1 }
+  end
+  fn loop_a(b: Buf, i: Int, n: Int): Buf do
+    if i >= n do b else loop_a(push_a(b, int_to_float(i)), i + 1, n) end
+  end
+
+  -- B: destructuring record pattern
+  fn push_b(b: Buf, v: Float): Buf do
+    let { data: d0, len: n } = b
+    { data: NativeArray.set_f32(d0, n, v), len: n + 1 }
+  end
+  fn loop_b(b: Buf, i: Int, n: Int): Buf do
+    if i >= n do b else loop_b(push_b(b, int_to_float(i)), i + 1, n) end
+  end
+
+  -- C: variant constructor, match-destructure
+  fn push_c(b: Buf2, v: Float): Buf2 do
+    match b do
+      Buf2(d0, n) -> Buf2(NativeArray.set_f32(d0, n, v), n + 1)
+    end
+  end
+  fn loop_c(b: Buf2, i: Int, n: Int): Buf2 do
+    if i >= n do b else loop_c(push_c(b, int_to_float(i)), i + 1, n) end
+  end
+
+  -- D: no record at all; thread arr + len separately (baseline for set_f32 + float arg cost)
+  fn loop_d(d: NativeF32Arr, i: Int, n: Int): NativeF32Arr do
+    if i >= n do d else loop_d(NativeArray.set_f32(d, i, int_to_float(i)), i + 1, n) end
+  end
+
+  -- E: like D but the float comes from a Float param through a helper (call boundary)
+  fn set_e(d: NativeF32Arr, i: Int, v: Float): NativeF32Arr do NativeArray.set_f32(d, i, v) end
+  fn loop_e(d: NativeF32Arr, i: Int, n: Int): NativeF32Arr do
+    if i >= n do d else loop_e(set_e(d, i, int_to_float(i)), i + 1, n) end
+  end
+
+  fn measure(name: String, f) : Unit do
+    let base = live_allocs()
+    let r = f(())
+    let after = live_allocs()
+    println(name ++ ": allocs=" ++ int_to_string(after - base) ++ " r=" ++ int_to_string(r))
+  end
+
+  fn main(_c: Cap(IO.Console), _f: Cap(IO.Foreign)) : Unit do
+    measure("A record-proj", fn _ ->
+      let r = loop_a({ data: NativeArray.make_f32(1000, 0.0), len: 0 }, 0, 1000)
+      r.len)
+    measure("B record-destructure", fn _ ->
+      let r = loop_b({ data: NativeArray.make_f32(1000, 0.0), len: 0 }, 0, 1000)
+      r.len)
+    measure("C variant", fn _ -> match loop_c(Buf2(NativeArray.make_f32(1000, 0.0), 0), 0, 1000) do Buf2(_, n) -> n end)
+    measure("D bare arr", fn _ -> NativeArray.length_f32(loop_d(NativeArray.make_f32(1000, 0.0), 0, 1000)))
+    measure("E bare arr via helper", fn _ -> NativeArray.length_f32(loop_e(NativeArray.make_f32(1000, 0.0), 0, 1000)))
+  end
+end

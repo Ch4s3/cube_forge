@@ -1,0 +1,11 @@
+mod Externmod2 do
+  needs IO
+  needs IO.Foreign
+  needs Window
+  alias App.Deep.Surface as Thing
+  fn main(cap : Cap(IO)) : Unit do
+    println(int_to_string(Thing.open(3)))
+    println(int_to_string(Thing.open(3)))
+
+  end
+end

@@ -1,0 +1,55 @@
+-- Window + GL-surface capability domain. Every entry point here is a thin
+-- binding onto native/cf_shim.c. No GL type leaks: buffers cross as
+-- NativeF32Arr / NativeU8Arr, scalars as Int/Float, matrices as 16 floats.
+--
+-- Every extern is wrapped in an ordinary fn. This is not decoration: an extern
+-- called *qualified* from another module (`Window.open()`) typechecks but
+-- fails at link time (`_CubeForge.Ffi.Window.open` undefined) — see GAPS.md.
+mod CubeForge.Ffi.Window do
+
+  needs IO.Foreign
+  needs Window
+
+  extern "cf_shim" : Cap(Window) do
+    fn x_win_open(w: Int, h: Int, title: String): Int = "cf_win_open"
+    fn x_win_should_close(): Bool = "cf_win_should_close"
+    fn x_win_swap(): Unit = "cf_win_swap"
+    fn x_win_time(): Float = "cf_win_time"
+    fn x_win_fb_w(): Int = "cf_win_fb_w"
+    fn x_win_fb_h(): Int = "cf_win_fb_h"
+    fn x_win_close(): Unit = "cf_win_close"
+    fn x_win_request_close(): Unit = "cf_win_request_close"
+    fn x_gfx_init(): Int = "cf_gfx_init"
+    fn x_gfx_upload(slot: Int, verts: NativeF32Arr, nfloats: Int): Unit = "cf_gfx_upload"
+    fn x_gfx_begin_frame(r: Float, g: Float, b: Float): Unit = "cf_gfx_begin_frame"
+    fn x_gfx_set_view_proj(m: NativeF32Arr): Unit = "cf_gfx_set_view_proj"
+    fn x_gfx_draw(slot: Int, nverts: Int): Unit = "cf_gfx_draw"
+    fn x_gfx_read_pixel(x: Int, y: Int): Int = "cf_gfx_read_pixel"
+    fn x_gfx_dump_bmp(path: String): Int = "cf_gfx_dump_bmp"
+  end
+
+  doc "Open the window and GL context. Returns 1 on success, 0 on failure."
+  fn open(w : Int, h : Int, title : String) : Int do x_win_open(w, h, title) end
+  fn should_close() : Bool do x_win_should_close() end
+  fn swap() : Unit do x_win_swap() end
+  doc "Seconds since the window system was initialised (monotonic, high resolution)."
+  fn time() : Float do x_win_time() end
+  fn fb_width() : Int do x_win_fb_w() end
+  fn fb_height() : Int do x_win_fb_h() end
+  fn close() : Unit do x_win_close() end
+  fn request_close() : Unit do x_win_request_close() end
+
+  doc "Compile the shader program and create the shared VAO. 1 on success."
+  fn gfx_init() : Int do x_gfx_init() end
+  doc "Upload the first [nfloats] floats of [verts] into mesh slot [slot]."
+  fn gfx_upload(slot : Int, verts : NativeF32Arr, nfloats : Int) : Unit do x_gfx_upload(slot, verts, nfloats) end
+  fn gfx_begin_frame(r : Float, g : Float, b : Float) : Unit do x_gfx_begin_frame(r, g, b) end
+  doc "Set the view-projection matrix: 16 floats, column-major."
+  fn gfx_set_view_proj(m : NativeF32Arr) : Unit do x_gfx_set_view_proj(m) end
+  fn gfx_draw(slot : Int, nverts : Int) : Unit do x_gfx_draw(slot, nverts) end
+  doc "Verification hook: read back one pixel of the back buffer as 0xRRGGBB."
+  fn gfx_read_pixel(x : Int, y : Int) : Int do x_gfx_read_pixel(x, y) end
+  doc "Verification hook: dump the back buffer to a 24-bit BMP at [path]. 1 on success."
+  fn gfx_dump_bmp(path : String) : Int do x_gfx_dump_bmp(path) end
+
+end

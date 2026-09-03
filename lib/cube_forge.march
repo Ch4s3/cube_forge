@@ -1,0 +1,71 @@
+-- cube_forge — a minimal voxel renderer, written to find March's rough edges.
+-- M1: window opens, input polls, one hardcoded triangle from a March buffer.
+mod CubeForge do
+
+  needs IO
+  needs IO.Foreign
+  needs Window
+  needs Input
+
+  import CubeForge.Ffi.Window
+  import CubeForge.Ffi.Input
+  alias CubeForge.F32Buf as F32Buf
+
+  -- Vertex layout shared with the shim: pos.xyz, uv, layer, shade (7 floats).
+  fn vertex(b, x : Float, y : Float, z : Float, u : Float, v : Float, layer : Float, shade : Float) do
+    b |> F32Buf.push3(x, y, z) |> F32Buf.push(u) |> F32Buf.push(v) |> F32Buf.push(layer) |> F32Buf.push(shade)
+  end
+
+  fn triangle() do
+    F32Buf.new(32)
+    |> vertex(-0.6, -0.5, 0.0, 1.0, 0.0, 0.0, 1.0)
+    |> vertex(0.6, -0.5, 0.0, 0.0, 1.0, 0.0, 1.0)
+    |> vertex(0.0, 0.6, 0.0, 0.0, 0.0, 1.0, 1.0)
+  end
+
+  fn identity_matrix() : NativeF32Arr do
+    let m = NativeArray.make_f32(16, 0.0)
+    let m1 = NativeArray.set_f32(m, 0, 1.0)
+    let m2 = NativeArray.set_f32(m1, 5, 1.0)
+    let m3 = NativeArray.set_f32(m2, 10, 1.0)
+    NativeArray.set_f32(m3, 15, 1.0)
+  end
+
+  -- Frame loop. `max_frames < 0` means run until the window closes.
+  fn frame_loop(frame : Int, max_frames : Int, nverts : Int, vp : NativeF32Arr) : Int do
+    if CubeForge.Ffi.Window.should_close() || (max_frames >= 0 && frame >= max_frames) do
+      frame
+    else
+      CubeForge.Ffi.Input.poll()
+      if CubeForge.Ffi.Input.key(CubeForge.Ffi.Input.key_escape()) do CubeForge.Ffi.Window.request_close() else () end
+      CubeForge.Ffi.Window.gfx_begin_frame(0.1, 0.1, 0.15)
+      CubeForge.Ffi.Window.gfx_set_view_proj(vp)
+      CubeForge.Ffi.Window.gfx_draw(0, nverts)
+      if frame == Env.get_int("CF_DUMP_FRAME", 2) do
+        -- verification: the centre pixel must not be the clear colour
+        let px = CubeForge.Ffi.Window.gfx_read_pixel(CubeForge.Ffi.Window.fb_width() / 2, CubeForge.Ffi.Window.fb_height() / 2)
+        println("centre pixel after draw: " ++ int_to_string(px))
+        let dump = Env.get("CF_DUMP", "")
+        if dump != "" do let _ = CubeForge.Ffi.Window.gfx_dump_bmp(dump) else () end
+      else () end
+      CubeForge.Ffi.Window.swap()
+      frame_loop(frame + 1, max_frames, nverts, vp)
+    end
+  end
+
+  fn main(cap : Cap(IO)) : Unit do
+    let max_frames = Env.get_int("CF_FRAMES", -1)
+    if CubeForge.Ffi.Window.open(800, 600, "cube_forge") == 0 do
+      println("failed to open window")
+    else
+      if CubeForge.Ffi.Window.gfx_init() == 0 do println("gfx init failed") else () end
+      let tri = triangle()
+      CubeForge.Ffi.Window.gfx_upload(0, F32Buf.storage(tri), F32Buf.len(tri))
+      let vp = identity_matrix()
+      let frames = frame_loop(0, max_frames, F32Buf.len(tri) / 7, vp)
+      println("ran " ++ int_to_string(frames) ++ " frames")
+      CubeForge.Ffi.Window.close()
+    end
+  end
+
+end

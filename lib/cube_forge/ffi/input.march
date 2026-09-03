@@ -1,0 +1,42 @@
+-- Input-device capability domain. A module that never declares `needs Input`
+-- is meant to be unable to reach anything in here; see GAPS.md for what the
+-- compiler actually enforces.
+mod CubeForge.Ffi.Input do
+
+  needs IO.Foreign
+  needs Input
+
+  extern "cf_shim" : Cap(Input) do
+    fn x_in_poll(): Unit = "cf_in_poll"
+    fn x_in_key(code: Int): Bool = "cf_in_key"
+    fn x_in_button(b: Int): Bool = "cf_in_button"
+    fn x_in_button_pressed(b: Int): Bool = "cf_in_button_pressed"
+    fn x_in_mouse_dx(): Float = "cf_in_mouse_dx"
+    fn x_in_mouse_dy(): Float = "cf_in_mouse_dy"
+    fn x_in_scroll_dy(): Float = "cf_in_scroll_dy"
+    fn x_in_capture_cursor(enabled: Int): Unit = "cf_in_capture_cursor"
+  end
+
+  doc "Pump the event queue; resets the per-frame mouse deltas first."
+  fn poll() : Unit do x_in_poll() end
+  fn key(code : Int) : Bool do x_in_key(code) end
+  fn button(b : Int) : Bool do x_in_button(b) end
+  doc "True if button [b] went down since the last poll (edge, not level)."
+  fn button_pressed(b : Int) : Bool do x_in_button_pressed(b) end
+  fn mouse_dx() : Float do x_in_mouse_dx() end
+  fn mouse_dy() : Float do x_in_mouse_dy() end
+  fn scroll_dy() : Float do x_in_scroll_dy() end
+  fn capture_cursor(enabled : Bool) : Unit do x_in_capture_cursor(if enabled do 1 else 0 end) end
+
+  -- GLFW key codes (GLFW 3.4, glfw3.h)
+  fn key_w() : Int do 87 end
+  fn key_a() : Int do 65 end
+  fn key_s() : Int do 83 end
+  fn key_d() : Int do 68 end
+  fn key_space() : Int do 32 end
+  fn key_shift() : Int do 340 end
+  fn key_escape() : Int do 256 end
+  fn button_left() : Int do 0 end
+  fn button_right() : Int do 1 end
+
+end

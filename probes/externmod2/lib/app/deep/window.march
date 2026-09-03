@@ -1,0 +1,11 @@
+-- leading comment before the module line
+mod App.Deep.Surface do
+  needs IO.Foreign
+  needs Window
+  extern "cfw" : Cap(Window) do
+    fn live_allocs(): Int = "march_live_allocs"
+    fn opn(w: Int, h: Int, title: String): Int = "cf_win_open"
+  end
+  fn wrapped() : Int do live_allocs() end
+  fn open(x: Int) : Int do x end
+end

@@ -1,0 +1,8 @@
+mod FieldCall do
+  type P = { x: Int, y: Int }
+  fn mk(a: Int): P do { x: a, y: a } end
+  fn main() : Unit do
+    let v = mk(3).x
+    println(int_to_string(v))
+  end
+end

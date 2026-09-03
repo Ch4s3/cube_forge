@@ -1,0 +1,70 @@
+-- Chunk — 16 x 256 x 16 voxels in a flat NativeU8Arr, index x + 16*(z + 16*y).
+-- Block ids: 0 air, 1 grass, 2 dirt, 3 stone.
+mod CubeForge.Chunk do
+
+  type Chunk = Chunk(NativeU8Arr)
+
+  fn size_x() : Int do 16 end
+  fn size_y() : Int do 256 end
+  fn size_z() : Int do 16 end
+  fn volume() : Int do 65536 end
+
+  doc "Flat index of a voxel; the refinements let Z3 discharge the bound."
+  fn index(x : {Int | 0 <= _ && _ < 16}, y : {Int | 0 <= _ && _ < 256}, z : {Int | 0 <= _ && _ < 16})
+      : {Int | 0 <= _ && _ < 65536} do
+    x + 16 * (z + 16 * y)
+  end
+
+  doc "Same index with runtime dimensions (what a no-const-generics world forces)."
+  fn index_dyn(sx : {Int | _ > 0}, sy : {Int | _ > 0}, sz : {Int | _ > 0},
+               x : {Int | 0 <= _ && _ < sx}, y : {Int | 0 <= _ && _ < sy}, z : {Int | 0 <= _ && _ < sz})
+      : {Int | 0 <= _ && _ < sx * sy * sz} do
+    x + sx * (z + sz * y)
+  end
+
+  fn new() : Chunk do Chunk(NativeArray.make_u8(65536, 0)) end
+
+  fn get(c : Chunk, x : {Int | 0 <= _ && _ < 16}, y : {Int | 0 <= _ && _ < 256}, z : {Int | 0 <= _ && _ < 16}) : Int do
+    match c do Chunk(a) -> NativeArray.get_u8(a, index(x, y, z)) end
+  end
+
+  doc "Block at (x, y, z), or 0 (air) when the coordinate is outside the chunk."
+  fn get_or_air(c : Chunk, x : Int, y : Int, z : Int) : Int do
+    if x < 0 || x >= 16 || y < 0 || y >= 256 || z < 0 || z >= 16 do 0
+    else get(c, x, y, z) end
+  end
+
+  fn set(c : Chunk, x : {Int | 0 <= _ && _ < 16}, y : {Int | 0 <= _ && _ < 256}, z : {Int | 0 <= _ && _ < 16}, v : Int) : Chunk do
+    match c do Chunk(a) -> Chunk(NativeArray.set_u8(a, index(x, y, z), v)) end
+  end
+
+  fn is_solid(id : Int) : Bool do id != 0 end
+
+  -- ── M2 test terrain: a bumpy surface so every face direction is exercised ──
+  pfn height_at(x : Int, z : Int) : Int do
+    let fx = int_to_float(x)
+    let fz = int_to_float(z)
+    64 + float_to_int(3.0 *. Math.sin(fx *. 0.5) +. 2.0 *. Math.cos(fz *. 0.7)) + (if (x + z) % 7 == 0 do 2 else 0 end)
+  end
+
+  pfn fill_column(c : Chunk, x : Int, z : Int, y : Int, top : Int) : Chunk do
+    if y > top do c
+    else
+      let id = if y == top do 1 else if y > top - 3 do 2 else 3 end end
+      fill_column(set(c, x, z, y, id), x, z, y + 1, top)
+    end
+  end
+
+  pfn fill_go(c : Chunk, i : Int) : Chunk do
+    if i >= 256 do c
+    else
+      let x = i % 16
+      let z = i / 16
+      fill_go(fill_column(c, x, z, 0, height_at(x, z)), i + 1)
+    end
+  end
+
+  doc "A chunk filled with the M2 test terrain."
+  fn test_terrain() : Chunk do fill_go(new(), 0) end
+
+end

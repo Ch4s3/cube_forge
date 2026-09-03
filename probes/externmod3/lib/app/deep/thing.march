@@ -1,0 +1,8 @@
+mod App.Deep.Thing do
+  needs IO.Foreign
+  needs Window
+  extern "cfw" : Cap(Window) do
+    fn live_allocs(): Int = "march_live_allocs"
+  end
+  fn wrapped() : Int do live_allocs() end
+end

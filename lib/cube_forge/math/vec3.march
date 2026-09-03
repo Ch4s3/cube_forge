@@ -1,0 +1,41 @@
+-- Vec3 — 3-component float vector. Written as stdlib-candidate code.
+-- A single-constructor variant (not a record) so a consumed Vec3 gets FBIP
+-- reuse when the result has the same shape; see GAPS.md G12.
+mod CubeForge.Math.Vec3 do
+
+  type Vec3 = Vec3(Float, Float, Float)
+
+  fn new(x : Float, y : Float, z : Float) : Vec3 do Vec3(x, y, z) end
+  fn zero() : Vec3 do Vec3(0.0, 0.0, 0.0) end
+  fn x(v : Vec3) : Float do match v do Vec3(a, _, _) -> a end end
+  fn y(v : Vec3) : Float do match v do Vec3(_, b, _) -> b end end
+  fn z(v : Vec3) : Float do match v do Vec3(_, _, c) -> c end end
+
+  fn add(a : Vec3, b : Vec3) : Vec3 do
+    match (a, b) do (Vec3(ax, ay, az), Vec3(bx, by, bz)) -> Vec3(ax +. bx, ay +. by, az +. bz) end
+  end
+  fn sub(a : Vec3, b : Vec3) : Vec3 do
+    match (a, b) do (Vec3(ax, ay, az), Vec3(bx, by, bz)) -> Vec3(ax -. bx, ay -. by, az -. bz) end
+  end
+  fn scale(a : Vec3, s : Float) : Vec3 do
+    match a do Vec3(ax, ay, az) -> Vec3(ax *. s, ay *. s, az *. s) end
+  end
+  fn dot(a : Vec3, b : Vec3) : Float do
+    match (a, b) do (Vec3(ax, ay, az), Vec3(bx, by, bz)) -> ax *. bx +. ay *. by +. az *. bz end
+  end
+  fn cross(a : Vec3, b : Vec3) : Vec3 do
+    match (a, b) do
+      (Vec3(ax, ay, az), Vec3(bx, by, bz)) ->
+        Vec3(ay *. bz -. az *. by, az *. bx -. ax *. bz, ax *. by -. ay *. bx)
+    end
+  end
+  fn length(a : Vec3) : Float do Math.sqrt(dot(a, a)) end
+  fn normalize(a : Vec3) : Vec3 do
+    let l = length(a)
+    if l < 0.000001 do a else scale(a, 1.0 /. l) end
+  end
+  fn to_string(a : Vec3) : String do
+    match a do Vec3(ax, ay, az) -> "(" ++ float_to_string(ax) ++ ", " ++ float_to_string(ay) ++ ", " ++ float_to_string(az) ++ ")" end
+  end
+
+end

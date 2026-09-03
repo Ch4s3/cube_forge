@@ -1,0 +1,9 @@
+mod Externmod3 do
+  needs IO
+  alias App.Deep.Thing as Thing
+  fn main(cap : Cap(IO)) : Unit do
+    println(int_to_string(Thing.wrapped()))
+    println(int_to_string(Thing.live_allocs()))
+
+  end
+end

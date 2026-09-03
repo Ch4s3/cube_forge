@@ -1,0 +1,6 @@
+[package]
+name = "externmod3"
+version = "0.1.0"
+type = "app"
+
+[deps]
