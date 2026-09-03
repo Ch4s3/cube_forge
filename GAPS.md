@@ -61,7 +61,7 @@ Reproduction probes live under `probes/` (copied from the session scratchpad).
 - **Done instead:** every extern in `lib/cube_forge/ffi/*.march` is private
   (`cf`-prefixed C symbol) and re-exported through an ordinary `fn`. The shim
   surface is therefore declared twice.
-- Verified: `probes/externmod3`.
+- Verified: `probes/externmod3` (0.2.0 and 0.3.0).
 
 ### G6. A qualified extern call *with arguments* reports "Unknown module"
 - `Thing.live_allocs()` resolves; `Thing.opn(1, 2, "x")` on the same extern
@@ -120,7 +120,9 @@ Reproduction probes live under `probes/` (copied from the session scratchpad).
 - The memory-model doc only ever shows reuse on constructors; nothing says
   records are excluded, and 2 allocations (not 1) suggests an intermediate.
 - **Done instead:** `F32Buf` is a variant, not a record.
-- Verified: `probes/probe1` (second run, cases A–E).
+- Verified: `probes/probe1` (cases A–E, 0.2.0 and 0.3.0). The current
+  `probes/probe1` source holds the G21 cases C/F/G/H; the A–E source is in
+  this entry's table.
 
 ### G13. No growable native buffer in the stdlib
 - `NativeArray` is fixed-length; `set_*` is in-place at rc==1 but there is no
@@ -160,7 +162,7 @@ Reproduction probes live under `probes/` (copied from the session scratchpad).
   of the result, calls it. One-arg externs are called in every shape.
   Debug and release alike. Cost me an hour: `let _ = gfx_init()` silently
   skipped shader compilation and the triangle never appeared.
-- Verified: `probes/probe_dce` (p_effect0 called 2 of 4 times).
+- Verified: `probes/probe_dce` (p_effect0 called 2 of 4 times; 0.2.0 and 0.3.0).
 - **Would need:** the dead-binding elimination pass (or whatever treats a
   zero-arg call as a pure constant) to consult the extern table.
 
@@ -307,4 +309,107 @@ objects per frame (`CF_ALLOC_PROBE=1` output: `Player.forward` 1/call,
 
 - **Consequence:** "no allocation in the frame loop" cannot even be
   measured honestly until this is fixed — every temporary Vec3 is a leak.
-- **Status:** see "Compiler patches" below.
+- **Resolution (2026-09-03):** this is a bug in march **0.2.0** (every
+  `~/.march/versions/*` build from Jul 28 – Aug 22 leaks 101–401 per 100
+  calls; the Jun/Jul 0.1.0 builds and the Aug 30 **0.3.0** build report 1–3,
+  i.e. clean). A `MARCH_TRACE_GC=1` trace of the 0.2.0 binary shows 403
+  leaked 24-byte float boxes + 100 leaked 32-byte cells per 100 iterations,
+  so the gauge was telling the truth. The 0.3.0 codegen for the same source
+  frees the case-merge float box (`llvm_case.ml`, commit `2b363bd7`) — the
+  leak is that fix's absence. See G27 for why it took an hour to see this.
+
+### G27. `forge build` silently uses a different compiler than `march` on PATH
+- `which march` → `~/.opam/march/bin/march` (0.3.0). `forge build` runs
+  `~/.march/current/bin/march` (0.2.0, symlink to `versions/local-main-b26bacf0`)
+  and prints nothing about which one. Every "compiler bug" observation in this
+  log up to G26 was made against 0.2.0 without my knowing it; G26's leak was
+  bisected across 35 installed toolchains before the version skew showed up.
+- **Would need:** `forge build` to print the toolchain path/version it
+  resolved (or honour PATH), and `forge.toml`'s `march = "~> 0.3"` constraint
+  to be enforced against the toolchain forge actually runs.
+
+### G28–G30. Leaks that survive in march 0.3.0 (`probes/probe_leak2`, net live objects per 100 calls, trace-confirmed)
+
+| shape | leak / 100 |
+|---|---|
+| (a) `match (a, b) do (VF(..), VF(..)) -> VF(..)` — tuple scrutinee over two Float variants | **501** |
+| (b) same over two Int variants | **501** |
+| (c) nested `match a do VF(..) -> match b do VF(..) -> …` — same function, no tuple | 1 |
+| (d) `match mkt(1.0) do (x, _) -> …` — returned `(Float, Float)` | **301** |
+| (e) same with `(Int, Int)` | **101** |
+| (f) `Mat(NativeFloatArr)` built by a recursive `set_float` loop, read via `match m do Mat(a) -> get_float(a, 5)` | **101** |
+| (g) `addf(scale(mkf(1.0), 2.0), scale(mkf(3.0), 0.5))` — chain of Float-variant temps | **501** |
+| (h) `match mk4(1.0) do (x, _, _, _) -> …` — returned `(Float, Float, Float, Bool)` | **401** |
+
+Trace by size: 1100 × 32 B (tuple cells), 600 × 40 B (3-field variants),
+500 × 24 B (float boxes), 100 × 160 B (the 16-float NativeFloatArr), 100 × 48 B.
+
+- **G28.** A tuple built as a match scrutinee is never freed, and neither are
+  the values it was built from. This is the idiomatic way to match two
+  arguments at once and it is what every binary `Vec3`/`Quat` op does.
+- **G29.** A tuple *returned* from a function and destructured by the caller's
+  `match` is never freed. Returning `(x, y, z, hit)` from `sweep_axis` is the
+  natural multi-value return.
+- **G30.** A `NativeFloatArr` inside a single-field variant, read through an
+  accessor, is never freed (the 160-byte array leaks each time).
+- Consequence for this project: the frame loop leaks 69 objects/frame on
+  0.3.0 (was 84 on 0.2.0). `Player.update` 21/call, `Quat` ops 24/call,
+  `Mat4.mul` 5/call. The workaround is to avoid tuple scrutinees and tuple
+  returns entirely (nested matches, accessor functions, multi-field variants),
+  which is exactly the kind of "route around it silently" this log exists to
+  make visible.
+
+**Root cause (read in the compiler, `lib/tir/rc_types.ml` module doc):**
+`needs_rc (TTuple _ | TRecord _) = false` — "tuples and records are
+heap-allocated (via march_alloc) but Perceus never emits inc/dec on the
+aggregate itself — the aggregate is never RC-freed and its fields belong to
+it." This was introduced deliberately (`0b52510d`, `390dff00` #4) to stop a
+class of double-frees on extracted fields, and the doc warns that flipping it
+back "starts emitting aggregate-level RC ops on top of the field-level
+accounting — double-frees". So in compiled March today:
+
+- every tuple that is not consumed by TCO/FBIP is leaked (G28, G29);
+- every record is leaked, which is also why G12's record update showed 2
+  allocations per push with nothing ever reclaimed;
+- the fields of a leaked aggregate are kept alive with it (the 40-byte
+  `VF` cells in the trace).
+
+That is not a bug in a pass, it is a hole in the memory model that the
+language's own idioms (`match (a, b)`, multi-value returns, records as
+state) walk straight into. A fix means giving aggregates a real owner
+(scrutinee free for `$TupleN` patterns, dec at last use for record bindings)
+and re-solving the field-level double-free those commits were avoiding. That
+is a multi-day compiler task, not something I can land in this exercise
+without a differential-oracle run, so cube_forge routes around it: no tuple
+scrutinees, no tuple returns, no records anywhere on the frame path.
+Multi-field variants (`Sweep(Float, Float, Float, Bool)`) are the
+substitute, and nested `match a do … match b do …` replaces `match (a, b)`.
+
+G30 (the 160-byte NativeFloatArr) is a different mechanism: `Mat(NativeFloatArr)`
+is a *newtype* (single-field variant, `Mat(a) ≡ a` in storage), and
+`add_scrutinee_free_for` skips newtype scrutinees
+(`scrutinee_shares_payload_storage`) on the assumption that "the variable's
+own RC lifecycle frees the shared object" — but the branch variable is then
+treated as borrowed, so when the scrutinee was an owned temporary nobody
+frees it. See `probes/probe_leak2` case (i) for the two-field control.
+
+### G31. A `NativeArray` value is never freed
+- `probes/probe_leak2` cases (j)–(n): a fresh `NativeFloatArr` — passed to a
+  reader function, read inline, filled by a `set_float` loop, or `set_float`
+  once — leaks 1 per iteration in every shape (100% of arrays). The
+  post-Perceus TIR for the inline case is:
+  ```
+  let a : NativeFloatArr = native_float_arr_make(16, 0.) in
+  let $t : Float = native_float_arr_get(a, 5) in +.(acc, $t)   -- no dec_rc a, ever
+  ```
+  so Perceus emits no `dec_rc` for a native-array binding at its last use.
+  `set_*` is "owned/consumed" per the runtime comment (it does free a shared
+  input on the copy path), but nothing frees the final array.
+- Consequences here: every `F32Buf` growth step leaks the old backing array
+  (5 × up to 512 KB per chunk mesh — the "8 allocations" the mesher reports
+  are 8 leaks); every per-frame matrix temporary leaked before the in-place
+  rewrite; the per-frame residue of 1 object is still under investigation.
+- **Would need:** native arrays to get the ordinary owned-value `dec_rc` at
+  last use. They are `TCon`s, so `needs_rc` already says yes; whatever
+  suppresses the dec (borrow-table classification of `native_*_get`? the
+  builtin-call result being treated as non-owning?) is the bug.

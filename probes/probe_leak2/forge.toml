@@ -1,0 +1,9 @@
+[package]
+name = "probe_leak2"
+version = "0.1.0"
+type = "app"
+
+[deps]
+
+[ffi]
+sources = ["native/l.c"]

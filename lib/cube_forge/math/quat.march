@@ -6,6 +6,11 @@ mod CubeForge.Math.Quat do
 
   type Quat = Quat(Float, Float, Float, Float)
 
+  fn x(q : Quat) : Float do match q do Quat(a, _, _, _) -> a end end
+  fn y(q : Quat) : Float do match q do Quat(_, b, _, _) -> b end end
+  fn z(q : Quat) : Float do match q do Quat(_, _, c, _) -> c end end
+  fn w(q : Quat) : Float do match q do Quat(_, _, _, d) -> d end end
+
   fn identity() : Quat do Quat(0.0, 0.0, 0.0, 1.0) end
 
   doc "Rotation of [angle] radians about the unit axis (ax, ay, az)."
@@ -17,12 +22,15 @@ mod CubeForge.Math.Quat do
 
   doc "Hamilton product a * b (apply b first, then a)."
   fn mul(a : Quat, b : Quat) : Quat do
-    match (a, b) do
-      (Quat(ax, ay, az, aw), Quat(qx, qy, qz, qw)) ->
-        Quat(aw *. qx +. ax *. qw +. ay *. qz -. az *. qy,
-             aw *. qy -. ax *. qz +. ay *. qw +. az *. qx,
-             aw *. qz +. ax *. qy -. ay *. qx +. az *. qw,
-             aw *. qw -. ax *. qx -. ay *. qy -. az *. qz)
+    match a do
+      Quat(ax, ay, az, aw) ->
+        match b do
+          Quat(qx, qy, qz, qw) ->
+            Quat(aw *. qx +. ax *. qw +. ay *. qz -. az *. qy,
+                 aw *. qy -. ax *. qz +. ay *. qw +. az *. qx,
+                 aw *. qz +. ax *. qy -. ay *. qx +. az *. qw,
+                 aw *. qw -. ax *. qx -. ay *. qy -. az *. qz)
+        end
     end
   end
 
@@ -50,7 +58,7 @@ mod CubeForge.Math.Quat do
   end
 
   doc "Rotation matrix (column-major) of a unit quaternion."
-  fn to_mat4(q : Quat) : CubeForge.Math.Mat4.Mat4 do
+  fn to_mat4(q : Quat) : NativeFloatArr do
     match q do
       Quat(x, y, z, w) ->
         let xx = x *. x

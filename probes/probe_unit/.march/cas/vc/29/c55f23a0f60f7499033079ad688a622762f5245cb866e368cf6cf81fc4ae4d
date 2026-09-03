@@ -1,0 +1,7 @@
+sat
+len	2
+$str2	$Str!val!0
+m	(- 1)
+$str1	$Str!val!1
+$str0	$Str!val!2
+first	0

@@ -23,55 +23,73 @@ mod CubeForge do
 
   -- Everything the frame loop threads through. A variant so the per-frame
   -- rebuild can reuse the cell (see GAPS.md G12).
-  type Frame = Frame(Int, Float, CubeForge.Player.Player, Int, Int)   -- frame, last_time, player, allocs_at_start, alloc_sample
+  -- frame, last_time, player, alloc_sample, view scratch (NativeFloatArr 16), vp upload buffer (NativeF32Arr 16)
+  type Frame = Frame(Int, Float, CubeForge.Player.Player, Int, NativeFloatArr, NativeF32Arr)
 
   pfn axis(neg : Bool, pos : Bool) : Float do
     if pos && !neg do 1.0 else if neg && !pos do -1.0 else 0.0 end end
   end
 
   -- Gather this frame's input into a value the (Input-cap-free) Player module can consume.
-  pfn read_input() : CubeForge.Player.Input do
+  pfn read_input(autowalk : Bool, autospin : Float) : CubeForge.Player.Input do
     -- CF_AUTOWALK=1: scripted forward walk for headless collision verification.
-    let mf = if Env.get_int("CF_AUTOWALK", 0) == 1 do 1.0 else axis(In.key(In.key_s()), In.key(In.key_w())) end
+    let mf = if autowalk do 1.0 else axis(In.key(In.key_s()), In.key(In.key_w())) end
     let mr = axis(In.key(In.key_a()), In.key(In.key_d()))
-    -- CF_AUTOSPIN=<milli-radians per frame of yaw>: scripted mouse-look for headless verification.
-    let spin = int_to_float(Env.get_int("CF_AUTOSPIN", 0)) /. 1000.0 /. Player.mouse_sens()
-    CubeForge.Player.Input(mf, mr, In.mouse_dx() +. spin, In.mouse_dy(), In.key(In.key_space()))
+    CubeForge.Player.Input(mf, mr, In.mouse_dx() +. autospin, In.mouse_dy(), In.key(In.key_space()))
   end
 
-  -- View-projection for the player's eye: proj * rotate(conj(q)) * translate(-eye).
-  pfn view_proj(proj : CubeForge.Math.Mat4.Mat4, p : CubeForge.Player.Player, dst : NativeF32Arr) : NativeF32Arr do
+  -- View matrix for the player's eye, written into the persistent scratch array in place.
+  pfn write_view(p : CubeForge.Player.Player, view : NativeFloatArr) : NativeFloatArr do
+    let q = Q.from_yaw_pitch(Player.yaw(p), Player.pitch(p))
+    let e = Player.eye(p)
+    M.write_view(Q.x(q), Q.y(q), Q.z(q), Q.w(q), V.x(e), V.y(e), V.z(e), view)
+  end
+
+  -- (kept for the allocation bisect) the temporary-matrix version
+  pfn view_proj(proj : NativeFloatArr, p : CubeForge.Player.Player, dst : NativeF32Arr) : NativeF32Arr do
     let q = Q.from_yaw_pitch(Player.yaw(p), Player.pitch(p))
     let rot = Q.to_mat4(Q.conjugate(q))
     let view = M.mul(rot, M.translation(V.scale(Player.eye(p), -1.0)))
     M.write_f32(M.mul(proj, view), dst)
   end
 
+  pfn repeat_view_inplace(proj : NativeFloatArr, p : CubeForge.Player.Player, view : NativeFloatArr, dst : NativeF32Arr, i : Int) : NativeF32Arr do
+    if i == 0 do dst else
+      let view1 = write_view(p, view)
+      repeat_view_inplace(proj, p, view1, M.mul_into_f32(proj, view1, dst), i - 1)
+    end
+  end
+
   -- Frame loop. `max_frames < 0` means run until the window closes.
-  fn frame_loop(f : Frame, max_frames : Int, nverts : Int, proj : CubeForge.Math.Mat4.Mat4, vp : NativeF32Arr, world : CubeForge.World.World) : Frame do
+  -- Run-time knobs read once, outside the frame loop (an Env read allocates).
+  type Knobs = Knobs(Int, Int, String, Bool, Float)   -- max_frames, dump_frame, dump_path, autowalk, autospin
+
+  fn frame_loop(f : Frame, k : Knobs, nverts : Int, proj : NativeFloatArr, world : CubeForge.World.World) : Frame do
     match f do
-      Frame(frame, last_t, player, a0, sample) ->
+      Frame(frame, last_t, player, sample, view, vp) ->
+        match k do
+        Knobs(max_frames, dump_frame, dump_path, autowalk, autospin) ->
         if Win.should_close() || (max_frames >= 0 && frame >= max_frames) do
-          Frame(frame, last_t, player, a0, sample)
+          Frame(frame, last_t, player, sample, view, vp)
         else
           In.poll()
           if In.key(In.key_escape()) do Win.request_close() else () end
           if In.button_pressed(In.button_left()) do CubeForge.Ffi.Input.capture_cursor(true) else () end
           let now = Win.time()
           let dt = if now -. last_t > 0.1 do 0.1 else now -. last_t end
-          let player1 = Player.update(player, read_input(), world, dt)
-          let vp1 = view_proj(proj, player1, vp)
+          let player1 = Player.update(player, read_input(autowalk, autospin), world, dt)
+          let view1 = write_view(player1, view)
+          let vp1 = M.mul_into_f32(proj, view1, vp)
           Win.gfx_begin_frame(0.55, 0.75, 0.95)
           Win.gfx_set_view_proj(vp1)
           Win.gfx_draw(0, nverts)
-          if frame == Env.get_int("CF_DUMP_FRAME", 30) do
-            let dump = Env.get("CF_DUMP", "")
-            if dump != "" do
-              if Win.gfx_dump_bmp(dump) == 0 do println("dump failed") else () end
+          if frame == dump_frame do
+            if dump_path != "" do
+              if Win.gfx_dump_bmp(dump_path) == 0 do println("dump failed") else () end
             else () end
             println("player at " ++ V.to_string(Player.position(player1)) ++ " on_ground=" ++ (if Player.on_ground(player1) do "true" else "false" end))
           else () end
-          if frame % 60 == 0 && Env.get_int("CF_AUTOWALK", 0) == 1 do
+          if frame % 60 == 0 && autowalk do
             println("frame " ++ int_to_string(frame) ++ " player at " ++ V.to_string(Player.position(player1)) ++ " on_ground=" ++ (if Player.on_ground(player1) do "true" else "false" end))
           else () end
           Win.swap()
@@ -80,7 +98,8 @@ mod CubeForge do
           if frame == 200 do
             println("live-object delta over frames 100..200: " ++ int_to_string(Win.live_allocs() - sample1) ++ " (" ++ int_to_string((Win.live_allocs() - sample1) / 100) ++ " per frame)")
           else () end
-          frame_loop(Frame(frame + 1, now, player1, a0, sample1), max_frames, nverts, proj, vp1, world)
+          frame_loop(Frame(frame + 1, now, player1, sample1, view1, vp1), k, nverts, proj, world)
+        end
         end
     end
   end
@@ -89,13 +108,13 @@ mod CubeForge do
   pfn repeat_update(p : CubeForge.Player.Player, w : CubeForge.World.World, i : Int) : CubeForge.Player.Player do
     if i == 0 do p else repeat_update(Player.update(p, CubeForge.Player.Input(0.3, 0.0, 1.0, 0.5, false), w, 0.016), w, i - 1) end
   end
-  pfn repeat_view(proj : CubeForge.Math.Mat4.Mat4, p : CubeForge.Player.Player, dst : NativeF32Arr, i : Int) : NativeF32Arr do
+  pfn repeat_view(proj : NativeFloatArr, p : CubeForge.Player.Player, dst : NativeF32Arr, i : Int) : NativeF32Arr do
     if i == 0 do dst else repeat_view(proj, p, view_proj(proj, p, dst), i - 1) end
   end
   pfn repeat_quat(i : Int, acc : Float) : Float do
     if i == 0 do acc else repeat_quat(i - 1, acc +. V.x(Q.rotate(Q.from_yaw_pitch(0.3, 0.2), V.new(1.0, 0.0, 0.0)))) end
   end
-  pfn repeat_mul(m : CubeForge.Math.Mat4.Mat4, i : Int) : CubeForge.Math.Mat4.Mat4 do
+  pfn repeat_mul(m : NativeFloatArr, i : Int) : NativeFloatArr do
     if i == 0 do m else repeat_mul(M.mul(m, M.identity()), i - 1) end
   end
   pfn repeat_forward(i : Int, acc : Float) : Float do
@@ -103,7 +122,7 @@ mod CubeForge do
   end
   pfn repeat_input(i : Int, acc : Float) : Float do
     if i == 0 do acc else
-      repeat_input(i - 1, acc +. Player.input_forward(read_input()))
+      repeat_input(i - 1, acc +. Player.input_forward(read_input(false, 0.0)))
     end
   end
   pfn measure(name : String, f) : Unit do
@@ -111,14 +130,15 @@ mod CubeForge do
     let _r = f(())
     println("  " ++ name ++ ": live delta over 100 iterations = " ++ int_to_string(Win.live_allocs() - a))
   end
-  pfn alloc_probe(world : CubeForge.World.World, proj : CubeForge.Math.Mat4.Mat4) : Unit do
+  pfn alloc_probe(world : CubeForge.World.World, proj : NativeFloatArr) : Unit do
     println("allocation bisect (net live objects; >0 means a leak):")
     measure("read_input", fn _ -> repeat_input(100, 0.0))
     measure("Player.forward", fn _ -> repeat_forward(100, 0.0))
     measure("Quat from_yaw_pitch+rotate", fn _ -> repeat_quat(100, 0.0))
     measure("Mat4.mul", fn _ -> M.get(repeat_mul(M.identity(), 100), 0, 0))
     measure("Player.update", fn _ -> V.x(Player.position(repeat_update(Player.new(8.0, 70.0, 8.0), world, 100))))
-    measure("view_proj", fn _ -> NativeArray.get_f32(repeat_view(proj, Player.new(8.0, 70.0, 8.0), NativeArray.make_f32(16, 0.0), 100), 0))
+    measure("view_proj (temporaries)", fn _ -> NativeArray.get_f32(repeat_view(proj, Player.new(8.0, 70.0, 8.0), NativeArray.make_f32(16, 0.0), 100), 0))
+    measure("view_proj (in place)", fn _ -> NativeArray.get_f32(repeat_view_inplace(proj, Player.new(8.0, 70.0, 8.0), NativeArray.make_float(16, 0.0), NativeArray.make_f32(16, 0.0), 100), 0))
   end
 
   fn main(cap : Cap(IO)) : Unit do
@@ -143,8 +163,11 @@ mod CubeForge do
       let player = Player.new(8.0, 75.0, 8.0)
       if Env.get_int("CF_ALLOC_PROBE", 0) == 1 do alloc_probe(world, proj) else () end
       let t3 = Win.time()
-      match frame_loop(Frame(0, t3, player, 0, 0), max_frames, nverts, proj, NativeArray.make_f32(16, 0.0), world) do
-        Frame(frames, _, p, _, _) ->
+      -- CF_AUTOSPIN=<milli-radians of yaw per frame>: scripted mouse-look for headless verification.
+      let knobs = Knobs(max_frames, Env.get_int("CF_DUMP_FRAME", 30), Env.get("CF_DUMP", ""), Env.get_int("CF_AUTOWALK", 0) == 1,
+                        int_to_float(Env.get_int("CF_AUTOSPIN", 0)) /. 1000.0 /. Player.mouse_sens())
+      match frame_loop(Frame(0, t3, player, 0, NativeArray.make_float(16, 0.0), NativeArray.make_f32(16, 0.0)), knobs, nverts, proj, world) do
+        Frame(frames, _, p, _, _, _) ->
           let t4 = Win.time()
           println("ran " ++ int_to_string(frames) ++ " frames in " ++ ms(t4 -. t3) ++ " (" ++ float_to_string(int_to_float(frames) /. (t4 -. t3)) ++ " fps, vsync on); player ended at " ++ V.to_string(Player.position(p)))
       end

@@ -1,28 +1,31 @@
 -- Mat4 — 4x4 float matrix, column-major (m[col*4 + row]), GL convention.
--- Storage is a NativeFloatArr(16) wrapped in a single-constructor variant.
+-- Storage is a bare NativeFloatArr(16). It was a single-constructor variant
+-- `Mat4(NativeFloatArr)`, but that is a newtype in the compiled backend and a
+-- newtype scrutinee that is an owned temporary is never freed (GAPS.md G30),
+-- so the wrapper is gone and the type name is just documentation.
 -- Every operation allocates one fresh 16-float array; there is no in-place
--- matrix arithmetic without a mutable-buffer API (GAPS.md G13/G18).
+-- matrix arithmetic without a mutable-buffer API (GAPS.md G13).
 mod CubeForge.Math.Mat4 do
 
   alias CubeForge.Math.Vec3 as V
 
-  type Mat4 = Mat4(NativeFloatArr)
+  type Vec4 = Vec4(Float, Float, Float, Float)
 
-  fn raw(m : Mat4) : NativeFloatArr do match m do Mat4(a) -> a end end
+  fn raw(m : NativeFloatArr) : NativeFloatArr do m end
 
-  fn get(m : Mat4, col : Int, row : Int) : Float do
-    match m do Mat4(a) -> NativeArray.get_float(a, col * 4 + row) end
+  fn get(m : NativeFloatArr, col : Int, row : Int) : Float do
+    NativeArray.get_float(m, col * 4 + row)
   end
 
-  fn identity() : Mat4 do
+  fn identity() : NativeFloatArr do
     let a = NativeArray.make_float(16, 0.0)
     let a1 = NativeArray.set_float(a, 0, 1.0)
     let a2 = NativeArray.set_float(a1, 5, 1.0)
     let a3 = NativeArray.set_float(a2, 10, 1.0)
-    Mat4(NativeArray.set_float(a3, 15, 1.0))
+    NativeArray.set_float(a3, 15, 1.0)
   end
 
-  fn from_list(xs : List(Float)) : Mat4 do Mat4(NativeArray.from_list_float(xs)) end
+  fn from_list(xs : List(Float)) : NativeFloatArr do NativeArray.from_list_float(xs) end
 
   -- out[c][r] = sum_k a[k][r] * b[c][k]
   pfn mul_cell(a : NativeFloatArr, b : NativeFloatArr, c : Int, r : Int) : Float do
@@ -38,26 +41,23 @@ mod CubeForge.Math.Mat4 do
   end
 
   doc "Matrix product a * b (apply b first, then a)."
-  fn mul(a : Mat4, b : Mat4) : Mat4 do
-    match (a, b) do
-      (Mat4(pa), Mat4(pb)) -> Mat4(mul_fill(pa, pb, NativeArray.make_float(16, 0.0), 0))
-    end
+  fn mul(a : NativeFloatArr, b : NativeFloatArr) : NativeFloatArr do
+    mul_fill(a, b, NativeArray.make_float(16, 0.0), 0)
   end
 
   doc "Right-handed perspective projection (GL clip space, z in [-1, 1])."
-  fn perspective(fov_y_rad : Float, aspect : Float, near : Float, far : Float) : Mat4 do
+  fn perspective(fov_y_rad : Float, aspect : Float, near : Float, far : Float) : NativeFloatArr do
     let f = 1.0 /. Math.tan(fov_y_rad /. 2.0)
     let a = NativeArray.make_float(16, 0.0)
     let a1 = NativeArray.set_float(a, 0, f /. aspect)
     let a2 = NativeArray.set_float(a1, 5, f)
     let a3 = NativeArray.set_float(a2, 10, (far +. near) /. (near -. far))
     let a4 = NativeArray.set_float(a3, 11, -1.0)
-    let a5 = NativeArray.set_float(a4, 14, (2.0 *. far *. near) /. (near -. far))
-    Mat4(a5)
+    NativeArray.set_float(a4, 14, (2.0 *. far *. near) /. (near -. far))
   end
 
   doc "View matrix looking from [eye] towards [target] with [up]."
-  fn look_at(eye : CubeForge.Math.Vec3.Vec3, target : CubeForge.Math.Vec3.Vec3, up : CubeForge.Math.Vec3.Vec3) : Mat4 do
+  fn look_at(eye : CubeForge.Math.Vec3.Vec3, target : CubeForge.Math.Vec3.Vec3, up : CubeForge.Math.Vec3.Vec3) : NativeFloatArr do
     let f = V.normalize(V.sub(target, eye))
     let s = V.normalize(V.cross(f, up))
     let u = V.cross(s, f)
@@ -74,29 +74,82 @@ mod CubeForge.Math.Mat4 do
     let a10 = NativeArray.set_float(a9, 12, 0.0 -. V.dot(s, eye))
     let a11 = NativeArray.set_float(a10, 13, 0.0 -. V.dot(u, eye))
     let a12 = NativeArray.set_float(a11, 14, V.dot(f, eye))
-    Mat4(NativeArray.set_float(a12, 15, 1.0))
+    NativeArray.set_float(a12, 15, 1.0)
   end
 
-  fn translation(v : CubeForge.Math.Vec3.Vec3) : Mat4 do
-    match identity() do
-      Mat4(a) ->
-        let a1 = NativeArray.set_float(a, 12, V.x(v))
-        let a2 = NativeArray.set_float(a1, 13, V.y(v))
-        Mat4(NativeArray.set_float(a2, 14, V.z(v)))
-    end
+  fn translation(v : CubeForge.Math.Vec3.Vec3) : NativeFloatArr do
+    let a1 = NativeArray.set_float(identity(), 12, V.x(v))
+    let a2 = NativeArray.set_float(a1, 13, V.y(v))
+    NativeArray.set_float(a2, 14, V.z(v))
   end
 
-  doc "Transform a point (w = 1) and return (x, y, z, w)."
-  fn transform_point(m : Mat4, p : CubeForge.Math.Vec3.Vec3) : (Float, Float, Float, Float) do
-    match m do
-      Mat4(a) ->
-        let px = V.x(p)
-        let py = V.y(p)
-        let pz = V.z(p)
-        let c = fn r -> NativeArray.get_float(a, 0 + r) *. px +. NativeArray.get_float(a, 4 + r) *. py
-                        +. NativeArray.get_float(a, 8 + r) *. pz +. NativeArray.get_float(a, 12 + r)
-        (c(0), c(1), c(2), c(3))
-    end
+  doc "Transform a point (w = 1) into a Vec4 (a variant, not a tuple — tuples leak, G29)."
+  fn transform_point(a : NativeFloatArr, p : CubeForge.Math.Vec3.Vec3) : Vec4 do
+    let px = V.x(p)
+    let py = V.y(p)
+    let pz = V.z(p)
+    let c = fn r -> NativeArray.get_float(a, 0 + r) *. px +. NativeArray.get_float(a, 4 + r) *. py
+                    +. NativeArray.get_float(a, 8 + r) *. pz +. NativeArray.get_float(a, 12 + r)
+    Vec4(c(0), c(1), c(2), c(3))
+  end
+
+  -- out_f32[i] = (a * b)[i], written in place into a persistent NativeF32Arr.
+  pfn mul_fill_f32(a : NativeFloatArr, b : NativeFloatArr, out : NativeF32Arr, i : Int) : NativeF32Arr do
+    if i >= 16 do out
+    else mul_fill_f32(a, b, NativeArray.set_f32(out, i, mul_cell(a, b, i / 4, i % 4)), i + 1) end
+  end
+
+  doc "a * b written into [dst] (NativeF32Arr(16)) in place; no temporaries when dst is uniquely owned."
+  fn mul_into_f32(a : NativeFloatArr, b : NativeFloatArr, dst : NativeF32Arr) : NativeF32Arr do
+    mul_fill_f32(a, b, dst, 0)
+  end
+
+  doc """
+  Write the view matrix for a camera at [eye] with orientation quaternion
+  (qx, qy, qz, qw) into [dst] in place: view = R(q)^T * T(-eye).
+  Takes the quaternion as four scalars so no temporary matrices are built.
+  """
+  fn write_view(qx : Float, qy : Float, qz : Float, qw : Float, ex : Float, ey : Float, ez : Float, dst : NativeFloatArr) : NativeFloatArr do
+    let xx = qx *. qx
+    let yy = qy *. qy
+    let zz = qz *. qz
+    let xy = qx *. qy
+    let xz = qx *. qz
+    let yz = qy *. qz
+    let wx = qw *. qx
+    let wy = qw *. qy
+    let wz = qw *. qz
+    -- R(q) column-major entries r[col][row]; view rotation is the transpose.
+    let r00 = 1.0 -. 2.0 *. (yy +. zz)
+    let r01 = 2.0 *. (xy +. wz)
+    let r02 = 2.0 *. (xz -. wy)
+    let r10 = 2.0 *. (xy -. wz)
+    let r11 = 1.0 -. 2.0 *. (xx +. zz)
+    let r12 = 2.0 *. (yz +. wx)
+    let r20 = 2.0 *. (xz +. wy)
+    let r21 = 2.0 *. (yz -. wx)
+    let r22 = 1.0 -. 2.0 *. (xx +. yy)
+    -- view[col][row] = R^T => view[c][r] = r[r][c]  (r<col><row> above is r[col][row])
+    let d0 = NativeArray.set_float(dst, 0, r00)
+    let d1 = NativeArray.set_float(d0, 1, r10)
+    let d2 = NativeArray.set_float(d1, 2, r20)
+    let d3 = NativeArray.set_float(d2, 3, 0.0)
+    let d4 = NativeArray.set_float(d3, 4, r01)
+    let d5 = NativeArray.set_float(d4, 5, r11)
+    let d6 = NativeArray.set_float(d5, 6, r21)
+    let d7 = NativeArray.set_float(d6, 7, 0.0)
+    let d8 = NativeArray.set_float(d7, 8, r02)
+    let d9 = NativeArray.set_float(d8, 9, r12)
+    let d10 = NativeArray.set_float(d9, 10, r22)
+    let d11 = NativeArray.set_float(d10, 11, 0.0)
+    -- translation column = R^T * (-eye)
+    let tx = 0.0 -. (r00 *. ex +. r01 *. ey +. r02 *. ez)
+    let ty = 0.0 -. (r10 *. ex +. r11 *. ey +. r12 *. ez)
+    let tz = 0.0 -. (r20 *. ex +. r21 *. ey +. r22 *. ez)
+    let d12 = NativeArray.set_float(d11, 12, tx)
+    let d13 = NativeArray.set_float(d12, 13, ty)
+    let d14 = NativeArray.set_float(d13, 14, tz)
+    NativeArray.set_float(d14, 15, 1.0)
   end
 
   pfn to_f32_fill(src : NativeFloatArr, dst : NativeF32Arr, i : Int) : NativeF32Arr do
@@ -105,8 +158,8 @@ mod CubeForge.Math.Mat4 do
   end
 
   doc "Write the 16 entries into [dst] (a NativeF32Arr of length >= 16) for GPU upload; in place at rc == 1."
-  fn write_f32(m : Mat4, dst : NativeF32Arr) : NativeF32Arr do
-    match m do Mat4(a) -> to_f32_fill(a, dst, 0) end
+  fn write_f32(m : NativeFloatArr, dst : NativeF32Arr) : NativeF32Arr do
+    to_f32_fill(m, dst, 0)
   end
 
 end

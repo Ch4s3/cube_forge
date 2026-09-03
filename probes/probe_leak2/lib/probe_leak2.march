@@ -1,0 +1,186 @@
+mod ProbeLeak2 do
+  needs IO
+  needs IO.Foreign
+  needs Ffi
+  extern "l" : Cap(Ffi) do
+    fn live_allocs(): Int = "march_live_allocs"
+  end
+
+  type VF = VF(Float, Float, Float)
+  type VI = VI(Int, Int, Int)
+  type Mat = Mat(NativeFloatArr)
+
+  fn mkf(a : Float) : VF do VF(a, a +. 1.0, a +. 2.0) end
+  fn mki(a : Int) : VI do VI(a, a + 1, a + 2) end
+  fn xf(v : VF) : Float do match v do VF(x, _, _) -> x end end
+
+  -- (a) tuple-scrutinee match over two Float variants
+  fn addf(a : VF, b : VF) : VF do
+    match (a, b) do (VF(x, y, z), VF(x2, y2, z2)) -> VF(x +. x2, y +. y2, z +. z2) end
+  end
+  fn loop_a(i : Int, acc : Float) : Float do
+    if i == 0 do acc else loop_a(i - 1, acc +. xf(addf(mkf(1.0), mkf(2.0)))) end
+  end
+  -- (b) same with Int variants
+  fn addi(a : VI, b : VI) : VI do
+    match (a, b) do (VI(x, y, z), VI(x2, y2, z2)) -> VI(x + x2, y + y2, z + z2) end
+  end
+  fn xi(v : VI) : Int do match v do VI(x, _, _) -> x end end
+  fn loop_b(i : Int, acc : Int) : Int do
+    if i == 0 do acc else loop_b(i - 1, acc + xi(addi(mki(1), mki(2)))) end
+  end
+  -- (c) nested-match form of (a): no tuple built
+  fn addf2(a : VF, b : VF) : VF do
+    match a do VF(x, y, z) -> match b do VF(x2, y2, z2) -> VF(x +. x2, y +. y2, z +. z2) end end
+  end
+  fn loop_c(i : Int, acc : Float) : Float do
+    if i == 0 do acc else loop_c(i - 1, acc +. xf(addf2(mkf(1.0), mkf(2.0)))) end
+  end
+  -- (d) returned Float tuple, destructured by the caller
+  fn mkt(a : Float) : (Float, Float) do (a, a +. 1.0) end
+  fn loop_d(i : Int, acc : Float) : Float do
+    if i == 0 do acc else match mkt(1.0) do (x, _) -> loop_d(i - 1, acc +. x) end end
+  end
+  -- (e) returned Int tuple
+  fn mkti(a : Int) : (Int, Int) do (a, a + 1) end
+  fn loop_e(i : Int, acc : Int) : Int do
+    if i == 0 do acc else match mkti(1) do (x, _) -> loop_e(i - 1, acc + x) end end
+  end
+  -- (f) NativeFloatArr filled by a recursive set loop, wrapped in a variant, read once
+  fn fill(a : NativeFloatArr, i : Int) : NativeFloatArr do
+    if i >= 16 do a else fill(NativeArray.set_float(a, i, int_to_float(i)), i + 1) end
+  end
+  fn mkm() : Mat do Mat(fill(NativeArray.make_float(16, 0.0), 0)) end
+  fn m0(m : Mat) : Float do match m do Mat(a) -> NativeArray.get_float(a, 5) end end
+  fn loop_f(i : Int, acc : Float) : Float do
+    if i == 0 do acc else loop_f(i - 1, acc +. m0(mkm())) end
+  end
+  -- (g) chain of Float-variant temporaries (the Quat.rotate shape)
+  fn scale(v : VF, s : Float) : VF do match v do VF(x, y, z) -> VF(x *. s, y *. s, z *. s) end end
+  fn loop_g(i : Int, acc : Float) : Float do
+    if i == 0 do acc else loop_g(i - 1, acc +. xf(addf(scale(mkf(1.0), 2.0), scale(mkf(3.0), 0.5)))) end
+  end
+  -- (h) 4-tuple with a Bool, returned and destructured (sweep_axis shape)
+  fn mk4(a : Float) : (Float, Float, Float, Bool) do (a, a, a, a > 0.0) end
+  fn loop_h(i : Int, acc : Float) : Float do
+    if i == 0 do acc else match mk4(1.0) do (x, _, _, _) -> loop_h(i - 1, acc +. x) end end
+  end
+
+  -- (i) two-field variant around the array (not a newtype)
+  type Mat2 = Mat2(NativeFloatArr, Int)
+  fn mkm2() : Mat2 do Mat2(fill(NativeArray.make_float(16, 0.0), 0), 16) end
+  fn m20(m : Mat2) : Float do match m do Mat2(a, _) -> NativeArray.get_float(a, 5) end end
+  fn loop_i(i : Int, acc : Float) : Float do
+    if i == 0 do acc else loop_i(i - 1, acc +. m20(mkm2())) end
+  end
+  -- (j) bare NativeFloatArr, no wrapper
+  fn a0(a : NativeFloatArr) : Float do NativeArray.get_float(a, 5) end
+  fn loop_j(i : Int, acc : Float) : Float do
+    if i == 0 do acc else loop_j(i - 1, acc +. a0(fill(NativeArray.make_float(16, 0.0), 0))) end
+  end
+
+  -- (k) fresh array passed straight to a borrowing reader, no fill loop
+  fn loop_k(i : Int, acc : Float) : Float do
+    if i == 0 do acc else loop_k(i - 1, acc +. a0(NativeArray.make_float(16, 0.0))) end
+  end
+  -- (l) fresh array, read inline in the same function
+  fn loop_l(i : Int, acc : Float) : Float do
+    if i == 0 do acc else
+      let a = NativeArray.make_float(16, 0.0)
+      loop_l(i - 1, acc +. NativeArray.get_float(a, 5))
+    end
+  end
+  -- (m) fresh array through the fill loop, read inline
+  fn loop_m(i : Int, acc : Float) : Float do
+    if i == 0 do acc else
+      let a = fill(NativeArray.make_float(16, 0.0), 0)
+      loop_m(i - 1, acc +. NativeArray.get_float(a, 5))
+    end
+  end
+  -- (n) fresh array passed to a function that CONSUMES it (set_float) and returns it, then dropped
+  fn loop_n(i : Int, acc : Float) : Float do
+    if i == 0 do acc else
+      let a = NativeArray.set_float(NativeArray.make_float(16, 0.0), 3, 1.0)
+      loop_n(i - 1, acc +. NativeArray.get_float(a, 3))
+    end
+  end
+
+  fn yf(v : VF) : Float do match v do VF(_, y, _) -> y end end
+  -- (o) let-bound Float variant read twice through accessors
+  fn loop_o(i : Int, acc : Float) : Float do
+    if i == 0 do acc else
+      let e = mkf(1.0)
+      loop_o(i - 1, acc +. xf(e) +. yf(e))
+    end
+  end
+  -- (p) let-bound Float variant read once
+  fn loop_p(i : Int, acc : Float) : Float do
+    if i == 0 do acc else
+      let e = mkf(1.0)
+      loop_p(i - 1, acc +. xf(e))
+    end
+  end
+  -- (q) Float variant temp read once, no let
+  fn loop_q(i : Int, acc : Float) : Float do
+    if i == 0 do acc else loop_q(i - 1, acc +. xf(mkf(1.0))) end
+  end
+
+  fn report(name : String, before : Int) : Unit do
+    println(name ++ ": net live delta over 100 = " ++ int_to_string(live_allocs() - before))
+  end
+
+  fn main(cap : Cap(IO)) : Unit do
+    let b0 = live_allocs()
+    let r0 = loop_a(100, 0.0)
+    report("a tuple-match of two Float variants", b0)
+    let b1 = live_allocs()
+    let r1 = loop_b(100, 0)
+    report("b tuple-match of two Int variants", b1)
+    let b2 = live_allocs()
+    let r2 = loop_c(100, 0.0)
+    report("c nested match, no tuple", b2)
+    let b3 = live_allocs()
+    let r3 = loop_d(100, 0.0)
+    report("d returned (Float, Float)", b3)
+    let b4 = live_allocs()
+    let r4 = loop_e(100, 0)
+    report("e returned (Int, Int)", b4)
+    let b5 = live_allocs()
+    let r5 = loop_f(100, 0.0)
+    report("f NativeFloatArr in a variant", b5)
+    let b6 = live_allocs()
+    let r6 = loop_g(100, 0.0)
+    report("g chain of Float-variant temps", b6)
+    let b7 = live_allocs()
+    let r7 = loop_h(100, 0.0)
+    report("h returned (Float, Float, Float, Bool)", b7)
+    let b8 = live_allocs()
+    let r8 = loop_i(100, 0.0)
+    report("i two-field variant around NativeFloatArr", b8)
+    let b9 = live_allocs()
+    let r9 = loop_j(100, 0.0)
+    report("j bare NativeFloatArr", b9)
+    let b10 = live_allocs()
+    let r10 = loop_k(100, 0.0)
+    report("k fresh array -> borrowing reader fn", b10)
+    let b11 = live_allocs()
+    let r11 = loop_l(100, 0.0)
+    report("l fresh array read inline", b11)
+    let b12 = live_allocs()
+    let r12 = loop_m(100, 0.0)
+    report("m filled array read inline", b12)
+    let b13 = live_allocs()
+    let r13 = loop_n(100, 0.0)
+    report("n set_float once, read inline", b13)
+    let b14 = live_allocs()
+    let r14 = loop_o(100, 0.0)
+    report("o let-bound variant, two accessor reads", b14)
+    let b15 = live_allocs()
+    let r15 = loop_p(100, 0.0)
+    report("p let-bound variant, one accessor read", b15)
+    let b16 = live_allocs()
+    let r16 = loop_q(100, 0.0)
+    report("q temp variant, one accessor read", b16)
+    println(float_to_string(r0 +. r2 +. r3 +. r5 +. r6 +. r7 +. r8 +. r9 +. r10 +. r11 +. r12 +. r13 +. r14 +. r15 +. r16) ++ " " ++ int_to_string(r1 + r4))
+  end
+end

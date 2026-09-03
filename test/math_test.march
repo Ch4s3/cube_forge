@@ -26,19 +26,19 @@ mod CubeForge.Test.Math do
     end
     test "translation moves a point" do
       match M.transform_point(M.translation(V.new(1.0, 2.0, 3.0)), V.new(1.0, 1.0, 1.0)) do
-        (x, y, z, w) -> Test.assert_true(near(x, 2.0) && near(y, 3.0) && near(z, 4.0) && near(w, 1.0), "translated")
+        CubeForge.Math.Mat4.Vec4(x, y, z, w) -> Test.assert_true(near(x, 2.0) && near(y, 3.0) && near(z, 4.0) && near(w, 1.0), "translated")
       end
     end
     test "look_at maps the target to the view axis" do
       let view = M.look_at(V.new(-12.0, 80.0, -12.0), V.new(8.0, 64.0, 8.0), V.new(0.0, 1.0, 0.0))
       match M.transform_point(view, V.new(8.0, 64.0, 8.0)) do
-        (x, y, z, _) -> Test.assert_true(near(x, 0.0) && near(y, 0.0) && z < 0.0, "target on -z axis")
+        CubeForge.Math.Mat4.Vec4(x, y, z, _) -> Test.assert_true(near(x, 0.0) && near(y, 0.0) && z < 0.0, "target on -z axis")
       end
     end
     test "perspective puts a point at -near on the near plane" do
       let p = M.perspective(1.0, 1.0, 0.1, 100.0)
       match M.transform_point(p, V.new(0.0, 0.0, -0.1)) do
-        (_, _, z, w) -> Test.assert_true(near(z /. w, -1.0), "near plane -> -1")
+        CubeForge.Math.Mat4.Vec4(_, _, z, w) -> Test.assert_true(near(z /. w, -1.0), "near plane -> -1")
       end
     end
   end

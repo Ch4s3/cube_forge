@@ -1,0 +1,6 @@
+sat
+len$vals	0
+expr	(Lag Elem!val!0 5 (StrVal Elem!val!1))
+n	0
+i	(- 1)
+idx	0
