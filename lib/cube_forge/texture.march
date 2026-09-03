@@ -4,11 +4,11 @@ mod CubeForge.Texture do
 
   fn size() : Int do 16 end
 
-  pfn put_rgba(a : NativeU8Arr, off : Int, r : Int, g : Int, b : Int) : NativeU8Arr do
+  pfn put_rgba(a : NativeU8Arr, off : Int, r : Int, g : Int, b : Int, alpha : Int) : NativeU8Arr do
     let a1 = NativeArray.set_u8(a, off, r)
     let a2 = NativeArray.set_u8(a1, off + 1, g)
     let a3 = NativeArray.set_u8(a2, off + 2, b)
-    NativeArray.set_u8(a3, off + 3, 255)
+    NativeArray.set_u8(a3, off + 3, alpha)
   end
 
   -- M2: one 16x16 green/dark-green checkerboard layer.
@@ -18,14 +18,26 @@ mod CubeForge.Texture do
       let x = i % 16
       let y = i / 16
       let light = (x / 2 + y / 2) % 2 == 0
-      let a1 = if light do put_rgba(a, i * 4, 110, 190, 80) else put_rgba(a, i * 4, 70, 140, 60) end
+      let a1 = if light do put_rgba(a, i * 4, 110, 190, 80, 255) else put_rgba(a, i * 4, 70, 140, 60, 255) end
       checker_go(a1, i + 1)
     end
   end
 
-  doc "16x16 RGBA checkerboard, one layer."
-  fn checkerboard() : NativeU8Arr do checker_go(NativeArray.make_u8(16 * 16 * 4, 0), 0) end
+  -- Layer 1: translucent blue water with a faint ripple pattern.
+  pfn water_go(a : NativeU8Arr, i : Int) : NativeU8Arr do
+    if i >= 256 do a
+    else
+      let x = i % 16
+      let y = i / 16
+      let ripple = if (x + y) % 8 < 2 do 25 else 0 end
+      water_go(put_rgba(a, 256 * 4 + i * 4, 40 + ripple, 90 + ripple, 200 + ripple, 150), i + 1)
+    end
+  end
 
-  fn layers() : Int do 1 end
+  doc "16x16 RGBA texture array, layer-major: layer 0 grass checkerboard, layer 1 water."
+  fn checkerboard() : NativeU8Arr do water_go(checker_go(NativeArray.make_u8(2 * 16 * 16 * 4, 0), 0), 0) end
+
+  fn layers() : Int do 2 end
+  fn water_layer() : Float do 1.0 end
 
 end

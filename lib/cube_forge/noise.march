@@ -46,7 +46,7 @@ mod CubeForge.Noise do
   doc "Terrain height for a world column."
   fn height(wx : Int, wz : Int, seed : Int) : Int do
     let f = fbm(int_to_float(wx) *. 0.03, int_to_float(wz) *. 0.03, seed)
-    58 + float_to_int(f *. 26.0)
+    50 + float_to_int(f *. 26.0)
   end
 
   -- ── 4-wide: columns wx .. wx+3 at one z, one octave, blended in F32x4 ──
@@ -90,7 +90,7 @@ mod CubeForge.Noise do
     let n1 = value2_x4(x0 +. 17.3 /. 0.06, z +. 9.1 /. 0.06, 0.06, seed + 1)
     let n2 = value2_x4(x0 +. 31.7 /. 0.12, z +. 3.3 /. 0.12, 0.12, seed + 2)
     let f = Simd.add_f32x4(Simd.add_f32x4(Simd.mul_f32x4(n0, Simd.splat_f32x4(0.6)), Simd.mul_f32x4(n1, Simd.splat_f32x4(0.3))), Simd.mul_f32x4(n2, Simd.splat_f32x4(0.1)))
-    Simd.add_f32x4(Simd.splat_f32x4(58.0), Simd.mul_f32x4(f, Simd.splat_f32x4(26.0)))
+    Simd.add_f32x4(Simd.splat_f32x4(50.0), Simd.mul_f32x4(f, Simd.splat_f32x4(26.0)))
   end
 
 end

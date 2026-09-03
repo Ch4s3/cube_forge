@@ -43,6 +43,20 @@ mod CubeForge.World do
   end
 
   fn solid_at(w : World, x : Int, y : Int, z : Int) : Bool do block_at(w, x, y, z) != 0 end
+  fn collidable_at(w : World, x : Int, y : Int, z : Int) : Bool do C.is_collidable(block_at(w, x, y, z)) end
+  fn water_at(w : World, x : Int, y : Int, z : Int) : Bool do block_at(w, x, y, z) == C.water() end
+
+  -- First column (x + 4096 * z) holding water at sea level, or -1. Used by the scripted swim test.
+  pfn find_water_go(w : World, i : Int, n : Int) : Int do
+    if i >= 16 * n * 16 * n do -1
+    else
+      let x = i % (16 * n)
+      let z = i / (16 * n)
+      if water_at(w, x, C.sea_level(), z) && water_at(w, x, C.sea_level() - 3, z) do x + 4096 * z
+      else find_water_go(w, i + 1, n) end
+    end
+  end
+  fn find_water(w : World) : Int do find_water_go(w, 0, side(w)) end
 
   doc "Set a block at a world coordinate (no-op outside the loaded area)."
   fn set_block(w : World, x : Int, y : Int, z : Int, id : Int) : World do

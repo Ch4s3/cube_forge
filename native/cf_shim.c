@@ -134,8 +134,8 @@ static const char *FS =
     "uniform int u_use_tex;\n"
     "out vec4 o_color;\n"
     "void main(){\n"
-    "  vec3 base = (u_use_tex == 1) ? texture(u_tex, vec3(v_uv, v_layer)).rgb : vec3(v_uv, v_layer);\n"
-    "  o_color = vec4(base * v_shade, 1.0);\n"
+    "  vec4 t = (u_use_tex == 1) ? texture(u_tex, vec3(v_uv, v_layer)) : vec4(v_uv, v_layer, 1.0);\n"
+    "  o_color = vec4(t.rgb * v_shade, t.a);\n"
     "}\n";
 
 static GLuint compile(GLenum kind, const char *src) {
@@ -221,6 +221,20 @@ void cf_gfx_upload_texture(void *arr, int64_t w, int64_t h, int64_t layers) {
     glUniform1i(g_u_use_tex, 1);
 }
 
+/* Translucent pass: blend, keep depth test, no depth writes, no culling (water
+ * surface visible from below). Call after every opaque draw. */
+void cf_gfx_draw_translucent(int64_t slot, int64_t nverts) {
+    if (slot < 0 || slot >= CF_MAX_MESHES || nverts <= 0) return;
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDepthMask(GL_FALSE);
+    glDisable(GL_CULL_FACE);
+    cf_gfx_draw(slot, nverts);
+    glEnable(GL_CULL_FACE);
+    glDepthMask(GL_TRUE);
+    glDisable(GL_BLEND);
+}
+
 /* Draw a mesh slot as GL_LINES with the current view-projection, untextured,
  * depth test off so a selection outline is never hidden by the face it sits on. */
 void cf_gfx_draw_lines(int64_t slot, int64_t nverts) {
@@ -240,14 +254,17 @@ void cf_gfx_draw_lines(int64_t slot, int64_t nverts) {
 
 /* Draw a screen-space overlay mesh (NDC coordinates, same 7-float layout):
  * identity view-projection, no texture, no depth test. Restores state after. */
-void cf_gfx_draw_hud(int64_t slot, int64_t nverts) {
+void cf_gfx_draw_hud(int64_t slot, int64_t nverts, int64_t textured) {
     static const float ident[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
     if (slot < 0 || slot >= CF_MAX_MESHES || nverts <= 0) return;
     glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glUniformMatrix4fv(g_u_vp, 1, GL_FALSE, ident);
-    glUniform1i(g_u_use_tex, 0);
+    glUniform1i(g_u_use_tex, (textured && g_tex) ? 1 : 0);
     cf_gfx_draw(slot, nverts);
     glUniform1i(g_u_use_tex, g_tex ? 1 : 0);
+    glDisable(GL_BLEND);
     glEnable(GL_DEPTH_TEST);
 }
 

@@ -78,3 +78,14 @@ body, e.g.
 next to the scalar lattice/hash part (`fmul d8, d8, d0` …). So the `Simd`
 blend does compile to NEON, but the lattice step is scalar by necessity
 (GAPS.md G32), and it makes no measurable difference at this problem size.
+
+## Static water (2026-09-03)
+
+| measure | value |
+|---|---|
+| world with sea level 62, terrain base 50 | 460 698 vertices, 30 246 water |
+| mesh all, 4 schedulers, headless | 326 ms wall (5.1 ms/chunk), unchanged by the second buffer |
+| frame rate with 64 opaque + 64 translucent draws + tint quad | 114–117 fps (vsync) |
+| per-frame live-object delta | 1 (unchanged) |
+| break / place / place-water edit + remesh | 12.6 / 12.1 / 12.1 ms |
+| swim test | falls in at y≈62.4, sinks at the −3 m/s clamp to 59.0, Space lifts at +2.5 m/s, eye underwater frames 240–400 |

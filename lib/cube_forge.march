@@ -1,5 +1,5 @@
 -- cube_forge — a minimal voxel renderer, written to find March's rough edges.
--- M5: DDA raycast selection, block break/place with targeted remesh.
+-- Static water: sea level, translucent pass, placeable water, swimming.
 mod CubeForge do
 
   needs IO
@@ -31,20 +31,27 @@ mod CubeForge do
   -- rebuild can reuse the cell (see GAPS.md G12).
   -- frame, last_time, player, alloc_sample, view scratch (NativeFloatArr 16), vp upload buffer (NativeF32Arr 16)
   type Frame = Frame(Int, Float, CubeForge.Player.Player, Int, NativeFloatArr, NativeF32Arr)
-  -- Mutable-per-edit world state: world, per-slot vertex counts, outline buffer, current hit
-  type Scene = Scene(CubeForge.World.World, NativeIntArr, CubeForge.F32Buf.F32Buf, CubeForge.Raycast.Hit)
+  -- Mutable-per-edit world state: world, per-slot vertex counts (opaque 0..63, water 64..127), outline buffer, current hit, selected block id
+  type Scene = Scene(CubeForge.World.World, NativeIntArr, CubeForge.F32Buf.F32Buf, CubeForge.Raycast.Hit, Int)
+  fn water_slot_base() : Int do 64 end
 
   fn reach() : Float do 8.0 end
+
+  -- Upload both meshes of chunk slot [slot] and record their vertex counts.
+  pfn upload_pair(m : CubeForge.Mesher.Meshes, slot : Int, counts : NativeIntArr) : NativeIntArr do
+    let o = Mesher.opaque_buf(m)
+    let w = Mesher.water_buf(m)
+    Win.gfx_upload(slot, F32Buf.storage(o), F32Buf.len(o))
+    Win.gfx_upload(water_slot_base() + slot, F32Buf.storage(w), F32Buf.len(w))
+    NativeArray.set_int(NativeArray.set_int(counts, slot, Mesher.vertex_count(o)), water_slot_base() + slot, Mesher.vertex_count(w))
+  end
 
   -- Remesh the chunk containing world (x, z) and upload it. Returns the counts array.
   pfn remesh_at(world : CubeForge.World.World, x : Int, z : Int, counts : NativeIntArr, empty : CubeForge.Chunk.Chunk) : NativeIntArr do
     let cx = World.floor_div16(x)
     let cz = World.floor_div16(z)
     if World.in_bounds(world, cx, cz) do
-      let m = Mesher.mesh_world_chunk(world, cx, cz, empty)
-      let slot = cx + World.side(world) * cz
-      Win.gfx_upload(slot, F32Buf.storage(m), F32Buf.len(m))
-      NativeArray.set_int(counts, slot, Mesher.vertex_count(m))
+      upload_pair(Mesher.mesh_world_chunk(world, cx, cz, empty), cx + World.side(world) * cz, counts)
     else counts end
   end
 
@@ -53,7 +60,7 @@ mod CubeForge do
   -- culled against the neighbour, so the neighbour's mesh changes too).
   pfn edit_block(sc : Scene, x : Int, y : Int, z : Int, id : Int) : Scene do
     match sc do
-      Scene(world, counts, outline, hit) ->
+      Scene(world, counts, outline, hit, sel) ->
         let t0 = Win.time()
         let world1 = World.set_block(world, x, y, z, id)
         let empty = Chunk.new()
@@ -65,7 +72,7 @@ mod CubeForge do
         let t1 = Win.time()
         println((if id == 0 do "broke" else "placed" end) ++ " block at " ++ int_to_string(x) ++ "," ++ int_to_string(y) ++ "," ++ int_to_string(z)
                 ++ " — edit + remesh " ++ ms(t1 -. t0))
-        Scene(world1, c3, outline, hit)
+        Scene(world1, c3, outline, hit, sel)
     end
   end
 
@@ -84,32 +91,36 @@ mod CubeForge do
   end
 
   -- Per-frame: raycast from the eye, refresh the outline, apply click edits.
-  pfn interact(sc : Scene, p : CubeForge.Player.Player, break_now : Bool, place_now : Bool) : Scene do
+  -- [place_id] < 0 means "the selected block"; a scripted edit passes an explicit id.
+  pfn interact(sc : Scene, p : CubeForge.Player.Player, break_now : Bool, place_now : Bool, place_id : Int, new_sel : Int) : Scene do
     match sc do
-      Scene(world, counts, outline, _) ->
+      Scene(world, counts, outline, _, sel0) ->
+        let sel = if new_sel > 0 do new_sel else sel0 end
         let e = Player.eye(p)
         let d = Player.forward(Player.yaw(p), Player.pitch(p))
         let hit = Ray.cast(world, V.x(e), V.y(e), V.z(e), V.x(d), V.y(d), V.z(d), reach())
         let outline1 = if Ray.is_hit(hit) do Outline.build(outline, Ray.bx(hit), Ray.by_(hit), Ray.bz(hit)) else F32Buf.clear(outline) end
         if Ray.is_hit(hit) do CubeForge.Ffi.Window.gfx_upload(254, F32Buf.storage(outline1), F32Buf.len(outline1)) else () end
-        let sc1 = Scene(world, counts, outline1, hit)
+        let sc1 = Scene(world, counts, outline1, hit, sel)
         if break_now && Ray.is_hit(hit) do
           edit_block(sc1, Ray.bx(hit), Ray.by_(hit), Ray.bz(hit), 0)
         else if place_now && Ray.is_hit(hit) do
           let px = Ray.bx(hit) + Ray.nx(hit)
           let py = Ray.by_(hit) + Ray.ny(hit)
           let pz = Ray.bz(hit) + Ray.nz(hit)
-          if overlaps_player(p, px, py, pz) do sc1 else edit_block(sc1, px, py, pz, 3) end
+          let id = if place_id > 0 do place_id else sel end
+          -- water may be placed into the player's own cell; solids may not
+          if id != Chunk.water() && overlaps_player(p, px, py, pz) do sc1 else edit_block(sc1, px, py, pz, id) end
         else sc1 end end
     end
   end
 
-  pfn scene_counts(sc : Scene) : NativeIntArr do match sc do Scene(_, c, _, _) -> c end end
-  pfn scene_world(sc : Scene) : CubeForge.World.World do match sc do Scene(w, _, _, _) -> w end end
-  pfn scene_has_hit(sc : Scene) : Bool do match sc do Scene(_, _, _, h) -> Ray.is_hit(h) end end
+  pfn scene_counts(sc : Scene) : NativeIntArr do match sc do Scene(_, c, _, _, _) -> c end end
+  pfn scene_world(sc : Scene) : CubeForge.World.World do match sc do Scene(w, _, _, _, _) -> w end end
+  pfn scene_has_hit(sc : Scene) : Bool do match sc do Scene(_, _, _, h, _) -> Ray.is_hit(h) end end
   fn scene_hit_string(sc : Scene) : String do
     match sc do
-      Scene(_, _, _, h) -> if Ray.is_hit(h) do int_to_string(Ray.bx(h)) ++ "," ++ int_to_string(Ray.by_(h)) ++ "," ++ int_to_string(Ray.bz(h)) ++ " face " ++ int_to_string(Ray.nx(h)) ++ "," ++ int_to_string(Ray.ny(h)) ++ "," ++ int_to_string(Ray.nz(h)) else "none" end
+      Scene(_, _, _, h, _) -> if Ray.is_hit(h) do int_to_string(Ray.bx(h)) ++ "," ++ int_to_string(Ray.by_(h)) ++ "," ++ int_to_string(Ray.bz(h)) ++ " face " ++ int_to_string(Ray.nx(h)) ++ "," ++ int_to_string(Ray.ny(h)) ++ "," ++ int_to_string(Ray.nz(h)) else "none" end
     end
   end
   -- FPS meter: window start time, frames in window, last displayed fps, HUD vertex buffer
@@ -136,11 +147,16 @@ mod CubeForge do
   end
 
   -- Gather this frame's input into a value the (Input-cap-free) Player module can consume.
-  pfn read_input(autowalk : Bool, autospin : Float) : CubeForge.Player.Input do
+  -- Block selection: keys 1-4; 0 when none is pressed this frame.
+  pfn selected_key() : Int do
+    if In.key(In.key_1()) do 1 else if In.key(In.key_2()) do 2 else if In.key(In.key_3()) do 3 else if In.key(In.key_4()) do 4 else 0 end end end end
+  end
+
+  pfn read_input(autowalk : Bool, autospin : Float, autoswim : Bool) : CubeForge.Player.Input do
     -- CF_AUTOWALK=1: scripted forward walk for headless collision verification.
     let mf = if autowalk do 1.0 else axis(In.key(In.key_s()), In.key(In.key_w())) end
     let mr = axis(In.key(In.key_a()), In.key(In.key_d()))
-    CubeForge.Player.Input(mf, mr, In.mouse_dx() +. autospin, In.mouse_dy(), In.key(In.key_space()))
+    CubeForge.Player.Input(mf, mr, In.mouse_dx() +. autospin, In.mouse_dy(), In.key(In.key_space()) || autoswim)
   end
 
   -- View matrix for the player's eye, written into the persistent scratch array in place.
@@ -167,13 +183,13 @@ mod CubeForge do
 
   -- Frame loop. `max_frames < 0` means run until the window closes.
   -- Run-time knobs read once, outside the frame loop (an Env read allocates).
-  type Knobs = Knobs(Int, Int, String, Bool, Float, Int)   -- max_frames, dump_frame, dump_path, autowalk, autospin, autoedit frame (<0 = off)
+  type Knobs = Knobs(Int, Int, String, Bool, Float, Int, Bool)   -- max_frames, dump_frame, dump_path, autowalk, autospin, autoedit frame (<0 = off), autoswim
 
   fn frame_loop(f : Frame, k : Knobs, sc : Scene, nchunks : Int, proj : NativeFloatArr, fps : Fps) : Frame do
     match f do
       Frame(frame, last_t, player, sample, view, vp) ->
         match k do
-        Knobs(max_frames, dump_frame, dump_path, autowalk, autospin, autoedit) ->
+        Knobs(max_frames, dump_frame, dump_path, autowalk, autospin, autoedit, autoswim) ->
         if Win.should_close() || (max_frames >= 0 && frame >= max_frames) do
           Frame(frame, last_t, player, sample, view, vp)
         else
@@ -182,22 +198,29 @@ mod CubeForge do
           if In.button_pressed(In.button_left()) do CubeForge.Ffi.Input.capture_cursor(true) else () end
           let now = Win.time()
           let dt = if now -. last_t > 0.1 do 0.1 else now -. last_t end
-          let player1 = Player.update(player, read_input(autowalk, autospin), scene_world(sc), dt)
+          let player1 = Player.update(player, read_input(autowalk, autospin, autoswim && frame >= 320), scene_world(sc), dt)
           let view1 = write_view(player1, view)
           let vp1 = M.mul_into_f32(proj, view1, vp)
           -- CF_AUTOEDIT=<frame>: scripted break at that frame and place 60 frames later (headless verification)
           let break_now = In.button_pressed(In.button_left()) || (autoedit >= 0 && frame == autoedit)
           let place_now = In.button_pressed(In.button_right()) || (autoedit >= 0 && frame == autoedit + 60)
-          let sc1 = interact(sc, player1, break_now, place_now)
-          if autoedit >= 0 && (frame == autoedit - 1 || frame == autoedit + 1 || frame == autoedit + 61) do
-            println("frame " ++ int_to_string(frame) ++ " looking at " ++ scene_hit_string(sc1) ++ "; block there = " ++ int_to_string(match sc1 do Scene(w, _, _, h) -> World.block_at(w, Ray.bx(h), Ray.by_(h), Ray.bz(h)) end))
+          -- scripted third step: place water 120 frames after the break
+          let place_water = autoedit >= 0 && frame == autoedit + 120
+          let sc1 = interact(sc, player1, break_now, place_now || place_water, if place_water do Chunk.water() else -1 end, selected_key())
+          if autoedit >= 0 && (frame == autoedit - 1 || frame == autoedit + 1 || frame == autoedit + 61 || frame == autoedit + 121) do
+            println("frame " ++ int_to_string(frame) ++ " looking at " ++ scene_hit_string(sc1) ++ "; block there = " ++ int_to_string(match sc1 do Scene(w, _, _, h, _) -> World.block_at(w, Ray.bx(h), Ray.by_(h), Ray.bz(h)) end))
+          else () end
+          if autoswim && frame % 20 == 0 && frame <= 400 do
+            println("frame " ++ int_to_string(frame) ++ " y=" ++ float_to_string(V.y(Player.position(player1))) ++ " in_water=" ++ (if Player.in_water(player1, scene_world(sc1)) do "true" else "false" end) ++ " eye_in_water=" ++ (if Player.eye_in_water(player1, scene_world(sc1)) do "true" else "false" end))
           else () end
           Win.gfx_begin_frame(0.55, 0.75, 0.95)
           Win.gfx_set_view_proj(vp1)
           draw_chunks(scene_counts(sc1), 0, nchunks)
+          draw_water(scene_counts(sc1), 0, nchunks)
           if scene_has_hit(sc1) do CubeForge.Ffi.Window.gfx_draw_lines(254, Outline.vertex_count()) else () end
+          if Player.eye_in_water(player1, scene_world(sc1)) do CubeForge.Ffi.Window.gfx_draw_hud(253, 6, true) else () end
           let fps1 = tick_fps(fps, now)
-          Win.gfx_draw_hud(255, fps_hud_verts(fps1))
+          Win.gfx_draw_hud(255, fps_hud_verts(fps1), false)
           if frame == dump_frame do
             if dump_path != "" do
               if Win.gfx_dump_bmp(dump_path) == 0 do println("dump failed") else () end
@@ -237,7 +260,7 @@ mod CubeForge do
   end
   pfn repeat_input(i : Int, acc : Float) : Float do
     if i == 0 do acc else
-      repeat_input(i - 1, acc +. Player.input_forward(read_input(false, 0.0)))
+      repeat_input(i - 1, acc +. Player.input_forward(read_input(false, 0.0, false)))
     end
   end
   pfn measure(name : String, f) : Unit do
@@ -292,32 +315,45 @@ mod CubeForge do
     end
   end
 
+  pfn draw_water(counts : NativeIntArr, i : Int, n : Int) : Unit do
+    if i >= n do ()
+    else
+      Win.gfx_draw_translucent(water_slot_base() + i, NativeArray.get_int(counts, water_slot_base() + i))
+      draw_water(counts, i + 1, n)
+    end
+  end
+
+  -- Full-screen quad in NDC for the underwater tint: layer 1 (water), shade 0.6. Built once.
+  pfn underwater_quad() : CubeForge.F32Buf.F32Buf do
+    let v = fn (b, x, y, u, t) -> b |> F32Buf.push3(x, y, 0.0) |> F32Buf.push(u) |> F32Buf.push(t) |> F32Buf.push(Texture.water_layer()) |> F32Buf.push(0.6)
+    F32Buf.new(64) |> v(-1.0, -1.0, 0.0, 0.0) |> v(1.0, -1.0, 4.0, 0.0) |> v(1.0, 1.0, 4.0, 3.0)
+                   |> v(-1.0, -1.0, 0.0, 0.0) |> v(1.0, 1.0, 4.0, 3.0) |> v(-1.0, 1.0, 0.0, 3.0)
+  end
+
   -- Stage 2 of world generation: mesh every chunk (each needs its 4 neighbours, which
   -- stage 1 guarantees), upload each mesh into its slot, record vertex counts.
-  pfn upload_meshes(meshes : List(CubeForge.F32Buf.F32Buf), i : Int, counts : NativeIntArr, total : Int) : Int do
-    match meshes do
-      Nil -> total
-      Cons(m, rest) ->
-        Win.gfx_upload(i, F32Buf.storage(m), F32Buf.len(m))
-        upload_meshes(rest, i + 1, NativeArray.set_int(counts, i, Mesher.vertex_count(m)), total + Mesher.vertex_count(m))
-    end
-  end
-
-  pfn count_verts(meshes : List(CubeForge.F32Buf.F32Buf), acc : Int) : Int do
-    match meshes do
-      Nil -> acc
-      Cons(m, rest) -> count_verts(rest, acc + Mesher.vertex_count(m))
-    end
-  end
-
-  pfn fill_counts(meshes : List(CubeForge.F32Buf.F32Buf), i : Int, counts : NativeIntArr) : NativeIntArr do
+  pfn upload_meshes(meshes : List(CubeForge.Mesher.Meshes), i : Int, counts : NativeIntArr) : NativeIntArr do
     match meshes do
       Nil -> counts
-      Cons(m, rest) -> fill_counts(rest, i + 1, NativeArray.set_int(counts, i, Mesher.vertex_count(m)))
+      Cons(m, rest) -> upload_meshes(rest, i + 1, upload_pair(m, i, counts))
     end
   end
 
-  fn mesh_all(world : CubeForge.World.World, n : Int, workers : Int) : List(CubeForge.F32Buf.F32Buf) do
+  pfn count_verts(meshes : List(CubeForge.Mesher.Meshes), acc : Int) : Int do
+    match meshes do
+      Nil -> acc
+      Cons(m, rest) -> count_verts(rest, acc + Mesher.vertex_count(Mesher.opaque_buf(m)) + Mesher.vertex_count(Mesher.water_buf(m)))
+    end
+  end
+
+  pfn count_water_verts(meshes : List(CubeForge.Mesher.Meshes), acc : Int) : Int do
+    match meshes do
+      Nil -> acc
+      Cons(m, rest) -> count_water_verts(rest, acc + Mesher.vertex_count(Mesher.water_buf(m)))
+    end
+  end
+
+  fn mesh_all(world : CubeForge.World.World, n : Int, workers : Int) : List(CubeForge.Mesher.Meshes) do
     let empty = Chunk.new()
     List.pmap_n(World.coords(n), fn i -> Mesher.mesh_world_chunk(world, i % n, i / n, empty), workers)
   end
@@ -347,20 +383,26 @@ mod CubeForge do
       println("world " ++ int_to_string(n) ++ "x" ++ int_to_string(n) ++ " chunks, " ++ int_to_string(workers) ++ " workers, "
               ++ int_to_string(Env.get_int("MARCH_NUM_SCHEDULERS", 4)) ++ " scheduler threads (MARCH_NUM_SCHEDULERS)")
       println("  terrain scalar noise: " ++ int_to_string(t1 - t0) ++ " ms   terrain F32x4 noise: " ++ int_to_string(t2 - t1) ++ " ms")
-      println("  mesh all: " ++ int_to_string(t3 - t2) ++ " ms wall, " ++ float_to_string(int_to_float(t3 - t2) /. int_to_float(n * n)) ++ " ms per chunk (wall / chunks), " ++ int_to_string(nverts) ++ " vertices")
+      println("  mesh all: " ++ int_to_string(t3 - t2) ++ " ms wall, " ++ float_to_string(int_to_float(t3 - t2) /. int_to_float(n * n)) ++ " ms per chunk (wall / chunks), " ++ int_to_string(nverts) ++ " vertices (" ++ int_to_string(count_water_verts(meshes, 0)) ++ " water)")
       if headless do ()
       else
-        let counts = fill_counts(meshes, 0, NativeArray.make_int(n * n, 0))
-        let _uploaded = upload_meshes(meshes, 0, NativeArray.make_int(n * n, 0), 0)
+        let counts = upload_meshes(meshes, 0, NativeArray.make_int(2 * water_slot_base(), 0))
+        let uq = underwater_quad()
+        Win.gfx_upload(253, F32Buf.storage(uq), F32Buf.len(uq))
         Win.gfx_upload_texture(Texture.checkerboard(), Texture.size(), Texture.size(), Texture.layers())
         let proj = M.perspective(70.0 *. Math.pi() /. 180.0, 800.0 /. 600.0, 0.1, 500.0)
+        let autoswim = Env.get_int("CF_AUTOSWIM", 0) == 1
+        let water_col = World.find_water(world)
         let spawn_pos = int_to_float(8 * n)
-        let player = Player.with_pitch(Player.new(spawn_pos, 100.0, spawn_pos), -0.6)
+        let player = if autoswim && water_col >= 0 do
+          println("autoswim: spawning over water column " ++ int_to_string(water_col % 4096) ++ "," ++ int_to_string(water_col / 4096))
+          Player.with_pitch(Player.new(int_to_float(water_col % 4096) +. 0.5, 90.0, int_to_float(water_col / 4096) +. 0.5), -0.6)
+        else Player.with_pitch(Player.new(spawn_pos, 100.0, spawn_pos), -0.6) end
         if Env.get_int("CF_ALLOC_PROBE", 0) == 1 do alloc_probe(world, proj) else () end
         let t4 = Win.time()
         let knobs = Knobs(max_frames, Env.get_int("CF_DUMP_FRAME", 30), Env.get("CF_DUMP", ""), Env.get_int("CF_AUTOWALK", 0) == 1,
-                          int_to_float(Env.get_int("CF_AUTOSPIN", 0)) /. 1000.0 /. Player.mouse_sens(), Env.get_int("CF_AUTOEDIT", -1))
-        let scene = Scene(world, counts, F32Buf.new(256), Ray.miss())
+                          int_to_float(Env.get_int("CF_AUTOSPIN", 0)) /. 1000.0 /. Player.mouse_sens(), Env.get_int("CF_AUTOEDIT", -1), autoswim)
+        let scene = Scene(world, counts, F32Buf.new(256), Ray.miss(), 3)
         let fps0 = Fps(t4, 0, 0, F32Buf.new(4096))
         match frame_loop(Frame(0, t4, player, 0, NativeArray.make_float(16, 0.0), NativeArray.make_f32(16, 0.0)), knobs, scene, n * n, proj, fps0) do
           Frame(frames, _, p, _, _, _) ->

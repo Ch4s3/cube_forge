@@ -564,3 +564,19 @@ order of value per line, each with a probe already in `probes/`:
   IO.Spawn but does not declare needs IO.Spawn` — the test binary links the
   whole `lib/`, and `World.generate`'s `pmap_n` is attributed to the test
   module. The fix is a `needs IO.Spawn` line that is a lie about the test.
+
+---
+
+## Static water notes
+
+### G42. `opaque` is a keyword; `fn opaque(m)` is a bare parse error
+- `opaque type` makes `opaque` unusable as a function name, with the same
+  no-hint "I got stuck here" as G4/G19/G34 (`on`, `by`, `spawn`).
+
+### G43. Threading two growing buffers through one loop needs the loop to own the branch
+- The natural shape `Meshes(o1, w1) = block_faces(o, w, …)` per block would
+  build one two-field variant per voxel (65 536 per chunk). Instead the loop
+  itself decides which buffer a block touches, so each iteration passes both
+  buffers straight through and only one is rebuilt. Works, allocation-free
+  apart from growth, but it is the loop shape the leak findings dictate, not
+  the one you would write first.

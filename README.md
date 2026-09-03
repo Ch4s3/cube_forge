@@ -56,8 +56,9 @@ Run it. The window must be created on the OS main thread and March runs
 MARCH_NUM_SCHEDULERS=1 ./.march/build/release/cube_forge
 ```
 
-Controls: click to capture the mouse, mouse-look, WASD, Space to jump, left
-click breaks, right click places stone, Esc quits. The FPS counter is top right.
+Controls: click to capture the mouse, mouse-look, WASD, Space to jump (or swim
+up in water), left click breaks, right click places the selected block, keys
+1–4 select grass/dirt/stone/water, Esc quits. The FPS counter is top right.
 
 ### Headless / scripted modes (used for every verification in this repo)
 
@@ -68,7 +69,8 @@ click breaks, right click places stone, Esc quits. The FPS counter is top right.
 | `CF_DUMP=path.bmp CF_DUMP_FRAME=N` | dump the back buffer at frame N (convert with `sips -s format png`) |
 | `CF_AUTOWALK=1` | hold W (collision test) |
 | `CF_AUTOSPIN=<mrad/frame>` | scripted mouse-look |
-| `CF_AUTOEDIT=<frame>` | break the targeted block at that frame, place one 60 frames later |
+| `CF_AUTOEDIT=<frame>` | break the targeted block at that frame, place stone 60 frames later, water 120 frames later |
+| `CF_AUTOSWIM=1` | spawn over a lake, sink, hold Space from frame 320; prints y and in-water state |
 | `CF_ALLOC_PROBE=1` | print net live-object deltas for each per-frame piece |
 | `CF_WORKERS`, `CF_SEED` | pmap worker count, terrain seed |
 

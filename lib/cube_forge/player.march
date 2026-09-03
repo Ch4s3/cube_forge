@@ -10,6 +10,10 @@ mod CubeForge.Player do
 
   -- position (feet, centre of the box), velocity, yaw, pitch, on_ground
   type Player = Player(CubeForge.Math.Vec3.Vec3, CubeForge.Math.Vec3.Vec3, Float, Float, Bool)
+  -- Water physics constants
+  fn water_gravity() : Float do -4.0 end
+  fn swim_speed() : Float do 4.0 end
+  fn water_vmax() : Float do 3.0 end
 
   -- Per-frame input snapshot, gathered by the caller (which holds the Input cap).
   type Input = Input(Float, Float, Float, Float, Bool)   -- move_fwd, move_right, mouse_dx, mouse_dy, jump
@@ -37,6 +41,24 @@ mod CubeForge.Player do
   fn yaw(p : Player) : Float do match p do Player(_, _, y, _, _) -> y end end
   fn pitch(p : Player) : Float do match p do Player(_, _, _, pt, _) -> pt end end
   fn on_ground(p : Player) : Bool do match p do Player(_, _, _, _, g) -> g end end
+
+  doc "True when the block at the feet or at the eye is water."
+  fn in_water(p : Player, w : CubeForge.World.World) : Bool do
+    match p do
+      Player(pos, _, _, _, _) ->
+        let x = float_to_int(Math.floor(V.x(pos)))
+        let z = float_to_int(Math.floor(V.z(pos)))
+        W.water_at(w, x, float_to_int(Math.floor(V.y(pos) +. 0.1)), z)
+          || W.water_at(w, x, float_to_int(Math.floor(V.y(pos) +. eye_height())), z)
+    end
+  end
+  doc "True when the eye itself is inside water (underwater tint)."
+  fn eye_in_water(p : Player, w : CubeForge.World.World) : Bool do
+    match p do
+      Player(pos, _, _, _, _) ->
+        W.water_at(w, float_to_int(Math.floor(V.x(pos))), float_to_int(Math.floor(V.y(pos) +. eye_height())), float_to_int(Math.floor(V.z(pos))))
+    end
+  end
 
   fn eye(p : Player) : CubeForge.Math.Vec3.Vec3 do
     match p do Player(pos, _, _, _, _) -> V.new(V.x(pos), V.y(pos) +. eye_height(), V.z(pos)) end
@@ -68,7 +90,7 @@ mod CubeForge.Player do
 
   pfn hits_go(w : CubeForge.World.World, x0 : Int, x1 : Int, y0 : Int, y1 : Int, z0 : Int, z1 : Int, x : Int, y : Int, z : Int) : Bool do
     if y > y1 do false
-    else if W.solid_at(w, x, y, z) do true
+    else if W.collidable_at(w, x, y, z) do true
     else
       if x < x1 do hits_go(w, x0, x1, y0, y1, z0, z1, x + 1, y, z)
       else if z < z1 do hits_go(w, x0, x1, y0, y1, z0, z1, x0, y, z + 1)
@@ -116,11 +138,16 @@ mod CubeForge.Player do
         let fz = 0.0 -. Math.cos(yaw1)
         let rx = Math.cos(yaw1)
         let rz = 0.0 -. Math.sin(yaw1)
-        let wx = (fx *. mf +. rx *. mr) *. walk_speed()
-        let wz = (fz *. mf +. rz *. mr) *. walk_speed()
-        let vy0 = V.y(vel) +. gravity() *. dt
+        let swimming = in_water(p, w)
+        let speed = if swimming do walk_speed() *. 0.5 else walk_speed() end
+        let wx = (fx *. mf +. rx *. mr) *. speed
+        let wz = (fz *. mf +. rz *. mr) *. speed
+        let g = if swimming do water_gravity() else gravity() end
+        let vy0 = V.y(vel) +. g *. dt
         let grounded0 = box_hits(w, V.x(pos), V.y(pos) -. 0.002, V.z(pos))
-        let vy1 = if jump && grounded0 do jump_speed() else vy0 end
+        let vy1 = if swimming do
+          clamp(if jump do vy0 +. swim_speed() *. dt *. 8.0 else vy0 end, 0.0 -. water_vmax(), water_vmax())
+        else if jump && grounded0 do jump_speed() else vy0 end end
         -- sweep x, then y, then z
         let px0 = V.x(pos)
         let py0 = V.y(pos)

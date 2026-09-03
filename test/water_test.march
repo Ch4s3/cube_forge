@@ -1,0 +1,45 @@
+-- Static water: block classification and the opaque/water mesh split.
+mod CubeForge.Test.Water do
+
+  needs IO.Spawn   -- capability ceiling charges World's pmap to every test module (GAPS.md G41)
+  import Test
+  alias CubeForge.Chunk as C
+  alias CubeForge.Mesher as Mesher
+  alias CubeForge.F32Buf as B
+
+  pfn near(a : Float, b : Float) : Bool do Math.abs(a -. b) < 0.0001 end
+
+  describe "Chunk.is_collidable" do
+    test "air and water do not collide, solids do" do
+      Test.assert_false(C.is_collidable(0), "air")
+      Test.assert_false(C.is_collidable(C.water()), "water")
+      Test.assert_true(C.is_collidable(1) && C.is_collidable(3), "grass, stone")
+    end
+  end
+
+  describe "Mesher water split" do
+    test "a lone water cell meshes to 6 water faces with a lowered top" do
+      let e = C.new()
+      let c = C.set(C.new(), 5, 5, 5, C.water())
+      let m = Mesher.mesh_with_neighbors(c, e, e, e, e, 0.0, 0.0)
+      Test.assert_eq_int(Mesher.vertex_count(Mesher.opaque_buf(m)), 0, "no opaque faces")
+      Test.assert_eq_int(Mesher.vertex_count(Mesher.water_buf(m)), 36, "6 water faces")
+      -- the top face is emitted first; its first vertex's y is index 1
+      Test.assert_true(near(Test.assert_some(B.get(Mesher.water_buf(m), 1), "y"), 5.0 +. Mesher.water_top()), "top lowered")
+    end
+    test "stone over water: stone keeps its bottom face, water loses its top" do
+      let e = C.new()
+      let c = C.set(C.set(C.new(), 5, 5, 5, C.water()), 5, 6, 5, 3)
+      let m = Mesher.mesh_with_neighbors(c, e, e, e, e, 0.0, 0.0)
+      Test.assert_eq_int(Mesher.vertex_count(Mesher.opaque_buf(m)), 36, "6 opaque faces (bottom visible through water)")
+      Test.assert_eq_int(Mesher.vertex_count(Mesher.water_buf(m)), 30, "5 water faces (top culled by stone)")
+    end
+    test "water beside water culls the shared face" do
+      let e = C.new()
+      let c = C.set(C.set(C.new(), 5, 5, 5, C.water()), 6, 5, 5, C.water())
+      let m = Mesher.mesh_with_neighbors(c, e, e, e, e, 0.0, 0.0)
+      Test.assert_eq_int(Mesher.vertex_count(Mesher.water_buf(m)), 60, "10 faces for two adjacent cells")
+    end
+  end
+
+end
