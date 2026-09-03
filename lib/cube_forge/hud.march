@@ -94,12 +94,12 @@ mod CubeForge.Hud do
   end
 
   -- Untextured HUD: hotbar slots, selection, counts, crosshair, break progress. Rebuilt in place.
-  fn build_hotbar(b : CubeForge.F32Buf.F32Buf, sel : Int, grass : Int, dirt : Int, stone : Int, progress : Float) : CubeForge.F32Buf.F32Buf do
+  fn build_hotbar(b : CubeForge.F32Buf.F32Buf, sel : Int, grass : Int, dirt : Int, stone : Int, water : Int, progress : Float) : CubeForge.F32Buf.F32Buf do
     let b0 = B.clear(b)
     let b1 = slot(b0, 0, sel == 1, grass, true)
     let b2 = slot(b1, 1, sel == 2, dirt, true)
     let b3 = slot(b2, 2, sel == 3, stone, true)
-    let b4 = slot(b3, 3, sel == 4, 0, false)
+    let b4 = slot(b3, 3, sel == 4, water, true)
     -- crosshair
     let b5 = crect(b4, -0.004, -0.03, 0.004, 0.03, 1.0, 1.0, 1.0)
     let b6 = crect(b5, -0.03, -0.004, 0.03, 0.004, 1.0, 1.0, 1.0)
