@@ -221,6 +221,19 @@ void cf_gfx_upload_texture(void *arr, int64_t w, int64_t h, int64_t layers) {
     glUniform1i(g_u_use_tex, 1);
 }
 
+/* Draw a screen-space overlay mesh (NDC coordinates, same 7-float layout):
+ * identity view-projection, no texture, no depth test. Restores state after. */
+void cf_gfx_draw_hud(int64_t slot, int64_t nverts) {
+    static const float ident[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+    if (slot < 0 || slot >= CF_MAX_MESHES || nverts <= 0) return;
+    glDisable(GL_DEPTH_TEST);
+    glUniformMatrix4fv(g_u_vp, 1, GL_FALSE, ident);
+    glUniform1i(g_u_use_tex, 0);
+    cf_gfx_draw(slot, nverts);
+    glUniform1i(g_u_use_tex, g_tex ? 1 : 0);
+    glEnable(GL_DEPTH_TEST);
+}
+
 /* Debug/verification hook: read back one pixel of the back buffer as 0xRRGGBB.
  * Call after drawing and before swap. */
 int64_t cf_gfx_read_pixel(int64_t x, int64_t y) {

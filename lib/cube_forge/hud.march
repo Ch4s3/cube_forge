@@ -1,0 +1,71 @@
+-- Hud — a 3x5 pixel digit font emitted as NDC quads into a reusable F32Buf.
+-- Vertex layout is the shared 7-float one; uv = (1, 1) and layer = 1 make the
+-- untextured shader path produce white, shade scales it.
+mod CubeForge.Hud do
+
+  alias CubeForge.F32Buf as B
+
+  -- 15-bit glyph masks, row-major top to bottom, 3 columns per row (bit 14 = top-left).
+  pfn glyph(d : Int) : Int do
+    match d do
+      0 -> 31599   -- 111 101 101 101 111
+      1 -> 11415   -- 010 110 010 010 111
+      2 -> 29671   -- 111 001 111 100 111
+      3 -> 29391   -- 111 001 111 001 111
+      4 -> 23497   -- 101 101 111 001 001
+      5 -> 31183   -- 111 100 111 001 111
+      6 -> 31215   -- 111 100 111 101 111
+      7 -> 29257   -- 111 001 001 001 001
+      8 -> 31727   -- 111 101 111 101 111
+      9 -> 31695   -- 111 101 111 001 111
+      _ -> 0
+    end
+  end
+
+  pfn vert(b : CubeForge.F32Buf.F32Buf, x : Float, y : Float, shade : Float) : CubeForge.F32Buf.F32Buf do
+    b |> B.push3(x, y, 0.0) |> B.push(1.0) |> B.push(1.0) |> B.push(1.0) |> B.push(shade)
+  end
+
+  pfn rect(b : CubeForge.F32Buf.F32Buf, x0 : Float, y0 : Float, x1 : Float, y1 : Float, shade : Float) : CubeForge.F32Buf.F32Buf do
+    b |> vert(x0, y0, shade) |> vert(x1, y0, shade) |> vert(x1, y1, shade)
+      |> vert(x0, y0, shade) |> vert(x1, y1, shade) |> vert(x0, y1, shade)
+  end
+
+  -- Emit the lit pixels of one glyph whose top-left is (x, y); px is the pixel size in NDC.
+  pfn glyph_pixels(b : CubeForge.F32Buf.F32Buf, mask : Int, i : Int, x : Float, y : Float, px : Float, py : Float) : CubeForge.F32Buf.F32Buf do
+    if i >= 15 do b
+    else
+      let bit = int_and(mask / (1 * pow2(14 - i)), 1)
+      let col = int_to_float(i % 3)
+      let row = int_to_float(i / 3)
+      let b1 = if bit == 1 do
+        rect(b, x +. col *. px, y -. (row +. 1.0) *. py, x +. (col +. 1.0) *. px, y -. row *. py, 1.0)
+      else b end
+      glyph_pixels(b1, mask, i + 1, x, y, px, py)
+    end
+  end
+
+  pfn pow2(n : Int) : Int do if n <= 0 do 1 else 2 * pow2(n - 1) end end
+
+  pfn digits_of(n : Int, acc : List(Int)) : List(Int) do
+    if n < 10 do Cons(n, acc) else digits_of(n / 10, Cons(n % 10, acc)) end
+  end
+
+  pfn emit_digits(b : CubeForge.F32Buf.F32Buf, ds : List(Int), x : Float, y : Float, px : Float, py : Float) : CubeForge.F32Buf.F32Buf do
+    match ds do
+      Nil -> b
+      Cons(d, rest) -> emit_digits(glyph_pixels(b, glyph(d), 0, x, y, px, py), rest, x +. 4.0 *. px, y, px, py)
+    end
+  end
+
+  doc """
+  Rebuild [b] (cleared in place) with the decimal digits of [n] right-aligned
+  at the top-right corner. Pixel size is given in NDC units per pixel.
+  """
+  fn build_number(b : CubeForge.F32Buf.F32Buf, n : Int, px : Float, py : Float) : CubeForge.F32Buf.F32Buf do
+    let ds = digits_of(if n < 0 do 0 else n end, Nil)
+    let width = int_to_float(List.length(ds)) *. 4.0 *. px
+    emit_digits(B.clear(b), ds, 0.98 -. width, 0.96, px, py)
+  end
+
+end

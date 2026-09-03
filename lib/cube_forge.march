@@ -18,6 +18,7 @@ mod CubeForge do
   alias CubeForge.Texture as Texture
   alias CubeForge.World as World
   alias CubeForge.Player as Player
+  alias CubeForge.Hud as Hud
 
   fn ms(seconds : Float) : String do float_to_string(seconds *. 1000.0) ++ "ms" end
 
@@ -25,6 +26,24 @@ mod CubeForge do
   -- rebuild can reuse the cell (see GAPS.md G12).
   -- frame, last_time, player, alloc_sample, view scratch (NativeFloatArr 16), vp upload buffer (NativeF32Arr 16)
   type Frame = Frame(Int, Float, CubeForge.Player.Player, Int, NativeFloatArr, NativeF32Arr)
+  -- FPS meter: window start time, frames in window, last displayed fps, HUD vertex buffer
+  type Fps = Fps(Float, Int, Int, CubeForge.F32Buf.F32Buf)
+
+  -- Update the FPS meter every 0.25 s and rebuild + upload the HUD digits when it changes.
+  pfn tick_fps(f : Fps, now : Float) : Fps do
+    match f do
+      Fps(t0, n, shown, hud) ->
+        if now -. t0 >= 0.25 do
+          let fps = float_to_int(int_to_float(n + 1) /. (now -. t0) +. 0.5)
+          let hud1 = Hud.build_number(hud, fps, 0.006, 0.008)
+          Win.gfx_upload(1, F32Buf.storage(hud1), F32Buf.len(hud1))
+          Fps(now, 0, fps, hud1)
+        else
+          Fps(t0, n + 1, shown, hud)
+        end
+    end
+  end
+  pfn fps_hud_verts(f : Fps) : Int do match f do Fps(_, _, _, hud) -> F32Buf.len(hud) / 7 end end
 
   pfn axis(neg : Bool, pos : Bool) : Float do
     if pos && !neg do 1.0 else if neg && !pos do -1.0 else 0.0 end end
@@ -64,7 +83,7 @@ mod CubeForge do
   -- Run-time knobs read once, outside the frame loop (an Env read allocates).
   type Knobs = Knobs(Int, Int, String, Bool, Float)   -- max_frames, dump_frame, dump_path, autowalk, autospin
 
-  fn frame_loop(f : Frame, k : Knobs, nverts : Int, proj : NativeFloatArr, world : CubeForge.World.World) : Frame do
+  fn frame_loop(f : Frame, k : Knobs, nverts : Int, proj : NativeFloatArr, world : CubeForge.World.World, fps : Fps) : Frame do
     match f do
       Frame(frame, last_t, player, sample, view, vp) ->
         match k do
@@ -83,6 +102,8 @@ mod CubeForge do
           Win.gfx_begin_frame(0.55, 0.75, 0.95)
           Win.gfx_set_view_proj(vp1)
           Win.gfx_draw(0, nverts)
+          let fps1 = tick_fps(fps, now)
+          Win.gfx_draw_hud(1, fps_hud_verts(fps1))
           if frame == dump_frame do
             if dump_path != "" do
               if Win.gfx_dump_bmp(dump_path) == 0 do println("dump failed") else () end
@@ -98,7 +119,7 @@ mod CubeForge do
           if frame == 200 do
             println("live-object delta over frames 100..200: " ++ int_to_string(Win.live_allocs() - sample1) ++ " (" ++ int_to_string((Win.live_allocs() - sample1) / 100) ++ " per frame)")
           else () end
-          frame_loop(Frame(frame + 1, now, player1, sample1, view1, vp1), k, nverts, proj, world)
+          frame_loop(Frame(frame + 1, now, player1, sample1, view1, vp1), k, nverts, proj, world, fps1)
         end
         end
     end
@@ -130,8 +151,19 @@ mod CubeForge do
     let _r = f(())
     println("  " ++ name ++ ": live delta over 100 iterations = " ++ int_to_string(Win.live_allocs() - a))
   end
+  pfn repeat_time(i : Int, acc : Float) : Float do
+    if i == 0 do acc else repeat_time(i - 1, acc +. Win.time() +. In.mouse_dx()) end
+  end
+  pfn repeat_poll(i : Int) : Int do
+    if i == 0 do 0 else
+      In.poll()
+      repeat_poll(i - 1)
+    end
+  end
   pfn alloc_probe(world : CubeForge.World.World, proj : NativeFloatArr) : Unit do
     println("allocation bisect (net live objects; >0 means a leak):")
+    measure("extern Float returns (time, mouse_dx)", fn _ -> repeat_time(100, 0.0))
+    measure("In.poll", fn _ -> repeat_poll(100))
     measure("read_input", fn _ -> repeat_input(100, 0.0))
     measure("Player.forward", fn _ -> repeat_forward(100, 0.0))
     measure("Quat from_yaw_pitch+rotate", fn _ -> repeat_quat(100, 0.0))
@@ -166,7 +198,8 @@ mod CubeForge do
       -- CF_AUTOSPIN=<milli-radians of yaw per frame>: scripted mouse-look for headless verification.
       let knobs = Knobs(max_frames, Env.get_int("CF_DUMP_FRAME", 30), Env.get("CF_DUMP", ""), Env.get_int("CF_AUTOWALK", 0) == 1,
                         int_to_float(Env.get_int("CF_AUTOSPIN", 0)) /. 1000.0 /. Player.mouse_sens())
-      match frame_loop(Frame(0, t3, player, 0, NativeArray.make_float(16, 0.0), NativeArray.make_f32(16, 0.0)), knobs, nverts, proj, world) do
+      let fps0 = Fps(t3, 0, 0, F32Buf.new(4096))
+      match frame_loop(Frame(0, t3, player, 0, NativeArray.make_float(16, 0.0), NativeArray.make_f32(16, 0.0)), knobs, nverts, proj, world, fps0) do
         Frame(frames, _, p, _, _, _) ->
           let t4 = Win.time()
           println("ran " ++ int_to_string(frames) ++ " frames in " ++ ms(t4 -. t3) ++ " (" ++ float_to_string(int_to_float(frames) /. (t4 -. t3)) ++ " fps, vsync on); player ended at " ++ V.to_string(Player.position(p)))
