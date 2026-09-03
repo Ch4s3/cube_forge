@@ -16,11 +16,11 @@ mod CubeForge.Player do
   fn water_vmax() : Float do 3.0 end
 
   -- Per-frame input snapshot, gathered by the caller (which holds the Input cap).
-  type Input = Input(Float, Float, Float, Float, Bool)   -- move_fwd, move_right, mouse_dx, mouse_dy, jump
+  type Input = Input(Float, Float, Float, Float, Bool, Bool)   -- move_fwd, move_right, mouse_dx, mouse_dy, jump (swim up), sink (Shift)
   -- Result of one axis sweep: position + hit flag. A variant, not a tuple (GAPS.md G29).
   type Sweep = Sweep(Float, Float, Float, Bool)
 
-  fn input_forward(i : Input) : Float do match i do Input(mf, _, _, _, _) -> mf end end
+  fn input_forward(i : Input) : Float do match i do Input(mf, _, _, _, _, _) -> mf end end
 
   fn half_width() : Float do 0.3 end
   fn height() : Float do 1.8 end
@@ -135,7 +135,7 @@ mod CubeForge.Player do
     match p do
       Player(pos, vel, yaw0, pitch0, _) ->
         match input do
-          Input(mf, mr, mdx, mdy, jump) ->
+          Input(mf, mr, mdx, mdy, jump, sink) ->
         let yaw1 = yaw0 -. mdx *. mouse_sens()
         let pitch1 = clamp(pitch0 -. mdy *. mouse_sens(), -1.55, 1.55)
         -- horizontal wish direction in world space (yaw only)
@@ -144,14 +144,20 @@ mod CubeForge.Player do
         let rx = Math.cos(yaw1)
         let rz = 0.0 -. Math.sin(yaw1)
         let swimming = in_water(p, w)
-        let speed = if swimming do walk_speed() *. 0.5 else walk_speed() end
-        let wx = (fx *. mf +. rx *. mr) *. speed
-        let wz = (fz *. mf +. rz *. mr) *. speed
+        let speed = if swimming do walk_speed() *. 0.6 else walk_speed() end
+        -- swimming: forward follows the look direction, so the horizontal part shrinks with pitch
+        let cp = if swimming do Math.cos(pitch1) else 1.0 end
+        let wx = (fx *. mf *. cp +. rx *. mr) *. speed
+        let wz = (fz *. mf *. cp +. rz *. mr) *. speed
         let g = if swimming do water_gravity() else gravity() end
         let vy0 = V.y(vel) +. g *. dt
         let grounded0 = box_hits(w, V.x(pos), V.y(pos) -. 0.002, V.z(pos))
         let vy1 = if swimming do
-          clamp(if jump do vy0 +. swim_speed() *. dt *. 8.0 else vy0 end, 0.0 -. water_vmax(), water_vmax())
+          -- vertical: look-direction component of forward motion, plus Space up / Shift down; idle drifts down slowly
+          let look_v = Math.sin(pitch1) *. mf *. speed
+          let target = look_v +. (if jump do swim_speed() else 0.0 end) -. (if sink do swim_speed() else 0.0 end) -. (if jump || sink || mf != 0.0 do 0.0 else 0.5 end)
+          -- ease the current vertical speed toward the target so water feels heavy
+          clamp(vy0 +. (target -. vy0) *. clamp(dt *. 10.0, 0.0, 1.0), 0.0 -. water_vmax(), water_vmax())
         else if jump && grounded0 do jump_speed() else vy0 end end
         -- sweep x, then y, then z
         let px0 = V.x(pos)

@@ -439,7 +439,9 @@ mod CubeForge do
         let inv0 = if new_sel > 0 do Inv.select(ui_inv(ui0), new_sel) else ui_inv(ui0) end
         let e = Player.eye(p)
         let d = Player.forward(Player.yaw(p), Player.pitch(p))
-        let hit = Ray.cast(world, V.x(e), V.y(e), V.z(e), V.x(d), V.y(d), V.z(d), reach())
+        -- water is only a target while the water slot is selected (to place against / remove sources);
+        -- otherwise the ray passes through it so the bed can be worked from the surface or underwater
+        let hit = Ray.cast(world, V.x(e), V.y(e), V.z(e), V.x(d), V.y(d), V.z(d), reach(), Inv.sel(inv0) != 4)
         let outline1 = if Ray.is_hit(hit) do Outline.build(outline, Ray.bx(hit), Ray.by_(hit), Ray.bz(hit)) else F32Buf.clear(outline) end
         if Ray.is_hit(hit) do CubeForge.Ffi.Window.gfx_upload(254, F32Buf.storage(outline1), F32Buf.len(outline1)) else () end
         -- breaking: hold accumulates on the same target; release or a miss resets
@@ -520,7 +522,7 @@ mod CubeForge do
     -- CF_AUTOWALK=1: scripted forward walk for headless collision verification.
     let mf = if autowalk do 1.0 else axis(In.key(In.key_s()), In.key(In.key_w())) end
     let mr = axis(In.key(In.key_a()), In.key(In.key_d()))
-    CubeForge.Player.Input(mf, mr, In.mouse_dx() +. autospin, In.mouse_dy(), In.key(In.key_space()) || autoswim)
+    CubeForge.Player.Input(mf, mr, In.mouse_dx() +. autospin, In.mouse_dy(), In.key(In.key_space()) || autoswim, In.key(In.key_shift()))
   end
 
   -- View matrix for the player's eye, written into the persistent scratch array in place.
@@ -584,7 +586,8 @@ mod CubeForge do
                     ++ " chunk(" ++ int_to_string(cx) ++ "," ++ int_to_string(cz - 1) ++ ")=" ++ int_to_string(scene_water_count(sc1, cx, cz - 1)))
           else () end
           if autoedit >= 0 && (frame == autoedit - 1 || frame == autoedit + 20 || frame == autoedit + 40 || frame == autoedit + 61 || frame == autoedit + 121 || frame == autoedit + 181) do
-            println("frame " ++ int_to_string(frame) ++ " looking at " ++ scene_hit_string(sc1) ++ "; block there = " ++ int_to_string(match sc1 do Scene(w, _, _, h, _, _, _, _) -> World.block_at(w, Ray.bx(h), Ray.by_(h), Ray.bz(h)) end) ++ "; " ++ inv_string(sc1))
+            println("frame " ++ int_to_string(frame) ++ " looking at " ++ scene_hit_string(sc1) ++ "; block there = " ++ int_to_string(match sc1 do Scene(w, _, _, h, _, _, _, _) -> World.block_at(w, Ray.bx(h), Ray.by_(h), Ray.bz(h)) end) ++ "; " ++ inv_string(sc1)
+                    ++ "; water cells in player chunk = " ++ int_to_string(scene_water_count(sc1, World.floor_div16(float_to_int(Math.floor(V.x(Player.position(player1))))), World.floor_div16(float_to_int(Math.floor(V.z(Player.position(player1))))))))
           else () end
           if autoswim && frame % 20 == 0 && frame <= 400 do
             println("frame " ++ int_to_string(frame) ++ " y=" ++ float_to_string(V.y(Player.position(player1))) ++ " in_water=" ++ (if Player.in_water(player1, scene_world(sc1)) do "true" else "false" end) ++ " eye_in_water=" ++ (if Player.eye_in_water(player1, scene_world(sc1)) do "true" else "false" end))
@@ -623,7 +626,7 @@ mod CubeForge do
 
   -- Allocation bisect: run each per-frame piece N times and print the live-object delta.
   pfn repeat_update(p : CubeForge.Player.Player, w : CubeForge.World.World, i : Int) : CubeForge.Player.Player do
-    if i == 0 do p else repeat_update(Player.update(p, CubeForge.Player.Input(0.3, 0.0, 1.0, 0.5, false), w, 0.016), w, i - 1) end
+    if i == 0 do p else repeat_update(Player.update(p, CubeForge.Player.Input(0.3, 0.0, 1.0, 0.5, false, false), w, 0.016), w, i - 1) end
   end
   pfn repeat_view(proj : NativeFloatArr, p : CubeForge.Player.Player, dst : NativeF32Arr, i : Int) : NativeF32Arr do
     if i == 0 do dst else repeat_view(proj, p, view_proj(proj, p, dst), i - 1) end
@@ -788,7 +791,7 @@ mod CubeForge do
         let spawn_pos = int_to_float(8 * n)
         let player = if autoswim && water_col >= 0 do
           println("autoswim: spawning over water column " ++ int_to_string(water_col % 4096) ++ "," ++ int_to_string(water_col / 4096))
-          Player.with_pitch(Player.new(int_to_float(water_col % 4096) +. 0.5, 90.0, int_to_float(water_col / 4096) +. 0.5), -0.6)
+          Player.with_pitch(Player.new(int_to_float(water_col % 4096) +. 0.5, 90.0, int_to_float(water_col / 4096) +. 0.5), -1.4)
         else Player.with_pitch(Player.new(spawn_pos, 100.0, spawn_pos), -0.6) end
         if Env.get_int("CF_ALLOC_PROBE", 0) == 1 do alloc_probe(world, proj) else () end
         let t4 = Win.time()

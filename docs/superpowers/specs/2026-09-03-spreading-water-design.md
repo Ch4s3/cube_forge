@@ -89,3 +89,10 @@ infinite ocean refill.
 - **Water top under a solid block is kept** (the 1/8 gap is visible).
 - `Actor.call` is unusable under `forge test` (G49): the actor is smoke-tested
   with `send`; the round-trip is verified by `CF_AUTOFLOW`.
+- **Lakes are infinite (2026-09-03 evening).** At or below sea level, a
+  dirty non-source cell that touches a source (beside or below one) becomes a
+  source, so anything connected to a lake fills to sea level. Above sea level
+  only the finite-spread rule applies. Unit tests moved their scenarios above
+  sea level accordingly, and a lake+pit test pins the fill.
+- **Targeting.** The raycast ignores water unless the water hotbar slot is
+  selected; swimming follows the look direction, Space swims up, Shift sinks.

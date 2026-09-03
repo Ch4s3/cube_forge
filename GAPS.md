@@ -788,3 +788,8 @@ that nothing promotes to the stack — the language has no unboxed aggregate.
 The frame loop's measured residue is still 1 live object per frame; the
 contract's stricter count is roughly a dozen short-lived cells per frame that
 are freed immediately.
+
+### G59. `pfn` is not allowed inside a `describe` block
+- A helper function written next to the tests that use it, inside
+  `describe "…" do … end`, is `I got stuck here` at the `pfn`. Helpers must
+  be module-level, so a test file's helpers and tests cannot be grouped.

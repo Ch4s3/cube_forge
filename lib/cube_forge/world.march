@@ -70,7 +70,7 @@ mod CubeForge.World do
       else find_water_go(w, i + 1, n) end
     end
   end
-  fn find_water(w : World) : Int do find_water_go(w, 0, side(w)) end
+  fn find_water(w : World) : Int do find_water_go(w, 16 * side(w) * 4, side(w)) end   -- start at z = 4, away from the world edge
 
   doc "Set a block at a world coordinate (no-op outside the loaded area)."
   fn set_block(w : World, x : Int, y : Int, z : Int, id : Int) : World do
