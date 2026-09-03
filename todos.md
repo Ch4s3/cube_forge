@@ -1,0 +1,25 @@
+# todos.md — feature backlog
+
+Planned, not started. One entry per feature; each gets its own design doc under
+`docs/superpowers/specs/` when picked up.
+
+## Water
+
+- [ ] **Static water** — in design now (`docs/superpowers/specs/`), sea level + translucent pass + in-water physics.
+- [ ] **Spreading water** — cellular-automaton flow with a level per cell; per-chunk ticks on actors or `pmap`, cross-chunk propagation as messages, remesh on change. Depends on static water.
+
+## Engine
+
+- [ ] **Main-thread pinning runtime patch** (GAPS.md G15) — chip spawned, in progress in a separate session.
+- [ ] **Greedy meshing + `NativeArray.blit` stdlib candidate** — halves mesh time; forces a real buffer API (GAPS.md G13).
+- [ ] **Lighting** — flood-fill sky/block light, per-vertex light in the 7-float layout; exercises `NativeU8Arr` at scale.
+- [ ] **Texture atlas via stb_image** — real block textures; needs `Bytes` across FFI fixed first (GAPS.md G8).
+- [ ] **Chunk streaming with actors** — infinite world, chunk lifecycle as actor state, supervision under load.
+- [ ] **Save/load through the CAS** — persistence keyed by BLAKE3 chunk hashes.
+
+## Compiler patches (from GAPS.md "Compiler patches")
+
+- [ ] `march_bytes_borrow` unwrap (G8) — one line + test.
+- [ ] Zero-arg extern dead-binding drop (G16).
+- [ ] `dec_rc` for NativeArray bindings (G31).
+- [ ] Aggregate RC for tuples/records (G28–G30) — the big one.
