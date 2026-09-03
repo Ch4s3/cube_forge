@@ -180,6 +180,21 @@ void cf_gfx_upload(int64_t slot, void *arr, int64_t nfloats) {
     if (getenv("CF_DEBUG")) { const float *f = narr_data(arr); fprintf(stderr, "cf: upload slot=%lld nfloats=%lld arrlen=%lld first=%g %g %g %g %g %g %g glerr=%d\n", (long long)slot, (long long)nfloats, (long long)narr_len(arr), f[0],f[1],f[2],f[3],f[4],f[5],f[6], (int)glGetError()); }
 }
 
+/* Assemble a VBO from several March buffers: reserve `nfloats` floats, then
+ * copy parts at float offsets. GL 3.3 core / GLES 3.0: glBufferData(NULL) +
+ * glBufferSubData. */
+void cf_gfx_upload_begin(int64_t slot, int64_t nfloats) {
+    if (slot < 0 || slot >= CF_MAX_MESHES) return;
+    glBindBuffer(GL_ARRAY_BUFFER, g_vbo[slot]);
+    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(nfloats * 4), NULL, GL_STATIC_DRAW);
+}
+void cf_gfx_upload_part(int64_t slot, int64_t offset, void *arr, int64_t nfloats) {
+    if (slot < 0 || slot >= CF_MAX_MESHES || nfloats <= 0) return;
+    if (nfloats > narr_len(arr)) nfloats = narr_len(arr);
+    glBindBuffer(GL_ARRAY_BUFFER, g_vbo[slot]);
+    glBufferSubData(GL_ARRAY_BUFFER, (GLintptr)(offset * 4), (GLsizeiptr)(nfloats * 4), narr_data(arr));
+}
+
 void cf_gfx_begin_frame(double r, double g, double b) {
     glClearColor((float)r, (float)g, (float)b, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -268,6 +283,23 @@ void cf_gfx_draw_hud(int64_t slot, int64_t nverts, int64_t textured) {
     glUniform1i(g_u_use_tex, g_tex ? 1 : 0);
     glDisable(GL_BLEND);
     glEnable(GL_DEPTH_TEST);
+}
+
+/* Proposed NativeArray.blit for the March runtime: copy n floats from src[si..]
+ * into dst[di..]. dst must be uniquely owned (rc == 1) — the same in-place
+ * contract native_f32_arr_set uses; here it is checked and violated loudly
+ * rather than silently copying, so a caller learns about a shared buffer. */
+void *cf_f32_blit(void *dst, int64_t di, void *src, int64_t si, int64_t n) {
+    int64_t rc = *(int64_t *)dst;
+    if (rc != 1) { fprintf(stderr, "cf_f32_blit: destination is shared (rc=%lld); refusing to write in place\n", (long long)rc); abort(); }
+    if (n <= 0) return dst;
+    if (di < 0 || si < 0 || di + n > narr_len(dst) || si + n > narr_len(src)) {
+        fprintf(stderr, "cf_f32_blit: out of range (di=%lld si=%lld n=%lld dst=%lld src=%lld)\n",
+                (long long)di, (long long)si, (long long)n, (long long)narr_len(dst), (long long)narr_len(src));
+        abort();
+    }
+    memcpy((float *)narr_data(dst) + di, (const float *)narr_data(src) + si, (size_t)n * 4);
+    return dst;
 }
 
 /* Debug/verification hook: read back one pixel of the back buffer as 0xRRGGBB.

@@ -1,0 +1,9 @@
+[package]
+name = "probe_ffi5"
+version = "0.1.0"
+type = "app"
+
+[deps]
+
+[ffi]
+sources = ["native/p.c"]

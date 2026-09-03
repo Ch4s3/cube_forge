@@ -13,6 +13,9 @@
 --    into a full copy: one allocation and a 512KB memcpy per pushed float (G21).
 mod CubeForge.F32Buf do
 
+  needs IO.Foreign
+  needs Window
+
   type F32Buf = F32Buf(NativeF32Arr, Int, Int)
 
   doc "A buffer with room for [cap] floats and length 0."
@@ -74,6 +77,27 @@ mod CubeForge.F32Buf do
   doc "Append three floats."
   fn push3(b : F32Buf, x : Float, y : Float, z : Float) : F32Buf do
     push(push(push(b, x), y), z)
+  end
+
+  doc "Append the live prefix of [src] to [b] with one memcpy (grows first if needed)."
+  fn append(b : F32Buf, src : F32Buf) : F32Buf do
+    match src do
+      F32Buf(sd, sn, _) ->
+        match b do
+          F32Buf(d, n, cap) ->
+            if n + sn <= cap do
+              F32Buf(CubeForge.Ffi.Window.f32_blit(d, n, sd, 0, sn), n + sn, cap)
+            else
+              let new_cap = grow_to(cap, n + sn)
+              F32Buf(CubeForge.Ffi.Window.f32_blit(grow(d, n, new_cap), n, sd, 0, sn), n + sn, new_cap)
+            end
+        end
+    end
+  end
+
+  pfn grow_to(cap : Int, need : Int) : Int do
+    let c = if cap < 16 do 32 else cap * 2 end
+    if c >= need do c else grow_to(c, need) end
   end
 
   doc "Reset length to 0, keeping the storage."

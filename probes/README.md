@@ -14,3 +14,5 @@ Small standalone forge projects / files that reproduce each finding in
 - `refine_index.march` — G22, refinement checker coverage for the voxel index
 - `dotted_pat.march`, `dotted_pat2.march` — G24/G25, dotted constructor patterns
 - `oneline_match.march` — (control) one-line match with tuple patterns parses
+- `actor_probe/` — control: native arrays in actor state, List reply, Actor.call inside pmap all work
+- `probe_ffi5/` — G51, an extern returning its borrowed argument is a use-after-free; `consume` fixes it

@@ -25,6 +25,7 @@ mod CubeForge do
   alias CubeForge.Raycast as Ray
   alias CubeForge.Outline as Outline
   alias CubeForge.Water as Water
+  alias CubeForge.ChunkMesh as CM
 
   fn ms(seconds : Float) : String do float_to_string(seconds *. 1000.0) ++ "ms" end
 
@@ -35,7 +36,8 @@ mod CubeForge do
   -- Mutable-per-edit world state: world, per-slot vertex counts (opaque 0..63, water 64..127), outline buffer, current hit,
   -- selected block id, water actor pids (Array, one per chunk), per-chunk "has dirty cells" flags
   -- `p` is the water-actor Pid type: Pid(state) cannot be written in an annotation (GAPS.md G45), so it is a parameter.
-  type Scene(p) = Scene(CubeForge.World.World, NativeIntArr, CubeForge.F32Buf.F32Buf, CubeForge.Raycast.Hit, Int, Array.PVec(p), NativeIntArr)
+  -- ... and the per-chunk section meshes
+  type Scene(p) = Scene(CubeForge.World.World, NativeIntArr, CubeForge.F32Buf.F32Buf, CubeForge.Raycast.Hit, Int, Array.PVec(p), NativeIntArr, Array.PVec(CubeForge.ChunkMesh.ChunkMesh))
   fn water_slot_base() : Int do 64 end
   fn tick_period() : Int do 10 end
 
@@ -52,7 +54,7 @@ mod CubeForge do
   -- Tell the water actor about a player edit (and its neighbour when the cell is on a border).
   pfn notify_edit(sc, x : Int, y : Int, z : Int, id : Int) do
     match sc do
-      Scene(w, counts, outline, hit, sel, pids, flags) ->
+      Scene(w, counts, outline, hit, sel, pids, flags, meshes) ->
         let n = World.side(w)
         let cx = World.floor_div16(x)
         let cz = World.floor_div16(z)
@@ -65,7 +67,7 @@ mod CubeForge do
           let f1 = NativeArray.set_int(flags, ci, 1)
           -- mirrors in the 4 neighbours: an edge cell changed
           let f2 = edge_notify(w, pids, f1, cx, cz, lx, y, lz, id)
-          Scene(w, counts, outline, hit, sel, pids, f2)
+          Scene(w, counts, outline, hit, sel, pids, f2, meshes)
         end
     end
   end
@@ -154,19 +156,50 @@ mod CubeForge do
   end
   pfn pow2(n : Int) : Int do if n <= 0 do 1 else 2 * pow2(n - 1) end end
 
-  type Applied = Applied(CubeForge.World.World, NativeIntArr, NativeIntArr, Int)   -- world, counts, flags, remeshed
+  type Applied = Applied(CubeForge.World.World, NativeIntArr, NativeIntArr, Array.PVec(CubeForge.ChunkMesh.ChunkMesh), Int)   -- world, counts, flags, meshes, sections remeshed
 
-  pfn apply_all(w : CubeForge.World.World, pids, flags : NativeIntArr, counts : NativeIntArr, cis : List(Int), replies, empty : CubeForge.Chunk.Chunk, remeshed : Int) : Applied do
+  -- Bitmask (bit sy) of the sections touched by the cell changes in a reply.
+  pfn section_mask(out : List(Int), acc : Int) : Int do
+    match out do
+      Nil -> acc
+      Cons(v, rest) ->
+        if v / 4294967296 == 0 do section_mask(rest, int_or(acc, pow2((v % 4294967296) / 256 / 4096)))
+        else section_mask(rest, acc) end
+    end
+  end
+
+  -- Rebuild every section named in [mask] (bit sy) of chunk (cx, cz); concat+upload once. Returns Remeshed and the count of rebuilt sections.
+  pfn remesh_sections(world : CubeForge.World.World, cx : Int, cz : Int, mask : Int, sy : Int, m : CubeForge.ChunkMesh.ChunkMesh, empty : CubeForge.Chunk.Chunk, done : Int) : CubeForge.ChunkMesh.ChunkMesh do
+    if sy >= 16 do m
+    else
+      -- a changed cell on a section boundary changes the adjacent section's culling too
+      let hit = int_and(mask, pow2(sy)) != 0
+      let m1 = if hit do CM.rebuild_section(m, world, cx, cz, sy, empty) else m end
+      remesh_sections(world, cx, cz, mask, sy + 1, m1, empty, done)
+    end
+  end
+
+  pfn widen_mask(mask : Int, sy : Int, acc : Int) : Int do
+    if sy >= 16 do acc
+    else if int_and(mask, pow2(sy)) != 0 do widen_mask(mask, sy + 1, int_or(int_or(acc, pow2(sy)), int_or(if sy > 0 do pow2(sy - 1) else 0 end, if sy < 15 do pow2(sy + 1) else 0 end)))
+    else widen_mask(mask, sy + 1, acc) end end
+  end
+
+  pfn count_bits(mask : Int, sy : Int, acc : Int) : Int do
+    if sy >= 16 do acc else count_bits(mask, sy + 1, if int_and(mask, pow2(sy)) != 0 do acc + 1 else acc end) end
+  end
+
+  pfn apply_all(w : CubeForge.World.World, pids, flags : NativeIntArr, counts : NativeIntArr, meshes, cis : List(Int), replies, empty : CubeForge.Chunk.Chunk, remeshed : Int) : Applied do
     match cis do
-      Nil -> Applied(w, counts, flags, remeshed)
+      Nil -> Applied(w, counts, flags, meshes, remeshed)
       Cons(ci, rest) ->
         match replies do
-          Nil -> Applied(w, counts, flags, remeshed)
+          Nil -> Applied(w, counts, flags, meshes, remeshed)
           Cons(r, rrest) ->
             match r do
               Err(e) ->
                 println("water tick error for chunk " ++ int_to_string(ci) ++ ": " ++ e)
-                apply_all(w, pids, flags, counts, rest, rrest, empty, remeshed)
+                apply_all(w, pids, flags, counts, meshes, rest, rrest, empty, remeshed)
               Ok(out) ->
                 let n = World.side(w)
                 match apply_reply(w, pids, flags, ci, out, Nil) do
@@ -174,30 +207,50 @@ mod CubeForge do
                     if has_cells(out) do
                       let cx = ci % n
                       let cz = ci / n
-                      let c1 = upload_pair(Mesher.mesh_world_chunk(w1, cx, cz, empty), ci, counts)
-                      -- a changed border cell changes that neighbour's culling too: remesh only those neighbours
-                      let c2 = remesh_neighbors(w1, cx, cz, c1, empty, edge_mask(out, 0))
-                      apply_all(w1, pids, flags1, c2, rest, rrest, empty, remeshed + 1)
-                    else apply_all(w1, pids, flags1, counts, rest, rrest, empty, remeshed) end
+                      let smask = widen_mask(section_mask(out, 0), 0, 0)
+                      let m1 = remesh_sections(w1, cx, cz, smask, 0, Array.get(meshes, ci), empty, 0)
+                      let c1 = upload_chunk(m1, ci, counts)
+                      let meshes1 = Array.set(meshes, ci, m1)
+                      -- a changed border cell changes that neighbour's culling too: remesh those neighbours' same sections
+                      match remesh_neighbors(w1, cx, cz, c1, meshes1, empty, edge_mask(out, 0), smask) do
+                        Remeshed(c2, meshes2) -> apply_all(w1, pids, flags1, c2, meshes2, rest, rrest, empty, remeshed + count_bits(smask, 0, 0))
+                      end
+                    else apply_all(w1, pids, flags1, counts, meshes, rest, rrest, empty, remeshed) end
                 end
             end
         end
     end
   end
 
-  -- mask bits: 1 = -z, 2 = +z, 4 = +x, 8 = -x
-  pfn remesh_neighbors(w : CubeForge.World.World, cx : Int, cz : Int, counts : NativeIntArr, empty : CubeForge.Chunk.Chunk, mask : Int) : NativeIntArr do
-    let n = World.side(w)
-    let c1 = if int_and(mask, 4) != 0 && World.in_bounds(w, cx + 1, cz) do upload_pair(Mesher.mesh_world_chunk(w, cx + 1, cz, empty), cx + 1 + n * cz, counts) else counts end
-    let c2 = if int_and(mask, 8) != 0 && World.in_bounds(w, cx - 1, cz) do upload_pair(Mesher.mesh_world_chunk(w, cx - 1, cz, empty), cx - 1 + n * cz, c1) else c1 end
-    let c3 = if int_and(mask, 2) != 0 && World.in_bounds(w, cx, cz + 1) do upload_pair(Mesher.mesh_world_chunk(w, cx, cz + 1, empty), cx + n * (cz + 1), c2) else c2 end
-    if int_and(mask, 1) != 0 && World.in_bounds(w, cx, cz - 1) do upload_pair(Mesher.mesh_world_chunk(w, cx, cz - 1, empty), cx + n * (cz - 1), c3) else c3 end
+  -- Remesh the sections in [smask] of the neighbour chunks named by [mask] (bits: 1 = -z, 2 = +z, 4 = +x, 8 = -x).
+  pfn remesh_neighbors(w : CubeForge.World.World, cx : Int, cz : Int, counts : NativeIntArr, meshes, empty : CubeForge.Chunk.Chunk, mask : Int, smask : Int) : Remeshed do
+    let r1 = if int_and(mask, 4) != 0 do remesh_chunk_sections(w, cx + 1, cz, smask, counts, meshes, empty) else Remeshed(counts, meshes) end
+    match r1 do
+      Remeshed(c1, m1) ->
+        let r2 = if int_and(mask, 8) != 0 do remesh_chunk_sections(w, cx - 1, cz, smask, c1, m1, empty) else Remeshed(c1, m1) end
+        match r2 do
+          Remeshed(c2, m2) ->
+            let r3 = if int_and(mask, 2) != 0 do remesh_chunk_sections(w, cx, cz + 1, smask, c2, m2, empty) else Remeshed(c2, m2) end
+            match r3 do
+              Remeshed(c3, m3) -> if int_and(mask, 1) != 0 do remesh_chunk_sections(w, cx, cz - 1, smask, c3, m3, empty) else Remeshed(c3, m3) end
+            end
+        end
+    end
+  end
+
+  pfn remesh_chunk_sections(w : CubeForge.World.World, cx : Int, cz : Int, smask : Int, counts : NativeIntArr, meshes, empty : CubeForge.Chunk.Chunk) : Remeshed do
+    if !World.in_bounds(w, cx, cz) do Remeshed(counts, meshes)
+    else
+      let ci = cx + World.side(w) * cz
+      let m1 = remesh_sections(w, cx, cz, smask, 0, Array.get(meshes, ci), empty, 0)
+      Remeshed(upload_chunk(m1, ci, counts), Array.set(meshes, ci, m1))
+    end
   end
 
   -- One water tick: call every flagged chunk actor in parallel, apply the replies, remesh what changed.
   pfn water_tick(sc, workers : Int, verbose : Bool) do
     match sc do
-      Scene(w, counts, outline, hit, sel, pids, flags) ->
+      Scene(w, counts, outline, hit, sel, pids, flags, meshes) ->
         let n = World.side(w)
         let cis = flagged(flags, n * n - 1, n, Nil)
         match cis do
@@ -208,13 +261,13 @@ mod CubeForge do
             let flags1 = clear_flags(flags, cis)
             let replies = List.pmap_n(cis, fn ci -> Water.call_tick(Array.get(pids, ci)), workers)
             let t1 = Win.time()
-            match apply_all(w, pids, flags1, counts, cis, replies, Chunk.new(), 0) do
-              Applied(w1, counts1, flags2, remeshed) ->
+            match apply_all(w, pids, flags1, counts, meshes, cis, replies, Chunk.new(), 0) do
+              Applied(w1, counts1, flags2, meshes1, remeshed) ->
                 let t2 = Win.time()
                 if verbose do
-                  println("water tick: " ++ int_to_string(List.length(cis)) ++ " chunks, calls " ++ ms(t1 -. t0) ++ ", apply+remesh " ++ ms(t2 -. t1) ++ " (" ++ int_to_string(remeshed) ++ " remeshed), reply sizes " ++ reply_sizes(replies))
+                  println("water tick: " ++ int_to_string(List.length(cis)) ++ " chunks, calls " ++ ms(t1 -. t0) ++ ", apply+remesh " ++ ms(t2 -. t1) ++ " (" ++ int_to_string(remeshed) ++ " sections remeshed), reply sizes " ++ reply_sizes(replies))
                 else () end
-                Scene(w1, counts1, outline, hit, sel, pids, flags2)
+                Scene(w1, counts1, outline, hit, sel, pids, flags2, meshes1)
             end
         end
     end
@@ -240,27 +293,63 @@ mod CubeForge do
   end
 
   pfn scene_water_count(sc, cx : Int, cz : Int) : Int do
-    match sc do Scene(w, _, _, _, _, _, _) -> Chunk.count_water(World.chunk_at(w, cx, cz)) end
+    match sc do Scene(w, _, _, _, _, _, _, _) -> Chunk.count_water(World.chunk_at(w, cx, cz)) end
   end
 
   fn reach() : Float do 8.0 end
 
-  -- Upload both meshes of chunk slot [slot] and record their vertex counts.
-  pfn upload_pair(m : CubeForge.Mesher.Meshes, slot : Int, counts : NativeIntArr) : NativeIntArr do
-    let o = Mesher.opaque_buf(m)
-    let w = Mesher.water_buf(m)
-    Win.gfx_upload(slot, F32Buf.storage(o), F32Buf.len(o))
-    Win.gfx_upload(water_slot_base() + slot, F32Buf.storage(w), F32Buf.len(w))
-    NativeArray.set_int(NativeArray.set_int(counts, slot, Mesher.vertex_count(o)), water_slot_base() + slot, Mesher.vertex_count(w))
+  -- Upload a chunk mesh's two buffers into chunk slot [slot] and record their vertex counts.
+  pfn upload_sections(slot : Int, secs : Array.PVec(CubeForge.F32Buf.F32Buf), i : Int, offset : Int) : Unit do
+    if i >= 16 do ()
+    else
+      let b = Array.get(secs, i)
+      Win.gfx_upload_part(slot, offset, F32Buf.storage(b), F32Buf.len(b))
+      upload_sections(slot, secs, i + 1, offset + F32Buf.len(b))
+    end
+  end
+  pfn upload_chunk(m : CubeForge.ChunkMesh.ChunkMesh, slot : Int, counts : NativeIntArr) : NativeIntArr do
+    let os = CM.opaque_sections(m)
+    let ws = CM.water_sections(m)
+    Win.gfx_upload_begin(slot, CM.total_floats(os))
+    upload_sections(slot, os, 0, 0)
+    Win.gfx_upload_begin(water_slot_base() + slot, CM.total_floats(ws))
+    upload_sections(water_slot_base() + slot, ws, 0, 0)
+    NativeArray.set_int(NativeArray.set_int(counts, slot, CM.opaque_vertices(m)), water_slot_base() + slot, CM.water_vertices(m))
   end
 
-  -- Remesh the chunk containing world (x, z) and upload it. Returns the counts array.
-  pfn remesh_at(world : CubeForge.World.World, x : Int, z : Int, counts : NativeIntArr, empty : CubeForge.Chunk.Chunk) : NativeIntArr do
+  -- counts + meshes after a remesh
+  type Remeshed = Remeshed(NativeIntArr, Array.PVec(CubeForge.ChunkMesh.ChunkMesh))
+
+  -- Rebuild section [sy] (and sy±1 when [also_adjacent]) of chunk (cx, cz), re-concatenate and upload.
+  pfn remesh_section(world : CubeForge.World.World, cx : Int, cz : Int, sy : Int, also_adjacent : Bool,
+                     counts : NativeIntArr, meshes, empty : CubeForge.Chunk.Chunk) : Remeshed do
+    if !World.in_bounds(world, cx, cz) do Remeshed(counts, meshes)
+    else
+      let ci = cx + World.side(world) * cz
+      let m0 = Array.get(meshes, ci)
+      let m1 = CM.rebuild_section(m0, world, cx, cz, sy, empty)
+      let m2 = if also_adjacent do CM.rebuild_section(CM.rebuild_section(m1, world, cx, cz, sy - 1, empty), world, cx, cz, sy + 1, empty) else m1 end
+      Remeshed(upload_chunk(m2, ci, counts), Array.set(meshes, ci, m2))
+    end
+  end
+
+  -- Remesh around a single edited world cell: its section (plus the adjacent section when on a
+  -- section boundary) and the same section of a neighbour chunk when on a chunk border.
+  pfn remesh_cell(world : CubeForge.World.World, x : Int, y : Int, z : Int, counts : NativeIntArr, meshes, empty : CubeForge.Chunk.Chunk) : Remeshed do
     let cx = World.floor_div16(x)
     let cz = World.floor_div16(z)
-    if World.in_bounds(world, cx, cz) do
-      upload_pair(Mesher.mesh_world_chunk(world, cx, cz, empty), cx + World.side(world) * cz, counts)
-    else counts end
+    let sy = y / 16
+    let ly = y % 16
+    let lx = World.mod16(x)
+    let lz = World.mod16(z)
+    match remesh_section(world, cx, cz, sy, ly == 0 || ly == 15, counts, meshes, empty) do
+      Remeshed(c1, m1) ->
+        let r2 = if lx == 0 do remesh_section(world, cx - 1, cz, sy, false, c1, m1, empty) else if lx == 15 do remesh_section(world, cx + 1, cz, sy, false, c1, m1, empty) else Remeshed(c1, m1) end end
+        match r2 do
+          Remeshed(c2, m2) ->
+            if lz == 0 do remesh_section(world, cx, cz - 1, sy, false, c2, m2, empty) else if lz == 15 do remesh_section(world, cx, cz + 1, sy, false, c2, m2, empty) else Remeshed(c2, m2) end end
+        end
+    end
   end
 
   -- Apply a block edit at (x, y, z): set the block, remesh its chunk, and a
@@ -268,19 +357,16 @@ mod CubeForge do
   -- culled against the neighbour, so the neighbour's mesh changes too).
   pfn edit_block(sc, x : Int, y : Int, z : Int, id : Int) do
     match sc do
-      Scene(world, counts, outline, hit, sel, pids, flags) ->
+      Scene(world, counts, outline, hit, sel, pids, flags, meshes) ->
         let t0 = Win.time()
         let world1 = World.set_block(world, x, y, z, id)
-        let empty = Chunk.new()
-        let c1 = remesh_at(world1, x, z, counts, empty)
-        let lx = World.mod16(x)
-        let lz = World.mod16(z)
-        let c2 = if lx == 0 do remesh_at(world1, x - 1, z, c1, empty) else if lx == 15 do remesh_at(world1, x + 1, z, c1, empty) else c1 end end
-        let c3 = if lz == 0 do remesh_at(world1, x, z - 1, c2, empty) else if lz == 15 do remesh_at(world1, x, z + 1, c2, empty) else c2 end end
-        let t1 = Win.time()
-        println((if id == 0 do "broke" else "placed" end) ++ " block at " ++ int_to_string(x) ++ "," ++ int_to_string(y) ++ "," ++ int_to_string(z)
-                ++ " — edit + remesh " ++ ms(t1 -. t0))
-        notify_edit(Scene(world1, c3, outline, hit, sel, pids, flags), x, y, z, id)
+        match remesh_cell(world1, x, y, z, counts, meshes, Chunk.new()) do
+          Remeshed(c1, m1) ->
+            let t1 = Win.time()
+            println((if id == 0 do "broke" else "placed" end) ++ " block at " ++ int_to_string(x) ++ "," ++ int_to_string(y) ++ "," ++ int_to_string(z)
+                    ++ " — edit + section remesh " ++ ms(t1 -. t0))
+            notify_edit(Scene(world1, c1, outline, hit, sel, pids, flags, m1), x, y, z, id)
+        end
     end
   end
 
@@ -321,14 +407,14 @@ mod CubeForge do
   -- [place_id] < 0 means "the selected block"; a scripted edit passes an explicit id.
   pfn interact(sc, p : CubeForge.Player.Player, break_now : Bool, place_now : Bool, place_id : Int, new_sel : Int) do
     match sc do
-      Scene(world, counts, outline, _, sel0, pids, flags) ->
+      Scene(world, counts, outline, _, sel0, pids, flags, meshes) ->
         let sel = if new_sel > 0 do new_sel else sel0 end
         let e = Player.eye(p)
         let d = Player.forward(Player.yaw(p), Player.pitch(p))
         let hit = Ray.cast(world, V.x(e), V.y(e), V.z(e), V.x(d), V.y(d), V.z(d), reach())
         let outline1 = if Ray.is_hit(hit) do Outline.build(outline, Ray.bx(hit), Ray.by_(hit), Ray.bz(hit)) else F32Buf.clear(outline) end
         if Ray.is_hit(hit) do CubeForge.Ffi.Window.gfx_upload(254, F32Buf.storage(outline1), F32Buf.len(outline1)) else () end
-        let sc1 = Scene(world, counts, outline1, hit, sel, pids, flags)
+        let sc1 = Scene(world, counts, outline1, hit, sel, pids, flags, meshes)
         if break_now && Ray.is_hit(hit) do
           edit_block(sc1, Ray.bx(hit), Ray.by_(hit), Ray.bz(hit), 0)
         else if place_now && Ray.is_hit(hit) do
@@ -342,12 +428,12 @@ mod CubeForge do
     end
   end
 
-  pfn scene_counts(sc) : NativeIntArr do match sc do Scene(_, c, _, _, _, _, _) -> c end end
-  pfn scene_world(sc) : CubeForge.World.World do match sc do Scene(w, _, _, _, _, _, _) -> w end end
-  pfn scene_has_hit(sc) : Bool do match sc do Scene(_, _, _, h, _, _, _) -> Ray.is_hit(h) end end
+  pfn scene_counts(sc) : NativeIntArr do match sc do Scene(_, c, _, _, _, _, _, _) -> c end end
+  pfn scene_world(sc) : CubeForge.World.World do match sc do Scene(w, _, _, _, _, _, _, _) -> w end end
+  pfn scene_has_hit(sc) : Bool do match sc do Scene(_, _, _, h, _, _, _, _) -> Ray.is_hit(h) end end
   fn scene_hit_string(sc) : String do
     match sc do
-      Scene(_, _, _, h, _, _, _) -> if Ray.is_hit(h) do int_to_string(Ray.bx(h)) ++ "," ++ int_to_string(Ray.by_(h)) ++ "," ++ int_to_string(Ray.bz(h)) ++ " face " ++ int_to_string(Ray.nx(h)) ++ "," ++ int_to_string(Ray.ny(h)) ++ "," ++ int_to_string(Ray.nz(h)) else "none" end
+      Scene(_, _, _, h, _, _, _, _) -> if Ray.is_hit(h) do int_to_string(Ray.bx(h)) ++ "," ++ int_to_string(Ray.by_(h)) ++ "," ++ int_to_string(Ray.bz(h)) ++ " face " ++ int_to_string(Ray.nx(h)) ++ "," ++ int_to_string(Ray.ny(h)) ++ "," ++ int_to_string(Ray.nz(h)) else "none" end
     end
   end
   -- FPS meter: window start time, frames in window, last displayed fps, HUD vertex buffer
@@ -446,7 +532,7 @@ mod CubeForge do
                     ++ " chunk(" ++ int_to_string(cx) ++ "," ++ int_to_string(cz - 1) ++ ")=" ++ int_to_string(scene_water_count(sc1, cx, cz - 1)))
           else () end
           if autoedit >= 0 && (frame == autoedit - 1 || frame == autoedit + 1 || frame == autoedit + 61 || frame == autoedit + 121) do
-            println("frame " ++ int_to_string(frame) ++ " looking at " ++ scene_hit_string(sc1) ++ "; block there = " ++ int_to_string(match sc1 do Scene(w, _, _, h, _, _, _) -> World.block_at(w, Ray.bx(h), Ray.by_(h), Ray.bz(h)) end))
+            println("frame " ++ int_to_string(frame) ++ " looking at " ++ scene_hit_string(sc1) ++ "; block there = " ++ int_to_string(match sc1 do Scene(w, _, _, h, _, _, _, _) -> World.block_at(w, Ray.bx(h), Ray.by_(h), Ray.bz(h)) end))
           else () end
           if autoswim && frame % 20 == 0 && frame <= 400 do
             println("frame " ++ int_to_string(frame) ++ " y=" ++ float_to_string(V.y(Player.position(player1))) ++ " in_water=" ++ (if Player.in_water(player1, scene_world(sc1)) do "true" else "false" end) ++ " eye_in_water=" ++ (if Player.eye_in_water(player1, scene_world(sc1)) do "true" else "false" end))
@@ -570,30 +656,37 @@ mod CubeForge do
 
   -- Stage 2 of world generation: mesh every chunk (each needs its 4 neighbours, which
   -- stage 1 guarantees), upload each mesh into its slot, record vertex counts.
-  pfn upload_meshes(meshes : List(CubeForge.Mesher.Meshes), i : Int, counts : NativeIntArr) : NativeIntArr do
+  pfn upload_meshes(meshes : List(CubeForge.ChunkMesh.ChunkMesh), i : Int, counts : NativeIntArr) : NativeIntArr do
     match meshes do
       Nil -> counts
-      Cons(m, rest) -> upload_meshes(rest, i + 1, upload_pair(m, i, counts))
+      Cons(m, rest) -> upload_meshes(rest, i + 1, upload_chunk(m, i, counts))
     end
   end
 
-  pfn count_verts(meshes : List(CubeForge.Mesher.Meshes), acc : Int) : Int do
+  pfn count_verts(meshes : List(CubeForge.ChunkMesh.ChunkMesh), acc : Int) : Int do
     match meshes do
       Nil -> acc
-      Cons(m, rest) -> count_verts(rest, acc + Mesher.vertex_count(Mesher.opaque_buf(m)) + Mesher.vertex_count(Mesher.water_buf(m)))
+      Cons(m, rest) -> count_verts(rest, acc + CM.opaque_vertices(m) + CM.water_vertices(m))
     end
   end
 
-  pfn count_water_verts(meshes : List(CubeForge.Mesher.Meshes), acc : Int) : Int do
+  pfn count_water_verts(meshes : List(CubeForge.ChunkMesh.ChunkMesh), acc : Int) : Int do
     match meshes do
       Nil -> acc
-      Cons(m, rest) -> count_water_verts(rest, acc + Mesher.vertex_count(Mesher.water_buf(m)))
+      Cons(m, rest) -> count_water_verts(rest, acc + CM.water_vertices(m))
     end
   end
 
-  fn mesh_all(world : CubeForge.World.World, n : Int, workers : Int) : List(CubeForge.Mesher.Meshes) do
+  fn mesh_all(world : CubeForge.World.World, n : Int, workers : Int) : List(CubeForge.ChunkMesh.ChunkMesh) do
     let empty = Chunk.new()
-    List.pmap_n(World.coords(n), fn i -> Mesher.mesh_world_chunk(world, i % n, i / n, empty), workers)
+    List.pmap_n(World.coords(n), fn i -> CM.build(world, i % n, i / n, empty), workers)
+  end
+
+  -- The naive whole-chunk mesher, kept for the headless timing comparison.
+  fn mesh_all_naive(world : CubeForge.World.World, n : Int, workers : Int) : Int do
+    let empty = Chunk.new()
+    let ms = List.pmap_n(World.coords(n), fn i -> Mesher.mesh_world_chunk(world, i % n, i / n, empty), workers)
+    List.fold_left(ms, 0, fn (acc, m) -> acc + Mesher.vertex_count(Mesher.opaque_buf(m)) + Mesher.vertex_count(Mesher.water_buf(m)))
   end
 
   fn main(cap : Cap(IO)) : Unit do
@@ -618,10 +711,15 @@ mod CubeForge do
       let meshes = mesh_all(world, n, workers)
       let t3 = System.monotonic_time()
       let nverts = count_verts(meshes, 0)
+      if headless do
+        let tn0 = System.monotonic_time()
+        let naive_verts = mesh_all_naive(world, n, workers)
+        println("  naive mesher for comparison: " ++ int_to_string(System.monotonic_time() - tn0) ++ " ms wall, " ++ int_to_string(naive_verts) ++ " vertices")
+      else () end
       println("world " ++ int_to_string(n) ++ "x" ++ int_to_string(n) ++ " chunks, " ++ int_to_string(workers) ++ " workers, "
               ++ int_to_string(Env.get_int("MARCH_NUM_SCHEDULERS", 4)) ++ " scheduler threads (MARCH_NUM_SCHEDULERS)")
       println("  terrain scalar noise: " ++ int_to_string(t1 - t0) ++ " ms   terrain F32x4 noise: " ++ int_to_string(t2 - t1) ++ " ms")
-      println("  mesh all: " ++ int_to_string(t3 - t2) ++ " ms wall, " ++ float_to_string(int_to_float(t3 - t2) /. int_to_float(n * n)) ++ " ms per chunk (wall / chunks), " ++ int_to_string(nverts) ++ " vertices (" ++ int_to_string(count_water_verts(meshes, 0)) ++ " water)")
+      println("  mesh all (greedy sections): " ++ int_to_string(t3 - t2) ++ " ms wall, " ++ float_to_string(int_to_float(t3 - t2) /. int_to_float(n * n)) ++ " ms per chunk (wall / chunks), " ++ int_to_string(nverts) ++ " vertices (" ++ int_to_string(count_water_verts(meshes, 0)) ++ " water)")
       if headless do ()
       else
         let counts = upload_meshes(meshes, 0, NativeArray.make_int(2 * water_slot_base(), 0))
@@ -643,7 +741,7 @@ mod CubeForge do
         let tw0 = Win.time()
         let pids = Array.from_list(spawn_water(n * n - 1, n, seed, Nil))
         println("spawned " ++ int_to_string(n * n) ++ " water actors in " ++ ms(Win.time() -. tw0) ++ " (loads run asynchronously)")
-        let scene = Scene(world, counts, F32Buf.new(256), Ray.miss(), 3, pids, NativeArray.make_int(n * n, 0))
+        let scene = Scene(world, counts, F32Buf.new(256), Ray.miss(), 3, pids, NativeArray.make_int(n * n, 0), Array.from_list(meshes))
         let fps0 = Fps(t4, 0, 0, F32Buf.new(4096))
         match frame_loop(Frame(0, t4, player, 0, NativeArray.make_float(16, 0.0), NativeArray.make_f32(16, 0.0)), knobs, scene, n * n, proj, fps0) do
           Frame(frames, _, p, _, _, _) ->

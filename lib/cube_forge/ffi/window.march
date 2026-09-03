@@ -21,12 +21,15 @@ mod CubeForge.Ffi.Window do
     fn x_win_request_close(): Unit = "cf_win_request_close"
     fn x_gfx_init(): Int = "cf_gfx_init"
     fn x_gfx_upload(slot: Int, verts: NativeF32Arr, nfloats: Int): Unit = "cf_gfx_upload"
+    fn x_gfx_upload_begin(slot: Int, nfloats: Int): Unit = "cf_gfx_upload_begin"
+    fn x_gfx_upload_part(slot: Int, offset: Int, arr: NativeF32Arr, nfloats: Int): Unit = "cf_gfx_upload_part"
     fn x_gfx_begin_frame(r: Float, g: Float, b: Float): Unit = "cf_gfx_begin_frame"
     fn x_gfx_set_view_proj(m: NativeF32Arr): Unit = "cf_gfx_set_view_proj"
     fn x_gfx_draw(slot: Int, nverts: Int): Unit = "cf_gfx_draw"
     fn x_gfx_read_pixel(x: Int, y: Int): Int = "cf_gfx_read_pixel"
     fn x_gfx_draw_hud(slot: Int, nverts: Int, textured: Int): Unit = "cf_gfx_draw_hud"
     fn x_gfx_draw_translucent(slot: Int, nverts: Int): Unit = "cf_gfx_draw_translucent"
+    fn x_f32_blit(consume dst: NativeF32Arr, di: Int, src: NativeF32Arr, si: Int, n: Int): NativeF32Arr = "cf_f32_blit"
     fn x_gfx_draw_lines(slot: Int, nverts: Int): Unit = "cf_gfx_draw_lines"
     fn x_gfx_dump_bmp(path: String): Int = "cf_gfx_dump_bmp"
     fn x_live_allocs(): Int = "march_live_allocs"
@@ -48,6 +51,10 @@ mod CubeForge.Ffi.Window do
   fn gfx_init() : Int do x_gfx_init() end
   doc "Upload the first [nfloats] floats of [verts] into mesh slot [slot]."
   fn gfx_upload(slot : Int, verts : NativeF32Arr, nfloats : Int) : Unit do x_gfx_upload(slot, verts, nfloats) end
+  doc "Reserve a VBO of [nfloats] floats in [slot]; fill it with gfx_upload_part."
+  fn gfx_upload_begin(slot : Int, nfloats : Int) : Unit do x_gfx_upload_begin(slot, nfloats) end
+  doc "Copy the first [nfloats] floats of [arr] into [slot] at float offset [offset]."
+  fn gfx_upload_part(slot : Int, offset : Int, arr : NativeF32Arr, nfloats : Int) : Unit do x_gfx_upload_part(slot, offset, arr, nfloats) end
   fn gfx_begin_frame(r : Float, g : Float, b : Float) : Unit do x_gfx_begin_frame(r, g, b) end
   doc "Set the view-projection matrix: 16 floats, column-major."
   fn gfx_set_view_proj(m : NativeF32Arr) : Unit do x_gfx_set_view_proj(m) end
@@ -56,6 +63,8 @@ mod CubeForge.Ffi.Window do
   fn gfx_draw_lines(slot : Int, nverts : Int) : Unit do x_gfx_draw_lines(slot, nverts) end
   doc "Draw an NDC-space overlay mesh: no depth test, no texture, identity view-projection."
   fn gfx_draw_hud(slot : Int, nverts : Int, textured : Bool) : Unit do x_gfx_draw_hud(slot, nverts, if textured do 1 else 0 end) end
+  doc "Stdlib candidate: copy [n] floats from src[si..] into dst[di..] in place; dst must be uniquely owned."
+  fn f32_blit(dst : NativeF32Arr, di : Int, src : NativeF32Arr, si : Int, n : Int) : NativeF32Arr do x_f32_blit(dst, di, src, si, n) end
   doc "Draw a slot blended, depth-tested but not depth-written, unculled. For water, after all opaque draws."
   fn gfx_draw_translucent(slot : Int, nverts : Int) : Unit do x_gfx_draw_translucent(slot, nverts) end
   doc "Verification hook: read back one pixel of the back buffer as 0xRRGGBB."

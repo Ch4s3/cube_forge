@@ -217,7 +217,13 @@ NativeArray `get` is documented as bounds-checked but is not (G18).
   read-back at frame 2 was my first "proof" and it was wrong. Verify at frame
   30+.
 
-### G18. `NativeArray.get_*` is documented as "panics if out of bounds" but is unchecked
+### G18. `NativeArray.get_*` bounds checking is inconsistent between the C source and the compiled path
+- **Correction (spreading-water work):** a compiled `NativeArray.get_int` with index 256 on a
+  256-element array *did* abort with `native_int_arr_get: index 256 out of bounds` — so the
+  compiled builtin path checks Int arrays even though the C function body I read does not.
+  Which of `get_u8` / `get_f32` / `get_float` are checked on which path is not documented;
+  the observation below stands for the C source, and the doc string is right for at least
+  `get_int` compiled.
 - `native_u8_arr_get` / `native_int_arr_get` / `native_float_arr_get`
   (`runtime/march_runtime.c`, `DEF_NARROW_INT_ARR` and the i64/f64 versions)
   read `arr + 32 + i * size` with no length comparison. The bounds-checking
@@ -669,3 +675,48 @@ order of value per line, each with a probe already in `probes/`:
   (G28 applies). One record per tick per chunk is small, but it is a leak by
   construction that nothing in the language lets you avoid, since actor state
   must be a record.
+
+---
+
+## Greedy meshing / sections / blit notes
+
+### G51. An extern that returns its own (borrowed) argument is a use-after-free, and nothing says so
+- `fn blit(dst: NativeF32Arr, …): NativeF32Arr` implemented as `return dst` in C:
+  March treats the returned pointer as a fresh owned value and releases `dst`
+  after the call (borrow default), so the next use of the result reads freed
+  memory; the second call in a chain aborts with `RC underflow (rc was 0)`.
+  `probes/probe_ffi5` shows a 3-argument call "working" only because the
+  argument stayed live; the 5-argument variant looked like an arity bug for
+  an hour.
+- The documented fix is `consume dst` (ownership transfers into the binding,
+  which then legitimately returns it). That is exactly the `set_*` in-place
+  contract, and `cf_f32_blit` now checks `rc == 1` on entry and aborts if the
+  buffer is shared, instead of silently copying.
+- **Would need:** `forge ffi gen-c` (or the typechecker) to warn when an
+  extern's return type equals a borrowed parameter's heap type — or a
+  `returns_arg` annotation. The docs' "must not retain" sentence does not
+  read as "must not return".
+
+### G52. `&&` in a bounds guard over a NativeArray read is an out-of-bounds read (G33 again)
+- `if u + wd < 16 && get_int(mask, u + wd + 16 * v) == key` evaluates the
+  read when `u + wd == 16`; on 0.3.0 the compiled `get_int` caught it
+  (`index 256 out of bounds`). The idiom every C/Rust/ML programmer reaches
+  for is unsafe in March and the language gives no hint.
+
+### G53. `native_int_arr_get` IS bounds-checked compiled (G18 corrected)
+- Recorded here so the correction is not lost: the failure mode above was a
+  clean runtime abort, not silent memory reading.
+
+### G54. A buffer stored in a persistent `Array` can never be updated in place
+- The first design kept per-chunk upload buffers inside `ChunkMesh` values held
+  in an `Array.PVec`. `Array.get` hands out a shared reference, so the buffer's
+  rc is ≥ 2 whenever anyone can see it, and every in-place operation (`set_*`,
+  the new `blit`) either copies or, with the explicit check, refuses. There is
+  no way to *move* a value out of a persistent container and put it back
+  (`Array` has no `take`/`swap`), so "mutable scratch owned by a long-lived
+  structure" is not expressible with FBIP alone. cube_forge sidesteps it by
+  letting the shim assemble VBOs from the 16 section buffers
+  (`gfx_upload_begin` + `gfx_upload_part`) instead of concatenating in March.
+- **Would need:** a linear "borrow out / put back" API on `Array`, or a real
+  uniquely-owned mutable buffer type that persistent containers can hold by
+  move.

@@ -106,3 +106,18 @@ blend does compile to NEON, but the lattice step is scalar by necessity
 The tick itself is cheap; the cost is meshing whole chunks for a handful of
 changed cells. Per-cell mesh patching or a dirty-region mesher is the obvious
 next step (todos.md, greedy meshing).
+
+## Greedy sections + shim-side VBO assembly (2026-09-03)
+
+| measure | before (naive whole-chunk) | after (greedy 16x16x16 sections) |
+|---|---|---|
+| world vertices (64 chunks, water unchanged) | 460 698 | **74 610** (44 364 opaque + 30 246 water) |
+| mesh all 64 chunks, 4 schedulers, headless | 307–337 ms | **259 ms** (4.0 ms/chunk); an earlier greedy pass without empty-section/empty-slice early-outs took 1 282 ms |
+| block edit + remesh | 12 ms | **2.6–6.6 ms** (1–3 sections + neighbour sections) |
+| water tick apply + remesh, 1 chunk changed | 12–21 ms | **5.5–9 ms** (3 sections: the changed one ± 1) |
+| water tick apply + remesh, 2 chunks changed | 37–39 ms | **16–19 ms** (6 sections) |
+| fps, 64 opaque + 64 water draws | 113–118 | 116–117 (unchanged; vsync-bound) |
+| per-frame live-object delta | 1 | 1 |
+
+`blit` (`cf_f32_blit`, the proposed `NativeArray.blit`) is exercised by
+`F32Buf.append` and its test, but the upload path no longer needs it (G54).

@@ -11,7 +11,7 @@ Planned, not started. One entry per feature; each gets its own design doc under
 ## Engine
 
 - [ ] **Main-thread pinning runtime patch** (GAPS.md G15) — chip spawned, in progress in a separate session.
-- [ ] **Greedy meshing + `NativeArray.blit` stdlib candidate** — halves mesh time; forces a real buffer API (GAPS.md G13).
+- [x] **Greedy meshing + sections + `blit` stdlib candidate** — done 2026-09-03 (`docs/superpowers/specs/2026-09-03-greedy-sections-blit-design.md`): 6x fewer vertices, section remesh 3–5x faster; blit exists as `cf_f32_blit` + `F32Buf.append`.
 - [ ] **Lighting** — flood-fill sky/block light, per-vertex light in the 7-float layout; exercises `NativeU8Arr` at scale.
 - [ ] **Texture atlas via stb_image** — real block textures; needs `Bytes` across FFI fixed first (GAPS.md G8).
 - [ ] **Chunk streaming with actors** — infinite world, chunk lifecycle as actor state, supervision under load.

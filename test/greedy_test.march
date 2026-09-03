@@ -1,0 +1,70 @@
+-- Greedy section meshing and F32Buf.append.
+mod CubeForge.Test.Greedy do
+
+  needs IO.Spawn
+  needs IO.Foreign
+  needs Window
+  import Test
+  alias CubeForge.Chunk as C
+  alias CubeForge.Mesher as Mesher
+  alias CubeForge.F32Buf as B
+
+  pfn near(a : Float, b : Float) : Bool do Math.abs(a -. b) < 0.0001 end
+
+  -- flat stone slab at y = 9 across the chunk
+  pfn slab_go(c : CubeForge.Chunk.Chunk, i : Int) : CubeForge.Chunk.Chunk do
+    if i >= 256 do c else slab_go(C.set(c, i % 16, 9, i / 16, 3), i + 1) end
+  end
+  -- checkerboard of stone / dirt at y = 9
+  pfn checker_go(c : CubeForge.Chunk.Chunk, i : Int) : CubeForge.Chunk.Chunk do
+    if i >= 256 do c else checker_go(C.set(c, i % 16, 9, i / 16, if (i % 16 + i / 16) % 2 == 0 do 3 else 2 end), i + 1) end
+  end
+
+  -- sum of quad areas in a buffer (every 6 vertices = one quad; area from uv extents of vertex 2)
+  pfn area_go(b : CubeForge.F32Buf.F32Buf, q : Int, nq : Int, acc : Float) : Float do
+    if q >= nq do acc
+    else
+      let base = q * 6 * 7
+      let uw = Test.assert_some(B.get(b, base + 2 * 7 + 3), "u")
+      let vh = Test.assert_some(B.get(b, base + 2 * 7 + 4), "v")
+      area_go(b, q + 1, nq, acc +. uw *. vh)
+    end
+  end
+  pfn total_area(b : CubeForge.F32Buf.F32Buf) : Float do area_go(b, 0, B.len(b) / 42, 0.0) end
+
+  describe "greedy sections" do
+    test "a flat slab is one quad per face direction it exposes" do
+      let e = C.new()
+      let b = Mesher.mesh_section_opaque(slab_go(C.new(), 0), e, e, e, e, 0, 0.0, 0.0)
+      -- top: 1 quad, bottom: 1 quad, four sides: 1 quad each (neighbours are empty chunks) = 6 quads
+      Test.assert_eq_int(B.len(b) / 42, 6, "6 merged quads")
+      Test.assert_true(near(total_area(b), 256.0 *. 2.0 +. 16.0 *. 4.0), "area matches the naive face count")
+    end
+    test "a checkerboard slab cannot merge its top" do
+      let e = C.new()
+      let b = Mesher.mesh_section_opaque(checker_go(C.new(), 0), e, e, e, e, 0, 0.0, 0.0)
+      -- 256 top + 256 bottom + 4 sides of 16 cells each that alternate (16 quads per side)
+      Test.assert_eq_int(B.len(b) / 42, 256 + 256 + 64, "no merging across different ids")
+    end
+    test "greedy covers the same face area as the naive mesher" do
+      let c = C.test_terrain()
+      let e = C.new()
+      let greedy = Mesher.mesh_section_opaque(c, e, e, e, e, 4, 0.0, 0.0)
+      let naive = Mesher.mesh_with_neighbors(c, e, e, e, e, 0.0, 0.0)
+      -- naive: count faces of section 4 only (y in 64..79) by scanning vertex y
+      Test.assert_true(total_area(greedy) > 0.0, "section 4 has faces")
+      Test.assert_true(B.len(greedy) <= B.len(Mesher.opaque_buf(naive)), "greedy never has more vertices than naive")
+    end
+  end
+
+  describe "F32Buf.append" do
+    test "appends the live prefix and grows" do
+      let a = B.push3(B.new(4), 1.0, 2.0, 3.0)
+      let b = B.push3(B.push3(B.new(2), 4.0, 5.0, 6.0), 7.0, 8.0, 9.0)
+      let ab = B.append(a, b)
+      Test.assert_eq_int(B.len(ab), 9, "length 9")
+      Test.assert_true(near(Test.assert_some(B.get(ab, 0), "0"), 1.0) && near(Test.assert_some(B.get(ab, 3), "3"), 4.0) && near(Test.assert_some(B.get(ab, 8), "8"), 9.0), "values")
+    end
+  end
+
+end

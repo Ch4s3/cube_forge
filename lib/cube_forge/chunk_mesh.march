@@ -1,0 +1,74 @@
+-- ChunkMesh — a chunk's mesh as 16 vertical sections (opaque greedy + water
+-- per cell). The VBO is assembled by the shim from the section buffers
+-- (gfx_upload_begin + one gfx_upload_part per section), so nothing is
+-- concatenated on the March side. Remeshing a block edit or a water tick
+-- touches only the affected section(s).
+--
+-- (An earlier version concatenated sections into persistent upload buffers with
+-- F32Buf.append; a buffer stored in a persistent Array is shared, so the
+-- in-place append could never run — GAPS.md G54.)
+mod CubeForge.ChunkMesh do
+
+  alias CubeForge.F32Buf as B
+  alias CubeForge.Mesher as Mesher
+  alias CubeForge.World as World
+
+  type ChunkMesh = ChunkMesh(Array.PVec(CubeForge.F32Buf.F32Buf), Array.PVec(CubeForge.F32Buf.F32Buf))
+
+  fn opaque_sections(m : ChunkMesh) : Array.PVec(CubeForge.F32Buf.F32Buf) do match m do ChunkMesh(o, _) -> o end end
+  fn water_sections(m : ChunkMesh) : Array.PVec(CubeForge.F32Buf.F32Buf) do match m do ChunkMesh(_, w) -> w end end
+
+  pfn total_go(secs : Array.PVec(CubeForge.F32Buf.F32Buf), i : Int, acc : Int) : Int do
+    if i >= 16 do acc else total_go(secs, i + 1, acc + B.len(Array.get(secs, i))) end
+  end
+  doc "Total floats across the 16 sections."
+  fn total_floats(secs : Array.PVec(CubeForge.F32Buf.F32Buf)) : Int do total_go(secs, 0, 0) end
+
+  -- Sections of chunk (cx, cz) built in order 0..15.
+  pfn build_sections(world : CubeForge.World.World, cx : Int, cz : Int, empty : CubeForge.Chunk.Chunk, sy : Int,
+                     os : List(CubeForge.F32Buf.F32Buf), ws : List(CubeForge.F32Buf.F32Buf)) : ChunkMesh do
+    if sy < 0 do ChunkMesh(Array.from_list(os), Array.from_list(ws))
+    else
+      let c = World.chunk_at(world, cx, cz)
+      let pick = fn (x, z) -> if World.in_bounds(world, x, z) do World.chunk_at(world, x, z) else empty end
+      let n = pick(cx, cz - 1)
+      let s = pick(cx, cz + 1)
+      let e = pick(cx + 1, cz)
+      let w = pick(cx - 1, cz)
+      let ox = int_to_float(16 * cx)
+      let oz = int_to_float(16 * cz)
+      build_sections(world, cx, cz, empty, sy - 1,
+                     Cons(Mesher.mesh_section_opaque(c, n, s, e, w, sy, ox, oz), os),
+                     Cons(Mesher.mesh_section_water(c, n, s, e, w, sy, ox, oz), ws))
+    end
+  end
+
+  doc "Mesh every section of chunk (cx, cz)."
+  fn build(world : CubeForge.World.World, cx : Int, cz : Int, empty : CubeForge.Chunk.Chunk) : ChunkMesh do
+    build_sections(world, cx, cz, empty, 15, Nil, Nil)
+  end
+
+  doc "Rebuild one section (0..15) of chunk (cx, cz)."
+  fn rebuild_section(m : ChunkMesh, world : CubeForge.World.World, cx : Int, cz : Int, sy : Int, empty : CubeForge.Chunk.Chunk) : ChunkMesh do
+    if sy < 0 || sy >= 16 do m
+    else
+      let c = World.chunk_at(world, cx, cz)
+      let pick = fn (x, z) -> if World.in_bounds(world, x, z) do World.chunk_at(world, x, z) else empty end
+      let n = pick(cx, cz - 1)
+      let s = pick(cx, cz + 1)
+      let e = pick(cx + 1, cz)
+      let w = pick(cx - 1, cz)
+      let ox = int_to_float(16 * cx)
+      let oz = int_to_float(16 * cz)
+      match m do
+        ChunkMesh(os, ws) ->
+          ChunkMesh(Array.set(os, sy, Mesher.mesh_section_opaque(c, n, s, e, w, sy, ox, oz)),
+                    Array.set(ws, sy, Mesher.mesh_section_water(c, n, s, e, w, sy, ox, oz)))
+      end
+    end
+  end
+
+  fn opaque_vertices(m : ChunkMesh) : Int do total_floats(opaque_sections(m)) / 7 end
+  fn water_vertices(m : ChunkMesh) : Int do total_floats(water_sections(m)) / 7 end
+
+end

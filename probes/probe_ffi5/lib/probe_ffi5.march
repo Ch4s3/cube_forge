@@ -1,0 +1,25 @@
+mod ProbeFfi5 do
+  needs IO
+  needs IO.Foreign
+  needs Ffi
+  extern "p" : Cap(Ffi) do
+    fn p3(dst: NativeF32Arr, di: Int, src: NativeF32Arr): NativeF32Arr = "p3"
+    fn p4(dst: NativeF32Arr, di: Int, src: NativeF32Arr, si: Int): NativeF32Arr = "p4"
+    fn p5(consume dst: NativeF32Arr, di: Int, src: NativeF32Arr, si: Int, n: Int): NativeF32Arr = "p5"
+    fn p5b(dst: NativeF32Arr, src: NativeF32Arr, di: Int, si: Int, n: Int): NativeF32Arr = "p5b"
+  end
+  fn main(cap : Cap(IO)) : Unit do
+    let d = NativeArray.make_f32(10, 0.0)
+    let s = NativeArray.make_f32(3, 1.0)
+    println("-- chained through `consume dst`")
+    let d1 = p5(d, 7, s, 1, 2)
+    let d2 = p5(d1, 7, s, 1, 2)
+    let d3 = p5(d2, 7, s, 1, 2)
+    println("len after chain: " ++ int_to_string(NativeArray.length_f32(d3)))
+    println("-- chained through a BORROWED dst (returns its argument: use-after-free)")
+    let e = NativeArray.make_f32(10, 0.0)
+    let e1 = p4(e, 7, s, 1)
+    let e2 = p4(e1, 7, s, 1)
+    println("len after borrowed chain: " ++ int_to_string(NativeArray.length_f32(e2)))
+  end
+end
