@@ -1,20 +1,72 @@
--- World — the set of chunks and the solid-voxel query used by physics and,
--- later, raycasting. M3: a single chunk at origin. Coordinates are world ints.
+-- World — an n x n grid of chunks and the solid-voxel query used by physics,
+-- meshing and raycasting. Coordinates are world ints; chunk (cx, cz) covers
+-- x in [16cx, 16cx+16), z likewise. Storage is an Array (persistent trie) of
+-- Chunk, indexed cx + n * cz.
 mod CubeForge.World do
+
+  needs IO.Spawn
 
   alias CubeForge.Chunk as C
 
-  type World = World(CubeForge.Chunk.Chunk)
+  type World = World(Array.PVec(CubeForge.Chunk.Chunk), Int)   -- chunks, side length in chunks
 
-  fn single(c : CubeForge.Chunk.Chunk) : World do World(c) end
+  fn size() : Int do 8 end
 
-  fn chunk(w : World) : CubeForge.Chunk.Chunk do match w do World(c) -> c end end
+  fn side(w : World) : Int do match w do World(_, n) -> n end end
+
+  fn in_bounds(w : World, cx : Int, cz : Int) : Bool do
+    let n = side(w)
+    cx >= 0 && cx < n && cz >= 0 && cz < n
+  end
+
+  doc "The chunk at grid (cx, cz); panics if out of bounds."
+  fn chunk_at(w : World, cx : Int, cz : Int) : CubeForge.Chunk.Chunk do
+    match w do World(cs, n) -> Array.get(cs, cx + n * cz) end
+  end
+
+  doc "Replace the chunk at grid (cx, cz)."
+  fn set_chunk(w : World, cx : Int, cz : Int, c : CubeForge.Chunk.Chunk) : World do
+    match w do World(cs, n) -> World(Array.set(cs, cx + n * cz, c), n) end
+  end
+
+  fn floor_div16(v : Int) : Int do if v >= 0 do v / 16 else (v - 15) / 16 end end
+  fn mod16(v : Int) : Int do v - 16 * floor_div16(v) end
 
   doc "Block id at a world coordinate; air outside the loaded area."
   fn block_at(w : World, x : Int, y : Int, z : Int) : Int do
-    match w do World(c) -> C.get_or_air(c, x, y, z) end
+    if y < 0 || y >= 256 do 0
+    else
+      let cx = floor_div16(x)
+      let cz = floor_div16(z)
+      if in_bounds(w, cx, cz) do C.get(chunk_at(w, cx, cz), mod16(x), y, mod16(z)) else 0 end
+    end
   end
 
   fn solid_at(w : World, x : Int, y : Int, z : Int) : Bool do block_at(w, x, y, z) != 0 end
+
+  doc "Set a block at a world coordinate (no-op outside the loaded area)."
+  fn set_block(w : World, x : Int, y : Int, z : Int, id : Int) : World do
+    let cx = floor_div16(x)
+    let cz = floor_div16(z)
+    if y < 0 || y >= 256 || !in_bounds(w, cx, cz) do w
+    else set_chunk(w, cx, cz, C.set(chunk_at(w, cx, cz), mod16(x), y, mod16(z), id)) end
+  end
+
+  -- Grid coordinates in row-major order, as (cx, cz) packed into one Int: cx + n * cz.
+  pfn coords_go(i : Int, n : Int, acc : List(Int)) : List(Int) do
+    if i < 0 do acc else coords_go(i - 1, n, Cons(i, acc)) end
+  end
+  fn coords(n : Int) : List(Int) do coords_go(n * n - 1, n, Nil) end
+
+  doc "Stage 1: generate every chunk in parallel. Chunks are independent, so this is a plain pmap."
+  fn generate(n : Int, seed : Int, workers : Int) : World do
+    let chunks = List.pmap_n(coords(n), fn i -> C.generate(16 * (i % n), 16 * (i / n), seed), workers)
+    World(Array.from_list(chunks), n)
+  end
+
+  fn generate_scalar(n : Int, seed : Int, workers : Int) : World do
+    let chunks = List.pmap_n(coords(n), fn i -> C.generate_scalar(16 * (i % n), 16 * (i / n), seed), workers)
+    World(Array.from_list(chunks), n)
+  end
 
 end

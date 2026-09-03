@@ -67,4 +67,33 @@ mod CubeForge.Chunk do
   doc "A chunk filled with the M2 test terrain."
   fn test_terrain() : Chunk do fill_go(new(), 0) end
 
+  -- ── M4: fill from the noise heightmap, four columns at a time ─────────────
+  pfn fill_noise_go(c : Chunk, i : Int, wx0 : Int, wz0 : Int, seed : Int) : Chunk do
+    if i >= 256 do c
+    else
+      let x = i % 16
+      let z = i / 16
+      let hs = CubeForge.Noise.height_x4(wx0 + x, wz0 + z, seed)
+      let c1 = fill_column(c, x, z, 0, float_to_int(Simd.extract_f32x4(hs, 0)))
+      let c2 = fill_column(c1, x + 1, z, 0, float_to_int(Simd.extract_f32x4(hs, 1)))
+      let c3 = fill_column(c2, x + 2, z, 0, float_to_int(Simd.extract_f32x4(hs, 2)))
+      let c4 = fill_column(c3, x + 3, z, 0, float_to_int(Simd.extract_f32x4(hs, 3)))
+      fill_noise_go(c4, i + 4, wx0, wz0, seed)
+    end
+  end
+
+  doc "Generate the chunk whose world origin is (wx0, wz0) from the noise heightmap."
+  fn generate(wx0 : Int, wz0 : Int, seed : Int) : Chunk do fill_noise_go(new(), 0, wx0, wz0, seed) end
+
+  -- Scalar reference generator (same terrain), for timing the 4-wide path against.
+  pfn fill_scalar_go(c : Chunk, i : Int, wx0 : Int, wz0 : Int, seed : Int) : Chunk do
+    if i >= 256 do c
+    else
+      let x = i % 16
+      let z = i / 16
+      fill_scalar_go(fill_column(c, x, z, 0, CubeForge.Noise.height(wx0 + x, wz0 + z, seed)), i + 1, wx0, wz0, seed)
+    end
+  end
+  fn generate_scalar(wx0 : Int, wz0 : Int, seed : Int) : Chunk do fill_scalar_go(new(), 0, wx0, wz0, seed) end
+
 end

@@ -1,0 +1,96 @@
+-- Noise — 2D value noise with fBm, scalar and 4-wide (F32x4) variants.
+--
+-- The lattice step (floor, integer hash) cannot be vectorized with the Simd
+-- module as it stands: there is no per-lane floor and no f32x4 <-> i32x4
+-- conversion (GAPS.md G32). So the 4-wide variant hashes the lattice corners
+-- as scalars and vectorizes the smoothstep + bilinear blend across 4 columns.
+mod CubeForge.Noise do
+
+  -- Integer hash of a lattice point to [0, 1). Deterministic, seedable.
+  fn hash2(ix : Int, iz : Int, seed : Int) : Float do
+    let h0 = int_xor(ix * 374761393 + iz * 668265263 + seed * 1274126177, 0)
+    let h1 = int_and(h0, 2147483647)
+    let h2 = int_xor(h1, h1 / 8192)
+    let h3 = int_and(h2 * 1103515245 + 12345, 2147483647)
+    let h4 = int_xor(h3, h3 / 65536)
+    int_to_float(int_and(h4, 65535)) /. 65536.0
+  end
+
+  fn smooth(t : Float) : Float do t *. t *. (3.0 -. 2.0 *. t) end
+
+  fn lerp(a : Float, b : Float, t : Float) : Float do a +. (b -. a) *. t end
+
+  doc "Value noise at (x, z), in [0, 1)."
+  fn value2(x : Float, z : Float, seed : Int) : Float do
+    let fx = Math.floor(x)
+    let fz = Math.floor(z)
+    let ix = float_to_int(fx)
+    let iz = float_to_int(fz)
+    let tx = smooth(x -. fx)
+    let tz = smooth(z -. fz)
+    let a = hash2(ix, iz, seed)
+    let b = hash2(ix + 1, iz, seed)
+    let c = hash2(ix, iz + 1, seed)
+    let d = hash2(ix + 1, iz + 1, seed)
+    lerp(lerp(a, b, tx), lerp(c, d, tx), tz)
+  end
+
+  doc "3-octave fBm in [0, 1)."
+  fn fbm(x : Float, z : Float, seed : Int) : Float do
+    let n0 = value2(x, z, seed)
+    let n1 = value2(x *. 2.0 +. 17.3, z *. 2.0 +. 9.1, seed + 1)
+    let n2 = value2(x *. 4.0 +. 31.7, z *. 4.0 +. 3.3, seed + 2)
+    (n0 *. 0.6 +. n1 *. 0.3 +. n2 *. 0.1)
+  end
+
+  doc "Terrain height for a world column."
+  fn height(wx : Int, wz : Int, seed : Int) : Int do
+    let f = fbm(int_to_float(wx) *. 0.03, int_to_float(wz) *. 0.03, seed)
+    58 + float_to_int(f *. 26.0)
+  end
+
+  -- ── 4-wide: columns wx .. wx+3 at one z, one octave, blended in F32x4 ──
+  pfn value2_x4(x0 : Float, z : Float, scale : Float, seed : Int) : F32x4 do
+    -- lattice (scalar): the four columns share iz; their ix may straddle a lattice line
+    let zs = z *. scale
+    let fz = Math.floor(zs)
+    let iz = float_to_int(fz)
+    let tz = smooth(zs -. fz)
+    let xs = Simd.make_f32x4(x0 *. scale, (x0 +. 1.0) *. scale, (x0 +. 2.0) *. scale, (x0 +. 3.0) *. scale)
+    -- per-lane floor is unavailable: pull lanes out, floor as scalars, push back
+    let f0 = Math.floor(Simd.extract_f32x4(xs, 0))
+    let f1 = Math.floor(Simd.extract_f32x4(xs, 1))
+    let f2 = Math.floor(Simd.extract_f32x4(xs, 2))
+    let f3 = Math.floor(Simd.extract_f32x4(xs, 3))
+    let fxs = Simd.make_f32x4(f0, f1, f2, f3)
+    let i0 = float_to_int(f0)
+    let i1 = float_to_int(f1)
+    let i2 = float_to_int(f2)
+    let i3 = float_to_int(f3)
+    -- corner hashes (scalar), packed per lane
+    let a = Simd.make_f32x4(hash2(i0, iz, seed), hash2(i1, iz, seed), hash2(i2, iz, seed), hash2(i3, iz, seed))
+    let b = Simd.make_f32x4(hash2(i0 + 1, iz, seed), hash2(i1 + 1, iz, seed), hash2(i2 + 1, iz, seed), hash2(i3 + 1, iz, seed))
+    let c = Simd.make_f32x4(hash2(i0, iz + 1, seed), hash2(i1, iz + 1, seed), hash2(i2, iz + 1, seed), hash2(i3, iz + 1, seed))
+    let d = Simd.make_f32x4(hash2(i0 + 1, iz + 1, seed), hash2(i1 + 1, iz + 1, seed), hash2(i2 + 1, iz + 1, seed), hash2(i3 + 1, iz + 1, seed))
+    -- vector part: t = smooth(x - floor x); blend
+    let t = Simd.sub_f32x4(xs, fxs)
+    let three = Simd.splat_f32x4(3.0)
+    let two = Simd.splat_f32x4(2.0)
+    let tx = Simd.mul_f32x4(Simd.mul_f32x4(t, t), Simd.sub_f32x4(three, Simd.mul_f32x4(two, t)))
+    let ab = Simd.add_f32x4(a, Simd.mul_f32x4(Simd.sub_f32x4(b, a), tx))
+    let cd = Simd.add_f32x4(c, Simd.mul_f32x4(Simd.sub_f32x4(d, c), tx))
+    Simd.add_f32x4(ab, Simd.mul_f32x4(Simd.sub_f32x4(cd, ab), Simd.splat_f32x4(tz)))
+  end
+
+  doc "Heights for the four columns wx .. wx+3 at wz, as an F32x4 (same value as `height`)."
+  fn height_x4(wx : Int, wz : Int, seed : Int) : F32x4 do
+    let x0 = int_to_float(wx)
+    let z = int_to_float(wz)
+    let n0 = value2_x4(x0, z, 0.03, seed)
+    let n1 = value2_x4(x0 +. 17.3 /. 0.06, z +. 9.1 /. 0.06, 0.06, seed + 1)
+    let n2 = value2_x4(x0 +. 31.7 /. 0.12, z +. 3.3 /. 0.12, 0.12, seed + 2)
+    let f = Simd.add_f32x4(Simd.add_f32x4(Simd.mul_f32x4(n0, Simd.splat_f32x4(0.6)), Simd.mul_f32x4(n1, Simd.splat_f32x4(0.3))), Simd.mul_f32x4(n2, Simd.splat_f32x4(0.1)))
+    Simd.add_f32x4(Simd.splat_f32x4(58.0), Simd.mul_f32x4(f, Simd.splat_f32x4(26.0)))
+  end
+
+end

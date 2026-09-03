@@ -77,6 +77,66 @@ mod CubeForge.Mesher do
     mesh_go(B.new(4096), c, 0, ox, oy, oz)
   end
 
+  -- ── M4: neighbour-aware meshing ────────────────────────────────────────────
+  -- A block lookup that falls through to the four horizontal neighbours so
+  -- chunk-boundary faces are culled correctly. Missing neighbours read as air.
+  -- Stage 2 of world generation: this may only run once the neighbours exist.
+  pfn nb_get(c : CubeForge.Chunk.Chunk, n : CubeForge.Chunk.Chunk, s : CubeForge.Chunk.Chunk,
+             e : CubeForge.Chunk.Chunk, w : CubeForge.Chunk.Chunk, x : Int, y : Int, z : Int) : Int do
+    if y < 0 || y >= 256 do 0
+    else if x < 0 do C.get(w, x + 16, y, z)
+    else if x >= 16 do C.get(e, x - 16, y, z)
+    else if z < 0 do C.get(n, x, y, z + 16)
+    else if z >= 16 do C.get(s, x, y, z - 16)
+    else C.get(c, x, y, z) end end end end end
+  end
+
+  pfn block_faces_nb(b : CubeForge.F32Buf.F32Buf, c : CubeForge.Chunk.Chunk, n : CubeForge.Chunk.Chunk, s : CubeForge.Chunk.Chunk,
+                     e : CubeForge.Chunk.Chunk, w : CubeForge.Chunk.Chunk, x : Int, y : Int, z : Int, ox : Float, oz : Float) : CubeForge.F32Buf.F32Buf do
+    let id = C.get(c, x, y, z)
+    if id == 0 do b
+    else
+      let l = layer_of(id)
+      let fx = ox +. int_to_float(x)
+      let fy = int_to_float(y)
+      let fz = oz +. int_to_float(z)
+      let fx1 = fx +. 1.0
+      let fy1 = fy +. 1.0
+      let fz1 = fz +. 1.0
+      let b1 = if nb_get(c, n, s, e, w, x, y + 1, z) == 0 do
+        quad(b, fx, fy1, fz, fx, fy1, fz1, fx1, fy1, fz1, fx1, fy1, fz, l, shade_top()) else b end
+      let b2 = if nb_get(c, n, s, e, w, x, y - 1, z) == 0 do
+        quad(b1, fx, fy, fz, fx1, fy, fz, fx1, fy, fz1, fx, fy, fz1, l, shade_bottom()) else b1 end
+      let b3 = if nb_get(c, n, s, e, w, x + 1, y, z) == 0 do
+        quad(b2, fx1, fy, fz, fx1, fy1, fz, fx1, fy1, fz1, fx1, fy, fz1, l, shade_x()) else b2 end
+      let b4 = if nb_get(c, n, s, e, w, x - 1, y, z) == 0 do
+        quad(b3, fx, fy, fz1, fx, fy1, fz1, fx, fy1, fz, fx, fy, fz, l, shade_x()) else b3 end
+      let b5 = if nb_get(c, n, s, e, w, x, y, z + 1) == 0 do
+        quad(b4, fx1, fy, fz1, fx1, fy1, fz1, fx, fy1, fz1, fx, fy, fz1, l, shade_z()) else b4 end
+      if nb_get(c, n, s, e, w, x, y, z - 1) == 0 do
+        quad(b5, fx, fy, fz, fx, fy1, fz, fx1, fy1, fz, fx1, fy, fz, l, shade_z()) else b5 end
+    end
+  end
+
+  pfn mesh_nb_go(b : CubeForge.F32Buf.F32Buf, c : CubeForge.Chunk.Chunk, n : CubeForge.Chunk.Chunk, s : CubeForge.Chunk.Chunk,
+                 e : CubeForge.Chunk.Chunk, w : CubeForge.Chunk.Chunk, i : Int, ox : Float, oz : Float) : CubeForge.F32Buf.F32Buf do
+    if i >= 65536 do b
+    else mesh_nb_go(block_faces_nb(b, c, n, s, e, w, i % 16, i / 256, (i / 16) % 16, ox, oz), c, n, s, e, w, i + 1, ox, oz) end
+  end
+
+  doc "Mesh chunk [c] with its four horizontal neighbours (n = -z, s = +z, e = +x, w = -x) into a fresh buffer."
+  fn mesh_with_neighbors(c : CubeForge.Chunk.Chunk, n : CubeForge.Chunk.Chunk, s : CubeForge.Chunk.Chunk,
+                         e : CubeForge.Chunk.Chunk, w : CubeForge.Chunk.Chunk, ox : Float, oz : Float) : CubeForge.F32Buf.F32Buf do
+    mesh_nb_go(B.new(4096), c, n, s, e, w, 0, ox, oz)
+  end
+
+  doc "Mesh the chunk at grid (cx, cz) of [world]; out-of-world neighbours are an empty chunk."
+  fn mesh_world_chunk(world : CubeForge.World.World, cx : Int, cz : Int, empty : CubeForge.Chunk.Chunk) : CubeForge.F32Buf.F32Buf do
+    let pick = fn (x, z) -> if CubeForge.World.in_bounds(world, x, z) do CubeForge.World.chunk_at(world, x, z) else empty end
+    mesh_with_neighbors(CubeForge.World.chunk_at(world, cx, cz), pick(cx, cz - 1), pick(cx, cz + 1), pick(cx + 1, cz), pick(cx - 1, cz),
+                        int_to_float(16 * cx), int_to_float(16 * cz))
+  end
+
   doc "Vertices in a mesh buffer (7 floats each)."
   fn vertex_count(b : CubeForge.F32Buf.F32Buf) : Int do B.len(b) / 7 end
 

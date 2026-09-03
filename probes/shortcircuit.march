@@ -1,0 +1,11 @@
+mod ShortCircuit do
+  needs IO.Console
+  fn noisy(tag : String) : Bool do
+    println("evaluated " ++ tag)
+    true
+  end
+  fn main(cap : Cap(IO.Console)) : Unit do
+    if false && noisy("rhs of &&") do println("then") else println("else") end
+    if true || noisy("rhs of ||") do println("then2") else println("else2") end
+  end
+end

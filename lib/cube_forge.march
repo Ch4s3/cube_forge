@@ -1,11 +1,14 @@
 -- cube_forge — a minimal voxel renderer, written to find March's rough edges.
--- M3: mouse-look, WASD, gravity, per-axis swept AABB collision.
+-- M4: 8x8 chunk world from value noise, generated and meshed in two pmap stages.
 mod CubeForge do
 
   needs IO
   needs IO.Foreign
   needs Window
   needs Input
+  needs IO.Spawn
+  needs IO.Clock
+  needs IO.Process
 
   alias CubeForge.Ffi.Window as Win
   alias CubeForge.Ffi.Input as In
@@ -36,7 +39,7 @@ mod CubeForge do
         if now -. t0 >= 0.25 do
           let fps = float_to_int(int_to_float(n + 1) /. (now -. t0) +. 0.5)
           let hud1 = Hud.build_number(hud, fps, 0.006, 0.008)
-          Win.gfx_upload(1, F32Buf.storage(hud1), F32Buf.len(hud1))
+          Win.gfx_upload(255, F32Buf.storage(hud1), F32Buf.len(hud1))
           Fps(now, 0, fps, hud1)
         else
           Fps(t0, n + 1, shown, hud)
@@ -83,7 +86,7 @@ mod CubeForge do
   -- Run-time knobs read once, outside the frame loop (an Env read allocates).
   type Knobs = Knobs(Int, Int, String, Bool, Float)   -- max_frames, dump_frame, dump_path, autowalk, autospin
 
-  fn frame_loop(f : Frame, k : Knobs, nverts : Int, proj : NativeFloatArr, world : CubeForge.World.World, fps : Fps) : Frame do
+  fn frame_loop(f : Frame, k : Knobs, counts : NativeIntArr, nchunks : Int, proj : NativeFloatArr, world : CubeForge.World.World, fps : Fps) : Frame do
     match f do
       Frame(frame, last_t, player, sample, view, vp) ->
         match k do
@@ -101,9 +104,9 @@ mod CubeForge do
           let vp1 = M.mul_into_f32(proj, view1, vp)
           Win.gfx_begin_frame(0.55, 0.75, 0.95)
           Win.gfx_set_view_proj(vp1)
-          Win.gfx_draw(0, nverts)
+          draw_chunks(counts, 0, nchunks)
           let fps1 = tick_fps(fps, now)
-          Win.gfx_draw_hud(1, fps_hud_verts(fps1))
+          Win.gfx_draw_hud(255, fps_hud_verts(fps1))
           if frame == dump_frame do
             if dump_path != "" do
               if Win.gfx_dump_bmp(dump_path) == 0 do println("dump failed") else () end
@@ -119,7 +122,7 @@ mod CubeForge do
           if frame == 200 do
             println("live-object delta over frames 100..200: " ++ int_to_string(Win.live_allocs() - sample1) ++ " (" ++ int_to_string((Win.live_allocs() - sample1) / 100) ++ " per frame)")
           else () end
-          frame_loop(Frame(frame + 1, now, player1, sample1, view1, vp1), k, nverts, proj, world, fps1)
+          frame_loop(Frame(frame + 1, now, player1, sample1, view1, vp1), k, counts, nchunks, proj, world, fps1)
         end
         end
     end
@@ -160,6 +163,18 @@ mod CubeForge do
       repeat_poll(i - 1)
     end
   end
+  pfn repeat_write_view(p : CubeForge.Player.Player, view : NativeFloatArr, i : Int) : NativeFloatArr do
+    if i == 0 do view else repeat_write_view(p, write_view(p, view), i - 1) end
+  end
+  pfn repeat_mul_into(proj : NativeFloatArr, view : NativeFloatArr, dst : NativeF32Arr, i : Int) : NativeF32Arr do
+    if i == 0 do dst else repeat_mul_into(proj, view, M.mul_into_f32(proj, view, dst), i - 1) end
+  end
+  pfn repeat_eye(p : CubeForge.Player.Player, i : Int, acc : Float) : Float do
+    if i == 0 do acc else repeat_eye(p, i - 1, acc +. V.y(Player.eye(p))) end
+  end
+  pfn repeat_fyp(i : Int, acc : Float) : Float do
+    if i == 0 do acc else repeat_fyp(i - 1, acc +. Q.w(Q.from_yaw_pitch(0.3, 0.2))) end
+  end
   pfn alloc_probe(world : CubeForge.World.World, proj : NativeFloatArr) : Unit do
     println("allocation bisect (net live objects; >0 means a leak):")
     measure("extern Float returns (time, mouse_dx)", fn _ -> repeat_time(100, 0.0))
@@ -170,41 +185,98 @@ mod CubeForge do
     measure("Mat4.mul", fn _ -> M.get(repeat_mul(M.identity(), 100), 0, 0))
     measure("Player.update", fn _ -> V.x(Player.position(repeat_update(Player.new(8.0, 70.0, 8.0), world, 100))))
     measure("view_proj (temporaries)", fn _ -> NativeArray.get_f32(repeat_view(proj, Player.new(8.0, 70.0, 8.0), NativeArray.make_f32(16, 0.0), 100), 0))
+    measure("write_view only", fn _ -> NativeArray.get_float(repeat_write_view(Player.new(8.0, 70.0, 8.0), NativeArray.make_float(16, 0.0), 100), 0))
+    measure("mul_into_f32 only", fn _ -> NativeArray.get_f32(repeat_mul_into(proj, NativeArray.make_float(16, 0.0), NativeArray.make_f32(16, 0.0), 100), 0))
+    measure("Player.eye only", fn _ -> repeat_eye(Player.new(8.0, 70.0, 8.0), 100, 0.0))
+    measure("Quat.from_yaw_pitch only", fn _ -> repeat_fyp(100, 0.0))
     measure("view_proj (in place)", fn _ -> NativeArray.get_f32(repeat_view_inplace(proj, Player.new(8.0, 70.0, 8.0), NativeArray.make_float(16, 0.0), NativeArray.make_f32(16, 0.0), 100), 0))
+  end
+
+  -- Draw every chunk slot; counts holds the vertex count per slot.
+  pfn draw_chunks(counts : NativeIntArr, i : Int, n : Int) : Unit do
+    if i >= n do ()
+    else
+      Win.gfx_draw(i, NativeArray.get_int(counts, i))
+      draw_chunks(counts, i + 1, n)
+    end
+  end
+
+  -- Stage 2 of world generation: mesh every chunk (each needs its 4 neighbours, which
+  -- stage 1 guarantees), upload each mesh into its slot, record vertex counts.
+  pfn upload_meshes(meshes : List(CubeForge.F32Buf.F32Buf), i : Int, counts : NativeIntArr, total : Int) : Int do
+    match meshes do
+      Nil -> total
+      Cons(m, rest) ->
+        Win.gfx_upload(i, F32Buf.storage(m), F32Buf.len(m))
+        upload_meshes(rest, i + 1, NativeArray.set_int(counts, i, Mesher.vertex_count(m)), total + Mesher.vertex_count(m))
+    end
+  end
+
+  pfn count_verts(meshes : List(CubeForge.F32Buf.F32Buf), acc : Int) : Int do
+    match meshes do
+      Nil -> acc
+      Cons(m, rest) -> count_verts(rest, acc + Mesher.vertex_count(m))
+    end
+  end
+
+  pfn fill_counts(meshes : List(CubeForge.F32Buf.F32Buf), i : Int, counts : NativeIntArr) : NativeIntArr do
+    match meshes do
+      Nil -> counts
+      Cons(m, rest) -> fill_counts(rest, i + 1, NativeArray.set_int(counts, i, Mesher.vertex_count(m)))
+    end
+  end
+
+  fn mesh_all(world : CubeForge.World.World, n : Int, workers : Int) : List(CubeForge.F32Buf.F32Buf) do
+    let empty = Chunk.new()
+    List.pmap_n(World.coords(n), fn i -> Mesher.mesh_world_chunk(world, i % n, i / n, empty), workers)
   end
 
   fn main(cap : Cap(IO)) : Unit do
     let max_frames = Env.get_int("CF_FRAMES", -1)
-    if Win.open(800, 600, "cube_forge") == 0 do
+    let n = World.size()
+    let workers = Env.get_int("CF_WORKERS", System.cpu_count())
+    let seed = Env.get_int("CF_SEED", 7)
+    let headless = Env.get_int("CF_HEADLESS", 0) == 1
+    -- `&&` does not short-circuit (GAPS.md G33), so the window open is gated with a nested if.
+    let opened = if headless do 1 else Win.open(800, 600, "cube_forge") end
+    if opened == 0 do
       println("failed to open window")
     else
-      if Win.gfx_init() == 0 do println("gfx init failed") else () end
-      let t0 = Win.time()
-      let chunk = Chunk.test_terrain()
-      let t1 = Win.time()
-      let a0 = Win.live_allocs()
-      let mesh = Mesher.mesh(chunk, 0.0, 0.0, 0.0)
-      let a1 = Win.live_allocs()
-      let t2 = Win.time()
-      let nverts = Mesher.vertex_count(mesh)
-      println("terrain " ++ ms(t1 -. t0) ++ ", mesh " ++ ms(t2 -. t1) ++ " (" ++ int_to_string(a1 - a0) ++ " allocations), " ++ int_to_string(nverts) ++ " vertices")
-      Win.gfx_upload(0, F32Buf.storage(mesh), F32Buf.len(mesh))
-      Win.gfx_upload_texture(Texture.checkerboard(), Texture.size(), Texture.size(), Texture.layers())
-      let proj = M.perspective(70.0 *. Math.pi() /. 180.0, 800.0 /. 600.0, 0.1, 500.0)
-      let world = World.single(chunk)
-      let player = Player.new(8.0, 75.0, 8.0)
-      if Env.get_int("CF_ALLOC_PROBE", 0) == 1 do alloc_probe(world, proj) else () end
-      let t3 = Win.time()
-      -- CF_AUTOSPIN=<milli-radians of yaw per frame>: scripted mouse-look for headless verification.
-      let knobs = Knobs(max_frames, Env.get_int("CF_DUMP_FRAME", 30), Env.get("CF_DUMP", ""), Env.get_int("CF_AUTOWALK", 0) == 1,
-                        int_to_float(Env.get_int("CF_AUTOSPIN", 0)) /. 1000.0 /. Player.mouse_sens())
-      let fps0 = Fps(t3, 0, 0, F32Buf.new(4096))
-      match frame_loop(Frame(0, t3, player, 0, NativeArray.make_float(16, 0.0), NativeArray.make_f32(16, 0.0)), knobs, nverts, proj, world, fps0) do
-        Frame(frames, _, p, _, _, _) ->
-          let t4 = Win.time()
-          println("ran " ++ int_to_string(frames) ++ " frames in " ++ ms(t4 -. t3) ++ " (" ++ float_to_string(int_to_float(frames) /. (t4 -. t3)) ++ " fps, vsync on); player ended at " ++ V.to_string(Player.position(p)))
+      if !headless do (if Win.gfx_init() == 0 do println("gfx init failed") else () end) else () end
+      -- stage 1: terrain (independent chunks)
+      let t0 = System.monotonic_time()
+      let world_scalar = World.generate_scalar(n, seed, workers)
+      let t1 = System.monotonic_time()
+      let world = World.generate(n, seed, workers)
+      let t2 = System.monotonic_time()
+      -- stage 2: meshing (needs neighbours; runs only after stage 1 completed)
+      let meshes = mesh_all(world, n, workers)
+      let t3 = System.monotonic_time()
+      let nverts = count_verts(meshes, 0)
+      println("world " ++ int_to_string(n) ++ "x" ++ int_to_string(n) ++ " chunks, " ++ int_to_string(workers) ++ " workers, "
+              ++ int_to_string(Env.get_int("MARCH_NUM_SCHEDULERS", 4)) ++ " scheduler threads (MARCH_NUM_SCHEDULERS)")
+      println("  terrain scalar noise: " ++ int_to_string(t1 - t0) ++ " ms   terrain F32x4 noise: " ++ int_to_string(t2 - t1) ++ " ms")
+      println("  mesh all: " ++ int_to_string(t3 - t2) ++ " ms wall, " ++ float_to_string(int_to_float(t3 - t2) /. int_to_float(n * n)) ++ " ms per chunk (wall / chunks), " ++ int_to_string(nverts) ++ " vertices")
+      if headless do ()
+      else
+        let counts = fill_counts(meshes, 0, NativeArray.make_int(n * n, 0))
+        let _uploaded = upload_meshes(meshes, 0, NativeArray.make_int(n * n, 0), 0)
+        Win.gfx_upload_texture(Texture.checkerboard(), Texture.size(), Texture.size(), Texture.layers())
+        let proj = M.perspective(70.0 *. Math.pi() /. 180.0, 800.0 /. 600.0, 0.1, 500.0)
+        let spawn_pos = int_to_float(8 * n)
+        let player = Player.new(spawn_pos, 100.0, spawn_pos)
+        if Env.get_int("CF_ALLOC_PROBE", 0) == 1 do alloc_probe(world, proj) else () end
+        let t4 = Win.time()
+        let knobs = Knobs(max_frames, Env.get_int("CF_DUMP_FRAME", 30), Env.get("CF_DUMP", ""), Env.get_int("CF_AUTOWALK", 0) == 1,
+                          int_to_float(Env.get_int("CF_AUTOSPIN", 0)) /. 1000.0 /. Player.mouse_sens())
+        let fps0 = Fps(t4, 0, 0, F32Buf.new(4096))
+        match frame_loop(Frame(0, t4, player, 0, NativeArray.make_float(16, 0.0), NativeArray.make_f32(16, 0.0)), knobs, counts, n * n, proj, world, fps0) do
+          Frame(frames, _, p, _, _, _) ->
+            let t5 = Win.time()
+            println("ran " ++ int_to_string(frames) ++ " frames in " ++ ms(t5 -. t4) ++ " (" ++ float_to_string(int_to_float(frames) /. (t5 -. t4)) ++ " fps, vsync on); player ended at " ++ V.to_string(Player.position(p)))
+        end
+        Win.close()
       end
-      Win.close()
     end
   end
 

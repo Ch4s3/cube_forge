@@ -413,3 +413,20 @@ frees it. See `probes/probe_leak2` case (i) for the two-field control.
   last use. They are `TCon`s, so `needs_rc` already says yes; whatever
   suppresses the dec (borrow-table classification of `native_*_get`? the
   builtin-call result being treated as non-owning?) is the bug.
+
+### G32. `Simd` has no per-lane floor and no f32x4 <-> i32x4 conversion
+- Value noise needs `floor(x)` per lane and the integer lattice coordinate to
+  hash. `Simd` offers arithmetic, compare, select and shifts, but no
+  `floor`/`trunc`/`convert`. The 4-wide noise in `lib/cube_forge/noise.march`
+  therefore extracts each lane, floors and hashes as scalars, and re-packs —
+  only the smoothstep and the bilinear blend are vector code. With `f32x8`
+  absent (G2) the "eight columns at once" spec item is not expressible at all.
+
+### G33. `&&` and `||` are not short-circuiting (interpreter and compiled)
+- `if false && noisy("rhs") …` prints `evaluated rhs`; `if true || noisy("rhs")`
+  likewise. Both backends agree, so it is the language, not a bug in one.
+  Nothing in `surface-syntax.md` says so. Consequences: `if !headless &&
+  Win.open(...) == 0` opened the window in headless mode; every bounds check
+  written as `x < 0 || x >= 16 || …` evaluates all six comparisons; and any
+  guard of the form `p != Nil && head(p) …` is a panic waiting to happen.
+- Verified: `probes/shortcircuit.march`.
