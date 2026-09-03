@@ -76,7 +76,9 @@ static void on_fb_size(GLFWwindow *w, int width, int height) {
 int64_t cf_win_open(int64_t w, int64_t h, march_value title) {
     if (!pthread_main_np()) {
         fprintf(stderr, "cf: cf_win_open must run on the process main thread (GLFW/Cocoa requirement). "
-                        "Run with MARCH_NUM_SCHEDULERS=1 or a main-thread-pinned runtime.\n");
+                        "Run with MARCH_PIN_MAIN=1 (pins `main` to scheduler 0 on the main thread; "
+                        "needs the runtime/pin-main-thread March runtime, see GAPS.md G15) "
+                        "or MARCH_NUM_SCHEDULERS=1 (serialises pmap).\n");
         return 0;
     }
     if (!glfwInit()) { fprintf(stderr, "cf: glfwInit failed\n"); return 0; }

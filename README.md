@@ -31,15 +31,23 @@ Prerequisites: the March toolchain (`march`, `forge`), Homebrew GLFW
 and `z3` on PATH for refinement checking.
 
 The project pins its compiler with `.march-version` (see GAPS.md G27 for why
-this matters): the file names a toolchain under `~/.march/versions/`. On this
-machine that entry is a symlink farm onto the opam-installed march 0.3.0:
+this matters): the file names a toolchain under `~/.march/versions/`. It is
+pinned to a march 0.3.0 build that carries the `runtime/pin-main-thread`
+runtime patch (GAPS.md G15: `MARCH_PIN_MAIN=1` keeps `main` on the OS main
+thread while the other scheduler workers keep running). To reproduce that
+entry from the march repo, check out branch `runtime/pin-main-thread`,
+`dune build`, then:
 
 ```bash
-mkdir -p ~/.march/versions/opam-0.3.0/bin
-ln -sfn ~/.opam/march/bin/march   ~/.march/versions/opam-0.3.0/bin/march
-ln -sfn ~/.opam/march/runtime     ~/.march/versions/opam-0.3.0/runtime
-ln -sfn ~/.opam/march/share/march ~/.march/versions/opam-0.3.0/stdlib
+V=~/.march/versions/$(cat .march-version)
+mkdir -p $V/bin $V/runtime $V/stdlib
+cp <march>/_build/default/bin/main.exe $V/bin/march
+cp <march>/runtime/* $V/runtime/
+cp <march>/stdlib/*.march $V/stdlib/
 ```
+
+Without the patch (stock 0.3.0, e.g. a symlink farm onto `~/.opam/march`) the
+engine still runs, but only with `MARCH_NUM_SCHEDULERS=1` (see below).
 
 Then:
 
@@ -50,8 +58,19 @@ forge test                  # 8 unit tests (math, buffer)
 forge lint --strict
 ```
 
-Run it. The window must be created on the OS main thread and March runs
-`main` on a scheduler worker (GAPS.md G15), so:
+Run it. The window must be created on the OS main thread; March runs `main`
+on whichever scheduler worker picks it up unless told otherwise (GAPS.md
+G15), so:
+
+```bash
+MARCH_PIN_MAIN=1 ./.march/build/release/cube_forge
+```
+
+`MARCH_PIN_MAIN=1` pins the `main` green thread to scheduler 0 (the process
+main thread) and leaves the other scheduler threads running, so world
+generation and meshing stay parallel (measured: `mesh all` 349 ms vs 436 ms).
+On a runtime without the patch the variable is ignored and the shim refuses
+to open the window; fall back to the old workaround, which serialises `pmap`:
 
 ```bash
 MARCH_NUM_SCHEDULERS=1 ./.march/build/release/cube_forge
@@ -65,7 +84,7 @@ up in water), left click breaks, right click places the selected block, keys
 
 | env | effect |
 |---|---|
-| `CF_HEADLESS=1` | no window: generate + mesh the world, print timings, exit (use without `MARCH_NUM_SCHEDULERS` to see parallel meshing) |
+| `CF_HEADLESS=1` | no window: generate + mesh the world, print timings, exit (needs neither `MARCH_PIN_MAIN` nor `MARCH_NUM_SCHEDULERS`) |
 | `CF_FRAMES=N` | exit after N frames |
 | `CF_DUMP=path.bmp CF_DUMP_FRAME=N` | dump the back buffer at frame N (convert with `sips -s format png`) |
 | `CF_AUTOWALK=1` | hold W (collision test) |
@@ -80,5 +99,5 @@ Example (what produced `RESULTS.md`):
 
 ```bash
 CF_HEADLESS=1 ./.march/build/release/cube_forge
-MARCH_NUM_SCHEDULERS=1 CF_FRAMES=460 CF_AUTOEDIT=330 CF_DUMP_FRAME=420 CF_DUMP=/tmp/m5.bmp ./.march/build/release/cube_forge
+MARCH_PIN_MAIN=1 CF_FRAMES=460 CF_AUTOEDIT=330 CF_DUMP_FRAME=420 CF_DUMP=/tmp/m5.bmp ./.march/build/release/cube_forge
 ```

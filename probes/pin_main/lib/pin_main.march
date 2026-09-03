@@ -1,0 +1,34 @@
+-- G15 probe. Prints whether `main` is on the OS main thread before and after a
+-- parallel map, and how long the parallel map took. Run it four ways:
+--   ./pin_main                                      (default schedulers, unpinned)
+--   MARCH_PIN_MAIN=1 ./pin_main                     (default schedulers, pinned)
+--   MARCH_NUM_SCHEDULERS=1 ./pin_main               (single scheduler)
+--   MARCH_NUM_SCHEDULERS=1 MARCH_PIN_MAIN=1 ./pin_main
+-- Pinned + default schedulers must say "main thread: true" both times AND be
+-- faster than the single-scheduler run.
+mod PinMain do
+  needs IO
+  needs IO.Foreign
+  needs IO.Spawn
+  needs IO.Clock
+  needs Ffi
+
+  -- CPU-heavy body: a long LCG chain, no allocation.
+  pfn spin(i : Int, acc : Int) : Int do
+    if i == 0 do acc else spin(i - 1, (acc * 1103515245 + i) % 2147483647) end
+  end
+
+  pfn b2s(b : Bool) : String do if b do "true" else "false" end end
+
+  fn main(cap : Cap(IO)) : Unit do
+    println("main thread (before pmap): " ++ b2s(Shim.T.is_main_thread()))
+    let xs = List.range(0, 64)
+    let t0 = System.monotonic_time()
+    let ys = List.pmap_n(xs, fn i -> spin(3000000, i), 8)
+    let t1 = System.monotonic_time()
+    let sum = List.sum_int(List.map(ys, fn y -> y % 1000000007))
+    println("pmap_n 64 x spin(3e6), 8 workers: " ++ int_to_string(t1 - t0) ++ " ms (checksum " ++ int_to_string(sum) ++ ")")
+    println("main thread (after pmap): " ++ b2s(Shim.T.is_main_thread()))
+    println("live allocs: " ++ int_to_string(Shim.T.live_allocs()))
+  end
+end

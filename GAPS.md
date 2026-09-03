@@ -20,7 +20,8 @@ Reproduction probes live under `probes/`.
    buffer growth step leaks.
 3. **`main` runs on a scheduler worker, not the OS main thread** (G15):
    GLFW/Cocoa traps. Workaround `MARCH_NUM_SCHEDULERS=1`, which also serialises
-   `pmap`.
+   `pmap`. **Patched** (runtime branch `runtime/pin-main-thread`,
+   `MARCH_PIN_MAIN=1`); see G15.
 4. **`&&`/`||` do not short-circuit** (G33), in both backends, undocumented.
 5. **A zero-arg extern call bound to an unused name is dropped** (G16) — a
    silent miscompile.
@@ -176,6 +177,30 @@ NativeArray `get` is documented as bounds-checked but is not (G18).
   scheduler has no affinity concept today (`march_proc` has no such field;
   every runnable proc goes through the Chase-Lev deques or the global runq).
   See the patch note in this file's "Compiler patches" section once done.
+- **Patched (2026-09-03), march branch `runtime/pin-main-thread`:** a
+  `pinned` field on `march_proc` and a scheduler-0-only mutex FIFO ("pin
+  queue") that only `sched_loop` on scheduler 0 pops, checked right after the
+  global runq. All four enqueue points (spawn, yield re-push, `march_sched_wake`,
+  and the deque-overflow path) route a pinned proc there, so no worker can pop
+  or steal it. `march_spawn_main` pins `main` when `MARCH_PIN_MAIN=1` is set
+  (opt-in; the default stays unpinned). With one scheduler the flag is a
+  no-op. Tasks spawned by `main` are not pinned, so `pmap` still fans out.
+  Measured on this machine (14 cores, runtime default of 4 scheduler threads):
+  - `probes/pin_main/` (pmap_n over 64 CPU-bound elements):
+    unpinned default 207 ms, main thread false; **pinned default 210 ms, main
+    thread true before and after the pmap**; `MARCH_NUM_SCHEDULERS=1` 762 ms
+    (748 ms pinned); stock 0.3.0 with `MARCH_PIN_MAIN=1` still reports false.
+  - cube_forge `mesh all`: headless 4 schedulers 327 ms, headless 1 scheduler
+    448 ms; **windowed `MARCH_PIN_MAIN=1` 349 ms** (window opens, 240 frames at
+    113 fps, frame 200 dump renders) vs windowed `MARCH_NUM_SCHEDULERS=1`
+    436 ms. Unpinned windowed still hits the shim's main-thread refusal.
+  - Runtime unit test `test/test_scheduler_pin.c` (4 schedulers): pinned proc
+    stays on the `march_sched_run` thread across 2000 yields and cross-thread
+    wakes while 128 siblings run on workers; a negative control (spawn
+    unpinned) fails both assertions.
+  Still open upstream: a `forge.toml`/compiler switch to bake the flag in (the
+  env var is read in `march_spawn_main`, before any user code runs, so a
+  `__attribute__((constructor))` `setenv` in the shim would also work).
 
 ### G16. A zero-arg extern call bound to an unused name is dropped (miscompile)
 - `let _ = w0()` and `let x = w0()` (x unused) where `w0` wraps a zero-arg
@@ -554,7 +579,9 @@ order of value per line, each with a probe already in `probes/`:
    nullary call as a pure constant needs to consult the extern table.
 3. Main-thread pinning for `main` (G15): a `pinned` flag on `march_proc`, a
    scheduler-0-only queue that `march_sched_wake`/yield-repush use for
-   pinned procs, an env var or `forge.toml` switch to set it.
+   pinned procs, an env var or `forge.toml` switch to set it. **Landed** on
+   march branch `runtime/pin-main-thread` (`MARCH_PIN_MAIN=1`); numbers under
+   G15. Probe: `probes/pin_main/`.
 4. `dec_rc` for native-array bindings (G31).
 5. Aggregate RC for tuples/records (G28–G30) — the real fix, and a project.
 

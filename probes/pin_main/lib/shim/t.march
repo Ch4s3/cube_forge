@@ -1,0 +1,10 @@
+mod Shim.T do
+  needs IO.Foreign
+  needs Ffi
+  extern "pin" : Cap(Ffi) do
+    fn x_is_main_thread(): Int = "pm_is_main_thread"
+    fn x_live_allocs(): Int = "pm_live_allocs"
+  end
+  fn is_main_thread() : Bool do x_is_main_thread() == 1 end
+  fn live_allocs() : Int do x_live_allocs() end
+end

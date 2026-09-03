@@ -1,0 +1,10 @@
+[package]
+name = "pin_main"
+version = "0.1.0"
+type = "app"
+description = "G15 probe: is `main` on the OS main thread, and does pmap still run in parallel?"
+
+[deps]
+
+[ffi]
+sources = ["native/pin.c"]
