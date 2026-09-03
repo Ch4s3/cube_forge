@@ -17,7 +17,8 @@ native/glad/, native/KHR/ generated GL loader (glad2, gl:core=3.3, no extensions
 lib/cube_forge/ffi/       two extern blocks = two capability domains (Window, Input), each wrapped
 lib/cube_forge/f32buf     growable uniquely-owned f32 buffer (the mesher's output type)
 lib/cube_forge/math/      Vec3, Mat4, Quat — stdlib-candidate code
-lib/cube_forge/{chunk,world,noise,mesher,player,raycast,outline,hud,texture}.march
+lib/cube_forge/{chunk,world,noise,mesher,player,raycast,outline,hud,texture,water}.march
+lib/cube_forge/water.march  finite-spread simulation: pure Sim step + one WaterChunk actor per chunk
 lib/cube_forge.march      entry point, frame loop, scripted verification modes
 test/math_test.march      forge test suite
 probes/                   one small project or file per GAPS.md finding
@@ -71,6 +72,7 @@ up in water), left click breaks, right click places the selected block, keys
 | `CF_AUTOSPIN=<mrad/frame>` | scripted mouse-look |
 | `CF_AUTOEDIT=<frame>` | break the targeted block at that frame, place stone 60 frames later, water 120 frames later |
 | `CF_AUTOSWIM=1` | spawn over a lake, sink, hold Space from frame 320; prints y and in-water state |
+| `CF_AUTOFLOW=<frame>` | place a water source at that frame, break it 600 frames later; prints per-chunk water counts and per-tick timings |
 | `CF_ALLOC_PROBE=1` | print net live-object deltas for each per-frame piece |
 | `CF_WORKERS`, `CF_SEED` | pmap worker count, terrain seed |
 

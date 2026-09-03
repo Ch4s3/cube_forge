@@ -40,8 +40,23 @@ mod CubeForge.Chunk do
 
   fn is_solid(id : Int) : Bool do id != 0 end
   doc "Blocks the player collides with: everything except air and water."
-  fn is_collidable(id : Int) : Bool do id != 0 && id != 4 end
+  fn is_collidable(id : Int) : Bool do id != 0 && !is_water(id) end
+  doc "Water source block (level 8)."
   fn water() : Int do 4 end
+  doc "Ids 4..11 are water: 4 is a source (level 8), 5..11 are flow cells (levels 7..1)."
+  fn is_water(id : Int) : Bool do id >= 4 && id <= 11 end
+  fn is_source(id : Int) : Bool do id == 4 end
+  fn level_of(id : Int) : Int do if is_water(id) do 12 - id else 0 end end
+  fn id_of_level(l : Int) : Int do 12 - l end
+
+  pfn count_water_go(a : NativeU8Arr, i : Int, acc : Int) : Int do
+    if i >= 65536 do acc else count_water_go(a, i + 1, if is_water(NativeArray.get_u8(a, i)) do acc + 1 else acc end) end
+  end
+  doc "Number of water cells in the chunk (test/verification helper)."
+  fn count_water(c : Chunk) : Int do match c do Chunk(a) -> count_water_go(a, 0, 0) end end
+  doc "Raw cell by flat index."
+  fn get_idx(c : Chunk, i : Int) : Int do match c do Chunk(a) -> NativeArray.get_u8(a, i) end end
+  fn set_idx(c : Chunk, i : Int, v : Int) : Chunk do match c do Chunk(a) -> Chunk(NativeArray.set_u8(a, i, v)) end end
   fn sea_level() : Int do 62 end
 
   -- ── M2 test terrain: a bumpy surface so every face direction is exercised ──

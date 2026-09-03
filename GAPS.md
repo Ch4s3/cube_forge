@@ -580,3 +580,65 @@ order of value per line, each with a probe already in `probes/`:
   buffers straight through and only one is rebuilt. Works, allocation-free
   apart from growth, but it is the loop shape the leak findings dictate, not
   the one you would write first.
+
+---
+
+## Spreading water notes (actor model)
+
+### G44. Message payloads cannot carry native arrays, so a chunk never crosses an actor boundary
+- `specs/lang/actors.md`: `NativeU8Arr` and friends are `non_sendable_types`,
+  checked at constructor application. `Actor.call` additionally takes a
+  zero-arg sentinel, so a call cannot carry arguments at all. The design
+  ("send the actor its neighbours' chunks, get a chunk back") was impossible
+  as written. What shipped: each `WaterChunk` regenerates its own chunk from
+  `(cx, cz, seed)` on `WLoad` (plus its four neighbours, to copy their edge
+  columns into a 16 KB mirror), and replies to `WTick` with a packed
+  `List(Int)` of cell changes that the frame loop applies to the world it
+  renders. Two copies of every chunk exist by construction.
+- This is the right shape for the actor model, but the rule bites hardest
+  exactly where actors are most useful (bulk data owned by one actor).
+  **Would need:** a linear/moved send for uniquely-owned buffers.
+
+### G45. `Pid(...)` cannot be written in a type annotation
+- A pid's type is `Pid({ sim : Sim, cx : Int, cz : Int })` (the state record),
+  which the parser accepts nowhere; a bare `Pid` annotation is a type error
+  (`expected Pid but got Pid({…})`). The `Scene` variant that stores the
+  64 pids had to become generic (`type Scene(p) = …`) and every function
+  taking a `Scene` lost its annotation.
+
+### G46. Actor message constructors are private to the module and only exist after the actor declaration
+- `WLoad(…)` from another module: `I don't know a constructor called WLoad`,
+  with or without `import`. Inside the module, the same constructor used in a
+  function written *above* the `actor … end` block: same error; moving the
+  function below the actor fixes it. So every actor needs a set of
+  send/call wrapper functions placed after it (`Water.send_load` etc.).
+  Meanwhile the docs say message names share one *global* namespace, which
+  is the opposite problem (collisions across modules).
+
+### G47. Discarding a `NativeArray.set_*` result silently drops the write when the array is shared
+- `let _f = NativeArray.set_int(flags, ci, 1)` inside a helper that returns
+  something else: when `flags` is also held by the caller, `set_int` copies,
+  the copy is discarded, and the write is lost with no warning. Cost me one
+  debugging round (the water never re-ticked). The in-place contract is only
+  honoured through the returned value; there is no lint for a discarded
+  `set_*` result even though the function is documented as returning the
+  updated array.
+
+### G48. An alias resolves to the wrong module at link time
+- `alias CubeForge.Water as W` in a test module typechecked, but the binary
+  failed to link: `Undefined symbols: _CubeForge.World.call_tick,
+  _CubeForge.World.edited`. Codegen resolved `W.` to `CubeForge.World`
+  (both modules start with `W`). Renaming the alias to `Water` fixed it.
+  `alias … as V` for `Vec3` never misfired. Verified by the test build.
+
+### G49. `Actor.call` cannot be used from `forge test`
+- `Err("actor_call: not in scheduler context")`. Test bodies run outside the
+  green-thread scheduler, so any request/reply test of an actor is impossible;
+  only `send` + `run_until_idle` smoke tests work. The actor round-trip is
+  covered by the `CF_AUTOFLOW` script instead.
+
+### G50. Actor state is a record, and records are never freed
+- Every handler returns `{ state with sim: s1 }` — a fresh record per message
+  (G28 applies). One record per tick per chunk is small, but it is a leak by
+  construction that nothing in the language lets you avoid, since actor state
+  must be a record.

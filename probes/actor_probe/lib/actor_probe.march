@@ -1,0 +1,62 @@
+mod ActorProbe do
+  needs IO
+  needs IO.Spawn
+
+  -- a simulation cell: native array + counters in a variant, held in actor state
+  type Sim = Sim(NativeU8Arr, Int)
+
+  type APTickReq = APTickReq
+
+  actor Cell do
+    state { sim : Sim, id : Int }
+    init { sim: Sim(NativeArray.make_u8(16, 0), 0), id: 0 }
+
+    -- call handler first (tag 0): reply with a packed change list
+    on APTick(reply_to) do
+      match state.sim do
+        Sim(arr, n) ->
+          let arr2 = NativeArray.set_u8(arr, n % 16, n + 1)
+          Actor.reply(reply_to, [state.id * 1000 + n, n + 1, NativeArray.get_u8(arr2, n % 16)])
+          { state with sim: Sim(arr2, n + 1) }
+      end
+    end
+
+    on APLoad(id : Int, fill : Int) do
+      { state with sim: Sim(NativeArray.make_u8(16, fill), 0), id: id }
+    end
+  end
+
+  pfn spawn_all(i : Int, acc) do
+    if i == 0 do acc
+    else
+      let p = spawn(Cell)
+      send(p, APLoad(i, 7))
+      spawn_all(i - 1, Cons(p, acc))
+    end
+  end
+
+  pfn show(xs : List(Int)) : String do
+    match xs do
+      Nil -> ""
+      Cons(h, t) -> int_to_string(h) ++ " " ++ show(t)
+    end
+  end
+
+  fn main(cap : Cap(IO)) : Unit do
+    let pids = spawn_all(8, Nil)
+    let t0 = System.monotonic_time()
+    let results = List.pmap_n(pids, fn p -> Actor.call(p, APTickReq, 5000), 8)
+    let t1 = System.monotonic_time()
+    let results2 = List.pmap_n(pids, fn p -> Actor.call(p, APTickReq, 5000), 8)
+    let t2 = System.monotonic_time()
+    List.each(results, fn r -> match r do
+      Ok(xs) -> println("reply " ++ show(xs))
+      Err(e) -> println("err " ++ e)
+    end)
+    List.each(results2, fn r -> match r do
+      Ok(xs) -> println("reply2 " ++ show(xs))
+      Err(e) -> println("err " ++ e)
+    end)
+    println("call rounds: " ++ int_to_string(t1 - t0) ++ " ms, " ++ int_to_string(t2 - t1) ++ " ms")
+  end
+end

@@ -1,5 +1,5 @@
 -- cube_forge — a minimal voxel renderer, written to find March's rough edges.
--- Static water: sea level, translucent pass, placeable water, swimming.
+-- Spreading water: per-chunk WaterChunk actors, finite-level flow, cross-chunk spills.
 mod CubeForge do
 
   needs IO
@@ -24,6 +24,7 @@ mod CubeForge do
   alias CubeForge.Hud as Hud
   alias CubeForge.Raycast as Ray
   alias CubeForge.Outline as Outline
+  alias CubeForge.Water as Water
 
   fn ms(seconds : Float) : String do float_to_string(seconds *. 1000.0) ++ "ms" end
 
@@ -31,9 +32,216 @@ mod CubeForge do
   -- rebuild can reuse the cell (see GAPS.md G12).
   -- frame, last_time, player, alloc_sample, view scratch (NativeFloatArr 16), vp upload buffer (NativeF32Arr 16)
   type Frame = Frame(Int, Float, CubeForge.Player.Player, Int, NativeFloatArr, NativeF32Arr)
-  -- Mutable-per-edit world state: world, per-slot vertex counts (opaque 0..63, water 64..127), outline buffer, current hit, selected block id
-  type Scene = Scene(CubeForge.World.World, NativeIntArr, CubeForge.F32Buf.F32Buf, CubeForge.Raycast.Hit, Int)
+  -- Mutable-per-edit world state: world, per-slot vertex counts (opaque 0..63, water 64..127), outline buffer, current hit,
+  -- selected block id, water actor pids (Array, one per chunk), per-chunk "has dirty cells" flags
+  -- `p` is the water-actor Pid type: Pid(state) cannot be written in an annotation (GAPS.md G45), so it is a parameter.
+  type Scene(p) = Scene(CubeForge.World.World, NativeIntArr, CubeForge.F32Buf.F32Buf, CubeForge.Raycast.Hit, Int, Array.PVec(p), NativeIntArr)
   fn water_slot_base() : Int do 64 end
+  fn tick_period() : Int do 10 end
+
+  -- ── Water actors ────────────────────────────────────────────────────────────
+  pfn spawn_water(i : Int, n : Int, seed : Int, acc) do
+    if i < 0 do acc
+    else
+      let p = Water.spawn_chunk()
+      Water.send_load(p, i % n, i / n, n, seed)
+      spawn_water(i - 1, n, seed, Cons(p, acc))
+    end
+  end
+
+  -- Tell the water actor about a player edit (and its neighbour when the cell is on a border).
+  pfn notify_edit(sc, x : Int, y : Int, z : Int, id : Int) do
+    match sc do
+      Scene(w, counts, outline, hit, sel, pids, flags) ->
+        let n = World.side(w)
+        let cx = World.floor_div16(x)
+        let cz = World.floor_div16(z)
+        if !World.in_bounds(w, cx, cz) do sc
+        else
+          let ci = cx + n * cz
+          let lx = World.mod16(x)
+          let lz = World.mod16(z)
+          Water.send_edited(Array.get(pids, ci), Water.idx(lx, y, lz), id)
+          let f1 = NativeArray.set_int(flags, ci, 1)
+          -- mirrors in the 4 neighbours: an edge cell changed
+          let f2 = edge_notify(w, pids, f1, cx, cz, lx, y, lz, id)
+          Scene(w, counts, outline, hit, sel, pids, f2)
+        end
+    end
+  end
+
+  -- If (lx, y, lz) is on a border, send WEdgeCell to the neighbour across it and flag that neighbour.
+  pfn edge_notify(w : CubeForge.World.World, pids, flags : NativeIntArr, cx : Int, cz : Int, lx : Int, y : Int, lz : Int, id : Int) : NativeIntArr do
+    let f1 = if lz == 0 do send_edge(w, pids, flags, cx, cz - 1, 1, Water.edge_slot(0, lx, y, lz), id) else flags end
+    let f2 = if lz == 15 do send_edge(w, pids, f1, cx, cz + 1, 0, Water.edge_slot(1, lx, y, lz), id) else f1 end
+    let f3 = if lx == 15 do send_edge(w, pids, f2, cx + 1, cz, 3, Water.edge_slot(2, lx, y, lz), id) else f2 end
+    if lx == 0 do send_edge(w, pids, f3, cx - 1, cz, 2, Water.edge_slot(3, lx, y, lz), id) else f3 end
+  end
+
+  pfn send_edge(w : CubeForge.World.World, pids, flags : NativeIntArr, cx : Int, cz : Int, dir : Int, slot : Int, id : Int) : NativeIntArr do
+    if !World.in_bounds(w, cx, cz) do flags
+    else
+      let ci = cx + World.side(w) * cz
+      Water.send_edge_cell(Array.get(pids, ci), dir, slot, id)
+      NativeArray.set_int(flags, ci, 1)
+    end
+  end
+
+  pfn send_spill(w : CubeForge.World.World, pids, flags : NativeIntArr, cx : Int, cz : Int, dir : Int, slot : Int, level : Int) : NativeIntArr do
+    if !World.in_bounds(w, cx, cz) do flags
+    else
+      let ci = cx + World.side(w) * cz
+      Water.send_spill(Array.get(pids, ci), dir, slot, level)
+      NativeArray.set_int(flags, ci, 1)
+    end
+  end
+
+  -- Neighbour grid coordinates for a direction from (cx, cz).
+  pfn nb_cx(cx : Int, dir : Int) : Int do if dir == 2 do cx + 1 else if dir == 3 do cx - 1 else cx end end end
+  pfn nb_cz(cz : Int, dir : Int) : Int do if dir == 0 do cz - 1 else if dir == 1 do cz + 1 else cz end end end
+
+  pfn flagged(flags : NativeIntArr, i : Int, n : Int, acc : List(Int)) : List(Int) do
+    if i < 0 do acc else flagged(flags, i - 1, n, if NativeArray.get_int(flags, i) == 1 do Cons(i, acc) else acc end) end
+  end
+
+  -- Result of applying one reply: world and flags are both threaded (a NativeIntArr update
+  -- returns the array — discarding it loses the write when the array is shared, GAPS.md G47).
+  type Rep = Rep(CubeForge.World.World, NativeIntArr)
+
+  -- Apply one actor's reply: cell writes are batched per chunk, edge/spill entries become
+  -- messages to neighbours (flagging them), a pending marker keeps the chunk flagged.
+  pfn apply_reply(w : CubeForge.World.World, pids, flags : NativeIntArr, ci : Int, out : List(Int), cells : List(Int)) : Rep do
+    let n = World.side(w)
+    let cx = ci % n
+    let cz = ci / n
+    match out do
+      Nil -> Rep(World.set_cells(w, cx, cz, cells), flags)
+      Cons(v, rest) ->
+        let kind = v / 4294967296
+        let payload = v % 4294967296
+        if kind == 0 do apply_reply(w, pids, flags, ci, rest, Cons(payload, cells))
+        else
+          let dir = payload / 1048576
+          let slot = (payload % 1048576) / 256
+          let val = payload % 256
+          if kind == 1 do
+            apply_reply(w, pids, send_edge(w, pids, flags, nb_cx(cx, dir), nb_cz(cz, dir), Water.opposite(dir), slot, val), ci, rest, cells)
+          else if kind == 2 do
+            apply_reply(w, pids, send_spill(w, pids, flags, nb_cx(cx, dir), nb_cz(cz, dir), Water.opposite(dir), slot, val), ci, rest, cells)
+          else
+            apply_reply(w, pids, NativeArray.set_int(flags, ci, 1), ci, rest, cells)
+          end end
+        end
+    end
+  end
+
+  pfn has_cells(out : List(Int)) : Bool do
+    match out do
+      Nil -> false
+      Cons(v, rest) -> if v / 4294967296 == 0 do true else has_cells(rest) end
+    end
+  end
+  -- Bitmask of edge directions present in a reply (bit d set when an edge-cell change in direction d occurred).
+  pfn edge_mask(out : List(Int), acc : Int) : Int do
+    match out do
+      Nil -> acc
+      Cons(v, rest) ->
+        if v / 4294967296 == 1 do
+          let dir = (v % 4294967296) / 1048576
+          edge_mask(rest, int_or(acc, pow2(dir)))
+        else edge_mask(rest, acc) end
+    end
+  end
+  pfn pow2(n : Int) : Int do if n <= 0 do 1 else 2 * pow2(n - 1) end end
+
+  type Applied = Applied(CubeForge.World.World, NativeIntArr, NativeIntArr, Int)   -- world, counts, flags, remeshed
+
+  pfn apply_all(w : CubeForge.World.World, pids, flags : NativeIntArr, counts : NativeIntArr, cis : List(Int), replies, empty : CubeForge.Chunk.Chunk, remeshed : Int) : Applied do
+    match cis do
+      Nil -> Applied(w, counts, flags, remeshed)
+      Cons(ci, rest) ->
+        match replies do
+          Nil -> Applied(w, counts, flags, remeshed)
+          Cons(r, rrest) ->
+            match r do
+              Err(e) ->
+                println("water tick error for chunk " ++ int_to_string(ci) ++ ": " ++ e)
+                apply_all(w, pids, flags, counts, rest, rrest, empty, remeshed)
+              Ok(out) ->
+                let n = World.side(w)
+                match apply_reply(w, pids, flags, ci, out, Nil) do
+                  Rep(w1, flags1) ->
+                    if has_cells(out) do
+                      let cx = ci % n
+                      let cz = ci / n
+                      let c1 = upload_pair(Mesher.mesh_world_chunk(w1, cx, cz, empty), ci, counts)
+                      -- a changed border cell changes that neighbour's culling too: remesh only those neighbours
+                      let c2 = remesh_neighbors(w1, cx, cz, c1, empty, edge_mask(out, 0))
+                      apply_all(w1, pids, flags1, c2, rest, rrest, empty, remeshed + 1)
+                    else apply_all(w1, pids, flags1, counts, rest, rrest, empty, remeshed) end
+                end
+            end
+        end
+    end
+  end
+
+  -- mask bits: 1 = -z, 2 = +z, 4 = +x, 8 = -x
+  pfn remesh_neighbors(w : CubeForge.World.World, cx : Int, cz : Int, counts : NativeIntArr, empty : CubeForge.Chunk.Chunk, mask : Int) : NativeIntArr do
+    let n = World.side(w)
+    let c1 = if int_and(mask, 4) != 0 && World.in_bounds(w, cx + 1, cz) do upload_pair(Mesher.mesh_world_chunk(w, cx + 1, cz, empty), cx + 1 + n * cz, counts) else counts end
+    let c2 = if int_and(mask, 8) != 0 && World.in_bounds(w, cx - 1, cz) do upload_pair(Mesher.mesh_world_chunk(w, cx - 1, cz, empty), cx - 1 + n * cz, c1) else c1 end
+    let c3 = if int_and(mask, 2) != 0 && World.in_bounds(w, cx, cz + 1) do upload_pair(Mesher.mesh_world_chunk(w, cx, cz + 1, empty), cx + n * (cz + 1), c2) else c2 end
+    if int_and(mask, 1) != 0 && World.in_bounds(w, cx, cz - 1) do upload_pair(Mesher.mesh_world_chunk(w, cx, cz - 1, empty), cx + n * (cz - 1), c3) else c3 end
+  end
+
+  -- One water tick: call every flagged chunk actor in parallel, apply the replies, remesh what changed.
+  pfn water_tick(sc, workers : Int, verbose : Bool) do
+    match sc do
+      Scene(w, counts, outline, hit, sel, pids, flags) ->
+        let n = World.side(w)
+        let cis = flagged(flags, n * n - 1, n, Nil)
+        match cis do
+          Nil -> sc
+          _ ->
+            let t0 = Win.time()
+            -- clear flags first; replies (pending markers, spills) re-flag as needed
+            let flags1 = clear_flags(flags, cis)
+            let replies = List.pmap_n(cis, fn ci -> Water.call_tick(Array.get(pids, ci)), workers)
+            let t1 = Win.time()
+            match apply_all(w, pids, flags1, counts, cis, replies, Chunk.new(), 0) do
+              Applied(w1, counts1, flags2, remeshed) ->
+                let t2 = Win.time()
+                if verbose do
+                  println("water tick: " ++ int_to_string(List.length(cis)) ++ " chunks, calls " ++ ms(t1 -. t0) ++ ", apply+remesh " ++ ms(t2 -. t1) ++ " (" ++ int_to_string(remeshed) ++ " remeshed), reply sizes " ++ reply_sizes(replies))
+                else () end
+                Scene(w1, counts1, outline, hit, sel, pids, flags2)
+            end
+        end
+    end
+  end
+
+  pfn reply_sizes(replies) : String do
+    match replies do
+      Nil -> ""
+      Cons(r, rest) ->
+        let sz = match r do
+          Ok(out) -> int_to_string(List.length(out))
+          Err(_) -> "err"
+        end
+        sz ++ " " ++ reply_sizes(rest)
+    end
+  end
+
+  pfn clear_flags(flags : NativeIntArr, cis : List(Int)) : NativeIntArr do
+    match cis do
+      Nil -> flags
+      Cons(ci, rest) -> clear_flags(NativeArray.set_int(flags, ci, 0), rest)
+    end
+  end
+
+  pfn scene_water_count(sc, cx : Int, cz : Int) : Int do
+    match sc do Scene(w, _, _, _, _, _, _) -> Chunk.count_water(World.chunk_at(w, cx, cz)) end
+  end
 
   fn reach() : Float do 8.0 end
 
@@ -58,9 +266,9 @@ mod CubeForge do
   -- Apply a block edit at (x, y, z): set the block, remesh its chunk, and a
   -- neighbour chunk when the block sits on a chunk boundary (its faces are
   -- culled against the neighbour, so the neighbour's mesh changes too).
-  pfn edit_block(sc : Scene, x : Int, y : Int, z : Int, id : Int) : Scene do
+  pfn edit_block(sc, x : Int, y : Int, z : Int, id : Int) do
     match sc do
-      Scene(world, counts, outline, hit, sel) ->
+      Scene(world, counts, outline, hit, sel, pids, flags) ->
         let t0 = Win.time()
         let world1 = World.set_block(world, x, y, z, id)
         let empty = Chunk.new()
@@ -72,7 +280,26 @@ mod CubeForge do
         let t1 = Win.time()
         println((if id == 0 do "broke" else "placed" end) ++ " block at " ++ int_to_string(x) ++ "," ++ int_to_string(y) ++ "," ++ int_to_string(z)
                 ++ " — edit + remesh " ++ ms(t1 -. t0))
-        Scene(world1, c3, outline, hit, sel)
+        notify_edit(Scene(world1, c3, outline, hit, sel, pids, flags), x, y, z, id)
+    end
+  end
+
+  -- Scripted: remove every source block within 3 cells of the player's feet (the one CF_AUTOFLOW placed).
+  pfn break_sources_near(sc, p : CubeForge.Player.Player) do
+    let pos = Player.position(p)
+    let px = float_to_int(Math.floor(V.x(pos)))
+    let py = float_to_int(Math.floor(V.y(pos)))
+    let pz = float_to_int(Math.floor(V.z(pos)))
+    break_sources_go(sc, px - 3, py - 3, pz - 3, px, py, pz, 0)
+  end
+  pfn break_sources_go(sc, x : Int, y : Int, z : Int, px : Int, py : Int, pz : Int, i : Int) do
+    if i >= 343 do sc
+    else
+      let cx = x + i % 7
+      let cy = y + (i / 7) % 7
+      let cz = z + i / 49
+      let sc1 = if Chunk.is_source(World.block_at(scene_world(sc), cx, cy, cz)) do edit_block(sc, cx, cy, cz, 0) else sc end
+      break_sources_go(sc1, x, y, z, px, py, pz, i + 1)
     end
   end
 
@@ -92,16 +319,16 @@ mod CubeForge do
 
   -- Per-frame: raycast from the eye, refresh the outline, apply click edits.
   -- [place_id] < 0 means "the selected block"; a scripted edit passes an explicit id.
-  pfn interact(sc : Scene, p : CubeForge.Player.Player, break_now : Bool, place_now : Bool, place_id : Int, new_sel : Int) : Scene do
+  pfn interact(sc, p : CubeForge.Player.Player, break_now : Bool, place_now : Bool, place_id : Int, new_sel : Int) do
     match sc do
-      Scene(world, counts, outline, _, sel0) ->
+      Scene(world, counts, outline, _, sel0, pids, flags) ->
         let sel = if new_sel > 0 do new_sel else sel0 end
         let e = Player.eye(p)
         let d = Player.forward(Player.yaw(p), Player.pitch(p))
         let hit = Ray.cast(world, V.x(e), V.y(e), V.z(e), V.x(d), V.y(d), V.z(d), reach())
         let outline1 = if Ray.is_hit(hit) do Outline.build(outline, Ray.bx(hit), Ray.by_(hit), Ray.bz(hit)) else F32Buf.clear(outline) end
         if Ray.is_hit(hit) do CubeForge.Ffi.Window.gfx_upload(254, F32Buf.storage(outline1), F32Buf.len(outline1)) else () end
-        let sc1 = Scene(world, counts, outline1, hit, sel)
+        let sc1 = Scene(world, counts, outline1, hit, sel, pids, flags)
         if break_now && Ray.is_hit(hit) do
           edit_block(sc1, Ray.bx(hit), Ray.by_(hit), Ray.bz(hit), 0)
         else if place_now && Ray.is_hit(hit) do
@@ -115,12 +342,12 @@ mod CubeForge do
     end
   end
 
-  pfn scene_counts(sc : Scene) : NativeIntArr do match sc do Scene(_, c, _, _, _) -> c end end
-  pfn scene_world(sc : Scene) : CubeForge.World.World do match sc do Scene(w, _, _, _, _) -> w end end
-  pfn scene_has_hit(sc : Scene) : Bool do match sc do Scene(_, _, _, h, _) -> Ray.is_hit(h) end end
-  fn scene_hit_string(sc : Scene) : String do
+  pfn scene_counts(sc) : NativeIntArr do match sc do Scene(_, c, _, _, _, _, _) -> c end end
+  pfn scene_world(sc) : CubeForge.World.World do match sc do Scene(w, _, _, _, _, _, _) -> w end end
+  pfn scene_has_hit(sc) : Bool do match sc do Scene(_, _, _, h, _, _, _) -> Ray.is_hit(h) end end
+  fn scene_hit_string(sc) : String do
     match sc do
-      Scene(_, _, _, h, _) -> if Ray.is_hit(h) do int_to_string(Ray.bx(h)) ++ "," ++ int_to_string(Ray.by_(h)) ++ "," ++ int_to_string(Ray.bz(h)) ++ " face " ++ int_to_string(Ray.nx(h)) ++ "," ++ int_to_string(Ray.ny(h)) ++ "," ++ int_to_string(Ray.nz(h)) else "none" end
+      Scene(_, _, _, h, _, _, _) -> if Ray.is_hit(h) do int_to_string(Ray.bx(h)) ++ "," ++ int_to_string(Ray.by_(h)) ++ "," ++ int_to_string(Ray.bz(h)) ++ " face " ++ int_to_string(Ray.nx(h)) ++ "," ++ int_to_string(Ray.ny(h)) ++ "," ++ int_to_string(Ray.nz(h)) else "none" end
     end
   end
   -- FPS meter: window start time, frames in window, last displayed fps, HUD vertex buffer
@@ -183,13 +410,13 @@ mod CubeForge do
 
   -- Frame loop. `max_frames < 0` means run until the window closes.
   -- Run-time knobs read once, outside the frame loop (an Env read allocates).
-  type Knobs = Knobs(Int, Int, String, Bool, Float, Int, Bool)   -- max_frames, dump_frame, dump_path, autowalk, autospin, autoedit frame (<0 = off), autoswim
+  type Knobs = Knobs(Int, Int, String, Bool, Float, Int, Bool, Int, Int)   -- max_frames, dump_frame, dump_path, autowalk, autospin, autoedit frame (<0 = off), autoswim, autoflow frame (<0 = off), workers
 
-  fn frame_loop(f : Frame, k : Knobs, sc : Scene, nchunks : Int, proj : NativeFloatArr, fps : Fps) : Frame do
+  fn frame_loop(f : Frame, k : Knobs, sc, nchunks : Int, proj : NativeFloatArr, fps : Fps) : Frame do
     match f do
       Frame(frame, last_t, player, sample, view, vp) ->
         match k do
-        Knobs(max_frames, dump_frame, dump_path, autowalk, autospin, autoedit, autoswim) ->
+        Knobs(max_frames, dump_frame, dump_path, autowalk, autospin, autoedit, autoswim, autoflow, workers) ->
         if Win.should_close() || (max_frames >= 0 && frame >= max_frames) do
           Frame(frame, last_t, player, sample, view, vp)
         else
@@ -205,10 +432,21 @@ mod CubeForge do
           let break_now = In.button_pressed(In.button_left()) || (autoedit >= 0 && frame == autoedit)
           let place_now = In.button_pressed(In.button_right()) || (autoedit >= 0 && frame == autoedit + 60)
           -- scripted third step: place water 120 frames after the break
-          let place_water = autoedit >= 0 && frame == autoedit + 120
-          let sc1 = interact(sc, player1, break_now, place_now || place_water, if place_water do Chunk.water() else -1 end, selected_key())
+          let place_water = (autoedit >= 0 && frame == autoedit + 120) || (autoflow >= 0 && frame == autoflow)
+          let sc0 = interact(sc, player1, break_now, place_now || place_water, if place_water do Chunk.water() else -1 end, selected_key())
+          -- CF_AUTOFLOW: break the source again 600 frames after placing it
+          let sc0b = if autoflow >= 0 && frame == autoflow + 600 do break_sources_near(sc0, player1) else sc0 end
+          -- water simulation tick
+          let sc1 = if frame % tick_period() == 0 do water_tick(sc0b, workers, autoflow >= 0) else sc0b end
+          if autoflow >= 0 && frame >= autoflow && (frame - autoflow) % 100 == 0 do
+            let cx = World.floor_div16(float_to_int(Math.floor(V.x(Player.position(player1)))))
+            let cz = World.floor_div16(float_to_int(Math.floor(V.z(Player.position(player1)))))
+            println("frame " ++ int_to_string(frame) ++ " water cells: chunk(" ++ int_to_string(cx) ++ "," ++ int_to_string(cz) ++ ")=" ++ int_to_string(scene_water_count(sc1, cx, cz))
+                    ++ " chunk(" ++ int_to_string(cx - 1) ++ "," ++ int_to_string(cz) ++ ")=" ++ int_to_string(scene_water_count(sc1, cx - 1, cz))
+                    ++ " chunk(" ++ int_to_string(cx) ++ "," ++ int_to_string(cz - 1) ++ ")=" ++ int_to_string(scene_water_count(sc1, cx, cz - 1)))
+          else () end
           if autoedit >= 0 && (frame == autoedit - 1 || frame == autoedit + 1 || frame == autoedit + 61 || frame == autoedit + 121) do
-            println("frame " ++ int_to_string(frame) ++ " looking at " ++ scene_hit_string(sc1) ++ "; block there = " ++ int_to_string(match sc1 do Scene(w, _, _, h, _) -> World.block_at(w, Ray.bx(h), Ray.by_(h), Ray.bz(h)) end))
+            println("frame " ++ int_to_string(frame) ++ " looking at " ++ scene_hit_string(sc1) ++ "; block there = " ++ int_to_string(match sc1 do Scene(w, _, _, h, _, _, _) -> World.block_at(w, Ray.bx(h), Ray.by_(h), Ray.bz(h)) end))
           else () end
           if autoswim && frame % 20 == 0 && frame <= 400 do
             println("frame " ++ int_to_string(frame) ++ " y=" ++ float_to_string(V.y(Player.position(player1))) ++ " in_water=" ++ (if Player.in_water(player1, scene_world(sc1)) do "true" else "false" end) ++ " eye_in_water=" ++ (if Player.eye_in_water(player1, scene_world(sc1)) do "true" else "false" end))
@@ -401,8 +639,11 @@ mod CubeForge do
         if Env.get_int("CF_ALLOC_PROBE", 0) == 1 do alloc_probe(world, proj) else () end
         let t4 = Win.time()
         let knobs = Knobs(max_frames, Env.get_int("CF_DUMP_FRAME", 30), Env.get("CF_DUMP", ""), Env.get_int("CF_AUTOWALK", 0) == 1,
-                          int_to_float(Env.get_int("CF_AUTOSPIN", 0)) /. 1000.0 /. Player.mouse_sens(), Env.get_int("CF_AUTOEDIT", -1), autoswim)
-        let scene = Scene(world, counts, F32Buf.new(256), Ray.miss(), 3)
+                          int_to_float(Env.get_int("CF_AUTOSPIN", 0)) /. 1000.0 /. Player.mouse_sens(), Env.get_int("CF_AUTOEDIT", -1), autoswim, Env.get_int("CF_AUTOFLOW", -1), workers)
+        let tw0 = Win.time()
+        let pids = Array.from_list(spawn_water(n * n - 1, n, seed, Nil))
+        println("spawned " ++ int_to_string(n * n) ++ " water actors in " ++ ms(Win.time() -. tw0) ++ " (loads run asynchronously)")
+        let scene = Scene(world, counts, F32Buf.new(256), Ray.miss(), 3, pids, NativeArray.make_int(n * n, 0))
         let fps0 = Fps(t4, 0, 0, F32Buf.new(4096))
         match frame_loop(Frame(0, t4, player, 0, NativeArray.make_float(16, 0.0), NativeArray.make_f32(16, 0.0)), knobs, scene, n * n, proj, fps0) do
           Frame(frames, _, p, _, _, _) ->

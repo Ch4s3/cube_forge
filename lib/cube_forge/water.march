@@ -1,0 +1,275 @@
+-- Water — finite-spread simulation. Pure step over a `Sim` (chunk + neighbour
+-- edge mirrors + dirty queue), wrapped by one `WaterChunk` actor per chunk.
+--
+-- Actor boundary rules (learned from specs/lang/actors.md, see GAPS.md G44):
+-- messages may not carry native arrays, so an actor never receives a chunk. It
+-- regenerates its own chunk from (cx, cz, seed) on WLoad, mirrors its four
+-- neighbours' edge columns from messages, and replies to WTick with a packed
+-- List(Int) of changes the frame loop applies to the world it renders.
+--
+-- Packed reply entries: kind * 2^32 + payload
+--   kind 0  cell change      payload = idx * 256 + id            (idx = x + 16*(z + 16*y))
+--   kind 1  edge cell change payload = dir * 2^20 + slot * 256 + id  (neighbour must update its mirror)
+--   kind 2  (reserved; spills are pull-based via edge mirrors now)
+--   kind 3  more work queued payload = remaining count
+-- dir: 0 = -z, 1 = +z, 2 = +x, 3 = -x. slot = x + 16*y for z-edges, z + 16*y for x-edges.
+mod CubeForge.Water do
+
+  needs IO.Spawn
+
+  alias CubeForge.Chunk as C
+
+  -- chunk, edge mirrors (4 * 4096), queue ring (65536), queue head, queue count, dirty bitmap (65536)
+  type Sim = Sim(CubeForge.Chunk.Chunk, NativeU8Arr, NativeIntArr, Int, Int, NativeU8Arr)
+
+  fn kind_cell() : Int do 0 end
+  fn kind_edge() : Int do 4294967296 end
+  fn kind_spill() : Int do 8589934592 end
+  fn kind_pending() : Int do 12884901888 end
+  fn max_cells_per_tick() : Int do 250 end
+
+  fn new_sim(c : CubeForge.Chunk.Chunk, edges : NativeU8Arr) : Sim do
+    Sim(c, edges, NativeArray.make_int(65536, 0), 0, 0, NativeArray.make_u8(65536, 0))
+  end
+
+  fn empty_edges() : NativeU8Arr do NativeArray.make_u8(4 * 4096, 0) end
+
+  fn sim_chunk(s : Sim) : CubeForge.Chunk.Chunk do match s do Sim(c, _, _, _, _, _) -> c end end
+  fn pending(s : Sim) : Int do match s do Sim(_, _, _, _, n, _) -> n end end
+
+  -- ── Edge mirrors ─────────────────────────────────────────────────────────────
+  fn edge_slot(dir : Int, x : Int, y : Int, z : Int) : Int do
+    if dir <= 1 do x + 16 * y else z + 16 * y end
+  end
+  fn opposite(dir : Int) : Int do int_xor(dir, 1) end
+
+  doc "Copy the neighbour chunk's facing column into the mirror for [dir]."
+  fn load_edge(edges : NativeU8Arr, dir : Int, nb : CubeForge.Chunk.Chunk) : NativeU8Arr do
+    load_edge_go(edges, dir, nb, 0)
+  end
+  pfn load_edge_go(edges : NativeU8Arr, dir : Int, nb : CubeForge.Chunk.Chunk, i : Int) : NativeU8Arr do
+    if i >= 4096 do edges
+    else
+      let a = i % 16
+      let y = i / 16
+      -- the neighbour's cell that touches us: -z neighbour's z = 15 row, +z's z = 0, +x's x = 0, -x's x = 15
+      let v = if dir == 0 do C.get(nb, a, y, 15) else if dir == 1 do C.get(nb, a, y, 0)
+              else if dir == 2 do C.get(nb, 0, y, a) else C.get(nb, 15, y, a) end end end
+      load_edge_go(NativeArray.set_u8(edges, dir * 4096 + i, v), dir, nb, i + 1)
+    end
+  end
+
+  -- ── Cell access with neighbours ───────────────────────────────────────────────
+  pfn cell(c : CubeForge.Chunk.Chunk, edges : NativeU8Arr, x : Int, y : Int, z : Int) : Int do
+    if y < 0 do 3 else if y >= 256 do 0
+    else if z < 0 do NativeArray.get_u8(edges, 0 * 4096 + x + 16 * y)
+    else if z >= 16 do NativeArray.get_u8(edges, 1 * 4096 + x + 16 * y)
+    else if x >= 16 do NativeArray.get_u8(edges, 2 * 4096 + z + 16 * y)
+    else if x < 0 do NativeArray.get_u8(edges, 3 * 4096 + z + 16 * y)
+    else C.get(c, x, y, z) end end end end end end
+  end
+
+  fn idx(x : Int, y : Int, z : Int) : Int do x + 16 * (z + 16 * y) end
+
+  -- ── Dirty queue ──────────────────────────────────────────────────────────────
+  doc "Mark cell (x, y, z) dirty if it is inside the chunk; deduplicated by the bitmap."
+  fn mark(s : Sim, x : Int, y : Int, z : Int) : Sim do
+    if x < 0 || x >= 16 || y < 0 || y >= 256 || z < 0 || z >= 16 do s
+    else
+      match s do
+        Sim(c, e, q, qh, qn, bm) ->
+          let i = idx(x, y, z)
+          if NativeArray.get_u8(bm, i) == 1 || qn >= 65536 do Sim(c, e, q, qh, qn, bm)
+          else Sim(c, e, NativeArray.set_int(q, (qh + qn) % 65536, i), qh, qn + 1, NativeArray.set_u8(bm, i, 1)) end
+      end
+    end
+  end
+
+  fn mark_neighbors(s : Sim, x : Int, y : Int, z : Int) : Sim do
+    s |> mark(x + 1, y, z) |> mark(x - 1, y, z) |> mark(x, y + 1, z) |> mark(x, y - 1, z) |> mark(x, y, z + 1) |> mark(x, y, z - 1)
+  end
+
+  -- ── Writes that also report ───────────────────────────────────────────────────
+  -- A step result: the sim plus the packed change list. A variant, not a tuple (GAPS.md G29).
+  type Step = Step(Sim, List(Int))
+  fn step_sim(st : Step) : Sim do match st do Step(s, _) -> s end end
+  fn step_out(st : Step) : List(Int) do match st do Step(_, o) -> o end end
+
+  pfn set_cell(st : Step, x : Int, y : Int, z : Int, id : Int) : Step do
+    match st do
+      Step(s, out) ->
+        match s do
+          Sim(c, e, q, qh, qn, bm) ->
+            let i = idx(x, y, z)
+            let s1 = mark_neighbors(Sim(C.set_idx(c, i, id), e, q, qh, qn, bm), x, y, z)
+            let out1 = Cons(kind_cell() + i * 256 + id, out)
+            let out2 = if z == 0 do Cons(kind_edge() + 0 * 1048576 + edge_slot(0, x, y, z) * 256 + id, out1) else out1 end
+            let out3 = if z == 15 do Cons(kind_edge() + 1 * 1048576 + edge_slot(1, x, y, z) * 256 + id, out2) else out2 end
+            let out4 = if x == 15 do Cons(kind_edge() + 2 * 1048576 + edge_slot(2, x, y, z) * 256 + id, out3) else out3 end
+            let out5 = if x == 0 do Cons(kind_edge() + 3 * 1048576 + edge_slot(3, x, y, z) * 256 + id, out4) else out4 end
+            Step(s1, out5)
+        end
+    end
+  end
+
+  pfn step_sim_chunk(st : Step) : CubeForge.Chunk.Chunk do sim_chunk(step_sim(st)) end
+
+  -- ── The rules (pull-based) ────────────────────────────────────────────────────
+  -- A water cell contributes to a horizontal neighbour only when it is supported:
+  -- the cell under it is neither air nor falling (flow) water. Water prefers falling.
+  pfn supported(c : CubeForge.Chunk.Chunk, e : NativeU8Arr, x : Int, y : Int, z : Int) : Bool do
+    let b = cell(c, e, x, y - 1, z)
+    b != 0 && (!C.is_water(b) || C.is_source(b))
+  end
+  pfn contrib(c : CubeForge.Chunk.Chunk, e : NativeU8Arr, x : Int, y : Int, z : Int) : Int do
+    let n = cell(c, e, x, y, z)
+    if C.is_water(n) && supported(c, e, x, y, z) do C.level_of(n) - 1 else 0 end
+  end
+
+  -- Process one dirty cell: compute the level it should have from its neighbours.
+  pfn process(st : Step, x : Int, y : Int, z : Int) : Step do
+    let c = step_sim_chunk(st)
+    let e = match step_sim(st) do Sim(_, ed, _, _, _, _) -> ed end
+    let id = C.get(c, x, y, z)
+    if C.is_source(id) || (id != 0 && !C.is_water(id)) do st
+    else
+      let from_above = if C.is_water(cell(c, e, x, y + 1, z)) do 7 else 0 end
+      let lvl = max4(from_above, contrib(c, e, x + 1, y, z), contrib(c, e, x - 1, y, z), contrib(c, e, x, y, z + 1), contrib(c, e, x, y, z - 1))
+      let new_id = if lvl < 1 do 0 else C.id_of_level(lvl) end
+      if new_id != id do set_cell(st, x, y, z, new_id) else st end
+    end
+  end
+
+  pfn max4(a : Int, b : Int, c : Int, d : Int, e : Int) : Int do
+    Math.max_int(a, Math.max_int(Math.max_int(b, c), Math.max_int(d, e)))
+  end
+
+  -- Pop and process up to [budget] dirty cells.
+  pfn run(st : Step, budget : Int) : Step do
+    match st do
+      Step(s, out) ->
+        match s do
+          Sim(c, e, q, qh, qn, bm) ->
+            if budget == 0 || qn == 0 do Step(Sim(c, e, q, qh, qn, bm), out)
+            else
+              let i = NativeArray.get_int(q, qh)
+              let s1 = Sim(c, e, q, (qh + 1) % 65536, qn - 1, NativeArray.set_u8(bm, i, 0))
+              let x = i % 16
+              let y = i / 256
+              let z = (i / 16) % 16
+              run(process(Step(s1, out), x, y, z), budget - 1)
+            end
+        end
+    end
+  end
+
+  doc "One tick: process up to max_cells_per_tick dirty cells. Returns the new sim and the packed change list."
+  fn tick(s : Sim) : Step do
+    match run(Step(s, Nil), max_cells_per_tick()) do
+      Step(s1, out) -> Step(s1, if pending(s1) > 0 do Cons(kind_pending() + pending(s1), out) else out end)
+    end
+  end
+
+  doc "A neighbour asks us to re-evaluate the cell on our side facing direction [dir] (level is informational)."
+  fn accept_spill(s : Sim, dir : Int, slot : Int, _level : Int) : Sim do
+    let a = slot % 16
+    let y = slot / 16
+    let x = if dir == 2 do 15 else if dir == 3 do 0 else a end end
+    let z = if dir == 0 do 0 else if dir == 1 do 15 else a end end
+    mark(s, x, y, z)
+  end
+
+  doc "A neighbour's edge cell changed: update the mirror for [dir] and mark our adjacent cell dirty."
+  fn edge_changed(s : Sim, dir : Int, slot : Int, id : Int) : Sim do
+    match s do
+      Sim(c, e, q, qh, qn, bm) ->
+        let a = slot % 16
+        let y = slot / 16
+        let x = if dir == 2 do 15 else if dir == 3 do 0 else a end end
+        let z = if dir == 0 do 0 else if dir == 1 do 15 else a end end
+        mark(Sim(c, NativeArray.set_u8(e, dir * 4096 + slot, id), q, qh, qn, bm), x, y, z)
+    end
+  end
+
+  doc "The player edited cell [i] to [id]: set it and mark it and its neighbours dirty."
+  fn edited(s : Sim, i : Int, id : Int) : Sim do
+    let x = i % 16
+    let y = i / 256
+    let z = (i / 16) % 16
+    match s do
+      Sim(c, e, q, qh, qn, bm) -> mark(mark_neighbors(Sim(C.set_idx(c, i, id), e, q, qh, qn, bm), x, y, z), x, y, z)
+    end
+  end
+
+  -- ── The actor ────────────────────────────────────────────────────────────────
+  type WTickReq = WTickReq
+
+  -- Handler bodies live here (the actor lint asks handlers to delegate).
+  pfn handle_tick(reply_to, s : Sim) : Sim do
+    match tick(s) do
+      Step(s1, out) ->
+        Actor.reply(reply_to, out)
+        s1
+    end
+  end
+
+  pfn load_sim(cx : Int, cz : Int, n : Int, seed : Int) : Sim do
+    let c = C.generate(16 * cx, 16 * cz, seed)
+    let nb = fn (x, z) -> if x >= 0 && x < n && z >= 0 && z < n do C.generate(16 * x, 16 * z, seed) else C.new() end
+    let e0 = load_edge(empty_edges(), 0, nb(cx, cz - 1))
+    let e1 = load_edge(e0, 1, nb(cx, cz + 1))
+    let e2 = load_edge(e1, 2, nb(cx + 1, cz))
+    new_sim(c, load_edge(e2, 3, nb(cx - 1, cz)))
+  end
+
+  actor WaterChunk do
+    state { sim : Sim, cx : Int, cz : Int }
+    init { sim: new_sim(C.new(), empty_edges()), cx: 0, cz: 0 }
+
+    -- call handler first (tag 0): run one tick, reply with the packed change list
+    on WTick(reply_to) do
+      { state with sim: handle_tick(reply_to, state.sim) }
+    end
+
+    -- regenerate this chunk and its neighbours' edge columns from the seed
+    on WLoad(cx : Int, cz : Int, n : Int, seed : Int) do
+      { sim: load_sim(cx, cz, n, seed), cx: cx, cz: cz }
+    end
+
+    on WEdited(i : Int, id : Int) do
+      { state with sim: edited(state.sim, i, id) }
+    end
+
+    on WSpill(dir : Int, slot : Int, level : Int) do
+      { state with sim: accept_spill(state.sim, dir, slot, level) }
+    end
+
+    on WEdgeCell(dir : Int, slot : Int, id : Int) do
+      { state with sim: edge_changed(state.sim, dir, slot, id) }
+    end
+  end
+
+  -- Message constructors are only in scope inside this module (GAPS.md G46), and only AFTER the actor declaration in file order, so the
+  -- frame loop drives the actor through these wrappers.
+  fn spawn_chunk() do spawn(WaterChunk) end
+  fn send_load(pid, cx : Int, cz : Int, n : Int, seed : Int) : Unit do
+    let _ = send(pid, WLoad(cx, cz, n, seed))
+    ()
+  end
+  fn send_edited(pid, i : Int, id : Int) : Unit do
+    let _ = send(pid, WEdited(i, id))
+    ()
+  end
+  fn send_spill(pid, dir : Int, slot : Int, level : Int) : Unit do
+    let _ = send(pid, WSpill(dir, slot, level))
+    ()
+  end
+  fn send_edge_cell(pid, dir : Int, slot : Int, id : Int) : Unit do
+    let _ = send(pid, WEdgeCell(dir, slot, id))
+    ()
+  end
+  doc "Run one tick on the actor and return its packed change list."
+  fn call_tick(pid) : Result(List(Int), String) do Actor.call(pid, WTickReq, 2000) end
+
+
+end

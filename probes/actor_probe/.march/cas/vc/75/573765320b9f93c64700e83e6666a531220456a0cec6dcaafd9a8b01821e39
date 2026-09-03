@@ -1,0 +1,6 @@
+sat
+len$vals	0
+expr	(Lead Elem!val!0 4 (StrVal Elem!val!1))
+n	0
+i	(- 1)
+idx	(- 1)

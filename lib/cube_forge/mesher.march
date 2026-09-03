@@ -33,7 +33,7 @@ mod CubeForge.Mesher do
   end
 
   doc "Texture-array layer for a block id: water is layer 1, everything else layer 0."
-  fn layer_of(id : Int) : Float do if id == 4 do 1.0 else 0.0 end end
+  fn layer_of(id : Int) : Float do if C.is_water(id) do 1.0 else 0.0 end end
 
   -- Opaque and water meshes of one chunk. A two-field variant, never a tuple (GAPS.md G29).
   type Meshes = Meshes(CubeForge.F32Buf.F32Buf, CubeForge.F32Buf.F32Buf)
@@ -121,31 +121,43 @@ mod CubeForge.Mesher do
   end
 
   -- Air and water do not hide an opaque face.
-  pfn see_through(id : Int) : Bool do id == 0 || id == 4 end
+  pfn see_through(id : Int) : Bool do id == 0 || C.is_water(id) end
 
-  -- Water block at (x, y, z): emit each face whose neighbour is air; the top sits 1/8 below the block top.
+  -- Water block at (x, y, z) with id [id]: top against non-water at the level height, sides against
+  -- air (full height) or against lower water (the strip between the two heights), bottom against air.
   pfn water_faces(b : CubeForge.F32Buf.F32Buf, c : CubeForge.Chunk.Chunk, n : CubeForge.Chunk.Chunk, s : CubeForge.Chunk.Chunk,
-                  e : CubeForge.Chunk.Chunk, w : CubeForge.Chunk.Chunk, x : Int, y : Int, z : Int, ox : Float, oz : Float) : CubeForge.F32Buf.F32Buf do
-    let l = layer_of(4)
+                  e : CubeForge.Chunk.Chunk, w : CubeForge.Chunk.Chunk, id : Int, x : Int, y : Int, z : Int, ox : Float, oz : Float) : CubeForge.F32Buf.F32Buf do
+    let l = layer_of(id)
     let fx = ox +. int_to_float(x)
     let fy = int_to_float(y)
     let fz = oz +. int_to_float(z)
     let fx1 = fx +. 1.0
-    let fy1 = fy +. water_top()
+    let h = fy +. water_height(id)
     let fz1 = fz +. 1.0
-    let b1 = if nb_get(c, n, s, e, w, x, y + 1, z) == 0 do
-      quad(b, fx, fy1, fz, fx, fy1, fz1, fx1, fy1, fz1, fx1, fy1, fz, l, shade_top()) else b end
+    let b1 = if !C.is_water(nb_get(c, n, s, e, w, x, y + 1, z)) do
+      quad(b, fx, h, fz, fx, h, fz1, fx1, h, fz1, fx1, h, fz, l, shade_top()) else b end
     let b2 = if nb_get(c, n, s, e, w, x, y - 1, z) == 0 do
       quad(b1, fx, fy, fz, fx1, fy, fz, fx1, fy, fz1, fx, fy, fz1, l, shade_bottom()) else b1 end
-    let b3 = if nb_get(c, n, s, e, w, x + 1, y, z) == 0 do
-      quad(b2, fx1, fy, fz, fx1, fy1, fz, fx1, fy1, fz1, fx1, fy, fz1, l, shade_x()) else b2 end
-    let b4 = if nb_get(c, n, s, e, w, x - 1, y, z) == 0 do
-      quad(b3, fx, fy, fz1, fx, fy1, fz1, fx, fy1, fz, fx, fy, fz, l, shade_x()) else b3 end
-    let b5 = if nb_get(c, n, s, e, w, x, y, z + 1) == 0 do
-      quad(b4, fx1, fy, fz1, fx1, fy1, fz1, fx, fy1, fz1, fx, fy, fz1, l, shade_z()) else b4 end
-    if nb_get(c, n, s, e, w, x, y, z - 1) == 0 do
-      quad(b5, fx, fy, fz, fx, fy1, fz, fx1, fy1, fz, fx1, fy, fz, l, shade_z()) else b5 end
+    let b3 = side_base(fy, id, nb_get(c, n, s, e, w, x + 1, y, z))
+    let b3b = if b3 < h do quad(b2, fx1, b3, fz, fx1, h, fz, fx1, h, fz1, fx1, b3, fz1, l, shade_x()) else b2 end
+    let b4 = side_base(fy, id, nb_get(c, n, s, e, w, x - 1, y, z))
+    let b4b = if b4 < h do quad(b3b, fx, b4, fz1, fx, h, fz1, fx, h, fz, fx, b4, fz, l, shade_x()) else b3b end
+    let b5 = side_base(fy, id, nb_get(c, n, s, e, w, x, y, z + 1))
+    let b5b = if b5 < h do quad(b4b, fx1, b5, fz1, fx1, h, fz1, fx, h, fz1, fx, b5, fz1, l, shade_z()) else b4b end
+    let b6 = side_base(fy, id, nb_get(c, n, s, e, w, x, y, z - 1))
+    if b6 < h do quad(b5b, fx, b6, fz, fx, h, fz, fx1, h, fz, fx1, b6, fz, l, shade_z()) else b5b end
   end
+
+  -- Bottom of the side strip to emit against neighbour [nid]: the block base for air, the neighbour's
+  -- surface for lower water, and the cell's own top (= nothing to emit) for solids and equal/higher water.
+  pfn side_base(fy : Float, id : Int, nid : Int) : Float do
+    if nid == 0 do fy
+    else if C.is_water(nid) && C.level_of(nid) < C.level_of(id) do fy +. water_height(nid)
+    else fy +. water_height(id) end end
+  end
+
+  doc "Surface height of a water cell within its block: level * 0.875 / 8."
+  fn water_height(id : Int) : Float do int_to_float(C.level_of(id)) *. water_top() /. 8.0 end
 
   doc "Height of the water surface within its block."
   fn water_top() : Float do 0.875 end
@@ -160,7 +172,7 @@ mod CubeForge.Mesher do
       let z = (i / 16) % 16
       let id = C.get(c, x, y, z)
       if id == 0 do mesh_nb_go(o, wb, c, n, s, e, w, i + 1, ox, oz)
-      else if id == 4 do mesh_nb_go(o, water_faces(wb, c, n, s, e, w, x, y, z, ox, oz), c, n, s, e, w, i + 1, ox, oz)
+      else if C.is_water(id) do mesh_nb_go(o, water_faces(wb, c, n, s, e, w, id, x, y, z, ox, oz), c, n, s, e, w, i + 1, ox, oz)
       else mesh_nb_go(opaque_faces(o, c, n, s, e, w, id, x, y, z, ox, oz), wb, c, n, s, e, w, i + 1, ox, oz) end end
     end
   end

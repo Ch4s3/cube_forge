@@ -6,7 +6,7 @@ Planned, not started. One entry per feature; each gets its own design doc under
 ## Water
 
 - [x] **Static water** — done 2026-09-03 (`docs/superpowers/specs/2026-09-03-static-water-design.md`).
-- [ ] **Spreading water** — cellular-automaton flow with a level per cell; per-chunk ticks on actors or `pmap`, cross-chunk propagation as messages, remesh on change. Depends on static water.
+- [x] **Spreading water** — done 2026-09-03 (`docs/superpowers/specs/2026-09-03-spreading-water-design.md`); one `WaterChunk` actor per chunk, pull-based levels, edge mirrors.
 
 ## Engine
 

@@ -1,0 +1,78 @@
+-- Spreading water: the pure Sim step and one WaterChunk actor round-trip.
+mod CubeForge.Test.Flow do
+
+  needs IO.Spawn
+  needs IO.Console
+  import Test
+  alias CubeForge.Chunk as C
+  alias CubeForge.Water as Water
+
+  -- A flat stone floor at y = 9 across the whole chunk.
+  pfn floor_go(c : CubeForge.Chunk.Chunk, i : Int) : CubeForge.Chunk.Chunk do
+    if i >= 256 do c else floor_go(C.set(c, i % 16, 9, i / 16, 3), i + 1) end
+  end
+  pfn floored() : CubeForge.Chunk.Chunk do floor_go(C.new(), 0) end
+
+  pfn run_ticks(s : CubeForge.Water.Sim, n : Int) : CubeForge.Water.Sim do
+    if n == 0 do s else run_ticks(Water.step_sim(Water.tick(s)), n - 1) end
+  end
+
+  describe "levels" do
+    test "ids map to levels and back" do
+      Test.assert_eq_int(C.level_of(C.water()), 8, "source is level 8")
+      Test.assert_eq_int(C.level_of(11), 1, "id 11 is level 1")
+      Test.assert_eq_int(C.id_of_level(7), 5, "level 7 is id 5")
+      Test.assert_false(C.is_water(3) || C.is_water(12), "stone and 12 are not water")
+    end
+  end
+
+  describe "Sim.tick" do
+    test "a source on a floor spreads rings 7..1 and stabilises" do
+      let s0 = Water.edited(Water.new_sim(C.set(floored(), 8, 10, 8, C.water()), Water.empty_edges()), Water.idx(8, 10, 8), C.water())
+      let s = run_ticks(s0, 30)
+      let c = Water.sim_chunk(s)
+      Test.assert_eq_int(C.get(c, 9, 10, 8), C.id_of_level(7), "distance 1 is level 7")
+      Test.assert_eq_int(C.get(c, 12, 10, 8), C.id_of_level(4), "distance 4 is level 4")
+      Test.assert_eq_int(C.get(c, 15, 10, 8), C.id_of_level(1), "distance 7 is level 1")
+      Test.assert_eq_int(C.get(c, 8, 10, 1), C.id_of_level(1), "distance 7 in z is level 1")
+      Test.assert_eq_int(C.get(c, 8, 11, 8), 0, "nothing above the source")
+      Test.assert_eq_int(Water.pending(s), 0, "queue drained")
+    end
+    test "removing the source drains everything" do
+      let s0 = Water.edited(Water.new_sim(C.set(floored(), 8, 10, 8, C.water()), Water.empty_edges()), Water.idx(8, 10, 8), C.water())
+      let s1 = run_ticks(s0, 30)
+      let s2 = run_ticks(Water.edited(s1, Water.idx(8, 10, 8), 0), 40)
+      Test.assert_eq_int(C.count_water(Water.sim_chunk(s2)), 0, "all water gone")
+    end
+    test "water falls down a shaft instead of spreading on the rim" do
+      -- a shaft next to the source: air from the floor down to y = 0 (the world floor at y < 0 is solid)
+      let c = C.set(C.set(floored(), 8, 10, 8, C.water()), 9, 9, 8, 0)
+      let s = run_ticks(Water.edited(Water.new_sim(c, Water.empty_edges()), Water.idx(8, 10, 8), C.water()), 60)
+      let ch = Water.sim_chunk(s)
+      Test.assert_eq_int(C.get(ch, 9, 10, 8), C.id_of_level(7), "rim cell above the shaft is water")
+      Test.assert_eq_int(C.get(ch, 9, 9, 8), C.id_of_level(7), "falling water is level 7")
+      Test.assert_true(C.is_water(C.get(ch, 9, 0, 8)), "water reaches the bottom of the shaft")
+      -- the unsupported rim cell contributes nothing; water still reaches (10,10,8) AROUND the shaft, two ledges lower
+      Test.assert_true(C.level_of(C.get(ch, 10, 10, 8)) < 6, "the rim cell over the shaft does not feed its neighbour directly")
+      Test.assert_true(C.is_water(C.get(ch, 10, 0, 8)), "it spreads at the bottom instead")
+    end
+    test "the per-tick budget leaves work queued" do
+      let s0 = Water.edited(Water.new_sim(C.set(floored(), 8, 10, 8, C.water()), Water.empty_edges()), Water.idx(8, 10, 8), C.water())
+      let one = Water.tick(s0)
+      Test.assert_true(Water.pending(Water.step_sim(one)) > 0, "still pending after one tick of 250 cells")
+    end
+  end
+
+  describe "WaterChunk actor" do
+    -- `Actor.call` fails with "actor_call: not in scheduler context" under `forge test`
+    -- (GAPS.md G49), so the round-trip is only exercised by the CF_AUTOFLOW script.
+    test "spawn, load and edit messages are accepted" do
+      let pid = Water.spawn_chunk()
+      Water.send_load(pid, 0, 0, 1, 7)
+      Water.send_edited(pid, Water.idx(8, 10, 8), C.water())
+      run_until_idle()
+      Test.assert_true(true, "no crash")
+    end
+  end
+
+end

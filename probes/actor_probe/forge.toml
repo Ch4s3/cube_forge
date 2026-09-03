@@ -1,0 +1,6 @@
+[package]
+name = "actor_probe"
+version = "0.1.0"
+type = "app"
+
+[deps]

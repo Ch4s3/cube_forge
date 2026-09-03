@@ -74,3 +74,18 @@ messages. Dogfooding target: March's actor model.
 
 Lava/other fluids, flow animation, sound, source creation from two sources,
 infinite ocean refill.
+
+## Amendments made during implementation
+
+- **Actors cannot receive chunks** (native arrays are non-sendable; `Actor.call`
+  takes a zero-arg sentinel). `WaterChunk` regenerates its chunk from
+  `(cx, cz, seed)` on `WLoad`, mirrors neighbour edge columns, and replies with
+  a packed `List(Int)`. See GAPS.md G44.
+- **Pull-based rule.** A dirty cell (air included) computes the level it should
+  have from its neighbours: 7 if water is above, else the best supported
+  horizontal neighbour's level − 1. "Supported" = the cell below is neither
+  air nor flow water. Spills are therefore just "mark that cell dirty"; the
+  mirror update (kind 1) carries the level.
+- **Water top under a solid block is kept** (the 1/8 gap is visible).
+- `Actor.call` is unusable under `forge test` (G49): the actor is smoke-tested
+  with `send`; the round-trip is verified by `CF_AUTOFLOW`.

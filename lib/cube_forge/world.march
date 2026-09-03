@@ -44,7 +44,19 @@ mod CubeForge.World do
 
   fn solid_at(w : World, x : Int, y : Int, z : Int) : Bool do block_at(w, x, y, z) != 0 end
   fn collidable_at(w : World, x : Int, y : Int, z : Int) : Bool do C.is_collidable(block_at(w, x, y, z)) end
-  fn water_at(w : World, x : Int, y : Int, z : Int) : Bool do block_at(w, x, y, z) == C.water() end
+  fn water_at(w : World, x : Int, y : Int, z : Int) : Bool do C.is_water(block_at(w, x, y, z)) end
+
+  -- Apply a list of packed (idx * 256 + id) cell writes to one chunk: the chunk is
+  -- copied once (copy-on-write, it is shared with the old world) and then updated in place.
+  pfn apply_cells(c : CubeForge.Chunk.Chunk, cells : List(Int)) : CubeForge.Chunk.Chunk do
+    match cells do
+      Nil -> c
+      Cons(v, rest) -> apply_cells(C.set_idx(c, v / 256, v % 256), rest)
+    end
+  end
+  fn set_cells(w : World, cx : Int, cz : Int, cells : List(Int)) : World do
+    if in_bounds(w, cx, cz) do set_chunk(w, cx, cz, apply_cells(chunk_at(w, cx, cz), cells)) else w end
+  end
 
   -- First column (x + 4096 * z) holding water at sea level, or -1. Used by the scripted swim test.
   pfn find_water_go(w : World, i : Int, n : Int) : Int do

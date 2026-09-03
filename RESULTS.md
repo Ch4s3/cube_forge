@@ -89,3 +89,20 @@ blend does compile to NEON, but the lattice step is scalar by necessity
 | per-frame live-object delta | 1 (unchanged) |
 | break / place / place-water edit + remesh | 12.6 / 12.1 / 12.1 ms |
 | swim test | falls in at y≈62.4, sinks at the −3 m/s clamp to 59.0, Space lifts at +2.5 m/s, eye underwater frames 240–400 |
+
+## Spreading water (2026-09-03, 64 `WaterChunk` actors, tick every 10 frames, 1 scheduler thread)
+
+| measure | value |
+|---|---|
+| spawn 64 actors + queue their `WLoad` | 25–35 ms (loads run asynchronously, ~5 chunk generations each) |
+| `Actor.call` round of a tick, 2 dirty chunks, via `pmap_n` | 0.4–2.2 ms |
+| apply replies + remesh, 1 chunk changed | 12–21 ms |
+| apply replies + remesh, 2 chunks changed (+ edge neighbours) | 37–39 ms (was 58–60 ms before remeshing only the edge directions involved) |
+| a source on a plateau, spread across 3 chunks | 40 cells, stable after ~4 ticks |
+| drain after breaking the source | back to 0 within ~8 ticks (80 frames) |
+| per-frame live-object delta with actors idle | 1 (unchanged) |
+| frame rate during flow | 113–118 fps; the 40 ms tick lands in one frame every 10 |
+
+The tick itself is cheap; the cost is meshing whole chunks for a handful of
+changed cells. Per-cell mesh patching or a dirty-region mesher is the obvious
+next step (todos.md, greedy meshing).

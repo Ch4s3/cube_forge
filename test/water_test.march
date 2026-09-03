@@ -32,7 +32,8 @@ mod CubeForge.Test.Water do
       let c = C.set(C.set(C.new(), 5, 5, 5, C.water()), 5, 6, 5, 3)
       let m = Mesher.mesh_with_neighbors(c, e, e, e, e, 0.0, 0.0)
       Test.assert_eq_int(Mesher.vertex_count(Mesher.opaque_buf(m)), 36, "6 opaque faces (bottom visible through water)")
-      Test.assert_eq_int(Mesher.vertex_count(Mesher.water_buf(m)), 30, "5 water faces (top culled by stone)")
+      -- the water top sits 1/8 below the stone, so the gap is visible and the top face is kept
+      Test.assert_eq_int(Mesher.vertex_count(Mesher.water_buf(m)), 36, "6 water faces (lowered top still visible under stone)")
     end
     test "water beside water culls the shared face" do
       let e = C.new()
