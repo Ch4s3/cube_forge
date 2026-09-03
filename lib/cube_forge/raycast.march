@@ -44,7 +44,7 @@ mod CubeForge.Raycast do
     end end
   end
 
-  doc "First solid block along the ray from (ox, oy, oz) in direction (dx, dy, dz), within max_dist."
+  -- First solid block along the ray from (ox, oy, oz) in direction (dx, dy, dz), within max_dist.
   fn cast(w : CubeForge.World.World, ox : Float, oy : Float, oz : Float, dx : Float, dy : Float, dz : Float, max_dist : Float) : Hit do
     step(w, float_to_int(Math.floor(ox)), float_to_int(Math.floor(oy)), float_to_int(Math.floor(oz)),
          sign(dx), sign(dy), sign(dz),

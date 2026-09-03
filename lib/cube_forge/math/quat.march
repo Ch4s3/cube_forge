@@ -13,14 +13,15 @@ mod CubeForge.Math.Quat do
 
   fn identity() : Quat do Quat(0.0, 0.0, 0.0, 1.0) end
 
-  doc "Rotation of [angle] radians about the unit axis (ax, ay, az)."
+  -- Rotation of [angle] radians about the unit axis (ax, ay, az).
   fn from_axis_angle(ax : Float, ay : Float, az : Float, angle : Float) : Quat do
     let h = angle /. 2.0
     let s = Math.sin(h)
     Quat(ax *. s, ay *. s, az *. s, Math.cos(h))
   end
 
-  doc "Hamilton product a * b (apply b first, then a)."
+  @[no_alloc]
+  -- Hamilton product a * b (apply b first, then a).
   fn mul(a : Quat, b : Quat) : Quat do
     match a do
       Quat(ax, ay, az, aw) ->
@@ -34,6 +35,7 @@ mod CubeForge.Math.Quat do
     end
   end
 
+  @[no_alloc]
   fn conjugate(q : Quat) : Quat do
     match q do Quat(x, y, z, w) -> Quat(0.0 -. x, 0.0 -. y, 0.0 -. z, w) end
   end
@@ -46,7 +48,7 @@ mod CubeForge.Math.Quat do
     end
   end
 
-  doc "Rotate a vector: v' = q v q*."
+  -- Rotate a vector: v' = q v q*.
   fn rotate(q : Quat, v : CubeForge.Math.Vec3.Vec3) : CubeForge.Math.Vec3.Vec3 do
     match q do
       Quat(qx, qy, qz, qw) ->
@@ -78,7 +80,7 @@ mod CubeForge.Math.Quat do
     end
   end
 
-  doc "Camera orientation from yaw (about +Y) then pitch (about the local +X)."
+  -- Camera orientation from yaw (about +Y) then pitch (about the local +X).
   fn from_yaw_pitch(yaw : Float, pitch : Float) : Quat do
     mul(from_axis_angle(0.0, 1.0, 0.0, yaw), from_axis_angle(1.0, 0.0, 0.0, pitch))
   end

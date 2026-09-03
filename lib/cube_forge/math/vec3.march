@@ -13,24 +13,29 @@ mod CubeForge.Math.Vec3 do
   fn y(v : Vec3) : Float do match v do Vec3(_, b, _) -> b end end
   fn z(v : Vec3) : Float do match v do Vec3(_, _, c) -> c end end
 
+  @[no_alloc]
   fn add(a : Vec3, b : Vec3) : Vec3 do
     match a do
       Vec3(ax, ay, az) -> match b do Vec3(x2, y2, z2) -> Vec3(ax +. x2, ay +. y2, az +. z2) end
     end
   end
+  @[no_alloc]
   fn sub(a : Vec3, b : Vec3) : Vec3 do
     match a do
       Vec3(ax, ay, az) -> match b do Vec3(x2, y2, z2) -> Vec3(ax -. x2, ay -. y2, az -. z2) end
     end
   end
+  @[no_alloc]
   fn scale(a : Vec3, s : Float) : Vec3 do
     match a do Vec3(ax, ay, az) -> Vec3(ax *. s, ay *. s, az *. s) end
   end
+  @[no_alloc]
   fn dot(a : Vec3, b : Vec3) : Float do
     match a do
       Vec3(ax, ay, az) -> match b do Vec3(x2, y2, z2) -> ax *. x2 +. ay *. y2 +. az *. z2 end
     end
   end
+  @[no_alloc]
   fn cross(a : Vec3, b : Vec3) : Vec3 do
     match a do
       Vec3(ax, ay, az) ->
@@ -39,7 +44,9 @@ mod CubeForge.Math.Vec3 do
         end
     end
   end
+  @[no_alloc]
   fn length(a : Vec3) : Float do Math.sqrt(dot(a, a)) end
+  @[no_alloc]
   fn normalize(a : Vec3) : Vec3 do
     let l = length(a)
     if l < 0.000001 do a else scale(a, 1.0 /. l) end

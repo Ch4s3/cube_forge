@@ -42,6 +42,7 @@ mod CubeForge do
   -- inventory + hotbar buffers (untextured, textured icons) + last built HUD key
   type Ui = Ui(CubeForge.Inventory.Inv, CubeForge.F32Buf.F32Buf, CubeForge.F32Buf.F32Buf, Int)
   fn ui_inv(u : Ui) : CubeForge.Inventory.Inv do match u do Ui(i, _, _, _) -> i end end
+  @[no_alloc]
   fn ui_with_inv(u : Ui, i : CubeForge.Inventory.Inv) : Ui do match u do Ui(_, a, b, k) -> Ui(i, a, b, k) end end
 
   -- Rebuild + upload the hotbar buffers when the inventory's HUD key changed.
@@ -465,10 +466,12 @@ mod CubeForge do
     end
   end
 
+  @[no_alloc]
   pfn set_inv(sc, inv : CubeForge.Inventory.Inv) do
     match sc do Scene(w, c, o, h, u, p, f, m) -> Scene(w, c, o, h, ui_with_inv(u, inv), p, f, m) end
   end
   pfn scene_ui(sc) : Ui do match sc do Scene(_, _, _, _, u, _, _, _) -> u end end
+  @[no_alloc]
   pfn scene_with_ui(sc, u : Ui) do match sc do Scene(w, c, o, h, _, p, f, m) -> Scene(w, c, o, h, u, p, f, m) end end
   fn inv_string(sc) : String do
     let i = ui_inv(scene_ui(sc))
@@ -512,6 +515,7 @@ mod CubeForge do
     if In.key(In.key_1()) do 1 else if In.key(In.key_2()) do 2 else if In.key(In.key_3()) do 3 else if In.key(In.key_4()) do 4 else 0 end end end end
   end
 
+  @[no_alloc(assume)]
   pfn read_input(autowalk : Bool, autospin : Float, autoswim : Bool) : CubeForge.Player.Input do
     -- CF_AUTOWALK=1: scripted forward walk for headless collision verification.
     let mf = if autowalk do 1.0 else axis(In.key(In.key_s()), In.key(In.key_w())) end
@@ -682,6 +686,7 @@ mod CubeForge do
   end
 
   -- Draw every chunk slot; counts holds the vertex count per slot.
+  @[no_alloc(assume)]
   pfn draw_chunks(counts : NativeIntArr, i : Int, n : Int) : Unit do
     if i >= n do ()
     else

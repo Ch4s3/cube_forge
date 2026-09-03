@@ -20,6 +20,7 @@ mod CubeForge.Inventory do
   doc "Block id in the selected slot."
   fn selected_id(i : Inv) : Int do let s = sel(i) if s == 4 do C.water() else s end end
 
+  @[no_alloc]
   fn select(i : Inv, slot : Int) : Inv do
     if slot < 1 || slot > 4 do i
     else match i do Inv(g, d, s, _, p, x, y, z) -> Inv(g, d, s, slot, p, x, y, z) end end
@@ -46,7 +47,8 @@ mod CubeForge.Inventory do
     end
   end
 
-  doc "Advance breaking on target (x, y, z) by [dt]; a different target restarts. Returns the updated Inv."
+  @[no_alloc]
+  -- Advance breaking on target (x, y, z) by [dt]; a different target restarts. Returns the updated Inv.
   fn hold(i : Inv, x : Int, y : Int, z : Int, dt : Float) : Inv do
     match i do
       Inv(g, d, s, sl, p, tx, ty, tz) ->
@@ -56,7 +58,8 @@ mod CubeForge.Inventory do
     end
   end
 
-  doc "Release the button / lose the target: progress resets."
+  @[no_alloc]
+  -- Release the button / lose the target: progress resets.
   fn release(i : Inv) : Inv do
     match i do Inv(g, d, s, sl, _, _, _, _) -> Inv(g, d, s, sl, 0.0, 0, -1, 0) end
   end

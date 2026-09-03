@@ -732,3 +732,59 @@ order of value per line, each with a probe already in `probes/`:
   (G54), and a scripted test needs an env knob because there is no way to
   drive input or read state from `forge test` (G49). None of it is hard; all
   of it is boilerplate a record type and an inspectable actor would remove.
+
+---
+
+## `@[no_alloc]` on march main (137737f3, 2026-09-03) — G1 revisited
+
+### G56. A function attribute and a `doc` string cannot coexist
+- `doc "…"` then `@[no_alloc]` then `fn` → `I got stuck here` at the
+  attribute; `@[no_alloc]` then `doc` then `fn` → stuck at the `doc`. Verified
+  with the fresh main build. So annotating a documented function means
+  deleting its doc string (this project turned them into `--` comments on
+  every annotated function). `forge fix --contracts` inserts the attribute
+  directly above `fn`, so it never hits this itself only because it skips
+  documented functions' doc lines — no, it produces the broken order too if
+  the function has a doc; in this codebase none of the 16 it chose had one.
+
+### G1 revisited: `@[no_alloc]` exists now, and here is what it says about the frame loop
+Toolchain: origin/main `137737f3` (2026-09-03) + the pin-main cherry-pick, built
+locally as `main-nalloc-137737f3`. `forge fix --contracts` inserted 16
+attributes on its own (all "consume one, rebuild same shape" functions:
+`Vec3.add/sub/scale/cross`, `Quat.mul/conjugate`, `Chunk.set/set_idx`,
+`F32Buf.clear`, inventory/scene rebuilders). Then `@[no_alloc(warn)]` on 40
+frame-path functions gave these verdicts, each with a precise, transitive
+diagnostic naming the constructor or builtin:
+
+| verified allocation-free | rejected, and why |
+|---|---|
+| `Vec3.dot/length/normalize`, `Mat4.write_view`, `Mat4.mul_into_f32` (+ helpers), `World.block_at/solid_at`, `Chunk.get/get_or_air`, `Player.box_hits/hits_go/in_water/snap` | `Vec3.new`, `Player.eye/forward`, `Quat.from_axis_angle/from_yaw_pitch/rotate`, `Raycast.step/cast` (`Hit`), `Player.sweep_axis` (`Sweep`), `Player.update`: **a fresh small variant is a heap cell**. No stack promotion happened for any of them, even the ones consumed immediately by the caller. |
+| | `F32Buf.push` → `native_f32_arr_make` in the growth path (correct: the contract is whole-function, so an amortized-growth buffer can never carry it; G58) |
+| | `Hud.build_number`, `Hud.slot`, `tick_fps`: `Nil` is a heap cell (documented caveat) |
+| | `read_input`, `draw_chunks`, `frame_loop`: extern calls are opaque; `@[no_alloc(assume)]` is the escape hatch |
+
+Two more findings from the exercise:
+
+### G57. A constructor in each branch of an `if` inside a match arm defeats reuse (contract says so; gauge did not)
+- `probes/probe1` `push_h`: `match b do Buf3(d, n, cap) -> if n < cap do Buf3(…) else Buf3(…) end end`
+  is reported as allocating `Buf3`; the identical function with the branch
+  decision hoisted into `let`s and a single constructor site passes. The
+  live-object gauge showed 0 for both because the second branch never ran, so
+  the contract is the more honest instrument. `F32Buf.push` was rewritten to
+  the single-site shape.
+
+### G58. The contract is whole-function and transitive; "no allocation on this path" is not expressible
+- The brief asked for a *path-specific* guarantee. `@[no_alloc]` rejects
+  `F32Buf.push` because its growth branch allocates, although the steady-state
+  path is in place and that is the property the mesher relies on. There is no
+  way to say "the branch guarded by `n < cap` allocates nothing", and no
+  `@[no_alloc(amortized)]`. The measurement approach (gauge + probes) stays the
+  only way to state that property.
+
+**Net answer to the brief's "every path executed per frame should carry
+`@noalloc`":** 15 of the 40 per-frame functions carry it and are verified; the
+rest cannot, because every fresh `Vec3`/`Quat`/`Hit`/`Sweep` is a heap cell
+that nothing promotes to the stack — the language has no unboxed aggregate.
+The frame loop's measured residue is still 1 live object per frame; the
+contract's stricter count is roughly a dozen short-lived cells per frame that
+are freed immediately.

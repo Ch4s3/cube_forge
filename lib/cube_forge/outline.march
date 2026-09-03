@@ -13,7 +13,7 @@ mod CubeForge.Outline do
     b |> v(x0, y0, z0) |> v(x1, y1, z1)
   end
 
-  doc "Rebuild [b] with the outline of the unit cube at integer block (x, y, z), slightly inflated."
+  -- Rebuild [b] with the outline of the unit cube at integer block (x, y, z), slightly inflated.
   fn build(b : CubeForge.F32Buf.F32Buf, x : Int, y : Int, z : Int) : CubeForge.F32Buf.F32Buf do
     let e = 0.004
     let x0 = int_to_float(x) -. e

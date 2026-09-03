@@ -32,7 +32,8 @@ mod CubeForge.World do
   fn floor_div16(v : Int) : Int do if v >= 0 do v / 16 else (v - 15) / 16 end end
   fn mod16(v : Int) : Int do v - 16 * floor_div16(v) end
 
-  doc "Block id at a world coordinate; air outside the loaded area."
+  @[no_alloc]
+  -- Block id at a world coordinate; air outside the loaded area.
   fn block_at(w : World, x : Int, y : Int, z : Int) : Int do
     if y < 0 || y >= 256 do 0
     else
@@ -42,6 +43,7 @@ mod CubeForge.World do
     end
   end
 
+  @[no_alloc]
   fn solid_at(w : World, x : Int, y : Int, z : Int) : Bool do block_at(w, x, y, z) != 0 end
   fn collidable_at(w : World, x : Int, y : Int, z : Int) : Bool do C.is_collidable(block_at(w, x, y, z)) end
   fn water_at(w : World, x : Int, y : Int, z : Int) : Bool do C.is_water(block_at(w, x, y, z)) end

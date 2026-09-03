@@ -3,6 +3,7 @@ mod CubeForge.Test.Flow do
 
   needs IO.Spawn
   needs IO.Console
+  needs IO.Process
   import Test
   alias CubeForge.Chunk as C
   alias CubeForge.Water as Water

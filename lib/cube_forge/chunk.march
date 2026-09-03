@@ -24,16 +24,19 @@ mod CubeForge.Chunk do
 
   fn new() : Chunk do Chunk(NativeArray.make_u8(65536, 0)) end
 
+  @[no_alloc]
   fn get(c : Chunk, x : {Int | 0 <= _ && _ < 16}, y : {Int | 0 <= _ && _ < 256}, z : {Int | 0 <= _ && _ < 16}) : Int do
     match c do Chunk(a) -> NativeArray.get_u8(a, index(x, y, z)) end
   end
 
-  doc "Block at (x, y, z), or 0 (air) when the coordinate is outside the chunk."
+  @[no_alloc]
+  -- Block at (x, y, z), or 0 (air) when the coordinate is outside the chunk.
   fn get_or_air(c : Chunk, x : Int, y : Int, z : Int) : Int do
     if x < 0 || x >= 16 || y < 0 || y >= 256 || z < 0 || z >= 16 do 0
     else get(c, x, y, z) end
   end
 
+  @[no_alloc]
   fn set(c : Chunk, x : {Int | 0 <= _ && _ < 16}, y : {Int | 0 <= _ && _ < 256}, z : {Int | 0 <= _ && _ < 16}, v : Int) : Chunk do
     match c do Chunk(a) -> Chunk(NativeArray.set_u8(a, index(x, y, z), v)) end
   end
@@ -56,6 +59,7 @@ mod CubeForge.Chunk do
   fn count_water(c : Chunk) : Int do match c do Chunk(a) -> count_water_go(a, 0, 0) end end
   doc "Raw cell by flat index."
   fn get_idx(c : Chunk, i : Int) : Int do match c do Chunk(a) -> NativeArray.get_u8(a, i) end end
+  @[no_alloc]
   fn set_idx(c : Chunk, i : Int, v : Int) : Chunk do match c do Chunk(a) -> Chunk(NativeArray.set_u8(a, i, v)) end end
   fn sea_level() : Int do 62 end
 

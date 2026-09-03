@@ -93,7 +93,7 @@ mod CubeForge.Hud do
     if show_count do emit_digits(b2, digits_of(count, Nil), x0 +. 0.012, y1 -. 0.012, 0.006, 0.008) else b2 end
   end
 
-  doc "Untextured HUD: hotbar slots, selection, counts, crosshair, break progress. Rebuilt in place."
+  -- Untextured HUD: hotbar slots, selection, counts, crosshair, break progress. Rebuilt in place.
   fn build_hotbar(b : CubeForge.F32Buf.F32Buf, sel : Int, grass : Int, dirt : Int, stone : Int, progress : Float) : CubeForge.F32Buf.F32Buf do
     let b0 = B.clear(b)
     let b1 = slot(b0, 0, sel == 1, grass, true)
@@ -117,10 +117,10 @@ mod CubeForge.Hud do
     B.clear(b) |> icon(0, 0.0) |> icon(1, 2.0) |> icon(2, 3.0) |> icon(3, 1.0)
   end
 
-  doc """
-  Rebuild [b] (cleared in place) with the decimal digits of [n] right-aligned
-  at the top-right corner. Pixel size is given in NDC units per pixel.
-  """
+  -- 
+  -- Rebuild [b] (cleared in place) with the decimal digits of [n] right-aligned
+  -- at the top-right corner. Pixel size is given in NDC units per pixel.
+  -- 
   fn build_number(b : CubeForge.F32Buf.F32Buf, n : Int, px : Float, py : Float) : CubeForge.F32Buf.F32Buf do
     let ds = digits_of(if n < 0 do 0 else n end, Nil)
     let width = int_to_float(List.length(ds)) *. 4.0 *. px

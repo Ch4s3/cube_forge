@@ -61,20 +61,20 @@ mod CubeForge.F32Buf do
     copy_into(d, NativeArray.make_f32(new_cap, 0.0), 0, n)
   end
 
-  doc "Append one float. Amortized O(1); in place when the buffer is uniquely owned."
+  -- Append one float. Amortized O(1); in place when the buffer is uniquely owned.
+  -- ONE constructor site on purpose: with a constructor in each `if` branch the
+  -- @[no_alloc] contract reports an allocation even though none is measured
+  -- (GAPS.md G57), so the growth decision is made first and the cell rebuilt once.
   fn push(b : F32Buf, v : Float) : F32Buf do
     match b do
       F32Buf(d, n, cap) ->
-        if n < cap do
-          F32Buf(NativeArray.set_f32(d, n, v), n + 1, cap)
-        else
-          let new_cap = if cap < 16 do 32 else cap * 2 end
-          F32Buf(NativeArray.set_f32(grow(d, n, new_cap), n, v), n + 1, new_cap)
-        end
+        let cap1 = if n < cap do cap else if cap < 16 do 32 else cap * 2 end end
+        let d1 = if n < cap do d else grow(d, n, cap1) end
+        F32Buf(NativeArray.set_f32(d1, n, v), n + 1, cap1)
     end
   end
 
-  doc "Append three floats."
+  -- Append three floats.
   fn push3(b : F32Buf, x : Float, y : Float, z : Float) : F32Buf do
     push(push(push(b, x), y), z)
   end
@@ -100,7 +100,8 @@ mod CubeForge.F32Buf do
     if c >= need do c else grow_to(c, need) end
   end
 
-  doc "Reset length to 0, keeping the storage."
+  @[no_alloc]
+  -- Reset length to 0, keeping the storage.
   fn clear(b : F32Buf) : F32Buf do
     match b do
       F32Buf(d, _, c) -> F32Buf(d, 0, c)

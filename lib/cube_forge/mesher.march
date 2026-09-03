@@ -334,7 +334,7 @@ mod CubeForge.Mesher do
     if d >= 6 do g else dirs_go(slices_go(g, c, n, s, e, w, sy, d, 0, ox, oz), c, n, s, e, w, sy, d + 1, ox, oz) end
   end
 
-  doc "Greedy-meshed opaque faces of section [sy] of chunk [c] (with its 4 neighbours)."
+  -- Greedy-meshed opaque faces of section [sy] of chunk [c] (with its 4 neighbours).
   fn mesh_section_opaque(c : CubeForge.Chunk.Chunk, n : CubeForge.Chunk.Chunk, s : CubeForge.Chunk.Chunk, e : CubeForge.Chunk.Chunk, w : CubeForge.Chunk.Chunk,
                          sy : Int, ox : Float, oz : Float) : CubeForge.F32Buf.F32Buf do
     if !section_has_opaque(c, sy * 4096, (sy + 1) * 4096) do B.new(1)

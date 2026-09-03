@@ -32,6 +32,7 @@ mod CubeForge.Math.Mat4 do
   fn from_list(xs : List(Float)) : NativeFloatArr do NativeArray.from_list_float(xs) end
 
   -- out[c][r] = sum_k a[k][r] * b[c][k]
+  @[no_alloc]
   pfn mul_cell(a : NativeFloatArr, b : NativeFloatArr, c : Int, r : Int) : Float do
     NativeArray.get_float(a, 0 * 4 + r) *. NativeArray.get_float(b, c * 4 + 0)
     +. NativeArray.get_float(a, 1 * 4 + r) *. NativeArray.get_float(b, c * 4 + 1)
@@ -98,21 +99,24 @@ mod CubeForge.Math.Mat4 do
   end
 
   -- out_f32[i] = (a * b)[i], written in place into a persistent NativeF32Arr.
+  @[no_alloc]
   pfn mul_fill_f32(a : NativeFloatArr, b : NativeFloatArr, out : NativeF32Arr, i : Int) : NativeF32Arr do
     if i >= 16 do out
     else mul_fill_f32(a, b, NativeArray.set_f32(out, i, mul_cell(a, b, i / 4, i % 4)), i + 1) end
   end
 
-  doc "a * b written into [dst] (NativeF32Arr(16)) in place; no temporaries when dst is uniquely owned."
+  @[no_alloc]
+  -- a * b written into [dst] (NativeF32Arr(16)) in place; no temporaries when dst is uniquely owned.
   fn mul_into_f32(a : NativeFloatArr, b : NativeFloatArr, dst : NativeF32Arr) : NativeF32Arr do
     mul_fill_f32(a, b, dst, 0)
   end
 
-  doc """
-  Write the view matrix for a camera at [eye] with orientation quaternion
-  (qx, qy, qz, qw) into [dst] in place: view = R(q)^T * T(-eye).
-  Takes the quaternion as four scalars so no temporary matrices are built.
-  """
+  @[no_alloc]
+  -- 
+  -- Write the view matrix for a camera at [eye] with orientation quaternion
+  -- (qx, qy, qz, qw) into [dst] in place: view = R(q)^T * T(-eye).
+  -- Takes the quaternion as four scalars so no temporary matrices are built.
+  -- 
   fn write_view(qx : Float, qy : Float, qz : Float, qw : Float, ex : Float, ey : Float, ez : Float, dst : NativeFloatArr) : NativeFloatArr do
     let xx = qx *. qx
     let yy = qy *. qy

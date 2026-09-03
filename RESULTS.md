@@ -121,3 +121,17 @@ next step (todos.md, greedy meshing).
 
 `blit` (`cf_f32_blit`, the proposed `NativeArray.blit`) is exercised by
 `F32Buf.append` and its test, but the upload path no longer needs it (G54).
+
+## `@[no_alloc]` contract sweep (march main 137737f3, 2026-09-03)
+
+| | count |
+|---|---|
+| attributes inserted by `forge fix --contracts` | 16 |
+| frame-path functions annotated `@[no_alloc(warn)]` by hand | 40 |
+| verified (kept as strict `@[no_alloc]`) | 15 |
+| rejected for a fresh small variant (`Vec3`, `Quat`, `Hit`, `Sweep`) | 11 |
+| rejected for amortized buffer growth | 4 (`push` and its callers) |
+| rejected for `Nil` being a heap cell | 3 |
+| extern wrappers marked `@[no_alloc(assume)]` | 2 |
+
+Build, tests (25), lint and the windowed run are unchanged with the attributes in place.

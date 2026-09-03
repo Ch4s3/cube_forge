@@ -11,6 +11,7 @@ mod Probe1 do
   type Buf3 = Buf3(NativeF32Arr, Int, Int)
 
   -- C: variant, no length call (baseline: 0 allocs)
+  @[no_alloc(warn)]
   fn push_c(b: Buf2, v: Float): Buf2 do
     match b do
       Buf2(d0, n) -> Buf2(NativeArray.set_f32(d0, n, v), n + 1)
@@ -45,6 +46,7 @@ mod Probe1 do
   end
 
   -- H: cached capacity field, no length call
+  @[no_alloc(warn)]
   fn push_h(b: Buf3, v: Float): Buf3 do
     match b do
       Buf3(d0, n, cap) ->
