@@ -1,0 +1,80 @@
+# RESULTS.md — timing numbers
+
+Machine: Apple Silicon (14 cores), macOS, march 0.3.0 (`forge build --release`
+= `--opt 2`), GLFW 3.5.1, 800x600 window, vsync on (display runs ~120 Hz).
+All numbers from the runs recorded in the session on 2026-09-03; each is a
+single run, not a median.
+
+## Mesh time per chunk (naive per-face mesher, 16x16x256, `F32Buf` output)
+
+| build | chunk | time | allocations during mesh |
+|---|---|---|---|
+| M2, debug, F32Buf reading `length_f32` before each set (G21) | test terrain, 10 608 verts | 2 341 ms | 74 258 |
+| M2, release, same code | " | 1 773 ms | 74 258 |
+| M2, release, capacity cached in the constructor | 31 680 verts | **9.4 ms** | 8 (all growth steps, all leaked — G31) |
+| M4, release, neighbour-aware, noise terrain | 64 chunks, 455 028 verts total | 7.2 ms/chunk single-threaded | — |
+
+Where the time goes (M2 chunk, 9.4 ms): 65 536 `block_faces` calls, each
+doing 1 `C.get` plus up to 6 `get_or_air` neighbour reads; every visible face
+is 6 × 7 = 42 `F32Buf.push` calls, each a C call (`native_f32_arr_set`) with
+an rc==1 check. No allocation in the loop body. A `blit`-style multi-push
+would roughly halve it.
+
+## World generation (8x8 chunks, `List.pmap_n` with 14 workers, headless)
+
+| `MARCH_NUM_SCHEDULERS` | terrain (scalar noise) | terrain (F32x4 noise) | mesh all 64 chunks |
+|---|---|---|---|
+| 1 | 3–6 ms | 4–6 ms | 459–468 ms |
+| 2 | 3 ms | 3 ms | 326 ms |
+| 4 (default) | 3 ms | 1–2 ms | 333–372 ms |
+| 8 | 2 ms | 3 ms | 334 ms |
+| 14 | 2 ms | 3 ms | 324 ms |
+
+Terrain is too cheap to measure at ms resolution (`System.monotonic_time` is
+milliseconds). Meshing scales ~1.4x and then stops (GAPS.md G37).
+
+## Frame rate at the 8x8 world
+
+| scenario | fps | notes |
+|---|---|---|
+| M3 single chunk | 115–119 | vsync-bound |
+| M4/M5 64 chunks, 455k vertices, 64 draw calls + outline + HUD | **112–117** | vsync-bound; frame time ~8.6 ms |
+
+The frame loop is not the bottleneck at this world size; the GPU work is 64
+`glDrawArrays` of static VBOs. Per-frame March work: input, `Player.update`
+(3 axis sweeps), quaternion → view matrix in place, 16-entry matrix product
+into the upload buffer, DDA raycast, outline rebuild.
+
+## Per-frame allocation (net live objects, frames 100–200, `march_live_allocs`)
+
+| state | per frame |
+|---|---|
+| M3 first version, march 0.2.0 | 84 |
+| same source, march 0.3.0 | 69 |
+| tuples/records/newtype wrappers removed from the frame path | 37 |
+| view-projection computed in place into persistent buffers | **1** |
+
+The residual 1/frame is a `NativeFloatArr`-related leak (G31) that only
+appears when `write_view` and `mul_into_f32` run back to back.
+
+## Block edit
+
+`CF_AUTOEDIT`: break + remesh of one chunk (plus neighbours when on a
+boundary) 17.1 ms; place + remesh 20.4 ms. That is one full chunk remesh
+(~7 ms) plus a 64 KB copy-on-write of the edited chunk (G38) plus VBO upload.
+
+## Vectorization evidence
+
+`objdump -d --macho .march/build/release/cube_forge`, symbol
+`_CubeForge.Noise.value2_x4`: 24 vector-form instructions in the function
+body, e.g.
+
+```
+10000c5b0:  fadd.2d  v2, v2, v3
+10000c5bc:  fmul.2d  v1, v2, v4[0]
+10000cb0c:  fsub.4s  v1, v1, v2
+```
+
+next to the scalar lattice/hash part (`fmul d8, d8, d0` …). So the `Simd`
+blend does compile to NEON, but the lattice step is scalar by necessity
+(GAPS.md G32), and it makes no measurable difference at this problem size.

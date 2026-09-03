@@ -3,12 +3,33 @@
 The primary output of this project. Every entry: what was needed, what March
 offered, what was done instead, and what would make it clean. Entries are in
 the order they were hit. "Verified" means reproduced with a runnable probe in
-this repo's toolchain (march 0.3.0, forge 0.3.0, macOS arm64, 2026-09-03).
+this repo's toolchain (macOS arm64, 2026-09-03). The toolchain was march
+**0.2.0** (`~/.march/current`, the one `forge` silently runs) until G27, and
+march **0.3.0** (pinned via `.march-version`) afterwards; entries say which.
 
-Reproduction probes live under `probes/` (copied from the session scratchpad).
+Reproduction probes live under `probes/`.
+
+## The five that matter most
+
+1. **Tuples and records are never freed** (G28–G30 root cause,
+   `lib/tir/rc_types.ml`: `needs_rc (TTuple|TRecord) = false`, by design).
+   `match (a, b)`, multi-value returns and record state all leak. This
+   project routes around it with multi-field variants and nested matches.
+2. **`NativeArray` values are never freed** (G31): no `dec_rc` is emitted for
+   a native-array binding at its last use, so every matrix temporary and every
+   buffer growth step leaks.
+3. **`main` runs on a scheduler worker, not the OS main thread** (G15):
+   GLFW/Cocoa traps. Workaround `MARCH_NUM_SCHEDULERS=1`, which also serialises
+   `pmap`.
+4. **`&&`/`||` do not short-circuit** (G33), in both backends, undocumented.
+5. **A zero-arg extern call bound to an unused name is dropped** (G16) — a
+   silent miscompile.
+
+Plus the two that cost the most time without being March-the-language:
+`forge build` runs a different compiler than `march` on PATH (G27), and
+NativeArray `get` is documented as bounds-checked but is not (G18).
 
 ---
-
 ## Language / spec
 
 ### G1. No `@noalloc` annotation exists; `cap no_alloc` is a module-wide directive
@@ -479,3 +500,67 @@ frees it. See `probes/probe_leak2` case (i) for the two-field control.
   shim on purpose (keep the surface small), so the outline costs one small
   upload per frame while a block is targeted. Zero March-side allocation
   (the `F32Buf` is cleared and refilled in place).
+
+
+---
+
+## Capability manifests (deliverable check)
+
+`forge cap inspect --allow-foreign .march/build/release/cube_forge`:
+
+```
+Capabilities — cube_forge
+  IO.Console              [march_println]
+  IO.Process              [march_process_env]
+Foreign code (IO.Foreign) — extern C declarations present
+  Capability analysis stops at the FFI boundary.
+Attributed to
+  IO.Console            CubeForge
+  IO.Process            CubeForge
+build: dead-stripped    coverage: partial (foreign code)
+```
+
+Declared in source: `CubeForge.Ffi.Window` needs `IO.Foreign, Window`;
+`CubeForge.Ffi.Input` needs `IO.Foreign, Input`; `CubeForge` needs
+`IO, IO.Foreign, Window, Input, IO.Spawn, IO.Clock, IO.Process`;
+`CubeForge.World` needs `IO.Spawn`.
+
+### G40. The declared set and the binary's set do not match, in both directions
+- The binary manifest does not mention `Window` or `Input` at all: custom
+  capability names attached to extern blocks are not part of what the
+  inspector measures ("analysis stops at the FFI boundary"). So the two
+  capability domains the spec asked for exist only as `needs` lines.
+- The binary does not show `IO.Spawn` or `IO.Clock` either, although
+  `List.pmap_n` spawns tasks and `System.monotonic_time` reads the clock — the
+  attribution is "to the wrapper" (stdlib), and dead-stripping hides the rest.
+- Conversely `forge check` warns that `needs Window` / `needs Input` are
+  unused in `CubeForge`, because no *function signature* carries `Cap(Window)`
+  (G11). The manifest that is checked and the manifest that is measured are
+  different sets, and neither is the one a reviewer of the shim wants.
+- `forge cap query` also aborts on the intentional parse-error probes under
+  `probes/`, so it cannot be run on this repo as-is.
+
+---
+
+## Compiler patches
+
+None landed. The user offered patches; these are the ones I would send, in
+order of value per line, each with a probe already in `probes/`:
+
+1. `runtime/march_ffi.c`: `march_bytes_borrow` must unwrap the `Bytes` cell
+   (`*(march_value *)((char *)b + 16)`) before `march_str_borrow` (G8). One
+   line plus a `test/native/ffi_bytes` case.
+2. The zero-arg-extern dead-binding drop (G16): whichever pass treats a
+   nullary call as a pure constant needs to consult the extern table.
+3. Main-thread pinning for `main` (G15): a `pinned` flag on `march_proc`, a
+   scheduler-0-only queue that `march_sched_wake`/yield-repush use for
+   pinned procs, an env var or `forge.toml` switch to set it.
+4. `dec_rc` for native-array bindings (G31).
+5. Aggregate RC for tuples/records (G28–G30) — the real fix, and a project.
+
+### G41. The capability ceiling charges a test module for a capability it never reaches
+- `test/math_test.march` imports only `Vec3`, `Mat4` and `F32Buf`, none of
+  which spawn. `forge test` fails with `module CubeForge.Test.Math uses
+  IO.Spawn but does not declare needs IO.Spawn` — the test binary links the
+  whole `lib/`, and `World.generate`'s `pmap_n` is attributed to the test
+  module. The fix is a `needs IO.Spawn` line that is a lie about the test.

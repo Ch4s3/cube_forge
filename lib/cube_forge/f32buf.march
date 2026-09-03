@@ -41,10 +41,10 @@ mod CubeForge.F32Buf do
     end
   end
 
-  doc "Float at index [i]. Panics if out of range."
-  fn get(b : F32Buf, i : Int) : Float do
+  doc "Float at index [i], or None when out of range."
+  fn get(b : F32Buf, i : Int) : Option(Float) do
     match b do
-      F32Buf(d, n, _) -> if i < 0 || i >= n do panic("F32Buf.get: out of range") else NativeArray.get_f32(d, i) end
+      F32Buf(d, n, _) -> if i < 0 || i >= n do None else Some(NativeArray.get_f32(d, i)) end
     end
   end
 

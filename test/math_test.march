@@ -1,6 +1,7 @@
 -- Unit tests for the math and buffer stdlib candidates.
 mod CubeForge.Test.Math do
 
+  needs IO.Spawn   -- not used here: the capability ceiling charges World.generate's pmap to this module (GAPS.md G41)
   import Test
   alias CubeForge.Math.Vec3 as V
   alias CubeForge.Math.Mat4 as M
@@ -25,21 +26,19 @@ mod CubeForge.Test.Math do
       Test.assert_true(near(M.get(m, 0, 0), 1.0) && near(M.get(m, 1, 0), 0.0) && near(M.get(m, 3, 3), 1.0), "diag")
     end
     test "translation moves a point" do
-      match M.transform_point(M.translation(V.new(1.0, 2.0, 3.0)), V.new(1.0, 1.0, 1.0)) do
-        CubeForge.Math.Mat4.Vec4(x, y, z, w) -> Test.assert_true(near(x, 2.0) && near(y, 3.0) && near(z, 4.0) && near(w, 1.0), "translated")
-      end
+      -- accessors, not a constructor pattern: 3-segment constructor paths do not parse (GAPS.md G24)
+      let r = M.transform_point(M.translation(V.new(1.0, 2.0, 3.0)), V.new(1.0, 1.0, 1.0))
+      Test.assert_true(near(M.x4(r), 2.0) && near(M.y4(r), 3.0) && near(M.z4(r), 4.0) && near(M.w4(r), 1.0), "translated")
     end
     test "look_at maps the target to the view axis" do
       let view = M.look_at(V.new(-12.0, 80.0, -12.0), V.new(8.0, 64.0, 8.0), V.new(0.0, 1.0, 0.0))
-      match M.transform_point(view, V.new(8.0, 64.0, 8.0)) do
-        CubeForge.Math.Mat4.Vec4(x, y, z, _) -> Test.assert_true(near(x, 0.0) && near(y, 0.0) && z < 0.0, "target on -z axis")
-      end
+      let r = M.transform_point(view, V.new(8.0, 64.0, 8.0))
+      Test.assert_true(near(M.x4(r), 0.0) && near(M.y4(r), 0.0) && M.z4(r) < 0.0, "target on -z axis")
     end
     test "perspective puts a point at -near on the near plane" do
       let p = M.perspective(1.0, 1.0, 0.1, 100.0)
-      match M.transform_point(p, V.new(0.0, 0.0, -0.1)) do
-        CubeForge.Math.Mat4.Vec4(_, _, z, w) -> Test.assert_true(near(z /. w, -1.0), "near plane -> -1")
-      end
+      let r = M.transform_point(p, V.new(0.0, 0.0, -0.1))
+      Test.assert_true(near(M.z4(r) /. M.w4(r), -1.0), "near plane -> -1")
     end
   end
 
@@ -49,7 +48,8 @@ mod CubeForge.Test.Math do
       let b = fill(B.new(4), 0)
       Test.assert_eq_int(B.len(b), 100, "len")
       Test.assert_true(B.capacity(b) >= 100, "cap")
-      Test.assert_true(near(B.get(b, 0), 0.0) && near(B.get(b, 99), 99.0) && near(B.get(b, 37), 37.0), "values")
+      Test.assert_true(near(Test.assert_some(B.get(b, 0), "get 0"), 0.0) && near(Test.assert_some(B.get(b, 99), "get 99"), 99.0) && near(Test.assert_some(B.get(b, 37), "get 37"), 37.0), "values")
+      Test.assert_none(B.get(b, 100), "out of range is None")
     end
     test "clear keeps storage" do
       let b = B.clear(B.push3(B.new(8), 1.0, 2.0, 3.0))
