@@ -213,3 +213,98 @@ Reproduction probes live under `probes/` (copied from the session scratchpad).
   retain `d`, so the later `set_f32` still sees rc == 1. The LSP's `⧉ copied`
   hint would have shown this; the CLI has no equivalent flag.
 - Verified: `probes/probe1` (cases C, F, G, H).
+
+---
+
+## Refinement types (the "prove the bounds away" experiment)
+
+### G22. What Z3 discharges for `x + 16 * (z + 16 * y)`, and what it does not
+Probe: `probes/refine_index.march` (`cap verified`, `--refine-report`).
+`index(x : {0 <= _ < 16}, y : {0 <= _ < 256}, z : {0 <= _ < 16}) : {0 <= _ < 65536}`.
+
+| call-site shape | result |
+|---|---|
+| literals `index(3, 200, 7)` | proved |
+| guard `if x >= 0 && x < 16 && ... do index(x, y, z)` | proved |
+| caller's own contract forwarded `e_forward(x : {..}, ..) -> index(x, y, z)` | proved |
+| inline loop decomposition `index(i % 16, i / 256, (i / 16) % 16)` | **unreflectable-predicate** — `%` and `/` are outside the SMT fragment (`+ - *` with literal coefficients only) |
+| the same through `let x = i % 16` | **solver-undecided** — "a caller's fact does not travel through a local let" (documented) |
+| the postcondition `_ < 65536` on `index` itself | proved |
+
+Runtime dimensions (`index_dyn(sx, sy, sz, x : {_ < sx}, y : {_ < sy}, z : {_ < sz})`):
+
+| shape | result |
+|---|---|
+| preconditions, contract forwarded | proved (relational predicates over another parameter work) |
+| preconditions, guard-established | proved |
+| postcondition `_ < sx * sy * sz` | **unreflectable-predicate** — a product of two variables is nonlinear and rejected before Z3 ever sees it, even though Z3 would decide this instance |
+
+So: with literal dimensions the bound proves as long as the index components
+arrive as parameters or guards, never as `i % 16`. With runtime dimensions the
+*inputs* prove but the *output bound* cannot even be stated. And per G18 there
+is no runtime check being removed either way — the mesher's real loop is
+`x = i % 16`, which is skipped in silence, and reads unchecked memory if wrong.
+This bit me once already: `set(c, x, z, y, id)` (y/z swapped) compiled clean.
+
+- **Would need:** `%` and `/` by a literal in the predicate fragment (Z3
+  handles `mod`/`div` by constants fine), let-bound value propagation, and a
+  nonlinear escape hatch (`*` between two variables) even if it is only
+  attempted with a timeout.
+
+### G23. `expected Unit but got ()` on an aliased call, gone with the full path
+- `if In.button_pressed(...) do In.capture_cursor(true) else () end` where
+  `In` is `alias CubeForge.Ffi.Input as In` and `capture_cursor(Bool) : Unit`
+  wraps a one-arg extern: `error: expected Unit but got ()` at the `()`.
+  Writing `CubeForge.Ffi.Input.capture_cursor(true)` in the same position
+  typechecks. The line above it, `In.request_close()` (zero-arg) in the same
+  shape, is fine. `probes/probe_unit` tries five shapes in isolation and
+  cannot reproduce it, so the trigger is something about the real module
+  (size? the second extern block? the `Input` capability name?). Recorded as
+  a diagnostic-quality finding: `Unit` and `()` are the same type everywhere
+  else, and the message gives no clue that the alias is involved.
+
+### G24. A three-segment constructor path does not parse in a pattern
+- `match Deep.Inner.mk() do Deep.Inner.T(v) -> v end` →
+  `I was expecting -> in the match arm here` (caret at the second dot).
+  `Inner.T(v)` (two segments) parses. Expressions accept any depth. With
+  modules named `CubeForge.Player`, every constructor pattern outside its own
+  module needs an accessor function instead.
+- Verified: `probes/dotted_pat.march`.
+
+### G25. A two-segment constructor pattern resolves against the wrong type
+- `probes/dotted_pat2.march`: `mod Inner do type T = T(Int) end` and
+  `match Inner.mk() do Inner.T(v) -> v end` compiles but warns
+  `Non-exhaustive pattern match — missing case: LWWRegister(_, _)`. The
+  qualifier was ignored and `T` resolved to the stdlib CRDT type's constructor.
+  Silent wrong-type resolution in patterns plus a nonsense diagnostic.
+
+---
+
+## Reference counting
+
+### G26. A Float-field variant (or tuple) passed to a borrowing function is never freed
+Probe: `probes/probe_leak` (net live objects over 100 iterations, `-O0` and `-O2` identical):
+
+| shape | net leak / 100 |
+|---|---|
+| (a) `xf(mkf(1.0))` — `VF(Float,Float,Float)` temp passed to an accessor that matches it | **101** |
+| (b) same with `VI(Int,Int,Int)` | 1 (baseline) |
+| (c) `let v = mkf(1.0)` then `match v` inline in the caller | 2 |
+| (d) `VF` threaded through `bump(v)` and rebuilt (FBIP) | 2 |
+| (e) `let v = mkf(1.0)` then `xf(v)` | **101** |
+| (f) `match mkt(1.0) do (x, _) -> …` — `(Float, Float)` tuple | **302** |
+| (g) `VI` matched inline | 1 |
+
+So the per-call leak is in the *borrowed-parameter* path when the argument's
+constructor carries `Float` fields: the callee borrows, nobody drops. `Int`
+fields are fine, and the same value matched in the owning function is fine.
+The tuple case leaks 3 per call (the cell plus, presumably, two boxed floats).
+Every math function in this project (`Vec3.x`, `Vec3.dot`, `Quat.rotate`,
+`Mat4.get`…) has exactly this shape, which is why the frame loop leaks 84
+objects per frame (`CF_ALLOC_PROBE=1` output: `Player.forward` 1/call,
+`Quat.from_yaw_pitch+rotate` 25/call, `Mat4.mul` 5/call, `Player.update`
+28/call, `view_proj` 56/call).
+
+- **Consequence:** "no allocation in the frame loop" cannot even be
+  measured honestly until this is fixed — every temporary Vec3 is a leak.
+- **Status:** see "Compiler patches" below.

@@ -1,0 +1,7 @@
+mod OneLine do
+  type V = V(Int, Int)
+  fn a1(v : V) : Int do match v do V(x, _) -> x end end
+  fn a2(p : (Int, Int)) : Int do match p do (x, _) -> x end end
+  fn a3(a : V, b : V) : Int do match (a, b) do (V(x, _), V(y, _)) -> x + y end end
+  fn main() : Int do a1(V(1, 2)) + a2((3, 4)) + a3(V(1, 1), V(2, 2)) end
+end

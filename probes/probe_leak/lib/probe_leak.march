@@ -1,0 +1,84 @@
+mod ProbeLeak do
+  needs IO
+  needs IO.Foreign
+  needs Ffi
+  extern "l" : Cap(Ffi) do
+    fn live_allocs(): Int = "march_live_allocs"
+  end
+
+  type VF = VF(Float, Float, Float)
+  type VI = VI(Int, Int, Int)
+
+  fn mkf(a : Float) : VF do VF(a, a +. 1.0, a +. 2.0) end
+  fn mki(a : Int) : VI do VI(a, a + 1, a + 2) end
+  fn xf(v : VF) : Float do match v do VF(x, _, _) -> x end end
+  fn xi(v : VI) : Int do match v do VI(x, _, _) -> x end end
+
+  -- (a) Float variant temp, read through a matching accessor
+  fn loop_a(i : Int, acc : Float) : Float do
+    if i == 0 do acc else loop_a(i - 1, acc +. xf(mkf(1.0))) end
+  end
+  -- (b) Int variant temp, same shape
+  fn loop_b(i : Int, acc : Int) : Int do
+    if i == 0 do acc else loop_b(i - 1, acc + xi(mki(1))) end
+  end
+  -- (c) Float variant temp, matched inline (no accessor call)
+  fn loop_c(i : Int, acc : Float) : Float do
+    if i == 0 do acc else
+      let v = mkf(1.0)
+      match v do VF(x, _, _) -> loop_c(i - 1, acc +. x) end
+    end
+  end
+  -- (d) Float variant threaded through (consumed and rebuilt)
+  fn bump(v : VF) : VF do match v do VF(x, y, z) -> VF(x +. 1.0, y, z) end end
+  fn loop_d(i : Int, v : VF) : VF do if i == 0 do v else loop_d(i - 1, bump(v)) end end
+  -- (e) Float variant temp passed to a fn that only matches and returns Float, via let
+  fn loop_e(i : Int, acc : Float) : Float do
+    if i == 0 do acc else
+      let v = mkf(1.0)
+      let x = xf(v)
+      loop_e(i - 1, acc +. x)
+    end
+  end
+  -- (f) tuple of floats returned and destructured
+  fn mkt(a : Float) : (Float, Float) do (a, a +. 1.0) end
+  fn loop_f(i : Int, acc : Float) : Float do
+    if i == 0 do acc else match mkt(1.0) do (x, _) -> loop_f(i - 1, acc +. x) end end
+  end
+  -- (g) Int variant, matched inline
+  fn loop_g(i : Int, acc : Int) : Int do
+    if i == 0 do acc else
+      let v = mki(1)
+      match v do VI(x, _, _) -> loop_g(i - 1, acc + x) end
+    end
+  end
+
+  fn report(name : String, before : Int) : Unit do
+    println(name ++ ": net live delta over 100 = " ++ int_to_string(live_allocs() - before))
+  end
+
+  fn main(cap : Cap(IO)) : Unit do
+    let b0 = live_allocs()
+    let r0 = loop_a(100, 0.0)
+    report("a Float variant via accessor", b0)
+    let b1 = live_allocs()
+    let r1 = loop_b(100, 0)
+    report("b Int variant via accessor", b1)
+    let b2 = live_allocs()
+    let r2 = loop_c(100, 0.0)
+    report("c Float variant matched inline", b2)
+    let b3 = live_allocs()
+    let r3 = xf(loop_d(100, VF(0.0, 0.0, 0.0)))
+    report("d Float variant threaded", b3)
+    let b4 = live_allocs()
+    let r4 = loop_e(100, 0.0)
+    report("e Float variant via let + accessor", b4)
+    let b5 = live_allocs()
+    let r5 = loop_f(100, 0.0)
+    report("f Float tuple destructured", b5)
+    let b6 = live_allocs()
+    let r6 = loop_g(100, 0)
+    report("g Int variant matched inline", b6)
+    println(float_to_string(r0 +. r2 +. r3 +. r4 +. r5) ++ " " ++ int_to_string(r1 + r6))
+  end
+end

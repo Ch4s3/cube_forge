@@ -9,3 +9,7 @@ Small standalone forge projects / files that reproduce each finding in
 - `externmod2/` — G6, qualified extern call with args → "Unknown module"
 - `externmod3/` — G5 (qualified extern → link failure), G11 (caller needs no cap)
 - `probe_dce/` — G16, zero-arg extern call bound to an unused name is dropped
+- `probe_unit/`, `unit_extern.march` — G23, `Unit` vs `()` (not reproduced in isolation)
+- `refine_index.march` — G22, refinement checker coverage for the voxel index
+- `dotted_pat.march`, `dotted_pat2.march` — G24/G25, dotted constructor patterns
+- `oneline_match.march` — (control) one-line match with tuple patterns parses

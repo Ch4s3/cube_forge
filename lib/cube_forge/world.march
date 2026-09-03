@@ -1,0 +1,20 @@
+-- World — the set of chunks and the solid-voxel query used by physics and,
+-- later, raycasting. M3: a single chunk at origin. Coordinates are world ints.
+mod CubeForge.World do
+
+  alias CubeForge.Chunk as C
+
+  type World = World(CubeForge.Chunk.Chunk)
+
+  fn single(c : CubeForge.Chunk.Chunk) : World do World(c) end
+
+  fn chunk(w : World) : CubeForge.Chunk.Chunk do match w do World(c) -> c end end
+
+  doc "Block id at a world coordinate; air outside the loaded area."
+  fn block_at(w : World, x : Int, y : Int, z : Int) : Int do
+    match w do World(c) -> C.get_or_air(c, x, y, z) end
+  end
+
+  fn solid_at(w : World, x : Int, y : Int, z : Int) : Bool do block_at(w, x, y, z) != 0 end
+
+end

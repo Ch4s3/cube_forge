@@ -26,7 +26,10 @@ mod CubeForge.Ffi.Input do
   fn mouse_dx() : Float do x_in_mouse_dx() end
   fn mouse_dy() : Float do x_in_mouse_dy() end
   fn scroll_dy() : Float do x_in_scroll_dy() end
-  fn capture_cursor(enabled : Bool) : Unit do x_in_capture_cursor(if enabled do 1 else 0 end) end
+  fn capture_cursor(enabled : Bool) : Unit do
+    x_in_capture_cursor(if enabled do 1 else 0 end)
+    ()
+  end
 
   -- GLFW key codes (GLFW 3.4, glfw3.h)
   fn key_w() : Int do 87 end

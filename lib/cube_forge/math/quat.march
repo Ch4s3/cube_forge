@@ -1,0 +1,78 @@
+-- Quat — unit quaternion (x, y, z, w). Stdlib-candidate code.
+mod CubeForge.Math.Quat do
+
+  alias CubeForge.Math.Vec3 as V
+  alias CubeForge.Math.Mat4 as M
+
+  type Quat = Quat(Float, Float, Float, Float)
+
+  fn identity() : Quat do Quat(0.0, 0.0, 0.0, 1.0) end
+
+  doc "Rotation of [angle] radians about the unit axis (ax, ay, az)."
+  fn from_axis_angle(ax : Float, ay : Float, az : Float, angle : Float) : Quat do
+    let h = angle /. 2.0
+    let s = Math.sin(h)
+    Quat(ax *. s, ay *. s, az *. s, Math.cos(h))
+  end
+
+  doc "Hamilton product a * b (apply b first, then a)."
+  fn mul(a : Quat, b : Quat) : Quat do
+    match (a, b) do
+      (Quat(ax, ay, az, aw), Quat(qx, qy, qz, qw)) ->
+        Quat(aw *. qx +. ax *. qw +. ay *. qz -. az *. qy,
+             aw *. qy -. ax *. qz +. ay *. qw +. az *. qx,
+             aw *. qz +. ax *. qy -. ay *. qx +. az *. qw,
+             aw *. qw -. ax *. qx -. ay *. qy -. az *. qz)
+    end
+  end
+
+  fn conjugate(q : Quat) : Quat do
+    match q do Quat(x, y, z, w) -> Quat(0.0 -. x, 0.0 -. y, 0.0 -. z, w) end
+  end
+
+  fn normalize(q : Quat) : Quat do
+    match q do
+      Quat(x, y, z, w) ->
+        let n = Math.sqrt(x *. x +. y *. y +. z *. z +. w *. w)
+        if n < 0.000001 do identity() else Quat(x /. n, y /. n, z /. n, w /. n) end
+    end
+  end
+
+  doc "Rotate a vector: v' = q v q*."
+  fn rotate(q : Quat, v : CubeForge.Math.Vec3.Vec3) : CubeForge.Math.Vec3.Vec3 do
+    match q do
+      Quat(qx, qy, qz, qw) ->
+        -- t = 2 * cross(q.xyz, v); v' = v + w * t + cross(q.xyz, t)
+        let u = V.new(qx, qy, qz)
+        let t = V.scale(V.cross(u, v), 2.0)
+        V.add(V.add(v, V.scale(t, qw)), V.cross(u, t))
+    end
+  end
+
+  doc "Rotation matrix (column-major) of a unit quaternion."
+  fn to_mat4(q : Quat) : CubeForge.Math.Mat4.Mat4 do
+    match q do
+      Quat(x, y, z, w) ->
+        let xx = x *. x
+        let yy = y *. y
+        let zz = z *. z
+        let xy = x *. y
+        let xz = x *. z
+        let yz = y *. z
+        let wx = w *. x
+        let wy = w *. y
+        let wz = w *. z
+        M.from_list([
+          1.0 -. 2.0 *. (yy +. zz), 2.0 *. (xy +. wz), 2.0 *. (xz -. wy), 0.0,
+          2.0 *. (xy -. wz), 1.0 -. 2.0 *. (xx +. zz), 2.0 *. (yz +. wx), 0.0,
+          2.0 *. (xz +. wy), 2.0 *. (yz -. wx), 1.0 -. 2.0 *. (xx +. yy), 0.0,
+          0.0, 0.0, 0.0, 1.0])
+    end
+  end
+
+  doc "Camera orientation from yaw (about +Y) then pitch (about the local +X)."
+  fn from_yaw_pitch(yaw : Float, pitch : Float) : Quat do
+    mul(from_axis_angle(0.0, 1.0, 0.0, yaw), from_axis_angle(1.0, 0.0, 0.0, pitch))
+  end
+
+end

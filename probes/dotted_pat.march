@@ -1,0 +1,8 @@
+mod DottedPat do
+  mod Deep.Inner do
+    type T = T(Int)
+    fn mk() : T do T(5) end
+  end
+  fn a() : Int do match Deep.Inner.mk() do Deep.Inner.T(v) -> v end end
+  fn main() : Int do a() end
+end

@@ -1,0 +1,8 @@
+mod DottedPat2 do
+  mod Inner do
+    type T = T(Int)
+    fn mk() : T do T(5) end
+  end
+  fn a() : Int do match Inner.mk() do Inner.T(v) -> v end end
+  fn main() : Int do a() end
+end

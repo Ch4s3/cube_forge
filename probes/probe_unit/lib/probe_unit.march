@@ -1,0 +1,14 @@
+mod ProbeUnit do
+  needs IO
+  needs IO.Foreign
+  needs Ffi
+  alias Other.W as W
+  fn main(cap : Cap(IO)) : Unit do
+    if true do W.w0() else () end                 -- (a) alias, zero-arg
+    if true do W.pure1(1) else () end             -- (b) alias, one-arg pure
+    if true do Other.W.w1(1) else () end          -- (c) full path, one-arg extern wrapper
+    if true do W.w1(1) else () end                -- (d) alias, one-arg extern wrapper
+    if true do W.w1b(true) else () end            -- (e) alias, one-arg Bool wrapper
+    ()
+  end
+end

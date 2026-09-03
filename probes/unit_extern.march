@@ -1,0 +1,19 @@
+mod UnitExtern do
+  needs IO
+  needs IO.Foreign
+  needs Ffi
+  extern "u" : Cap(Ffi) do
+    fn e0(): Unit = "u_e0"
+    fn e1(n: Int): Unit = "u_e1"
+  end
+  fn w0() : Unit do e0() end
+  fn w1(n : Int) : Unit do e1(n) end
+  fn w1b(b : Bool) : Unit do e1(if b do 1 else 0 end) end
+  fn main(cap : Cap(IO)) : Unit do
+    if true do w0() else () end          -- (a) zero-arg wrapper
+    if true do w1(1) else () end         -- (b) one-arg wrapper
+    if true do w1b(true) else () end     -- (c) wrapper whose arg is an if-expression
+    if true do e1(1) else () end         -- (d) extern directly
+    ()
+  end
+end
