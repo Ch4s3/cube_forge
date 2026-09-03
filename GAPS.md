@@ -135,3 +135,81 @@ Reproduction probes live under `probes/` (copied from the session scratchpad).
 ### G14. `NativeArray.fold_*` does not link when compiled
 - Documented in `stdlib/native_array.march` itself; noted here because it is
   the obvious way to write "sum of a column" and it fails at link, not check.
+
+---
+
+## Runtime
+
+### G15. `main` does not run on the process main thread — GLFW/Cocoa cannot be called
+- `fn main` is spawned as a green thread (`march_spawn_main`) and picked up by
+  whichever scheduler worker steals it. `pthread_main_np()` was 0 inside
+  `cf_win_open`; `glfwInit` on macOS then traps (SIGTRAP, exit 133) with no
+  March-side diagnostic, because Cocoa requires the main thread.
+- **Workaround:** `MARCH_NUM_SCHEDULERS=1` — in that mode scheduler 0 runs on
+  the calling (main) thread and there is nobody to steal from. Costs all
+  parallelism (`pmap` becomes sequential).
+- **Would need:** a way to pin the main green thread to scheduler 0 (an
+  attribute on `main`, or a forge.toml flag) while workers keep running. The
+  scheduler has no affinity concept today (`march_proc` has no such field;
+  every runnable proc goes through the Chase-Lev deques or the global runq).
+  See the patch note in this file's "Compiler patches" section once done.
+
+### G16. A zero-arg extern call bound to an unused name is dropped (miscompile)
+- `let _ = w0()` and `let x = w0()` (x unused) where `w0` wraps a zero-arg
+  extern: the C function is **not called**. A bare `w0()` statement, or a use
+  of the result, calls it. One-arg externs are called in every shape.
+  Debug and release alike. Cost me an hour: `let _ = gfx_init()` silently
+  skipped shader compilation and the triangle never appeared.
+- Verified: `probes/probe_dce` (p_effect0 called 2 of 4 times).
+- **Would need:** the dead-binding elimination pass (or whatever treats a
+  zero-arg call as a pure constant) to consult the extern table.
+
+### G17. The first ~2 frames after window creation read back as the clear colour
+- Not a March issue (macOS drawable attach), but recorded because a pixel
+  read-back at frame 2 was my first "proof" and it was wrong. Verify at frame
+  30+.
+
+### G18. `NativeArray.get_*` is documented as "panics if out of bounds" but is unchecked
+- `native_u8_arr_get` / `native_int_arr_get` / `native_float_arr_get`
+  (`runtime/march_runtime.c`, `DEF_NARROW_INT_ARR` and the i64/f64 versions)
+  read `arr + 32 + i * size` with no length comparison. The bounds-checking
+  helper `typed_array_check_bounds` belongs to `Array`, not `NativeArray`.
+- Consequence for the "prove the bounds checks away" goal: there is no check
+  to prove away. The refinement on `Chunk.index` is the *only* thing standing
+  between a bad index and a silent out-of-bounds read, and the refinement
+  checker is definite-failure only (silence ≠ proof) unless the module opts
+  into `cap verified`.
+- **Would need:** either a real check in `get` (with a `get_unchecked`
+  variant that requires a refined index), or the doc fixed. The former is
+  what makes refinements pay for themselves.
+
+### G19. `by` is a reserved word and the parse error points at the next token
+- `Vec3(bx, by, bz)` as a pattern → `I got stuck here` with the caret under
+  `bz`. `by` is the session-type keyword (`choose by Client`); it is not in
+  the soft-keyword list in `surface-syntax.md`, and unlike the soft keywords it
+  is not even bindable. A vector library that names components `bx, by, bz`
+  is the first thing anyone writes.
+
+### G20. `alias` works in expressions but not in type annotations
+- `alias CubeForge.F32Buf as B` then `B.push(b, v)` resolves, but a parameter
+  annotated `b : B.F32Buf` fails with `Unknown module `B`. Did you mean `Io`?`.
+  The full path `CubeForge.F32Buf.F32Buf` works in the annotation. So every
+  signature in a module that uses aliases carries the long form while its body
+  uses the short one.
+
+### G21. A borrowed read before a consuming update turns FBIP into a full copy
+- `match b do Buf2(d, n) -> if n < NativeArray.length_f32(d) do Buf2(set_f32(d, n, v), n + 1) ...`
+  costs **one allocation + a full-array memcpy per push** (1000/1000 in the
+  probe; in the real mesher 74258 allocations and 1.8 s for 10608 vertices).
+  Hoisting the length into a `let` does not help. Removing the read (case C)
+  or caching capacity in the constructor (case H) gives 0 allocations and the
+  mesh drops to 4.3 ms.
+- The memory-model doc says to "consume the value you transform"; it does not
+  say that a *borrowing* read of the same value earlier in the arm counts as a
+  second use. Either `length_f32` is not in the borrow table, or liveness
+  analysis dups `d` for the call because `d` is still live afterwards.
+- **Done instead:** `F32Buf(data, len, cap)` carries its own capacity.
+- **Would need:** borrowed-param inference to see that `length_f32` does not
+  retain `d`, so the later `set_f32` still sees rc == 1. The LSP's `⧉ copied`
+  hint would have shown this; the CLI has no equivalent flag.
+- Verified: `probes/probe1` (cases C, F, G, H).

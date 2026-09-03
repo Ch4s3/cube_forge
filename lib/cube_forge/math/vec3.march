@@ -12,21 +12,27 @@ mod CubeForge.Math.Vec3 do
   fn z(v : Vec3) : Float do match v do Vec3(_, _, c) -> c end end
 
   fn add(a : Vec3, b : Vec3) : Vec3 do
-    match (a, b) do (Vec3(ax, ay, az), Vec3(bx, by, bz)) -> Vec3(ax +. bx, ay +. by, az +. bz) end
+    match (a, b) do
+      (Vec3(ax, ay, az), Vec3(x2, y2, z2)) -> Vec3(ax +. x2, ay +. y2, az +. z2)
+    end
   end
   fn sub(a : Vec3, b : Vec3) : Vec3 do
-    match (a, b) do (Vec3(ax, ay, az), Vec3(bx, by, bz)) -> Vec3(ax -. bx, ay -. by, az -. bz) end
+    match (a, b) do
+      (Vec3(ax, ay, az), Vec3(x2, y2, z2)) -> Vec3(ax -. x2, ay -. y2, az -. z2)
+    end
   end
   fn scale(a : Vec3, s : Float) : Vec3 do
     match a do Vec3(ax, ay, az) -> Vec3(ax *. s, ay *. s, az *. s) end
   end
   fn dot(a : Vec3, b : Vec3) : Float do
-    match (a, b) do (Vec3(ax, ay, az), Vec3(bx, by, bz)) -> ax *. bx +. ay *. by +. az *. bz end
+    match (a, b) do
+      (Vec3(ax, ay, az), Vec3(x2, y2, z2)) -> ax *. x2 +. ay *. y2 +. az *. z2
+    end
   end
   fn cross(a : Vec3, b : Vec3) : Vec3 do
     match (a, b) do
-      (Vec3(ax, ay, az), Vec3(bx, by, bz)) ->
-        Vec3(ay *. bz -. az *. by, az *. bx -. ax *. bz, ax *. by -. ay *. bx)
+      (Vec3(ax, ay, az), Vec3(x2, y2, z2)) ->
+        Vec3(ay *. z2 -. az *. y2, az *. x2 -. ax *. z2, ax *. y2 -. ay *. x2)
     end
   end
   fn length(a : Vec3) : Float do Math.sqrt(dot(a, a)) end

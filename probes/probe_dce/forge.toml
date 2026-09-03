@@ -1,0 +1,9 @@
+[package]
+name = "probe_dce"
+version = "0.1.0"
+type = "app"
+
+[deps]
+
+[ffi]
+sources = ["native/p.c"]

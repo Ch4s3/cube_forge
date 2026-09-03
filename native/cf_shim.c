@@ -204,6 +204,23 @@ void cf_gfx_draw(int64_t slot, int64_t nverts) {
     if (getenv("CF_DEBUG")) { fprintf(stderr, "cf: draw slot=%lld nverts=%lld glerr=%d prog=%u vao=%u\n", (long long)slot, (long long)nverts, (int)glGetError(), g_prog, g_vao); }
 }
 
+/* Upload an RGBA8 texture array (layer-major, row-major, 4 bytes/texel) from a
+ * March NativeU8Arr. Nearest filtering: voxel look, no mipmaps. */
+void cf_gfx_upload_texture(void *arr, int64_t w, int64_t h, int64_t layers) {
+    if (narr_len(arr) < w * h * layers * 4) { fprintf(stderr, "cf: texture array too small\n"); return; }
+    if (!g_tex) glGenTextures(1, &g_tex);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, g_tex);
+    glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_RGBA8, (GLsizei)w, (GLsizei)h, (GLsizei)layers, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, narr_data(arr));
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glUseProgram(g_prog);
+    glUniform1i(g_u_use_tex, 1);
+}
+
 /* Debug/verification hook: read back one pixel of the back buffer as 0xRRGGBB.
  * Call after drawing and before swap. */
 int64_t cf_gfx_read_pixel(int64_t x, int64_t y) {

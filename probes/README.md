@@ -8,3 +8,4 @@ Small standalone forge projects / files that reproduce each finding in
 - `probe1/` — G8 (Bytes over FFI), G9 (NativeArray over FFI), G12 (record vs variant allocation)
 - `externmod2/` — G6, qualified extern call with args → "Unknown module"
 - `externmod3/` — G5 (qualified extern → link failure), G11 (caller needs no cap)
+- `probe_dce/` — G16, zero-arg extern call bound to an unused name is dropped

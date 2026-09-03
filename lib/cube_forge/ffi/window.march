@@ -26,6 +26,8 @@ mod CubeForge.Ffi.Window do
     fn x_gfx_draw(slot: Int, nverts: Int): Unit = "cf_gfx_draw"
     fn x_gfx_read_pixel(x: Int, y: Int): Int = "cf_gfx_read_pixel"
     fn x_gfx_dump_bmp(path: String): Int = "cf_gfx_dump_bmp"
+    fn x_live_allocs(): Int = "march_live_allocs"
+    fn x_gfx_upload_texture(pixels: NativeU8Arr, w: Int, h: Int, layers: Int): Unit = "cf_gfx_upload_texture"
   end
 
   doc "Open the window and GL context. Returns 1 on success, 0 on failure."
@@ -51,5 +53,9 @@ mod CubeForge.Ffi.Window do
   fn gfx_read_pixel(x : Int, y : Int) : Int do x_gfx_read_pixel(x, y) end
   doc "Verification hook: dump the back buffer to a 24-bit BMP at [path]. 1 on success."
   fn gfx_dump_bmp(path : String) : Int do x_gfx_dump_bmp(path) end
+  doc "Runtime leak gauge: net live March heap objects (debug/verification only)."
+  fn live_allocs() : Int do x_live_allocs() end
+  doc "Upload an RGBA8 texture array (layer-major) and switch the shader to textured mode."
+  fn gfx_upload_texture(pixels : NativeU8Arr, w : Int, h : Int, layers : Int) : Unit do x_gfx_upload_texture(pixels, w, h, layers) end
 
 end

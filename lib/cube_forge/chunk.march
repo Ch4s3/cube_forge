@@ -51,7 +51,7 @@ mod CubeForge.Chunk do
     if y > top do c
     else
       let id = if y == top do 1 else if y > top - 3 do 2 else 3 end end
-      fill_column(set(c, x, z, y, id), x, z, y + 1, top)
+      fill_column(set(c, x, y, z, id), x, z, y + 1, top)
     end
   end
 

@@ -1,0 +1,12 @@
+mod ProbeDce do
+  needs IO
+  needs IO.Foreign
+  needs Ffi
+  fn main(cap : Cap(IO)) : Unit do
+    let _ = Other.W.w0()            -- (a) let _ = zero-arg wrapper of zero-arg extern
+    Other.W.w0()                    -- (b) bare statement
+    let x = Other.W.w0()            -- (c) bound, unused
+    if Other.W.w0() == 0 do println("zero") else () end   -- (d) used
+    println("done")
+  end
+end

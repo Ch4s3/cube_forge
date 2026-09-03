@@ -1,0 +1,83 @@
+-- Mesher — naive per-face mesher. For every solid voxel, emit each face whose
+-- neighbour is air. Output is a flat F32Buf of 7-float vertices
+-- (pos.xyz, uv, layer, shade), 6 vertices per face, ready for the VBO.
+--
+-- This module deliberately has no `needs Input`: it must not be able to reach
+-- the input capability domain.
+mod CubeForge.Mesher do
+
+  alias CubeForge.F32Buf as B
+  alias CubeForge.Chunk as C
+
+  -- Per-face directional multiplier: flat ambient look, no lighting.
+  fn shade_top() : Float do 1.0 end
+  fn shade_bottom() : Float do 0.55 end
+  fn shade_x() : Float do 0.75 end
+  fn shade_z() : Float do 0.85 end
+
+  pfn vert(b : CubeForge.F32Buf.F32Buf, x : Float, y : Float, z : Float, u : Float, v : Float, layer : Float, shade : Float) : CubeForge.F32Buf.F32Buf do
+    b |> B.push3(x, y, z) |> B.push(u) |> B.push(v) |> B.push(layer) |> B.push(shade)
+  end
+
+  -- Two triangles from four corners given counter-clockwise as seen from outside.
+  pfn quad(b : CubeForge.F32Buf.F32Buf,
+           x0 : Float, y0 : Float, z0 : Float, x1 : Float, y1 : Float, z1 : Float,
+           x2 : Float, y2 : Float, z2 : Float, x3 : Float, y3 : Float, z3 : Float,
+           layer : Float, shade : Float) : CubeForge.F32Buf.F32Buf do
+    b |> vert(x0, y0, z0, 0.0, 0.0, layer, shade)
+      |> vert(x1, y1, z1, 1.0, 0.0, layer, shade)
+      |> vert(x2, y2, z2, 1.0, 1.0, layer, shade)
+      |> vert(x0, y0, z0, 0.0, 0.0, layer, shade)
+      |> vert(x2, y2, z2, 1.0, 1.0, layer, shade)
+      |> vert(x3, y3, z3, 0.0, 1.0, layer, shade)
+  end
+
+  doc "Texture-array layer for a block id (M2: everything uses layer 0)."
+  fn layer_of(_id : Int) : Float do 0.0 end
+
+  -- Emit the visible faces of the solid block at (x, y, z); (ox, oy, oz) is the chunk origin.
+  pfn block_faces(b : CubeForge.F32Buf.F32Buf, c : CubeForge.Chunk.Chunk, x : Int, y : Int, z : Int, ox : Float, oy : Float, oz : Float) : CubeForge.F32Buf.F32Buf do
+    let id = C.get(c, x, y, z)
+    if id == 0 do b
+    else
+      let l = layer_of(id)
+      let fx = ox +. int_to_float(x)
+      let fy = oy +. int_to_float(y)
+      let fz = oz +. int_to_float(z)
+      let fx1 = fx +. 1.0
+      let fy1 = fy +. 1.0
+      let fz1 = fz +. 1.0
+      let b1 = if C.get_or_air(c, x, y + 1, z) == 0 do
+        quad(b, fx, fy1, fz, fx, fy1, fz1, fx1, fy1, fz1, fx1, fy1, fz, l, shade_top()) else b end
+      let b2 = if C.get_or_air(c, x, y - 1, z) == 0 do
+        quad(b1, fx, fy, fz, fx1, fy, fz, fx1, fy, fz1, fx, fy, fz1, l, shade_bottom()) else b1 end
+      let b3 = if C.get_or_air(c, x + 1, y, z) == 0 do
+        quad(b2, fx1, fy, fz, fx1, fy1, fz, fx1, fy1, fz1, fx1, fy, fz1, l, shade_x()) else b2 end
+      let b4 = if C.get_or_air(c, x - 1, y, z) == 0 do
+        quad(b3, fx, fy, fz1, fx, fy1, fz1, fx, fy1, fz, fx, fy, fz, l, shade_x()) else b3 end
+      let b5 = if C.get_or_air(c, x, y, z + 1) == 0 do
+        quad(b4, fx1, fy, fz1, fx1, fy1, fz1, fx, fy1, fz1, fx, fy, fz1, l, shade_z()) else b4 end
+      if C.get_or_air(c, x, y, z - 1) == 0 do
+        quad(b5, fx, fy, fz, fx, fy1, fz, fx1, fy1, fz, fx1, fy, fz, l, shade_z()) else b5 end
+    end
+  end
+
+  pfn mesh_go(b : CubeForge.F32Buf.F32Buf, c : CubeForge.Chunk.Chunk, i : Int, ox : Float, oy : Float, oz : Float) : CubeForge.F32Buf.F32Buf do
+    if i >= 65536 do b
+    else
+      let x = i % 16
+      let z = (i / 16) % 16
+      let y = i / 256
+      mesh_go(block_faces(b, c, x, y, z, ox, oy, oz), c, i + 1, ox, oy, oz)
+    end
+  end
+
+  doc "Mesh a whole chunk into a fresh buffer. Chunk-local coordinates are offset by the origin."
+  fn mesh(c : CubeForge.Chunk.Chunk, ox : Float, oy : Float, oz : Float) : CubeForge.F32Buf.F32Buf do
+    mesh_go(B.new(4096), c, 0, ox, oy, oz)
+  end
+
+  doc "Vertices in a mesh buffer (7 floats each)."
+  fn vertex_count(b : CubeForge.F32Buf.F32Buf) : Int do B.len(b) / 7 end
+
+end

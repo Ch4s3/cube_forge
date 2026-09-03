@@ -1,0 +1,57 @@
+-- G22 probe: can Z3 discharge the voxel index bound, and how does it hold up
+-- when the chunk dimension is a runtime value? Run with:
+--   march --check --refine-report probes/refine_index.march
+-- `cap verified` makes every undecided obligation an error, so silence = proof.
+mod RefineIndex do
+  cap verified
+
+  fn index(x : {Int | 0 <= _ && _ < 16}, y : {Int | 0 <= _ && _ < 256}, z : {Int | 0 <= _ && _ < 16})
+      : {Int | 0 <= _ && _ < 65536} do
+    x + 16 * (z + 16 * y)
+  end
+
+  fn index_dyn(sx : {Int | _ > 0}, sy : {Int | _ > 0}, sz : {Int | _ > 0},
+               x : {Int | 0 <= _ && _ < sx}, y : {Int | 0 <= _ && _ < sy}, z : {Int | 0 <= _ && _ < sz})
+      : {Int | 0 <= _ && _ < sx * sy * sz} do
+    x + sx * (z + sz * y)
+  end
+
+  -- (a) literal arguments
+  fn a_literal() : Int do index(3, 200, 7) end
+
+  -- (b) arguments computed inline from a loop counter
+  fn b_inline(i : {Int | 0 <= _ && _ < 65536}) : Int do index(i % 16, i / 256, (i / 16) % 16) end
+
+  -- (c) same, but through let bindings (the documented "fact does not travel through a let" limit)
+  fn c_let(i : {Int | 0 <= _ && _ < 65536}) : Int do
+    let x = i % 16
+    let y = i / 256
+    let z = (i / 16) % 16
+    index(x, y, z)
+  end
+
+  -- (d) guard-established facts
+  fn d_guard(x : Int, y : Int, z : Int) : Int do
+    if x >= 0 && x < 16 && y >= 0 && y < 256 && z >= 0 && z < 16 do index(x, y, z) else -1 end
+  end
+
+  -- (e) the caller's own contract forwards
+  fn e_forward(x : {Int | 0 <= _ && _ < 16}, y : {Int | 0 <= _ && _ < 256}, z : {Int | 0 <= _ && _ < 16}) : Int do
+    index(x, y, z)
+  end
+
+  -- (f) runtime dimensions, contract forwarded
+  fn f_dyn_forward(sx : {Int | _ > 0}, sy : {Int | _ > 0}, sz : {Int | _ > 0},
+                   x : {Int | 0 <= _ && _ < sx}, y : {Int | 0 <= _ && _ < sy}, z : {Int | 0 <= _ && _ < sz}) : Int do
+    index_dyn(sx, sy, sz, x, y, z)
+  end
+
+  -- (g) runtime dimensions, guard-established
+  fn g_dyn_guard(sx : Int, sy : Int, sz : Int, x : Int, y : Int, z : Int) : Int do
+    if sx > 0 && sy > 0 && sz > 0 && x >= 0 && x < sx && y >= 0 && y < sy && z >= 0 && z < sz do
+      index_dyn(sx, sy, sz, x, y, z)
+    else -1 end
+  end
+
+  fn main() : Int do a_literal() + b_inline(5) + c_let(5) + d_guard(1, 2, 3) + e_forward(1, 2, 3) + f_dyn_forward(16, 256, 16, 1, 2, 3) + g_dyn_guard(16, 256, 16, 1, 2, 3) end
+end

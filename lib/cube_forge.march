@@ -1,5 +1,5 @@
 -- cube_forge — a minimal voxel renderer, written to find March's rough edges.
--- M1: window opens, input polls, one hardcoded triangle from a March buffer.
+-- M2: one 16x16x256 chunk, naive mesher, single texture, fixed camera.
 mod CubeForge do
 
   needs IO
@@ -7,64 +7,68 @@ mod CubeForge do
   needs Window
   needs Input
 
-  import CubeForge.Ffi.Window
-  import CubeForge.Ffi.Input
+  alias CubeForge.Ffi.Window as Win
+  alias CubeForge.Ffi.Input as In
   alias CubeForge.F32Buf as F32Buf
+  alias CubeForge.Math.Vec3 as V
+  alias CubeForge.Math.Mat4 as M
+  alias CubeForge.Chunk as Chunk
+  alias CubeForge.Mesher as Mesher
+  alias CubeForge.Texture as Texture
 
-  -- Vertex layout shared with the shim: pos.xyz, uv, layer, shade (7 floats).
-  fn vertex(b, x : Float, y : Float, z : Float, u : Float, v : Float, layer : Float, shade : Float) do
-    b |> F32Buf.push3(x, y, z) |> F32Buf.push(u) |> F32Buf.push(v) |> F32Buf.push(layer) |> F32Buf.push(shade)
-  end
-
-  fn triangle() do
-    F32Buf.new(32)
-    |> vertex(-0.6, -0.5, 0.0, 1.0, 0.0, 0.0, 1.0)
-    |> vertex(0.6, -0.5, 0.0, 0.0, 1.0, 0.0, 1.0)
-    |> vertex(0.0, 0.6, 0.0, 0.0, 0.0, 1.0, 1.0)
-  end
-
-  fn identity_matrix() : NativeF32Arr do
-    let m = NativeArray.make_f32(16, 0.0)
-    let m1 = NativeArray.set_f32(m, 0, 1.0)
-    let m2 = NativeArray.set_f32(m1, 5, 1.0)
-    let m3 = NativeArray.set_f32(m2, 10, 1.0)
-    NativeArray.set_f32(m3, 15, 1.0)
-  end
+  fn ms(seconds : Float) : String do float_to_string(seconds *. 1000.0) ++ "ms" end
 
   -- Frame loop. `max_frames < 0` means run until the window closes.
   fn frame_loop(frame : Int, max_frames : Int, nverts : Int, vp : NativeF32Arr) : Int do
-    if CubeForge.Ffi.Window.should_close() || (max_frames >= 0 && frame >= max_frames) do
+    if Win.should_close() || (max_frames >= 0 && frame >= max_frames) do
       frame
     else
-      CubeForge.Ffi.Input.poll()
-      if CubeForge.Ffi.Input.key(CubeForge.Ffi.Input.key_escape()) do CubeForge.Ffi.Window.request_close() else () end
-      CubeForge.Ffi.Window.gfx_begin_frame(0.1, 0.1, 0.15)
-      CubeForge.Ffi.Window.gfx_set_view_proj(vp)
-      CubeForge.Ffi.Window.gfx_draw(0, nverts)
-      if frame == Env.get_int("CF_DUMP_FRAME", 2) do
-        -- verification: the centre pixel must not be the clear colour
-        let px = CubeForge.Ffi.Window.gfx_read_pixel(CubeForge.Ffi.Window.fb_width() / 2, CubeForge.Ffi.Window.fb_height() / 2)
-        println("centre pixel after draw: " ++ int_to_string(px))
+      In.poll()
+      if In.key(In.key_escape()) do Win.request_close() else () end
+      Win.gfx_begin_frame(0.55, 0.75, 0.95)
+      Win.gfx_set_view_proj(vp)
+      Win.gfx_draw(0, nverts)
+      if frame == Env.get_int("CF_DUMP_FRAME", 30) do
         let dump = Env.get("CF_DUMP", "")
-        if dump != "" do let _ = CubeForge.Ffi.Window.gfx_dump_bmp(dump) else () end
+        if dump != "" do
+          if Win.gfx_dump_bmp(dump) == 0 do println("dump failed") else () end
+        else () end
       else () end
-      CubeForge.Ffi.Window.swap()
+      Win.swap()
       frame_loop(frame + 1, max_frames, nverts, vp)
     end
   end
 
   fn main(cap : Cap(IO)) : Unit do
     let max_frames = Env.get_int("CF_FRAMES", -1)
-    if CubeForge.Ffi.Window.open(800, 600, "cube_forge") == 0 do
+    if Win.open(800, 600, "cube_forge") == 0 do
       println("failed to open window")
     else
-      if CubeForge.Ffi.Window.gfx_init() == 0 do println("gfx init failed") else () end
-      let tri = triangle()
-      CubeForge.Ffi.Window.gfx_upload(0, F32Buf.storage(tri), F32Buf.len(tri))
-      let vp = identity_matrix()
-      let frames = frame_loop(0, max_frames, F32Buf.len(tri) / 7, vp)
-      println("ran " ++ int_to_string(frames) ++ " frames")
-      CubeForge.Ffi.Window.close()
+      if Win.gfx_init() == 0 do println("gfx init failed") else () end
+      let t0 = Win.time()
+      let chunk = Chunk.test_terrain()
+      let t1 = Win.time()
+      let a0 = Win.live_allocs()
+      let mesh = Mesher.mesh(chunk, 0.0, 0.0, 0.0)
+      let a1 = Win.live_allocs()
+      let t2 = Win.time()
+      println("allocations during mesh: " ++ int_to_string(a1 - a0))
+      let nverts = Mesher.vertex_count(mesh)
+      println("terrain " ++ ms(t1 -. t0) ++ ", mesh " ++ ms(t2 -. t1) ++ ", " ++ int_to_string(nverts) ++ " vertices, buffer cap " ++ int_to_string(F32Buf.capacity(mesh)))
+      Win.gfx_upload(0, F32Buf.storage(mesh), F32Buf.len(mesh))
+      Win.gfx_upload_texture(Texture.checkerboard(), Texture.size(), Texture.size(), Texture.layers())
+      let proj = M.perspective(70.0 *. Math.pi() /. 180.0, 800.0 /. 600.0, 0.1, 500.0)
+      let view = M.look_at(V.new(-12.0, 80.0, -12.0), V.new(8.0, 64.0, 8.0), V.new(0.0, 1.0, 0.0))
+      let vpm = M.mul(proj, view)
+      let vp = M.write_f32(vpm, NativeArray.make_f32(16, 0.0))
+      match M.transform_point(vpm, V.new(8.0, 64.0, 8.0)) do
+        (cx, cy, cz, cw) -> println("target clip: " ++ float_to_string(cx /. cw) ++ " " ++ float_to_string(cy /. cw) ++ " " ++ float_to_string(cz /. cw))
+      end
+      let t3 = Win.time()
+      let frames = frame_loop(0, max_frames, nverts, vp)
+      let t4 = Win.time()
+      println("ran " ++ int_to_string(frames) ++ " frames in " ++ ms(t4 -. t3) ++ " (" ++ float_to_string(int_to_float(frames) /. (t4 -. t3)) ++ " fps, vsync on)")
+      Win.close()
     end
   end
 

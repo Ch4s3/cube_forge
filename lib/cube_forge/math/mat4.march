@@ -57,7 +57,7 @@ mod CubeForge.Math.Mat4 do
   end
 
   doc "View matrix looking from [eye] towards [target] with [up]."
-  fn look_at(eye : V.Vec3, target : V.Vec3, up : V.Vec3) : Mat4 do
+  fn look_at(eye : CubeForge.Math.Vec3.Vec3, target : CubeForge.Math.Vec3.Vec3, up : CubeForge.Math.Vec3.Vec3) : Mat4 do
     let f = V.normalize(V.sub(target, eye))
     let s = V.normalize(V.cross(f, up))
     let u = V.cross(s, f)
@@ -77,7 +77,7 @@ mod CubeForge.Math.Mat4 do
     Mat4(NativeArray.set_float(a12, 15, 1.0))
   end
 
-  fn translation(v : V.Vec3) : Mat4 do
+  fn translation(v : CubeForge.Math.Vec3.Vec3) : Mat4 do
     match identity() do
       Mat4(a) ->
         let a1 = NativeArray.set_float(a, 12, V.x(v))
@@ -87,7 +87,7 @@ mod CubeForge.Math.Mat4 do
   end
 
   doc "Transform a point (w = 1) and return (x, y, z, w)."
-  fn transform_point(m : Mat4, p : V.Vec3) : (Float, Float, Float, Float) do
+  fn transform_point(m : Mat4, p : CubeForge.Math.Vec3.Vec3) : (Float, Float, Float, Float) do
     match m do
       Mat4(a) ->
         let px = V.x(p)

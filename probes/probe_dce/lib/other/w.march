@@ -1,0 +1,11 @@
+mod Other.W do
+  needs IO.Foreign
+  needs Ffi
+  extern "p" : Cap(Ffi) do
+    fn effect(tag: Int): Int = "p_effect"
+    fn effect0(): Int = "p_effect0"
+  end
+  fn wrapped(tag : Int) : Int do effect(tag) end
+  fn wrapped0() : Int do effect(70) end
+  fn w0() : Int do effect0() end
+end
