@@ -1,5 +1,5 @@
 -- cube_forge — a minimal voxel renderer, written to find March's rough edges.
--- M4: 8x8 chunk world from value noise, generated and meshed in two pmap stages.
+-- M5: DDA raycast selection, block break/place with targeted remesh.
 mod CubeForge do
 
   needs IO
@@ -22,6 +22,8 @@ mod CubeForge do
   alias CubeForge.World as World
   alias CubeForge.Player as Player
   alias CubeForge.Hud as Hud
+  alias CubeForge.Raycast as Ray
+  alias CubeForge.Outline as Outline
 
   fn ms(seconds : Float) : String do float_to_string(seconds *. 1000.0) ++ "ms" end
 
@@ -29,6 +31,87 @@ mod CubeForge do
   -- rebuild can reuse the cell (see GAPS.md G12).
   -- frame, last_time, player, alloc_sample, view scratch (NativeFloatArr 16), vp upload buffer (NativeF32Arr 16)
   type Frame = Frame(Int, Float, CubeForge.Player.Player, Int, NativeFloatArr, NativeF32Arr)
+  -- Mutable-per-edit world state: world, per-slot vertex counts, outline buffer, current hit
+  type Scene = Scene(CubeForge.World.World, NativeIntArr, CubeForge.F32Buf.F32Buf, CubeForge.Raycast.Hit)
+
+  fn reach() : Float do 8.0 end
+
+  -- Remesh the chunk containing world (x, z) and upload it. Returns the counts array.
+  pfn remesh_at(world : CubeForge.World.World, x : Int, z : Int, counts : NativeIntArr, empty : CubeForge.Chunk.Chunk) : NativeIntArr do
+    let cx = World.floor_div16(x)
+    let cz = World.floor_div16(z)
+    if World.in_bounds(world, cx, cz) do
+      let m = Mesher.mesh_world_chunk(world, cx, cz, empty)
+      let slot = cx + World.side(world) * cz
+      Win.gfx_upload(slot, F32Buf.storage(m), F32Buf.len(m))
+      NativeArray.set_int(counts, slot, Mesher.vertex_count(m))
+    else counts end
+  end
+
+  -- Apply a block edit at (x, y, z): set the block, remesh its chunk, and a
+  -- neighbour chunk when the block sits on a chunk boundary (its faces are
+  -- culled against the neighbour, so the neighbour's mesh changes too).
+  pfn edit_block(sc : Scene, x : Int, y : Int, z : Int, id : Int) : Scene do
+    match sc do
+      Scene(world, counts, outline, hit) ->
+        let t0 = Win.time()
+        let world1 = World.set_block(world, x, y, z, id)
+        let empty = Chunk.new()
+        let c1 = remesh_at(world1, x, z, counts, empty)
+        let lx = World.mod16(x)
+        let lz = World.mod16(z)
+        let c2 = if lx == 0 do remesh_at(world1, x - 1, z, c1, empty) else if lx == 15 do remesh_at(world1, x + 1, z, c1, empty) else c1 end end
+        let c3 = if lz == 0 do remesh_at(world1, x, z - 1, c2, empty) else if lz == 15 do remesh_at(world1, x, z + 1, c2, empty) else c2 end end
+        let t1 = Win.time()
+        println((if id == 0 do "broke" else "placed" end) ++ " block at " ++ int_to_string(x) ++ "," ++ int_to_string(y) ++ "," ++ int_to_string(z)
+                ++ " — edit + remesh " ++ ms(t1 -. t0))
+        Scene(world1, c3, outline, hit)
+    end
+  end
+
+  -- Would placing a block at (x, y, z) overlap the player's box?
+  pfn overlaps_player(p : CubeForge.Player.Player, x : Int, y : Int, z : Int) : Bool do
+    let pos = Player.position(p)
+    let px = V.x(pos)
+    let py = V.y(pos)
+    let pz = V.z(pos)
+    let fx = int_to_float(x)
+    let fy = int_to_float(y)
+    let fz = int_to_float(z)
+    fx < px +. Player.half_width() && fx +. 1.0 > px -. Player.half_width()
+      && fy < py +. Player.height() && fy +. 1.0 > py
+      && fz < pz +. Player.half_width() && fz +. 1.0 > pz -. Player.half_width()
+  end
+
+  -- Per-frame: raycast from the eye, refresh the outline, apply click edits.
+  pfn interact(sc : Scene, p : CubeForge.Player.Player, break_now : Bool, place_now : Bool) : Scene do
+    match sc do
+      Scene(world, counts, outline, _) ->
+        let e = Player.eye(p)
+        let d = Player.forward(Player.yaw(p), Player.pitch(p))
+        let hit = Ray.cast(world, V.x(e), V.y(e), V.z(e), V.x(d), V.y(d), V.z(d), reach())
+        let outline1 = if Ray.is_hit(hit) do Outline.build(outline, Ray.bx(hit), Ray.by_(hit), Ray.bz(hit)) else F32Buf.clear(outline) end
+        if Ray.is_hit(hit) do CubeForge.Ffi.Window.gfx_upload(254, F32Buf.storage(outline1), F32Buf.len(outline1)) else () end
+        let sc1 = Scene(world, counts, outline1, hit)
+        if break_now && Ray.is_hit(hit) do
+          edit_block(sc1, Ray.bx(hit), Ray.by_(hit), Ray.bz(hit), 0)
+        else if place_now && Ray.is_hit(hit) do
+          let px = Ray.bx(hit) + Ray.nx(hit)
+          let py = Ray.by_(hit) + Ray.ny(hit)
+          let pz = Ray.bz(hit) + Ray.nz(hit)
+          if overlaps_player(p, px, py, pz) do sc1 else edit_block(sc1, px, py, pz, 3) end
+        else sc1 end end
+    end
+  end
+
+  pfn scene_counts(sc : Scene) : NativeIntArr do match sc do Scene(_, c, _, _) -> c end end
+  pfn scene_world(sc : Scene) : CubeForge.World.World do match sc do Scene(w, _, _, _) -> w end end
+  pfn scene_has_hit(sc : Scene) : Bool do match sc do Scene(_, _, _, h) -> Ray.is_hit(h) end end
+  fn scene_hit_string(sc : Scene) : String do
+    match sc do
+      Scene(_, _, _, h) -> if Ray.is_hit(h) do int_to_string(Ray.bx(h)) ++ "," ++ int_to_string(Ray.by_(h)) ++ "," ++ int_to_string(Ray.bz(h)) ++ " face " ++ int_to_string(Ray.nx(h)) ++ "," ++ int_to_string(Ray.ny(h)) ++ "," ++ int_to_string(Ray.nz(h)) else "none" end
+    end
+  end
   -- FPS meter: window start time, frames in window, last displayed fps, HUD vertex buffer
   type Fps = Fps(Float, Int, Int, CubeForge.F32Buf.F32Buf)
 
@@ -84,13 +167,13 @@ mod CubeForge do
 
   -- Frame loop. `max_frames < 0` means run until the window closes.
   -- Run-time knobs read once, outside the frame loop (an Env read allocates).
-  type Knobs = Knobs(Int, Int, String, Bool, Float)   -- max_frames, dump_frame, dump_path, autowalk, autospin
+  type Knobs = Knobs(Int, Int, String, Bool, Float, Int)   -- max_frames, dump_frame, dump_path, autowalk, autospin, autoedit frame (<0 = off)
 
-  fn frame_loop(f : Frame, k : Knobs, counts : NativeIntArr, nchunks : Int, proj : NativeFloatArr, world : CubeForge.World.World, fps : Fps) : Frame do
+  fn frame_loop(f : Frame, k : Knobs, sc : Scene, nchunks : Int, proj : NativeFloatArr, fps : Fps) : Frame do
     match f do
       Frame(frame, last_t, player, sample, view, vp) ->
         match k do
-        Knobs(max_frames, dump_frame, dump_path, autowalk, autospin) ->
+        Knobs(max_frames, dump_frame, dump_path, autowalk, autospin, autoedit) ->
         if Win.should_close() || (max_frames >= 0 && frame >= max_frames) do
           Frame(frame, last_t, player, sample, view, vp)
         else
@@ -99,12 +182,20 @@ mod CubeForge do
           if In.button_pressed(In.button_left()) do CubeForge.Ffi.Input.capture_cursor(true) else () end
           let now = Win.time()
           let dt = if now -. last_t > 0.1 do 0.1 else now -. last_t end
-          let player1 = Player.update(player, read_input(autowalk, autospin), world, dt)
+          let player1 = Player.update(player, read_input(autowalk, autospin), scene_world(sc), dt)
           let view1 = write_view(player1, view)
           let vp1 = M.mul_into_f32(proj, view1, vp)
+          -- CF_AUTOEDIT=<frame>: scripted break at that frame and place 60 frames later (headless verification)
+          let break_now = In.button_pressed(In.button_left()) || (autoedit >= 0 && frame == autoedit)
+          let place_now = In.button_pressed(In.button_right()) || (autoedit >= 0 && frame == autoedit + 60)
+          let sc1 = interact(sc, player1, break_now, place_now)
+          if autoedit >= 0 && (frame == autoedit - 1 || frame == autoedit + 1 || frame == autoedit + 61) do
+            println("frame " ++ int_to_string(frame) ++ " looking at " ++ scene_hit_string(sc1) ++ "; block there = " ++ int_to_string(match sc1 do Scene(w, _, _, h) -> World.block_at(w, Ray.bx(h), Ray.by_(h), Ray.bz(h)) end))
+          else () end
           Win.gfx_begin_frame(0.55, 0.75, 0.95)
           Win.gfx_set_view_proj(vp1)
-          draw_chunks(counts, 0, nchunks)
+          draw_chunks(scene_counts(sc1), 0, nchunks)
+          if scene_has_hit(sc1) do CubeForge.Ffi.Window.gfx_draw_lines(254, Outline.vertex_count()) else () end
           let fps1 = tick_fps(fps, now)
           Win.gfx_draw_hud(255, fps_hud_verts(fps1))
           if frame == dump_frame do
@@ -122,7 +213,7 @@ mod CubeForge do
           if frame == 200 do
             println("live-object delta over frames 100..200: " ++ int_to_string(Win.live_allocs() - sample1) ++ " (" ++ int_to_string((Win.live_allocs() - sample1) / 100) ++ " per frame)")
           else () end
-          frame_loop(Frame(frame + 1, now, player1, sample1, view1, vp1), k, counts, nchunks, proj, world, fps1)
+          frame_loop(Frame(frame + 1, now, player1, sample1, view1, vp1), k, sc1, nchunks, proj, fps1)
         end
         end
     end
@@ -264,13 +355,14 @@ mod CubeForge do
         Win.gfx_upload_texture(Texture.checkerboard(), Texture.size(), Texture.size(), Texture.layers())
         let proj = M.perspective(70.0 *. Math.pi() /. 180.0, 800.0 /. 600.0, 0.1, 500.0)
         let spawn_pos = int_to_float(8 * n)
-        let player = Player.new(spawn_pos, 100.0, spawn_pos)
+        let player = Player.with_pitch(Player.new(spawn_pos, 100.0, spawn_pos), -0.6)
         if Env.get_int("CF_ALLOC_PROBE", 0) == 1 do alloc_probe(world, proj) else () end
         let t4 = Win.time()
         let knobs = Knobs(max_frames, Env.get_int("CF_DUMP_FRAME", 30), Env.get("CF_DUMP", ""), Env.get_int("CF_AUTOWALK", 0) == 1,
-                          int_to_float(Env.get_int("CF_AUTOSPIN", 0)) /. 1000.0 /. Player.mouse_sens())
+                          int_to_float(Env.get_int("CF_AUTOSPIN", 0)) /. 1000.0 /. Player.mouse_sens(), Env.get_int("CF_AUTOEDIT", -1))
+        let scene = Scene(world, counts, F32Buf.new(256), Ray.miss())
         let fps0 = Fps(t4, 0, 0, F32Buf.new(4096))
-        match frame_loop(Frame(0, t4, player, 0, NativeArray.make_float(16, 0.0), NativeArray.make_f32(16, 0.0)), knobs, counts, n * n, proj, world, fps0) do
+        match frame_loop(Frame(0, t4, player, 0, NativeArray.make_float(16, 0.0), NativeArray.make_f32(16, 0.0)), knobs, scene, n * n, proj, fps0) do
           Frame(frames, _, p, _, _, _) ->
             let t5 = Win.time()
             println("ran " ++ int_to_string(frames) ++ " frames in " ++ ms(t5 -. t4) ++ " (" ++ float_to_string(int_to_float(frames) /. (t5 -. t4)) ++ " fps, vsync on); player ended at " ++ V.to_string(Player.position(p)))

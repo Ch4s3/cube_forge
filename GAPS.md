@@ -430,3 +430,52 @@ frees it. See `probes/probe_leak2` case (i) for the two-field control.
   written as `x < 0 || x >= 16 || …` evaluates all six comparisons; and any
   guard of the form `p != Nil && head(p) …` is a panic waiting to happen.
 - Verified: `probes/shortcircuit.march`.
+
+---
+
+## M4 notes
+
+### G34. `spawn` is a keyword; `let spawn = …` is a bare "I got stuck here"
+- The actor-spawn keyword collides with an ordinary variable name and the
+  parse error points at the `let` with no mention of the keyword. Same family
+  as G4/G19 (`on`, `by`).
+
+### G35. `Array`'s type is spelled `PVec`, and only as `Array.PVec(a)`
+- `type World = World(Array(Chunk), Int)` typechecks against the module's
+  functions with `expected PVec(a) but got Array(Chunk)`. Writing `PVec(…)`
+  gives `I cannot find PVec`; the working spelling is `Array.PVec(Chunk)`.
+  Nothing in `docs/stdlib.md` or the module header says the type has a
+  different name from the module.
+
+### G36. A call to a function that no longer exists is reported as an unknown module
+- `World.single(chunk)` after `single` was removed: `Unknown module `World``
+  (the module exists and is aliased). Same diagnostic class as G6.
+
+### G37. `pmap` scaling is weak for the mesh stage
+- See the timing table in `RESULTS.md`. Chunk meshing is embarrassingly
+  parallel (each task touches only its own `F32Buf` and reads five chunks),
+  yet 4 scheduler threads give ~1.25x over 1 and 8/14 threads do not improve
+  further. Candidates: atomic RC traffic on the shared chunk cells (every
+  `C.get` on a borrowed chunk is free of RC ops, but the closure captures the
+  world), the global allocator lock behind `march_alloc` for the ~5
+  F32Buf growth steps per chunk, or `List.pmap_n`'s chunking handing all 64
+  elements to a handful of tasks. Not root-caused here.
+
+---
+
+## M5 notes
+
+### G38. Block edits copy the whole chunk
+- `World.set_block` → `Array.set` on the persistent trie plus `Chunk.set` on
+  a chunk that is still referenced from the old world value, so `set_u8`
+  takes its copy-on-write path: a 64 KB memcpy per edit. Unavoidable with a
+  persistent world value and no linear ownership of the chunk being edited
+  (the frame loop holds the world in `Scene`, and `Array.get` hands out a
+  shared reference). A `linear` chunk borrowed out of the array and put back
+  would be the March-native answer; `Array` has no such API.
+
+### G39. Selection outline and HUD are uploaded every frame they change
+- `gfx_upload` is a `glBufferData` per call — no `glBufferSubData` in the
+  shim on purpose (keep the surface small), so the outline costs one small
+  upload per frame while a block is targeted. Zero March-side allocation
+  (the `F32Buf` is cleared and refilled in place).

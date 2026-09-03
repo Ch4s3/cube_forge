@@ -1,0 +1,33 @@
+-- Outline — the 12 edges of a unit cube as 24 GL_LINES vertices, rebuilt in
+-- place into a reusable F32Buf every frame the selection moves.
+mod CubeForge.Outline do
+
+  alias CubeForge.F32Buf as B
+
+  pfn v(b : CubeForge.F32Buf.F32Buf, x : Float, y : Float, z : Float) : CubeForge.F32Buf.F32Buf do
+    -- uv = (0, 0), layer 0, shade 0 => black in the untextured shader path
+    b |> B.push3(x, y, z) |> B.push(0.0) |> B.push(0.0) |> B.push(0.0) |> B.push(0.0)
+  end
+
+  pfn edge(b : CubeForge.F32Buf.F32Buf, x0 : Float, y0 : Float, z0 : Float, x1 : Float, y1 : Float, z1 : Float) : CubeForge.F32Buf.F32Buf do
+    b |> v(x0, y0, z0) |> v(x1, y1, z1)
+  end
+
+  doc "Rebuild [b] with the outline of the unit cube at integer block (x, y, z), slightly inflated."
+  fn build(b : CubeForge.F32Buf.F32Buf, x : Int, y : Int, z : Int) : CubeForge.F32Buf.F32Buf do
+    let e = 0.004
+    let x0 = int_to_float(x) -. e
+    let y0 = int_to_float(y) -. e
+    let z0 = int_to_float(z) -. e
+    let x1 = int_to_float(x) +. 1.0 +. e
+    let y1 = int_to_float(y) +. 1.0 +. e
+    let z1 = int_to_float(z) +. 1.0 +. e
+    B.clear(b)
+    |> edge(x0, y0, z0, x1, y0, z0) |> edge(x1, y0, z0, x1, y0, z1) |> edge(x1, y0, z1, x0, y0, z1) |> edge(x0, y0, z1, x0, y0, z0)
+    |> edge(x0, y1, z0, x1, y1, z0) |> edge(x1, y1, z0, x1, y1, z1) |> edge(x1, y1, z1, x0, y1, z1) |> edge(x0, y1, z1, x0, y1, z0)
+    |> edge(x0, y0, z0, x0, y1, z0) |> edge(x1, y0, z0, x1, y1, z0) |> edge(x1, y0, z1, x1, y1, z1) |> edge(x0, y0, z1, x0, y1, z1)
+  end
+
+  fn vertex_count() : Int do 24 end
+
+end

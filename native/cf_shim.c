@@ -221,6 +221,23 @@ void cf_gfx_upload_texture(void *arr, int64_t w, int64_t h, int64_t layers) {
     glUniform1i(g_u_use_tex, 1);
 }
 
+/* Draw a mesh slot as GL_LINES with the current view-projection, untextured,
+ * depth test off so a selection outline is never hidden by the face it sits on. */
+void cf_gfx_draw_lines(int64_t slot, int64_t nverts) {
+    if (slot < 0 || slot >= CF_MAX_MESHES || nverts <= 0) return;
+    glDisable(GL_DEPTH_TEST);
+    glUniform1i(g_u_use_tex, 0);
+    glBindBuffer(GL_ARRAY_BUFFER, g_vbo[slot]);
+    GLsizei stride = CF_VERT_FLOATS * sizeof(float);
+    glEnableVertexAttribArray(0); glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void *)0);
+    glEnableVertexAttribArray(1); glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, stride, (void *)(3 * 4));
+    glEnableVertexAttribArray(2); glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, stride, (void *)(5 * 4));
+    glEnableVertexAttribArray(3); glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, stride, (void *)(6 * 4));
+    glDrawArrays(GL_LINES, 0, (GLsizei)nverts);
+    glUniform1i(g_u_use_tex, g_tex ? 1 : 0);
+    glEnable(GL_DEPTH_TEST);
+}
+
 /* Draw a screen-space overlay mesh (NDC coordinates, same 7-float layout):
  * identity view-projection, no texture, no depth test. Restores state after. */
 void cf_gfx_draw_hud(int64_t slot, int64_t nverts) {

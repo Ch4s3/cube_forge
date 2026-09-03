@@ -30,6 +30,9 @@ mod CubeForge.Player do
     Player(V.new(x, y, z), V.zero(), 0.0, 0.0, false)
   end
 
+  fn with_pitch(p : Player, pitch : Float) : Player do
+    match p do Player(pos, vel, yaw, _, g) -> Player(pos, vel, yaw, pitch, g) end
+  end
   fn position(p : Player) : CubeForge.Math.Vec3.Vec3 do match p do Player(pos, _, _, _, _) -> pos end end
   fn yaw(p : Player) : Float do match p do Player(_, _, y, _, _) -> y end end
   fn pitch(p : Player) : Float do match p do Player(_, _, _, pt, _) -> pt end end
