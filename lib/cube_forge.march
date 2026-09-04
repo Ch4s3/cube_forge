@@ -92,10 +92,20 @@ mod CubeForge do
   fn foliage_slot_base() : Int do 128 end
   fn tick_period() : Int do 10 end
   -- Which frame of the period each phase of the world tick runs on. Spread so
-  -- that no frame carries more than one of them; see the frame loop.
+  -- that no frame carries more than one of them; see the frame loop. The
+  -- retexture runs twice at half budget rather than once at full: it is the one
+  -- phase whose work is a batch of independent columns, so it is the one that
+  -- can be halved without being restructured.
   fn water_slot() : Int do 0 end
-  fn biome_slot() : Int do 3 end
+  fn field_slot() : Int do 2 end
   fn veg_slot() : Int do 6 end
+  -- The retexture runs in halves, on two frames of the period. Quarters were
+  -- measured and are worse: four batches remesh overlapping sections four
+  -- times, and 131 fps against 137.
+  fn migrate_slots() : Int do 2 end
+  pfn is_migrate_slot(phase : Int) : Bool do
+    if phase == 4 do true else phase == 8 end
+  end
 
   -- ── Water actors ────────────────────────────────────────────────────────────
   -- Create the chunk-actor pool. The actors are spawned empty; `reload_water`
@@ -1172,28 +1182,36 @@ mod CubeForge do
           let phase = frame % tick_period()
           -- water simulation tick
           let scw = if phase == water_slot() do water_tick(sc0d, workers, autoflow >= 0) else sc0d end
-          -- The climate field, and the retexturing that follows from it: the
-          -- surface migrates toward the biome's palette, at most biome_budget
-          -- columns, each a real edit so relight, remesh and the water actors
-          -- all see it.
-          let sc1 = if phase == biome_slot() do
+          -- The climate field.
+          let scb = if phase == field_slot() do
             let tb0 = Win.time()
-            let scb = scene_with_biome(scw, Biome.tick(scene_biome(scw), scene_world(scw), seed, Biome.default_rate() *. int_to_float(biome_rate) /. 100.0))
-            if autoflow >= 0 && frame % 100 == biome_slot() do println("biome tick: " ++ ms(Win.time() -. tb0)) else () end
+            let f1 = scene_with_biome(scw, Biome.tick(scene_biome(scw), scene_world(scw), seed, Biome.default_rate() *. int_to_float(biome_rate) /. 100.0))
+            if autoflow >= 0 && frame % 100 == field_slot() do println("biome tick: " ++ ms(Win.time() -. tb0)) else () end
+            f1
+          else scw end
+          -- Retexturing: the surface migrates toward the biome's palette, each
+          -- column a real edit so relight, remesh and the water actors all see
+          -- it. Half the budget on each of two frames. Both halves read the same
+          -- window of the rolling cursor, which is keyed on the period, and the
+          -- first half's columns are no longer candidates by the time the second
+          -- runs -- so a period still retextures up to biome_budget columns from
+          -- the same window, in two smaller pieces.
+          let scm = if is_migrate_slot(phase) do
             let tm0 = Win.time()
-            let picks = Biome.migrations(scene_biome(scb), scene_world(scb), frame / tick_period(), 2048, biome_budget)
-            let scm = migrate(scb, picks)
-            if autoflow >= 0 && frame % 100 == biome_slot() do println("biome migrate: " ++ int_to_string(List.length(picks)) ++ " columns in " ++ ms(Win.time() -. tm0)) else () end
-            scm
-          else if phase == veg_slot() do
+            let picks = Biome.migrations(scene_biome(scb), scene_world(scb), frame / tick_period(), 2048, biome_budget / migrate_slots())
+            let m1 = migrate(scb, picks)
+            if autoflow >= 0 && frame % 100 == 4 do println("biome migrate: " ++ int_to_string(List.length(picks)) ++ " columns in " ++ ms(Win.time() -. tm0)) else () end
+            m1
+          else scb end
+          let sc1 = if phase == veg_slot() do
             -- Vegetation: grow where the biome wants a tree and the cell says so,
             -- fell where it no longer does. Each one is a chop-sized edit.
             let tv0 = Win.time()
-            let vpicks = Veg.candidates(scene_biome(scw), scene_world(scw), seed, frame / tick_period(), 2048, veg_budget)
-            let scv = vegetate(scw, seed, vpicks)
+            let vpicks = Veg.candidates(scene_biome(scm), scene_world(scm), seed, frame / tick_period(), 2048, veg_budget)
+            let scv = vegetate(scm, seed, vpicks)
             if autoflow >= 0 && frame % 100 == veg_slot() do println("biome veg: " ++ int_to_string(List.length(vpicks)) ++ " trees in " ++ ms(Win.time() -. tv0)) else () end
             scv
-          else scw end end
+          else scm end
           if autoflow >= 0 && frame >= autoflow && (frame - autoflow) % 100 == 0 do
             let cx = World.floor_div16(float_to_int(Math.floor(V.x(Player.position(player1)))))
             let cz = World.floor_div16(float_to_int(Math.floor(V.z(Player.position(player1)))))
