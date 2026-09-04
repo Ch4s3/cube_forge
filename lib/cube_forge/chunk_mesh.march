@@ -68,7 +68,7 @@ mod CubeForge.ChunkMesh do
     end
   end
 
-  fn opaque_vertices(m : ChunkMesh) : Int do total_floats(opaque_sections(m)) / 7 end
-  fn water_vertices(m : ChunkMesh) : Int do total_floats(water_sections(m)) / 7 end
+  fn opaque_vertices(m : ChunkMesh) : Int do total_floats(opaque_sections(m)) / 8 end
+  fn water_vertices(m : ChunkMesh) : Int do total_floats(water_sections(m)) / 8 end
 
 end

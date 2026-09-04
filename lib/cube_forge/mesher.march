@@ -1,6 +1,6 @@
 -- Mesher — naive per-face mesher. For every solid voxel, emit each face whose
 -- neighbour is air. Output is a flat F32Buf of 7-float vertices
--- (pos.xyz, uv, layer, shade), 6 vertices per face, ready for the VBO.
+-- (pos.xyz, uv, layer, shade, face), 6 vertices per face, ready for the VBO.
 --
 -- This module deliberately has no `needs Input`: it must not be able to reach
 -- the input capability domain.
@@ -9,27 +9,31 @@ mod CubeForge.Mesher do
   alias CubeForge.F32Buf as B
   alias CubeForge.Chunk as C
 
-  -- Per-face directional multiplier: flat ambient look, no lighting.
-  fn shade_top() : Float do 1.0 end
-  fn shade_bottom() : Float do 0.55 end
-  fn shade_x() : Float do 0.75 end
-  fn shade_z() : Float do 0.85 end
+  -- Face index, resolved in the vertex shader to a normal (for the flashlight)
+  -- and to the directional multiplier that used to be baked in here.
+  -- 0 +y, 1 -y, 2 +x, 3 -x, 4 +z, 5 -z — the order `d` uses in face_key.
+  fn face_top() : Float do 0.0 end
+  fn face_bottom() : Float do 1.0 end
+  fn face_xpos() : Float do 2.0 end
+  fn face_xneg() : Float do 3.0 end
+  fn face_zpos() : Float do 4.0 end
+  fn face_zneg() : Float do 5.0 end
 
-  pfn vert(b : CubeForge.F32Buf.F32Buf, x : Float, y : Float, z : Float, u : Float, v : Float, layer : Float, shade : Float) : CubeForge.F32Buf.F32Buf do
-    b |> B.push3(x, y, z) |> B.push(u) |> B.push(v) |> B.push(layer) |> B.push(shade)
+  pfn vert(b : CubeForge.F32Buf.F32Buf, x : Float, y : Float, z : Float, u : Float, v : Float, layer : Float, shade : Float, face : Float) : CubeForge.F32Buf.F32Buf do
+    b |> B.push3(x, y, z) |> B.push(u) |> B.push(v) |> B.push(layer) |> B.push(shade) |> B.push(face)
   end
 
   -- Two triangles from four corners given counter-clockwise as seen from outside.
   pfn quad(b : CubeForge.F32Buf.F32Buf,
            x0 : Float, y0 : Float, z0 : Float, x1 : Float, y1 : Float, z1 : Float,
            x2 : Float, y2 : Float, z2 : Float, x3 : Float, y3 : Float, z3 : Float,
-           layer : Float, shade : Float) : CubeForge.F32Buf.F32Buf do
-    b |> vert(x0, y0, z0, 0.0, 0.0, layer, shade)
-      |> vert(x1, y1, z1, 1.0, 0.0, layer, shade)
-      |> vert(x2, y2, z2, 1.0, 1.0, layer, shade)
-      |> vert(x0, y0, z0, 0.0, 0.0, layer, shade)
-      |> vert(x2, y2, z2, 1.0, 1.0, layer, shade)
-      |> vert(x3, y3, z3, 0.0, 1.0, layer, shade)
+           layer : Float, shade : Float, face : Float) : CubeForge.F32Buf.F32Buf do
+    b |> vert(x0, y0, z0, 0.0, 0.0, layer, shade, face)
+      |> vert(x1, y1, z1, 1.0, 0.0, layer, shade, face)
+      |> vert(x2, y2, z2, 1.0, 1.0, layer, shade, face)
+      |> vert(x0, y0, z0, 0.0, 0.0, layer, shade, face)
+      |> vert(x2, y2, z2, 1.0, 1.0, layer, shade, face)
+      |> vert(x3, y3, z3, 0.0, 1.0, layer, shade, face)
   end
 
   doc "Texture-array layer for a block id (see Texture.layer_for)."
@@ -53,17 +57,17 @@ mod CubeForge.Mesher do
       let fy1 = fy +. 1.0
       let fz1 = fz +. 1.0
       let b1 = if C.get_or_air(c, x, y + 1, z) == 0 do
-        quad(b, fx, fy1, fz, fx, fy1, fz1, fx1, fy1, fz1, fx1, fy1, fz, l, shade_top()) else b end
+        quad(b, fx, fy1, fz, fx, fy1, fz1, fx1, fy1, fz1, fx1, fy1, fz, l, 1.0, face_top()) else b end
       let b2 = if C.get_or_air(c, x, y - 1, z) == 0 do
-        quad(b1, fx, fy, fz, fx1, fy, fz, fx1, fy, fz1, fx, fy, fz1, l, shade_bottom()) else b1 end
+        quad(b1, fx, fy, fz, fx1, fy, fz, fx1, fy, fz1, fx, fy, fz1, l, 1.0, face_bottom()) else b1 end
       let b3 = if C.get_or_air(c, x + 1, y, z) == 0 do
-        quad(b2, fx1, fy, fz, fx1, fy1, fz, fx1, fy1, fz1, fx1, fy, fz1, l, shade_x()) else b2 end
+        quad(b2, fx1, fy, fz, fx1, fy1, fz, fx1, fy1, fz1, fx1, fy, fz1, l, 1.0, face_xpos()) else b2 end
       let b4 = if C.get_or_air(c, x - 1, y, z) == 0 do
-        quad(b3, fx, fy, fz1, fx, fy1, fz1, fx, fy1, fz, fx, fy, fz, l, shade_x()) else b3 end
+        quad(b3, fx, fy, fz1, fx, fy1, fz1, fx, fy1, fz, fx, fy, fz, l, 1.0, face_xneg()) else b3 end
       let b5 = if C.get_or_air(c, x, y, z + 1) == 0 do
-        quad(b4, fx1, fy, fz1, fx1, fy1, fz1, fx, fy1, fz1, fx, fy, fz1, l, shade_z()) else b4 end
+        quad(b4, fx1, fy, fz1, fx1, fy1, fz1, fx, fy1, fz1, fx, fy, fz1, l, 1.0, face_zpos()) else b4 end
       if C.get_or_air(c, x, y, z - 1) == 0 do
-        quad(b5, fx, fy, fz, fx, fy1, fz, fx1, fy1, fz, fx1, fy, fz, l, shade_z()) else b5 end
+        quad(b5, fx, fy, fz, fx, fy1, fz, fx1, fy1, fz, fx1, fy, fz, l, 1.0, face_zneg()) else b5 end
     end
   end
 
@@ -107,17 +111,17 @@ mod CubeForge.Mesher do
     let fy1 = fy +. 1.0
     let fz1 = fz +. 1.0
     let b1 = if see_through(nb_get(c, n, s, e, w, x, y + 1, z)) do
-      quad(b, fx, fy1, fz, fx, fy1, fz1, fx1, fy1, fz1, fx1, fy1, fz, l, shade_top()) else b end
+      quad(b, fx, fy1, fz, fx, fy1, fz1, fx1, fy1, fz1, fx1, fy1, fz, l, 1.0, face_top()) else b end
     let b2 = if see_through(nb_get(c, n, s, e, w, x, y - 1, z)) do
-      quad(b1, fx, fy, fz, fx1, fy, fz, fx1, fy, fz1, fx, fy, fz1, l, shade_bottom()) else b1 end
+      quad(b1, fx, fy, fz, fx1, fy, fz, fx1, fy, fz1, fx, fy, fz1, l, 1.0, face_bottom()) else b1 end
     let b3 = if see_through(nb_get(c, n, s, e, w, x + 1, y, z)) do
-      quad(b2, fx1, fy, fz, fx1, fy1, fz, fx1, fy1, fz1, fx1, fy, fz1, l, shade_x()) else b2 end
+      quad(b2, fx1, fy, fz, fx1, fy1, fz, fx1, fy1, fz1, fx1, fy, fz1, l, 1.0, face_xpos()) else b2 end
     let b4 = if see_through(nb_get(c, n, s, e, w, x - 1, y, z)) do
-      quad(b3, fx, fy, fz1, fx, fy1, fz1, fx, fy1, fz, fx, fy, fz, l, shade_x()) else b3 end
+      quad(b3, fx, fy, fz1, fx, fy1, fz1, fx, fy1, fz, fx, fy, fz, l, 1.0, face_xneg()) else b3 end
     let b5 = if see_through(nb_get(c, n, s, e, w, x, y, z + 1)) do
-      quad(b4, fx1, fy, fz1, fx1, fy1, fz1, fx, fy1, fz1, fx, fy, fz1, l, shade_z()) else b4 end
+      quad(b4, fx1, fy, fz1, fx1, fy1, fz1, fx, fy1, fz1, fx, fy, fz1, l, 1.0, face_zpos()) else b4 end
     if see_through(nb_get(c, n, s, e, w, x, y, z - 1)) do
-      quad(b5, fx, fy, fz, fx, fy1, fz, fx1, fy1, fz, fx1, fy, fz, l, shade_z()) else b5 end
+      quad(b5, fx, fy, fz, fx, fy1, fz, fx1, fy1, fz, fx1, fy, fz, l, 1.0, face_zneg()) else b5 end
   end
 
   -- Air and water do not hide an opaque face.
@@ -135,17 +139,17 @@ mod CubeForge.Mesher do
     let h = fy +. water_height(id)
     let fz1 = fz +. 1.0
     let b1 = if !C.is_water(nb_get(c, n, s, e, w, x, y + 1, z)) do
-      quad(b, fx, h, fz, fx, h, fz1, fx1, h, fz1, fx1, h, fz, l, shade_top()) else b end
+      quad(b, fx, h, fz, fx, h, fz1, fx1, h, fz1, fx1, h, fz, l, 1.0, face_top()) else b end
     let b2 = if nb_get(c, n, s, e, w, x, y - 1, z) == 0 do
-      quad(b1, fx, fy, fz, fx1, fy, fz, fx1, fy, fz1, fx, fy, fz1, l, shade_bottom()) else b1 end
+      quad(b1, fx, fy, fz, fx1, fy, fz, fx1, fy, fz1, fx, fy, fz1, l, 1.0, face_bottom()) else b1 end
     let b3 = side_base(fy, id, nb_get(c, n, s, e, w, x + 1, y, z))
-    let b3b = if b3 < h do quad(b2, fx1, b3, fz, fx1, h, fz, fx1, h, fz1, fx1, b3, fz1, l, shade_x()) else b2 end
+    let b3b = if b3 < h do quad(b2, fx1, b3, fz, fx1, h, fz, fx1, h, fz1, fx1, b3, fz1, l, 1.0, face_xpos()) else b2 end
     let b4 = side_base(fy, id, nb_get(c, n, s, e, w, x - 1, y, z))
-    let b4b = if b4 < h do quad(b3b, fx, b4, fz1, fx, h, fz1, fx, h, fz, fx, b4, fz, l, shade_x()) else b3b end
+    let b4b = if b4 < h do quad(b3b, fx, b4, fz1, fx, h, fz1, fx, h, fz, fx, b4, fz, l, 1.0, face_xneg()) else b3b end
     let b5 = side_base(fy, id, nb_get(c, n, s, e, w, x, y, z + 1))
-    let b5b = if b5 < h do quad(b4b, fx1, b5, fz1, fx1, h, fz1, fx, h, fz1, fx, b5, fz1, l, shade_z()) else b4b end
+    let b5b = if b5 < h do quad(b4b, fx1, b5, fz1, fx1, h, fz1, fx, h, fz1, fx, b5, fz1, l, 1.0, face_zpos()) else b4b end
     let b6 = side_base(fy, id, nb_get(c, n, s, e, w, x, y, z - 1))
-    if b6 < h do quad(b5b, fx, b6, fz, fx, h, fz, fx1, h, fz, fx1, b6, fz, l, shade_z()) else b5b end
+    if b6 < h do quad(b5b, fx, b6, fz, fx, h, fz, fx1, h, fz, fx1, b6, fz, l, 1.0, face_zneg()) else b5b end
   end
 
   -- Bottom of the side strip to emit against neighbour [nid]: the block base for air, the neighbour's
@@ -196,13 +200,13 @@ mod CubeForge.Mesher do
   pfn quad_sized(b : CubeForge.F32Buf.F32Buf,
                  x0 : Float, y0 : Float, z0 : Float, x1 : Float, y1 : Float, z1 : Float,
                  x2 : Float, y2 : Float, z2 : Float, x3 : Float, y3 : Float, z3 : Float,
-                 uw : Float, vh : Float, layer : Float, shade : Float) : CubeForge.F32Buf.F32Buf do
-    b |> vert(x0, y0, z0, 0.0, 0.0, layer, shade)
-      |> vert(x1, y1, z1, uw, 0.0, layer, shade)
-      |> vert(x2, y2, z2, uw, vh, layer, shade)
-      |> vert(x0, y0, z0, 0.0, 0.0, layer, shade)
-      |> vert(x2, y2, z2, uw, vh, layer, shade)
-      |> vert(x3, y3, z3, 0.0, vh, layer, shade)
+                 uw : Float, vh : Float, layer : Float, shade : Float, face : Float) : CubeForge.F32Buf.F32Buf do
+    b |> vert(x0, y0, z0, 0.0, 0.0, layer, shade, face)
+      |> vert(x1, y1, z1, uw, 0.0, layer, shade, face)
+      |> vert(x2, y2, z2, uw, vh, layer, shade, face)
+      |> vert(x0, y0, z0, 0.0, 0.0, layer, shade, face)
+      |> vert(x2, y2, z2, uw, vh, layer, shade, face)
+      |> vert(x3, y3, z3, 0.0, vh, layer, shade, face)
   end
 
   -- Is the block at (x, y, z) an opaque block whose face in direction d is visible?
@@ -274,24 +278,24 @@ mod CubeForge.Mesher do
       let y = int_to_float(sy * 16 + a)
       let x1 = x +. fw
       let z1 = z +. fh
-      if d == 0 do quad_sized(b, x, y +. 1.0, z, x, y +. 1.0, z1, x1, y +. 1.0, z1, x1, y +. 1.0, z, fh, fw, l, shade_top())
-      else quad_sized(b, x, y, z, x1, y, z, x1, y, z1, x, y, z1, fw, fh, l, shade_bottom()) end
+      if d == 0 do quad_sized(b, x, y +. 1.0, z, x, y +. 1.0, z1, x1, y +. 1.0, z1, x1, y +. 1.0, z, fh, fw, l, 1.0, face_top())
+      else quad_sized(b, x, y, z, x1, y, z, x1, y, z1, x, y, z1, fw, fh, l, 1.0, face_bottom()) end
     else if d <= 3 do
       let x = ox +. int_to_float(a)
       let z = oz +. int_to_float(u)
       let y = int_to_float(sy * 16 + v)
       let z1 = z +. fw
       let y1 = y +. fh
-      if d == 2 do quad_sized(b, x +. 1.0, y, z, x +. 1.0, y1, z, x +. 1.0, y1, z1, x +. 1.0, y, z1, fh, fw, l, shade_x())
-      else quad_sized(b, x, y, z1, x, y1, z1, x, y1, z, x, y, z, fh, fw, l, shade_x()) end
+      if d == 2 do quad_sized(b, x +. 1.0, y, z, x +. 1.0, y1, z, x +. 1.0, y1, z1, x +. 1.0, y, z1, fh, fw, l, 1.0, face_xpos())
+      else quad_sized(b, x, y, z1, x, y1, z1, x, y1, z, x, y, z, fh, fw, l, 1.0, face_xneg()) end
     else
       let x = ox +. int_to_float(u)
       let z = oz +. int_to_float(a)
       let y = int_to_float(sy * 16 + v)
       let x1 = x +. fw
       let y1 = y +. fh
-      if d == 4 do quad_sized(b, x1, y, z +. 1.0, x1, y1, z +. 1.0, x, y1, z +. 1.0, x, y, z +. 1.0, fh, fw, l, shade_z())
-      else quad_sized(b, x, y, z, x, y1, z, x1, y1, z, x1, y, z, fh, fw, l, shade_z()) end
+      if d == 4 do quad_sized(b, x1, y, z +. 1.0, x1, y1, z +. 1.0, x, y1, z +. 1.0, x, y, z +. 1.0, fh, fw, l, 1.0, face_zpos())
+      else quad_sized(b, x, y, z, x, y1, z, x1, y1, z, x1, y, z, fh, fw, l, 1.0, face_zneg()) end
     end end
   end
 
@@ -362,6 +366,6 @@ mod CubeForge.Mesher do
   end
 
   doc "Vertices in a mesh buffer (7 floats each)."
-  fn vertex_count(b : CubeForge.F32Buf.F32Buf) : Int do B.len(b) / 7 end
+  fn vertex_count(b : CubeForge.F32Buf.F32Buf) : Int do B.len(b) / 8 end
 
 end
