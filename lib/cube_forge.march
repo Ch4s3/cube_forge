@@ -45,7 +45,11 @@ mod CubeForge do
   pfn pair_a(w : Wx) : Float do match w do Wx(a, _) -> a end end
   pfn pair_b(w : Wx) : Float do match w do Wx(_, b) -> b end end
 
-  type Frame = Frame(Int, Float, CubeForge.Player.Player, Int, NativeFloatArr, NativeF32Arr, Bool, CubeForge.F32Buf.F32Buf, Bool, Float, Float, Bool, Int, CubeForge.Menu.Menu, CubeForge.F32Buf.F32Buf, Int)   -- ..., inventory open, slot a stack was lifted from (-1 = not dragging), escape menu, its vertex buffer, seed of the session to start next (-1 = keep playing)
+  type Frame = Frame(Int, Float, CubeForge.Player.Player, Int, NativeFloatArr, NativeF32Arr, Bool, CubeForge.F32Buf.F32Buf, Bool, Float, Float, Bool, Int, CubeForge.Menu.Menu, CubeForge.F32Buf.F32Buf, Int, Float, Int)   -- ..., inventory open, slot a stack was lifted from (-1 = not dragging), escape menu, its vertex buffer, seed of the session to start next (-1 = keep playing), worst frame seen after warmup, and the frame it was
+  -- Frames before this are not counted toward the worst frame: the first few
+  -- carry one-time costs (the first draw of each buffer, the first time down
+  -- every path) that no steady-state budget should be measured against.
+  fn warmup_frames() : Int do 60 end
   -- Mutable-per-edit world state: world, per-slot vertex counts (opaque 0..63, water 64..127), outline buffer, current hit,
   -- selected block id, water actor pids (Array, one per chunk), per-chunk "has dirty cells" flags
   -- `p` is the water-actor Pid type: Pid(state) cannot be written in an annotation (GAPS.md G45), so it is a parameter.
@@ -87,6 +91,11 @@ mod CubeForge do
   fn water_slot_base() : Int do 64 end
   fn foliage_slot_base() : Int do 128 end
   fn tick_period() : Int do 10 end
+  -- Which frame of the period each phase of the world tick runs on. Spread so
+  -- that no frame carries more than one of them; see the frame loop.
+  fn water_slot() : Int do 0 end
+  fn biome_slot() : Int do 3 end
+  fn veg_slot() : Int do 6 end
 
   -- ── Water actors ────────────────────────────────────────────────────────────
   -- Create the chunk-actor pool. The actors are spawned empty; `reload_water`
@@ -255,6 +264,8 @@ mod CubeForge do
   fn pass_opaque() : Int do 1 end
   doc "Opaque and foliage, no water: growing or felling a tree."
   fn pass_solid() : Int do 2 end
+  doc "Water only: the water actors' replies."
+  fn pass_water() : Int do 3 end
 
   pfn rebuild_for(m : CubeForge.ChunkMesh.ChunkMesh, world : CubeForge.World.World, cx : Int, cz : Int, sy : Int, empty : CubeForge.Chunk.Chunk, passes : Int) : CubeForge.ChunkMesh.ChunkMesh do
     if passes == pass_opaque() do CM.rebuild_section_opaque(m, world, cx, cz, sy, empty)
@@ -302,7 +313,7 @@ mod CubeForge do
                       let cz = ci / n
                       let smask = widen_mask(section_mask(out, 0), 0, 0)
                       let m1 = remesh_sections_water(w1, cx, cz, smask, 0, Array.get(meshes, ci), empty)
-                      let c1 = upload_chunk(m1, ci, counts)
+                      let c1 = upload_chunk_passes(m1, ci, counts, pass_water())
                       let meshes1 = Array.set(meshes, ci, m1)
                       -- a changed border cell changes that neighbour's culling too: remesh those neighbours' same sections
                       match remesh_neighbors_water(w1, cx, cz, c1, meshes1, empty, edge_mask(out, 0), smask) do
@@ -332,7 +343,7 @@ mod CubeForge do
     else
       let ci = cx + World.side(w) * cz
       let m1 = remesh_sections_water(w, cx, cz, smask, 0, Array.get(meshes, ci), empty)
-      Remeshed(upload_chunk(m1, ci, counts), Array.set(meshes, ci, m1))
+      Remeshed(upload_chunk_passes(m1, ci, counts, pass_water()), Array.set(meshes, ci, m1))
     end
   end
   pfn remesh_neighbors_water(w : CubeForge.World.World, cx : Int, cz : Int, counts : NativeIntArr, meshes, empty : CubeForge.Chunk.Chunk, mask : Int, smask : Int) : Remeshed do
@@ -392,7 +403,7 @@ mod CubeForge do
     else
       let ci = cx + World.side(w) * cz
       let m1 = remesh_sections(w, cx, cz, smask, 0, Array.get(meshes, ci), empty, passes)
-      Remeshed(upload_chunk(m1, ci, counts), Array.set(meshes, ci, m1))
+      Remeshed(upload_chunk_passes(m1, ci, counts, passes), Array.set(meshes, ci, m1))
     end
   end
 
@@ -479,15 +490,30 @@ mod CubeForge do
     end
   end
   pfn upload_chunk(m : CubeForge.ChunkMesh.ChunkMesh, slot : Int, counts : NativeIntArr) : NativeIntArr do
+    upload_chunk_passes(m, slot, counts, pass_all())
+  end
+
+  -- Upload only the passes that were rebuilt. Every remesh used to push all
+  -- three passes of all sixteen sections of the chunk whichever one it had
+  -- touched, so a water cell moving re-sent that chunk's terrain and leaves as
+  -- well. The vertex counts are still written for all three -- they are three
+  -- array stores, and a pass that was not rebuilt has the count it already had.
+  pfn upload_chunk_passes(m : CubeForge.ChunkMesh.ChunkMesh, slot : Int, counts : NativeIntArr, passes : Int) : NativeIntArr do
     let os = CM.opaque_sections(m)
     let ws = CM.water_sections(m)
-    Win.gfx_upload_begin(slot, CM.total_floats(os))
-    upload_sections(slot, os, 0, 0)
-    Win.gfx_upload_begin(water_slot_base() + slot, CM.total_floats(ws))
-    upload_sections(water_slot_base() + slot, ws, 0, 0)
     let fs = CM.foliage_sections(m)
-    Win.gfx_upload_begin(foliage_slot_base() + slot, CM.total_floats(fs))
-    upload_sections(foliage_slot_base() + slot, fs, 0, 0)
+    if passes != pass_water() do
+      Win.gfx_upload_begin(slot, CM.total_floats(os))
+      upload_sections(slot, os, 0, 0)
+    else () end
+    if if passes == pass_all() do true else passes == pass_water() end do
+      Win.gfx_upload_begin(water_slot_base() + slot, CM.total_floats(ws))
+      upload_sections(water_slot_base() + slot, ws, 0, 0)
+    else () end
+    if if passes == pass_all() do true else passes == pass_solid() end do
+      Win.gfx_upload_begin(foliage_slot_base() + slot, CM.total_floats(fs))
+      upload_sections(foliage_slot_base() + slot, fs, 0, 0)
+    else () end
     NativeArray.set_int(NativeArray.set_int(NativeArray.set_int(counts, slot, CM.opaque_vertices(m)),
                                             water_slot_base() + slot, CM.water_vertices(m)),
                         foliage_slot_base() + slot, CM.foliage_vertices(m))
@@ -1017,11 +1043,11 @@ mod CubeForge do
 
   fn frame_loop(f : Frame, k : Knobs, sc, nchunks : Int, proj : NativeFloatArr, map_proj : NativeFloatArr, fps : Fps, wxpid, seed : Int) : Frame do
     match f do
-      Frame(frame, last_t, player, sample, view, vp, map_mode, marker, flash, wcache, bcache, inv_open, drag_from, menu, menubuf, next_seed) ->
+      Frame(frame, last_t, player, sample, view, vp, map_mode, marker, flash, wcache, bcache, inv_open, drag_from, menu, menubuf, next_seed, worst, worst_at) ->
         match k do
         Knobs(max_frames, dump_frame, dump_path, autowalk, autospin, autoedit, autoswim, autoflow, workers, automap, day_len, sun_deg, shadow_dist, soft_shadows, autoinv, autobreak, weather_pin, precip_cap, biome_rate, biome_map, autocanal, biome_budget, veg_budget, time_pin, remesh_all_at, automenu) ->
         if Win.should_close() || (max_frames >= 0 && frame >= max_frames) || next_seed >= 0 do
-          Frame(frame, last_t, player, sample, view, vp, map_mode, marker, flash, wcache, bcache, inv_open, drag_from, menu, menubuf, next_seed)
+          Frame(frame, last_t, player, sample, view, vp, map_mode, marker, flash, wcache, bcache, inv_open, drag_from, menu, menubuf, next_seed, worst, worst_at)
         else
           In.poll()
           -- I toggles the inventory. While it is open the cursor is released and no
@@ -1050,6 +1076,13 @@ mod CubeForge do
           let map_mode1 = if automap >= 0 && frame >= automap do true else map_mode0 end
           let now = Win.time()
           let dt = if now -. last_t > 0.1 do 0.1 else now -. last_t end
+          -- The frame that just ended, for the frame-budget gauge. Not dt: dt is
+          -- clamped for the physics, and a clamped spike is exactly the one worth
+          -- seeing. Uncapped runs (CF_VSYNC=0) measure the work; with vsync on
+          -- this measures the wait as well, so a budget is checked uncapped.
+          let elapsed = now -. last_t
+          let worst1 = if frame > warmup_frames() && elapsed > worst do elapsed else worst end
+          let worst_at1 = if frame > warmup_frames() && elapsed > worst do frame - 1 else worst_at end
           -- Cursor in NDC. The shim hands back framebuffer pixels, so the only
           -- conversion here is pixels to NDC, with y flipped (screen y grows down).
           -- Read only while the window is open: each of these extern calls returns
@@ -1124,27 +1157,43 @@ mod CubeForge do
           -- CF_AUTOCANAL=<frame>: a line of water beside the player, placed through
           -- edit_block so the biome field sees it the way a real edit would.
           let sc0d = if autocanal >= 0 && frame == autocanal do dig_canal(sc0c, player1, -4) else sc0c end
+          -- The world tick, spread over three frames of the period rather than
+          -- landing in one. The phases were already sequential and each is a
+          -- whole step on its own; running them in the same frame only ever
+          -- meant one frame carrying all of it. Together they cost ~25 ms, which
+          -- is a stall at any frame rate; apart they are ~8, ~8 and ~9.
+          --
+          -- The order within a period is unchanged -- water, then the field and
+          -- its retexturing, then vegetation -- and every rolling cursor still
+          -- advances once per period, since they are keyed on frame / tick_period().
+          -- What does change is that vegetation reads a field three frames older
+          -- than the retexture left it, which is why this moves the state hash
+          -- where every other step in this sequence held it.
+          let phase = frame % tick_period()
           -- water simulation tick
-          let sc1 = if frame % tick_period() == 0 do
-            let scw = water_tick(sc0d, workers, autoflow >= 0)
+          let scw = if phase == water_slot() do water_tick(sc0d, workers, autoflow >= 0) else sc0d end
+          -- The climate field, and the retexturing that follows from it: the
+          -- surface migrates toward the biome's palette, at most biome_budget
+          -- columns, each a real edit so relight, remesh and the water actors
+          -- all see it.
+          let sc1 = if phase == biome_slot() do
             let tb0 = Win.time()
             let scb = scene_with_biome(scw, Biome.tick(scene_biome(scw), scene_world(scw), seed, Biome.default_rate() *. int_to_float(biome_rate) /. 100.0))
-            if autoflow >= 0 && frame % 100 == 0 do println("biome tick: " ++ ms(Win.time() -. tb0)) else () end
-            -- Retexture: the surface migrates toward the biome's palette, at most
-            -- biome_budget columns per tick, each one a real edit_block so relight,
-            -- remesh and the water actors all see it.
+            if autoflow >= 0 && frame % 100 == biome_slot() do println("biome tick: " ++ ms(Win.time() -. tb0)) else () end
             let tm0 = Win.time()
             let picks = Biome.migrations(scene_biome(scb), scene_world(scb), frame / tick_period(), 2048, biome_budget)
             let scm = migrate(scb, picks)
-            if autoflow >= 0 && frame % 100 == 0 do println("biome migrate: " ++ int_to_string(List.length(picks)) ++ " columns in " ++ ms(Win.time() -. tm0)) else () end
+            if autoflow >= 0 && frame % 100 == biome_slot() do println("biome migrate: " ++ int_to_string(List.length(picks)) ++ " columns in " ++ ms(Win.time() -. tm0)) else () end
+            scm
+          else if phase == veg_slot() do
             -- Vegetation: grow where the biome wants a tree and the cell says so,
             -- fell where it no longer does. Each one is a chop-sized edit.
             let tv0 = Win.time()
-            let vpicks = Veg.candidates(scene_biome(scm), scene_world(scm), seed, frame / tick_period(), 2048, veg_budget)
-            let scv = vegetate(scm, seed, vpicks)
-            if autoflow >= 0 && frame % 100 == 0 do println("biome veg: " ++ int_to_string(List.length(vpicks)) ++ " trees in " ++ ms(Win.time() -. tv0)) else () end
+            let vpicks = Veg.candidates(scene_biome(scw), scene_world(scw), seed, frame / tick_period(), 2048, veg_budget)
+            let scv = vegetate(scw, seed, vpicks)
+            if autoflow >= 0 && frame % 100 == veg_slot() do println("biome veg: " ++ int_to_string(List.length(vpicks)) ++ " trees in " ++ ms(Win.time() -. tv0)) else () end
             scv
-          else sc0d end
+          else scw end end
           if autoflow >= 0 && frame >= autoflow && (frame - autoflow) % 100 == 0 do
             let cx = World.floor_div16(float_to_int(Math.floor(V.x(Player.position(player1)))))
             let cz = World.floor_div16(float_to_int(Math.floor(V.z(Player.position(player1)))))
@@ -1283,7 +1332,7 @@ mod CubeForge do
           if frame == 200 do
             println("live-object delta over frames 100..200: " ++ int_to_string(Win.live_allocs() - sample1) ++ " (" ++ int_to_string((Win.live_allocs() - sample1) / 100) ++ " per frame)")
           else () end
-          frame_loop(Frame(frame + 1, now, player1, sample1, view1, vp1, map_mode1, marker1, flash1, wnow, bnow, inv_open2, drag2, menu2, menubuf1, next_seed1), k, sc2, nchunks, proj, map_proj, fps1, wxpid, seed)
+          frame_loop(Frame(frame + 1, now, player1, sample1, view1, vp1, map_mode1, marker1, flash1, wnow, bnow, inv_open2, drag2, menu2, menubuf1, next_seed1, worst1, worst_at1), k, sc2, nchunks, proj, map_proj, fps1, wxpid, seed)
         end
         end
     end
@@ -1622,10 +1671,11 @@ mod CubeForge do
       let scene = Scene(world, counts, F32Buf.new(256), Ray.miss(), Ui(Inv.new(), F32Buf.new(2048), F32Buf.new(256), -1), pids, spring_flags(world, biome0, 0, n, NativeArray.make_int(n * n, 0)), Array.from_list(meshes), biome0)
       let fps0 = Fps(t4, 0, 0, F32Buf.new(4096))
       Weather.send_seed(wxpid, seed)
-      match frame_loop(Frame(0, t4, player, 0, NativeArray.make_float(16, 0.0), NativeArray.make_f32(16, 0.0), false, F32Buf.new(64), Env.get_int("CF_FLASH", 0) == 1, 0.0, 0.0, false, -1, Menu.new(seed), F32Buf.new(2048), -1), k, scene, n * n, proj, map_proj, fps0, wxpid, seed) do
-        Frame(frames, _, p, _, _, _, _, _, _, _, _, _, _, _, _, ns) ->
+      match frame_loop(Frame(0, t4, player, 0, NativeArray.make_float(16, 0.0), NativeArray.make_f32(16, 0.0), false, F32Buf.new(64), Env.get_int("CF_FLASH", 0) == 1, 0.0, 0.0, false, -1, Menu.new(seed), F32Buf.new(2048), -1, 0.0, -1), k, scene, n * n, proj, map_proj, fps0, wxpid, seed) do
+        Frame(frames, _, p, _, _, _, _, _, _, _, _, _, _, _, _, ns, worst, worst_at) ->
           let t5 = Win.time()
           println("ran " ++ int_to_string(frames) ++ " frames in " ++ ms(t5 -. t4) ++ " (" ++ float_to_string(int_to_float(frames) /. (t5 -. t4)) ++ " fps, vsync on); player ended at " ++ V.to_string(Player.position(p)))
+          println("worst frame after warmup: " ++ ms(worst) ++ " at frame " ++ int_to_string(worst_at))
           ns
       end
     end
