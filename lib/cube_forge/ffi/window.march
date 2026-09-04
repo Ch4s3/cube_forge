@@ -25,6 +25,7 @@ mod CubeForge.Ffi.Window do
     fn x_gfx_upload_part(slot: Int, offset: Int, arr: NativeF32Arr, nfloats: Int): Unit = "cf_gfx_upload_part"
     fn x_gfx_begin_frame(r: Float, g: Float, b: Float): Unit = "cf_gfx_begin_frame"
     fn x_gfx_set_view_proj(m: NativeF32Arr): Unit = "cf_gfx_set_view_proj"
+    fn x_gfx_set_light(sun: Float, ex: Float, ey: Float, ez: Float, dx: Float, dy: Float, dz: Float, flash: Int): Unit = "cf_gfx_set_light"
     fn x_gfx_draw(slot: Int, nverts: Int): Unit = "cf_gfx_draw"
     fn x_gfx_read_pixel(x: Int, y: Int): Int = "cf_gfx_read_pixel"
     fn x_gfx_draw_hud(slot: Int, nverts: Int, textured: Int): Unit = "cf_gfx_draw_hud"
@@ -59,6 +60,11 @@ mod CubeForge.Ffi.Window do
   fn gfx_begin_frame(r : Float, g : Float, b : Float) : Unit do x_gfx_begin_frame(r, g, b) end
   doc "Set the view-projection matrix: 16 floats, column-major."
   fn gfx_set_view_proj(m : NativeF32Arr) : Unit do x_gfx_set_view_proj(m) end
+
+  doc "Sun level 0..1, eye position, look direction, and whether the flashlight is on."
+  fn gfx_set_light(sun : Float, ex : Float, ey : Float, ez : Float, dx : Float, dy : Float, dz : Float, flash : Bool) : Unit do
+    x_gfx_set_light(sun, ex, ey, ez, dx, dy, dz, if flash do 1 else 0 end)
+  end
   fn gfx_draw(slot : Int, nverts : Int) : Unit do x_gfx_draw(slot, nverts) end
   doc "Draw a slot as GL_LINES in world space (untextured, no depth test)."
   fn gfx_draw_lines(slot : Int, nverts : Int) : Unit do x_gfx_draw_lines(slot, nverts) end

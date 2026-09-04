@@ -39,6 +39,7 @@ mod CubeForge.Ffi.Input do
   fn key_space() : Int do 32 end
   fn key_shift() : Int do 340 end
   fn key_escape() : Int do 256 end
+  fn key_f() : Int do 70 end
   fn key_1() : Int do 49 end
   fn key_2() : Int do 50 end
   fn key_3() : Int do 51 end

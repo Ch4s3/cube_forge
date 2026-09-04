@@ -145,12 +145,27 @@ static const char *VS =
 static const char *FS =
     "#version 330 core\n"
     "in vec2 v_uv; in float v_layer; in float v_shade;\n"
+    "in vec3 v_world; in vec3 v_normal;\n"
     "uniform sampler2DArray u_tex;\n"
     "uniform int u_use_tex;\n"
+    "uniform float u_sun;\n"
+    "uniform vec3 u_eye;\n"
+    "uniform vec3 u_dir;\n"
+    "uniform float u_flash;\n"
     "out vec4 o_color;\n"
+    /* The beam shape never varies at runtime, only its position, aim and
+     * on/off state, so the cone half-angles are constants rather than uniforms. */
+    "const float COS_INNER = 0.97;\n"
+    "const float COS_OUTER = 0.88;\n"
     "void main(){\n"
     "  vec4 t = (u_use_tex == 1) ? texture(u_tex, vec3(v_uv, v_layer)) : vec4(v_uv, v_layer, 1.0);\n"
-    "  o_color = vec4(t.rgb * v_shade, t.a);\n"
+    "  float baked = v_shade * mix(0.06, 1.0, u_sun);\n"
+    "  vec3  L  = u_eye - v_world;\n"
+    "  float d2 = dot(L, L);\n"
+    "  vec3  Ln = L * inversesqrt(max(d2, 1e-6));\n"
+    "  float spot  = smoothstep(COS_OUTER, COS_INNER, dot(-Ln, u_dir));\n"
+    "  float flash = u_flash * spot * max(dot(v_normal, Ln), 0.0) / (1.0 + 0.02 * d2);\n"
+    "  o_color = vec4(t.rgb * (baked + flash), t.a);\n"
     "}\n";
 
 static GLuint compile(GLenum kind, const char *src) {
@@ -164,6 +179,7 @@ static GLuint compile(GLenum kind, const char *src) {
 #define CF_MAX_MESHES 256
 static GLuint g_vbo[CF_MAX_MESHES];
 static GLint  g_u_use_tex = -1;
+static GLint  g_u_sun = -1, g_u_eye = -1, g_u_dir = -1, g_u_flash = -1;
 static GLuint g_tex = 0;
 
 int64_t cf_gfx_init(void) {
@@ -176,6 +192,10 @@ int64_t cf_gfx_init(void) {
     g_u_vp = glGetUniformLocation(g_prog, "u_vp");
     g_u_tex = glGetUniformLocation(g_prog, "u_tex");
     g_u_use_tex = glGetUniformLocation(g_prog, "u_use_tex");
+    g_u_sun = glGetUniformLocation(g_prog, "u_sun");
+    g_u_eye = glGetUniformLocation(g_prog, "u_eye");
+    g_u_dir = glGetUniformLocation(g_prog, "u_dir");
+    g_u_flash = glGetUniformLocation(g_prog, "u_flash");
     glGenVertexArrays(1, &g_vao);
     glGenBuffers(CF_MAX_MESHES, g_vbo);
     glUseProgram(g_prog);
@@ -268,9 +288,25 @@ void cf_gfx_draw_translucent(int64_t slot, int64_t nverts) {
 
 /* Draw a mesh slot as GL_LINES with the current view-projection, untextured,
  * depth test off so a selection outline is never hidden by the face it sits on. */
+/* The HUD and the block outline share the world program but must not be lit:
+ * they are screen-space or wireframe overlays. Force full sun and no flashlight
+ * around their draws, then restore what the frame asked for. */
+static float g_sun_saved = 1.0f, g_flash_saved = 0.0f;
+static void cf_unlit_begin(void) {
+    glGetUniformfv(g_prog, g_u_sun, &g_sun_saved);
+    glGetUniformfv(g_prog, g_u_flash, &g_flash_saved);
+    glUniform1f(g_u_sun, 1.0f);
+    glUniform1f(g_u_flash, 0.0f);
+}
+static void cf_unlit_end(void) {
+    glUniform1f(g_u_sun, g_sun_saved);
+    glUniform1f(g_u_flash, g_flash_saved);
+}
+
 void cf_gfx_draw_lines(int64_t slot, int64_t nverts) {
     if (slot < 0 || slot >= CF_MAX_MESHES || nverts <= 0) return;
     glDisable(GL_DEPTH_TEST);
+    cf_unlit_begin();
     glUniform1i(g_u_use_tex, 0);
     glBindBuffer(GL_ARRAY_BUFFER, g_vbo[slot]);
     GLsizei stride = CF_VERT_FLOATS * sizeof(float);
@@ -281,11 +317,12 @@ void cf_gfx_draw_lines(int64_t slot, int64_t nverts) {
     glEnableVertexAttribArray(4); glVertexAttribPointer(4, 1, GL_FLOAT, GL_FALSE, stride, (void *)(7 * 4));
     glDrawArrays(GL_LINES, 0, (GLsizei)nverts);
     glUniform1i(g_u_use_tex, g_tex ? 1 : 0);
+    cf_unlit_end();
     glEnable(GL_DEPTH_TEST);
 }
 
-/* Draw a screen-space overlay mesh (NDC coordinates, same 7-float layout):
- * identity view-projection, no texture, no depth test. Restores state after. */
+/* Draw a screen-space overlay mesh (NDC coordinates, same 8-float layout):
+ * identity view-projection, no texture, no depth test, unlit. Restores state after. */
 void cf_gfx_draw_hud(int64_t slot, int64_t nverts, int64_t textured) {
     static const float ident[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
     if (slot < 0 || slot >= CF_MAX_MESHES || nverts <= 0) return;
@@ -293,9 +330,11 @@ void cf_gfx_draw_hud(int64_t slot, int64_t nverts, int64_t textured) {
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glUniformMatrix4fv(g_u_vp, 1, GL_FALSE, ident);
+    cf_unlit_begin();
     glUniform1i(g_u_use_tex, (textured && g_tex) ? 1 : 0);
     cf_gfx_draw(slot, nverts);
     glUniform1i(g_u_use_tex, g_tex ? 1 : 0);
+    cf_unlit_end();
     glDisable(GL_BLEND);
     glEnable(GL_DEPTH_TEST);
 }
@@ -332,6 +371,18 @@ void *cf_u8_blit(void *dst, int64_t di, void *src, int64_t si, int64_t n) {
     }
     memcpy((unsigned char *)narr_data(dst) + di, (const unsigned char *)narr_data(src) + si, (size_t)n);
     return dst;
+}
+
+/* Sun level 0..1, eye position, look direction, and the flashlight toggle.
+ * Called once per frame before the world passes. */
+void cf_gfx_set_light(double sun, double ex, double ey, double ez,
+                      double dx, double dy, double dz, int64_t flash) {
+    if (!g_prog) return;
+    glUseProgram(g_prog);
+    glUniform1f(g_u_sun, (float)sun);
+    glUniform3f(g_u_eye, (float)ex, (float)ey, (float)ez);
+    glUniform3f(g_u_dir, (float)dx, (float)dy, (float)dz);
+    glUniform1f(g_u_flash, flash ? 1.0f : 0.0f);
 }
 
 /* Debug/verification hook: read back one pixel of the back buffer as 0xRRGGBB.

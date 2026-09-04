@@ -833,3 +833,24 @@ are freed immediately.
   the right API for a raycast or a physics probe and the wrong one for anything
   that walks voxels in bulk. Every future bulk pass (meshing, save/load, chunk
   streaming) should fetch the chunk once and index it directly.
+
+### G61. Two more identifiers that are silently reserved: `by` and `on`
+- `pfn corner_pack(..., by : Int, bz : Int)` and `let on = st % 2` both produce a
+  bare `parse error` pointing at the identifier, with no indication that the name
+  is the problem. Renaming to `avy` and `lamp` fixed each immediately.
+- Related parse traps hit in the same session, all reported as `parse error` at
+  the offending token rather than as a named rule:
+  - a `doc` string and a function attribute cannot coexist (already G56) — the
+    workaround is a `--` comment above `@[no_alloc]`;
+  - float comparison is `<`, not `<.`, even though the arithmetic is `+.` / `-.`;
+  - a nested `if` inside a one-line `if ... do <expr> else ... end` branch does
+    not parse, parenthesised or not.
+- **Would need:** a reserved-word list in the error (``on` is reserved`), and the
+  parser naming the construct it rejected.
+
+### G62. `forge check` does not catch an arity/type mismatch across modules
+- Task 7 changed `Mesher.mesh_section_opaque` from 8 parameters to 9, inserting a
+  `NativeU8Arr` where `chunk_mesh.march` was still passing an `Int`. `forge check`
+  reported **0 errors** on `lib/`; only `forge build` caught it, at the clang stage.
+- Cheap to trip over: the whole point of `check` is the fast inner loop, and a
+  cross-module signature change is exactly what it should catch.

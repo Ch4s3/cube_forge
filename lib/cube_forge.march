@@ -32,8 +32,10 @@ mod CubeForge do
 
   -- Everything the frame loop threads through. A variant so the per-frame
   -- rebuild can reuse the cell (see GAPS.md G12).
-  -- frame, last_time, player, alloc_sample, view scratch (NativeFloatArr 16), vp upload buffer (NativeF32Arr 16)
-  type Frame = Frame(Int, Float, CubeForge.Player.Player, Int, NativeFloatArr, NativeF32Arr)
+  -- frame, last_time, player, alloc_sample, view scratch (NativeFloatArr 16), vp upload buffer (NativeF32Arr 16),
+  -- flashlight state packed as (on ? 1 : 0) + (F held last frame ? 2 : 0) — the
+  -- key poll is level-triggered, so the toggle needs last frame's edge.
+  type Frame = Frame(Int, Float, CubeForge.Player.Player, Int, NativeFloatArr, NativeF32Arr, Int)
   -- Mutable-per-edit world state: world, per-slot vertex counts (opaque 0..63, water 64..127), outline buffer, current hit,
   -- selected block id, water actor pids (Array, one per chunk), per-chunk "has dirty cells" flags
   -- `p` is the water-actor Pid type: Pid(state) cannot be written in an annotation (GAPS.md G45), so it is a parameter.
@@ -509,6 +511,23 @@ mod CubeForge do
     if pos && !neg do 1.0 else if neg && !pos do -1.0 else 0.0 end end
   end
 
+  doc "Sun level 0..1 over a day of [day] seconds (CF_DAY). Cosine, not sine, so the world starts at noon rather than at midnight; night is the clamped half of the cycle."
+  fn sun_level(t : Float, day : Float) : Float do
+    let phase = Math.cos(t *. 6.283185307 /. day)
+    if phase < 0.0 do 0.0 else phase end
+  end
+
+  -- Toggle the flashlight on the frame F goes down. [st] packs the lamp state in
+  -- bit 0 and last frame's key state in bit 1.
+  pfn flash_step(st : Int, down : Bool) : Int do
+    let lamp = st % 2
+    let was = st / 2
+    let d = if down do 1 else 0 end
+    let lamp1 = if d == 1 && was == 0 do (lamp + 1) % 2 else lamp end
+    lamp1 + 2 * d
+  end
+  pfn flash_on(st : Int) : Bool do st % 2 == 1 end
+
   -- Gather this frame's input into a value the (Input-cap-free) Player module can consume.
   -- Block selection: keys 1-4; 0 when none is pressed this frame.
   pfn selected_key() : Int do
@@ -547,15 +566,15 @@ mod CubeForge do
 
   -- Frame loop. `max_frames < 0` means run until the window closes.
   -- Run-time knobs read once, outside the frame loop (an Env read allocates).
-  type Knobs = Knobs(Int, Int, String, Bool, Float, Int, Bool, Int, Int)   -- max_frames, dump_frame, dump_path, autowalk, autospin, autoedit frame (<0 = off), autoswim, autoflow frame (<0 = off), workers
+  type Knobs = Knobs(Int, Int, String, Bool, Float, Int, Bool, Int, Int, Float)   -- max_frames, dump_frame, dump_path, autowalk, autospin, autoedit frame (<0 = off), autoswim, autoflow frame (<0 = off), workers, day length in seconds
 
   fn frame_loop(f : Frame, k : Knobs, sc, nchunks : Int, proj : NativeFloatArr, fps : Fps) : Frame do
     match f do
-      Frame(frame, last_t, player, sample, view, vp) ->
+      Frame(frame, last_t, player, sample, view, vp, flash) ->
         match k do
-        Knobs(max_frames, dump_frame, dump_path, autowalk, autospin, autoedit, autoswim, autoflow, workers) ->
+        Knobs(max_frames, dump_frame, dump_path, autowalk, autospin, autoedit, autoswim, autoflow, workers, day_len) ->
         if Win.should_close() || (max_frames >= 0 && frame >= max_frames) do
-          Frame(frame, last_t, player, sample, view, vp)
+          Frame(frame, last_t, player, sample, view, vp, flash)
         else
           In.poll()
           if In.key(In.key_escape()) do Win.request_close() else () end
@@ -589,7 +608,12 @@ mod CubeForge do
           if autoswim && frame % 20 == 0 && frame <= 400 do
             println("frame " ++ int_to_string(frame) ++ " y=" ++ float_to_string(V.y(Player.position(player1))) ++ " in_water=" ++ (if Player.in_water(player1, scene_world(sc1)) do "true" else "false" end) ++ " eye_in_water=" ++ (if Player.eye_in_water(player1, scene_world(sc1)) do "true" else "false" end))
           else () end
-          Win.gfx_begin_frame(0.55, 0.75, 0.95)
+          let flash1 = flash_step(flash, In.key(In.key_f()))
+          let sun = sun_level(now, day_len)
+          let eye = Player.eye(player1)
+          let look = Player.forward(Player.yaw(player1), Player.pitch(player1))
+          Win.gfx_begin_frame(0.55 *. sun, 0.75 *. sun, 0.95 *. sun)
+          Win.gfx_set_light(sun, V.x(eye), V.y(eye), V.z(eye), V.x(look), V.y(look), V.z(look), flash_on(flash1))
           Win.gfx_set_view_proj(vp1)
           draw_chunks(scene_counts(sc1), 0, nchunks)
           draw_water(scene_counts(sc1), 0, nchunks)
@@ -615,7 +639,7 @@ mod CubeForge do
           if frame == 200 do
             println("live-object delta over frames 100..200: " ++ int_to_string(Win.live_allocs() - sample1) ++ " (" ++ int_to_string((Win.live_allocs() - sample1) / 100) ++ " per frame)")
           else () end
-          frame_loop(Frame(frame + 1, now, player1, sample1, view1, vp1), k, sc2, nchunks, proj, fps1)
+          frame_loop(Frame(frame + 1, now, player1, sample1, view1, vp1, flash1), k, sc2, nchunks, proj, fps1)
         end
         end
     end
@@ -797,14 +821,14 @@ mod CubeForge do
         if Env.get_int("CF_ALLOC_PROBE", 0) == 1 do alloc_probe(world, proj) else () end
         let t4 = Win.time()
         let knobs = Knobs(max_frames, Env.get_int("CF_DUMP_FRAME", 30), Env.get("CF_DUMP", ""), Env.get_int("CF_AUTOWALK", 0) == 1,
-                          int_to_float(Env.get_int("CF_AUTOSPIN", 0)) /. 1000.0 /. Player.mouse_sens(), Env.get_int("CF_AUTOEDIT", -1), autoswim, Env.get_int("CF_AUTOFLOW", -1), workers)
+                          int_to_float(Env.get_int("CF_AUTOSPIN", 0)) /. 1000.0 /. Player.mouse_sens(), Env.get_int("CF_AUTOEDIT", -1), autoswim, Env.get_int("CF_AUTOFLOW", -1), workers, int_to_float(Env.get_int("CF_DAY", 240)))
         let tw0 = Win.time()
         let pids = Array.from_list(spawn_water(n * n - 1, n, seed, Nil))
         println("spawned " ++ int_to_string(n * n) ++ " water actors in " ++ ms(Win.time() -. tw0) ++ " (loads run asynchronously)")
         let scene = Scene(world, counts, F32Buf.new(256), Ray.miss(), Ui(Inv.new(), F32Buf.new(2048), F32Buf.new(256), -1), pids, NativeArray.make_int(n * n, 0), Array.from_list(meshes))
         let fps0 = Fps(t4, 0, 0, F32Buf.new(4096))
-        match frame_loop(Frame(0, t4, player, 0, NativeArray.make_float(16, 0.0), NativeArray.make_f32(16, 0.0)), knobs, scene, n * n, proj, fps0) do
-          Frame(frames, _, p, _, _, _) ->
+        match frame_loop(Frame(0, t4, player, 0, NativeArray.make_float(16, 0.0), NativeArray.make_f32(16, 0.0), Env.get_int("CF_FLASH", 0)), knobs, scene, n * n, proj, fps0) do
+          Frame(frames, _, p, _, _, _, _) ->
             let t5 = Win.time()
             println("ran " ++ int_to_string(frames) ++ " frames in " ++ ms(t5 -. t4) ++ " (" ++ float_to_string(int_to_float(frames) /. (t5 -. t4)) ++ " fps, vsync on); player ended at " ++ V.to_string(Player.position(p)))
         end
