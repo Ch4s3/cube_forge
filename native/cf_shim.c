@@ -233,6 +233,7 @@ static const char *FS =
     "const vec3 WORLD = vec3(128.0, 256.0, 128.0);\n"
     "const int  MAX_STEPS = 256;\n"
     "const float SOFT_SPREAD = 0.035;\n"
+    "const int SOFT_TAPS = 2;\n"
     "const float CS = 8.0;\n"          /* coarse cell size, matching CF_OCC_CS */
     "const int  MAX_COARSE = 160;\n"
     /* Amanatides-Woo voxel DDA. Returns the distance at which the ray first
@@ -318,10 +319,17 @@ static const char *FS =
     "  return smoothstep(0.75, 1.0, hit / maxDist);\n"
     "}\n"
     "float hash12(vec2 v){ return fract(sin(dot(v, vec2(12.9898, 78.233))) * 43758.5453); }\n"
-    /* Hard shadows are one ray. Soft shadows spread four over a small cone:
+    /* Hard shadows are one ray. Soft shadows spread SOFT_TAPS over a small cone:
      * because the rays diverge, the penumbra widens with distance from the
      * caster on its own, which is what real soft shadows do. The cone is rotated
-     * per pixel so four samples read as softness rather than as four bands. */
+     * per pixel so the samples read as softness rather than as bands.
+     *
+     * Two taps, not four. The trace is the whole cost of a shadow -- hard
+     * shadows measure within 0.1 ms of no shadows at all, four-tap soft ones
+     * cost 3.3 ms of an 8.1 ms frame at 1920x1200 -- so the tap count IS the
+     * shadow budget. The per-pixel rotation is what makes a low tap count read
+     * as softness instead of as banding, and it does not care how many taps it
+     * is rotating. */
     "float shadow(vec3 p, vec3 dir, float maxDist){\n"
     "  if (u_shadow <= 0.0) return 1.0;\n"
     "  if (u_soft < 0.5) return shadowOf(traceDist(p, dir, maxDist), maxDist);\n"
@@ -330,12 +338,12 @@ static const char *FS =
     "  vec3 t2 = cross(dir, t1);\n"
     "  float a0 = hash12(gl_FragCoord.xy) * 6.2831853;\n"
     "  float acc = 0.0;\n"
-    "  for (int k = 0; k < 4; k++){\n"
-    "    float a = a0 + float(k) * 1.5707963;\n"
+    "  for (int k = 0; k < SOFT_TAPS; k++){\n"
+    "    float a = a0 + float(k) * (6.2831853 / float(SOFT_TAPS));\n"
     "    vec3 d = normalize(dir + (t1 * cos(a) + t2 * sin(a)) * SOFT_SPREAD);\n"
     "    acc += shadowOf(traceDist(p, d, maxDist), maxDist);\n"
     "  }\n"
-    "  return acc * 0.25;\n"
+    "  return acc * (1.0 / float(SOFT_TAPS));\n"
     "}\n"
     /* Eight compass directions for the flow effects 2..9, in the order the
      * mesher packs them: +x, +x+z, +z, -x+z, -x, -x-z, -z, +x-z. */
