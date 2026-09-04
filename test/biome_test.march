@@ -4,6 +4,19 @@ mod CubeForge.Test.Biome do
   needs IO.Spawn   -- capability ceiling, as in test/water_test.march
   import Test
   alias CubeForge.Biome as Biome
+  alias CubeForge.Chunk as C
+
+  -- A flat world: every column solid stone up to [h].
+  pfn flat_cells(c : CubeForge.Chunk.Chunk, i : Int, h : Int) : CubeForge.Chunk.Chunk do
+    if i >= 256 * h do c
+    else flat_cells(C.set(c, i % 16, i / 256, (i / 16) % 16, 3), i + 1, h) end
+  end
+  pfn flat_chunks(i : Int, h : Int, acc : List(CubeForge.Chunk.Chunk)) : List(CubeForge.Chunk.Chunk) do
+    if i < 0 do acc else flat_chunks(i - 1, h, Cons(flat_cells(C.new(), 0, h), acc)) end
+  end
+  pfn flat_world(h : Int) : CubeForge.World.World do
+    CubeForge.World.World(Array.from_list(flat_chunks(63, h, Nil)), CubeForge.Light.new(), CubeForge.Light.new(), 8)
+  end
 
   -- Inland (far from water) at sea level, so only the axes decide.
   pfn inland(t : Float, m : Float) : Int do Biome.classify(t, m, 62, 99) end
@@ -46,6 +59,31 @@ mod CubeForge.Test.Biome do
       Test.assert_true(high < low, "lapse rate")
       Test.assert_true(Math.abs(Biome.temp_target(40, 40, 7, 62) -. Biome.temp_target(40, 40, 8, 62)) > 0.0001, "seed matters")
       Test.assert_true(low >= 0.0 && low <= 1.0, "clamped")
+    end
+  end
+
+  describe "Biome.build" do
+    test "heightmap reads the surface" do
+      let f = Biome.build(flat_world(70), 7)
+      Test.assert_eq_int(Biome.height_of(f, 5, 5), 69, "top solid block of a 70-high column")
+      let w2 = CubeForge.World.set_block(flat_world(70), 5, 70, 5, 3)
+      Test.assert_eq_int(Biome.height_of(Biome.build(w2, 7), 5, 5), 70, "a block placed on top raises it")
+    end
+
+    test "distance to water is Chebyshev and capped at the reach" do
+      let w = CubeForge.World.set_block(flat_world(70), 64, 70, 64, C.water())
+      let d = Biome.distances(Biome.build(w, 7), w)
+      Test.assert_eq_int(NativeArray.get_int(d, 64 + 128 * 64), 0, "on the water")
+      Test.assert_eq_int(NativeArray.get_int(d, 67 + 128 * 66), 3, "Chebyshev: max(3, 2)")
+      Test.assert_eq_int(NativeArray.get_int(d, 0), Biome.reach(), "far away is capped")
+    end
+
+    test "a dry temperate flat world is grassland; beside water it is beach" do
+      let w = CubeForge.World.set_block(flat_world(63), 64, 63, 64, C.water())
+      let f = Biome.build(w, 7)
+      Test.assert_eq_int(Biome.biome_of(f, 65, 64), Biome.b_beach(), "next to the water")
+      let far = Biome.biome_of(f, 5, 5)
+      Test.assert_true(far == Biome.b_grassland() || far == Biome.b_tundra() || far == Biome.b_desert(), "far away is one of the dry biomes")
     end
   end
 

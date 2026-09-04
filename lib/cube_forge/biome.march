@@ -61,4 +61,128 @@ mod CubeForge.Biome do
     end end
   end
 
+
+  alias CubeForge.World as W
+  alias CubeForge.Chunk as C
+
+  fn cols(w : CubeForge.World.World) : Int do W.side(w) * 16 end
+
+  -- Highest non-air block in a column, scanning down from [top]. 0 if none.
+  pfn surface_go(w : CubeForge.World.World, wx : Int, wz : Int, y : Int) : Int do
+    if y <= 0 do 0
+    else if W.block_at(w, wx, y, wz) != 0 do y
+    else surface_go(w, wx, wz, y - 1) end end
+  end
+
+  -- Water at the surface, or one above it.
+  pfn wet_at(w : CubeForge.World.World, wx : Int, wz : Int, h : Int) : Bool do
+    C.is_water(W.block_at(w, wx, h, wz)) || C.is_water(W.block_at(w, wx, h + 1, wz))
+  end
+
+  pfn scan_go(w : CubeForge.World.World, n : Int, top : Int, i : Int,
+              hs : NativeU8Arr, ws : NativeU8Arr) : Field do
+    if i >= n * n do Field(hs, ws, NativeArray.make_float(n * n, 0.0), NativeArray.make_float(n * n, 0.0), NativeArray.make_u8(n * n, 0), NativeArray.make_u8(n * n, 0))
+    else
+      let h = surface_go(w, i % n, i / n, top)
+      scan_go(w, n, top, i + 1, NativeArray.set_u8(hs, i, h), NativeArray.set_u8(ws, i, if wet_at(w, i % n, i / n, h) do 1 else 0 end))
+    end
+  end
+
+  -- ── Multi-source BFS: Chebyshev distance to the nearest water column ──────
+  -- Distance array and ring queue travel together in a Bfs cell and are ALWAYS
+  -- threaded, never written and discarded: a NativeArray write returns the array
+  -- it wrote, which is a fresh copy whenever March judges the input shared
+  -- (GAPS G68), so `let _ = set_int(...)` silently loses the write.
+  type Bfs = Bfs(NativeIntArr, NativeIntArr, Int)   -- distances, queue, queue length
+
+  pfn seed_go(ws : NativeU8Arr, n : Int, i : Int, b : Bfs) : Bfs do
+    if i >= n * n do b
+    else if NativeArray.get_u8(ws, i) == 1 do
+      match b do Bfs(d, q, qn) -> seed_go(ws, n, i + 1, Bfs(NativeArray.set_int(d, i, 0), NativeArray.set_int(q, qn, i), qn + 1)) end
+    else seed_go(ws, n, i + 1, b) end end
+  end
+
+  -- dx, dz for neighbour k of 8: the 3x3 ring minus the centre, row by row.
+  pfn ndx(k : Int) : Int do
+    let kk = if k >= 4 do k + 1 else k end
+    kk % 3 - 1
+  end
+  pfn ndz(k : Int) : Int do
+    let kk = if k >= 4 do k + 1 else k end
+    kk / 3 - 1
+  end
+
+  -- Relax the eight neighbours of column (x, z); push any whose distance improved.
+  pfn relax(b : Bfs, n : Int, x : Int, z : Int, nd : Int, k : Int) : Bfs do
+    if k >= 8 do b
+    else
+      let nx = x + ndx(k)
+      let nz = z + ndz(k)
+      if nx < 0 || nz < 0 || nx >= n || nz >= n do relax(b, n, x, z, nd, k + 1)
+      else
+        let j = nx + n * nz
+        match b do
+          Bfs(d, q, qn) ->
+            if nd < NativeArray.get_int(d, j) do
+              relax(Bfs(NativeArray.set_int(d, j, nd), NativeArray.set_int(q, qn, j), qn + 1), n, x, z, nd, k + 1)
+            else relax(b, n, x, z, nd, k + 1) end
+        end
+      end
+    end
+  end
+
+  pfn bfs_go(b : Bfs, qh : Int, n : Int) : NativeIntArr do
+    match b do
+      Bfs(d, q, qn) ->
+        if qh >= qn do d
+        else
+          let i = NativeArray.get_int(q, qh)
+          let nd = NativeArray.get_int(d, i) + 1
+          if nd >= reach() do bfs_go(b, qh + 1, n)
+          else bfs_go(relax(b, n, i % n, i / n, nd, 0), qh + 1, n) end
+        end
+    end
+  end
+
+  doc "Chebyshev distance to the nearest water column, capped at reach(). Fresh arrays every call (GAPS G68)."
+  fn distances(f : Field, w : CubeForge.World.World) : NativeIntArr do
+    let n = cols(w)
+    match f do
+      Field(_, ws, _, _, _, _) ->
+        -- every column can be pushed at most reach() times; size the ring generously
+        bfs_go(seed_go(ws, n, 0, Bfs(NativeArray.make_int(n * n, reach()), NativeArray.make_int(n * n * 4, 0), 0)), 0, n)
+    end
+  end
+
+  -- Classify every column from its targets, writing the eased axes AT target
+  -- (a fresh world starts fully classified; easing is for changes).
+  pfn classify_all(f : Field, seed : Int, d : NativeIntArr, n : Int, i : Int,
+                   ta : NativeFloatArr, ma : NativeFloatArr, bs : NativeU8Arr) : Field do
+    if i >= n * n do match f do Field(hs, ws, _, _, _, hold) -> Field(hs, ws, ta, ma, bs, hold) end
+    else
+      let h = height_of(f, i % n, i / n)
+      let dist = NativeArray.get_int(d, i)
+      let t = temp_target(i % n, i / n, seed, h)
+      let m = moisture_target(dist)
+      let b = classify(t, m, h, dist)
+      classify_all(f, seed, d, n, i + 1, NativeArray.set_float(ta, i, t), NativeArray.set_float(ma, i, m), NativeArray.set_u8(bs, i, b))
+    end
+  end
+
+  doc "Build the field from a world: scan every column's surface and water, then classify."
+  fn build(w : CubeForge.World.World, seed : Int) : Field do
+    let n = cols(w)
+    let f0 = scan_go(w, n, CubeForge.Light.sky_floor(w), 0, NativeArray.make_u8(n * n, 0), NativeArray.make_u8(n * n, 0))
+    let d = distances(f0, w)
+    classify_all(f0, seed, d, n, 0, NativeArray.make_float(n * n, 0.0), NativeArray.make_float(n * n, 0.0), NativeArray.make_u8(n * n, 0))
+  end
+
+  fn height_of(f : Field, wx : Int, wz : Int) : Int do
+    match f do Field(hs, _, _, _, _, _) -> NativeArray.get_u8(hs, wx + 128 * wz) end
+  end
+  fn biome_of(f : Field, wx : Int, wz : Int) : Int do
+    match f do Field(_, _, _, _, bs, _) -> NativeArray.get_u8(bs, wx + 128 * wz) end
+  end
+  fn field_biomes(f : Field) : NativeU8Arr do match f do Field(_, _, _, _, bs, _) -> bs end end
+
 end
