@@ -31,7 +31,9 @@ Planned, not started. One entry per feature; each gets its own design doc under
 ## Compiler patches (from GAPS.md "Compiler patches")
 
 - [ ] Per-read `inc_rc` on borrowed `NativeArray` (G67) — blocks double-buffering
-      the skylight sweep, which is ~10 ms of every block edit. Same root as G31.
+      the skylight sweep, which is ~10 ms of every block edit. Root cause found
+      and a fix validated against 576 codegen tests; plan in
+      `docs/superpowers/plans/2026-09-04-g67-borrowed-array-reads.md`.
 
 - [ ] `march_bytes_borrow` unwrap (G8) — one line + test.
 - [ ] Zero-arg extern dead-binding drop (G16).
