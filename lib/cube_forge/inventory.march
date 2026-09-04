@@ -1,114 +1,194 @@
--- Inventory — counts for the three solid blocks, the selected hotbar slot,
--- and the break-in-progress state. A variant, threaded through the frame loop.
+-- Inventory — 36 slots, each holding an item id and a count, plus the selected
+-- hotbar slot and the break-in-progress state.
+--
+-- Slots 0..8 are the hotbar, 9..35 the backpack. A slot's item is stored, not
+-- implied by its position: that is what makes drag-and-drop possible, and it is
+-- why this is an array rather than the flat variant it replaced. Thirty-six
+-- slots as a variant would be seventy-two fields.
+--
+-- Layout is item id at 2*slot, count at 2*slot+1. An empty slot is item 0 with
+-- count 0; the two always move together, so `set` writes both.
 mod CubeForge.Inventory do
 
   alias CubeForge.Chunk as C
 
-  -- Slots map 1:1 to placeable blocks: 1 grass, 2 dirt, 3 stone, 4 water, 5 sand,
-  -- 6 snow, 7 granite, 8 oak log, 9 pine log. Counts per slot, then selected slot,
-  -- break progress, target x, y, z.
-  type Inv = Inv(Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Float, Int, Int, Int)
+  type Inv = Inv(NativeIntArr, Int, Float, Int, Int, Int)   -- slots, sel (1-based), progress, target x, y, z
 
-  fn slots() : Int do 9 end
-  fn new() : Inv do Inv(0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0.0, 0, -1, 0) end
+  doc "Hotbar slots, drawn along the bottom and selectable with the number keys."
+  fn hotbar_slots() : Int do 9 end
+  doc "Backpack slots, only reachable while the inventory window is open."
+  fn pack_slots() : Int do 27 end
+  doc "Total addressable slots. Hotbar is [0, hotbar_slots), backpack the rest."
+  fn slots() : Int do hotbar_slots() + pack_slots() end
+
+  fn new() : Inv do Inv(NativeArray.make_int(2 * slots(), 0), 1, 0.0, 0, -1, 0) end
   fn break_seconds() : Float do 0.4 end
 
-  fn sel(i : Inv) : Int do match i do Inv(_, _, _, _, _, _, _, _, _, s, _, _, _, _) -> s end end
-  fn progress(i : Inv) : Float do match i do Inv(_, _, _, _, _, _, _, _, _, _, p, _, _, _) -> p end end
+  -- ── Slot access ─────────────────────────────────────────────────────────────
 
-  doc "Block id placed by hotbar slot [slot] (1-7)."
-  fn block_of_slot(slot : Int) : Int do
-    if slot == 4 do C.water()
-    else if slot == 5 do C.sand()
-    else if slot == 6 do C.snow()
-    else if slot == 7 do C.granite()
-    else if slot == 8 do C.oak_log()
-    else if slot == 9 do C.pine_log()
-    else slot end end end end end end
+  fn cells(i : Inv) : NativeIntArr do match i do Inv(a, _, _, _, _, _) -> a end end
+
+  doc "Item id in slot [s] (0-based), or 0 when the slot is empty."
+  fn item_at(i : Inv, s : Int) : Int do
+    if s < 0 || s >= slots() do 0 else NativeArray.get_int(cells(i), 2 * s) end
   end
 
-  doc "Hotbar slot a broken block goes into, or 0 if it is not collectable."
-  fn slot_of_block(id : Int) : Int do
-    if id == 1 || id == 2 || id == 3 do id
-    else if C.is_source(id) do 4
-    else if id == C.sand() do 5
-    else if id == C.snow() do 6
-    else if id == C.granite() do 7
-    else if id == C.oak_log() do 8
-    else if id == C.pine_log() do 9
-    else 0 end end end end end end end
+  doc "Count in slot [s] (0-based), or 0 when the slot is empty."
+  fn count_at(i : Inv, s : Int) : Int do
+    if s < 0 || s >= slots() do 0 else NativeArray.get_int(cells(i), 2 * s + 1) end
   end
 
-  doc "Count held in hotbar slot [slot] (1-7)."
-  fn count(i : Inv, slot : Int) : Int do
-    match i do
-      Inv(c1, c2, c3, c4, c5, c6, c7, c8, c9, _, _, _, _, _) ->
-        if slot == 1 do c1 else if slot == 2 do c2 else if slot == 3 do c3 else if slot == 4 do c4
-        else if slot == 5 do c5 else if slot == 6 do c6 else if slot == 7 do c7
-        else if slot == 8 do c8 else if slot == 9 do c9 else 0 end end end end end end end end end
+  fn is_empty_at(i : Inv, s : Int) : Bool do count_at(i, s) <= 0 end
+
+  -- Write item and count together. A count of 0 clears the item too, so an empty
+  -- slot is always (0, 0) and never a stale id with nothing behind it.
+  fn set_slot(i : Inv, s : Int, item : Int, n : Int) : Inv do
+    if s < 0 || s >= slots() do i
+    else
+      match i do
+        Inv(a, sel, p, x, y, z) ->
+          let it = if n <= 0 do 0 else item end
+          let ct = if n <= 0 do 0 else n end
+          Inv(NativeArray.set_int(NativeArray.set_int(a, 2 * s, it), 2 * s + 1, ct), sel, p, x, y, z)
+      end
     end
   end
 
-  -- Add [d] to slot [slot]; slot 0 (a block that is not collectable) is a no-op.
-  pfn add(i : Inv, slot : Int, d : Int) : Inv do
-    match i do
-      Inv(c1, c2, c3, c4, c5, c6, c7, c8, c9, sl, p, x, y, z) ->
-        if slot == 1 do Inv(c1 + d, c2, c3, c4, c5, c6, c7, c8, c9, sl, p, x, y, z)
-        else if slot == 2 do Inv(c1, c2 + d, c3, c4, c5, c6, c7, c8, c9, sl, p, x, y, z)
-        else if slot == 3 do Inv(c1, c2, c3 + d, c4, c5, c6, c7, c8, c9, sl, p, x, y, z)
-        else if slot == 4 do Inv(c1, c2, c3, c4 + d, c5, c6, c7, c8, c9, sl, p, x, y, z)
-        else if slot == 5 do Inv(c1, c2, c3, c4, c5 + d, c6, c7, c8, c9, sl, p, x, y, z)
-        else if slot == 6 do Inv(c1, c2, c3, c4, c5, c6 + d, c7, c8, c9, sl, p, x, y, z)
-        else if slot == 7 do Inv(c1, c2, c3, c4, c5, c6, c7 + d, c8, c9, sl, p, x, y, z)
-        else if slot == 8 do Inv(c1, c2, c3, c4, c5, c6, c7, c8 + d, c9, sl, p, x, y, z)
-        else if slot == 9 do Inv(c1, c2, c3, c4, c5, c6, c7, c8, c9 + d, sl, p, x, y, z)
-        else i end end end end end end end end end
-    end
-  end
+  -- ── Selection ───────────────────────────────────────────────────────────────
 
-  doc "Block id in the selected slot."
-  fn selected_id(i : Inv) : Int do block_of_slot(sel(i)) end
+  doc "Selected hotbar slot, 1-based, as the number keys address it."
+  fn sel(i : Inv) : Int do match i do Inv(_, s, _, _, _, _) -> s end end
+  fn progress(i : Inv) : Float do match i do Inv(_, _, p, _, _, _) -> p end end
 
   @[no_alloc]
   fn select(i : Inv, slot : Int) : Inv do
-    if slot < 1 || slot > slots() do i
-    else match i do Inv(c1, c2, c3, c4, c5, c6, c7, c8, c9, _, p, x, y, z) -> Inv(c1, c2, c3, c4, c5, c6, c7, c8, c9, slot, p, x, y, z) end end
+    if slot < 1 || slot > hotbar_slots() do i
+    else match i do Inv(a, _, p, x, y, z) -> Inv(a, slot, p, x, y, z) end end
   end
 
+  doc "Block id in the selected slot, or 0 when it is empty."
+  fn selected_id(i : Inv) : Int do item_at(i, sel(i) - 1) end
+
   doc "True if the selected slot holds at least one block."
-  fn can_place(i : Inv) : Bool do count(i, sel(i)) > 0 end
+  fn can_place(i : Inv) : Bool do count_at(i, sel(i) - 1) > 0 end
 
   doc "Consume one of the selected block."
-  fn consume(i : Inv) : Inv do add(i, sel(i), -1) end
+  fn consume(i : Inv) : Inv do
+    let s = sel(i) - 1
+    set_slot(i, s, item_at(i, s), count_at(i, s) - 1)
+  end
 
-  doc "Add the yield of a broken block: one of its own kind, or nothing if not collectable."
-  fn harvest(i : Inv, id : Int) : Inv do add(i, slot_of_block(id), 1) end
+  doc "Count held in hotbar slot [slot] (1-based), for the HUD."
+  fn count(i : Inv, slot : Int) : Int do count_at(i, slot - 1) end
+  doc "Item id in hotbar slot [slot] (1-based), for the HUD."
+  fn item(i : Inv, slot : Int) : Int do item_at(i, slot - 1) end
+
+  -- ── Collecting ──────────────────────────────────────────────────────────────
+
+  doc "Item a broken block yields, or 0 when it is not collectable."
+  fn yield_of(id : Int) : Int do
+    if id == 0 || id == C.bedrock() do 0
+    else if C.is_water(id) do C.water()   -- any flow level collects as a source
+    else if C.is_foliage(id) do 0         -- leaves crumble
+    else id end end end
+  end
+
+  -- First slot in [lo, hi) already holding [item], or -1.
+  pfn find_stack(i : Inv, item : Int, s : Int, hi : Int) : Int do
+    if s >= hi do -1
+    else if item_at(i, s) == item && count_at(i, s) > 0 do s
+    else find_stack(i, item, s + 1, hi) end end
+  end
+
+  -- First empty slot in [lo, hi), or -1.
+  pfn find_empty(i : Inv, s : Int, hi : Int) : Int do
+    if s >= hi do -1
+    else if is_empty_at(i, s) do s
+    else find_empty(i, s + 1, hi) end end
+  end
+
+  doc """
+  Where [item] should land: a hotbar stack of the same item, else an empty
+  hotbar slot, else the same two over the backpack, else -1 when full.
+  Hotbar first is what keeps mining playable without opening the window.
+  """
+  fn slot_for(i : Inv, item : Int) : Int do
+    let h = hotbar_slots()
+    let hs = find_stack(i, item, 0, h)
+    if hs >= 0 do hs
+    else
+      let he = find_empty(i, 0, h)
+      if he >= 0 do he
+      else
+        let ps = find_stack(i, item, h, slots())
+        if ps >= 0 do ps else find_empty(i, h, slots()) end
+      end
+    end
+  end
+
+  doc "Add the yield of a broken block. A full inventory silently drops it."
+  fn harvest(i : Inv, id : Int) : Inv do
+    let item = yield_of(id)
+    if item == 0 do i
+    else
+      let s = slot_for(i, item)
+      if s < 0 do i else set_slot(i, s, item, count_at(i, s) + 1) end
+    end
+  end
+
+  -- ── Moving stacks ───────────────────────────────────────────────────────────
+
+  doc """
+  Move the whole stack in [from] to [to]. An occupied destination swaps, a
+  matching destination merges (stacks are unbounded), and either index being
+  out of range or the two being equal leaves the inventory untouched.
+  Total counts are preserved in every case.
+  """
+  fn move_stack(i : Inv, from : Int, to : Int) : Inv do
+    if from < 0 || from >= slots() || to < 0 || to >= slots() || from == to do i
+    else if is_empty_at(i, from) do i
+    else
+      let fi = item_at(i, from)
+      let fc = count_at(i, from)
+      let ti = item_at(i, to)
+      let tc = count_at(i, to)
+      if tc <= 0 do set_slot(set_slot(i, to, fi, fc), from, 0, 0)
+      else if ti == fi do set_slot(set_slot(i, to, fi, fc + tc), from, 0, 0)
+      else set_slot(set_slot(i, to, fi, fc), from, ti, tc) end end
+    end end
+  end
+
+  -- ── Breaking ────────────────────────────────────────────────────────────────
 
   -- Advance breaking on target (x, y, z) by [dt]; a different target restarts.
   fn hold(i : Inv, x : Int, y : Int, z : Int, dt : Float) : Inv do
     match i do
-      Inv(c1, c2, c3, c4, c5, c6, c7, c8, c9, sl, p, tx, ty, tz) ->
+      Inv(a, sl, p, tx, ty, tz) ->
         let same = tx == x && ty == y && tz == z
         let p1 = if same do p +. dt /. break_seconds() else dt /. break_seconds() end
-        Inv(c1, c2, c3, c4, c5, c6, c7, c8, c9, sl, if p1 > 1.0 do 1.0 else p1 end, x, y, z)
+        Inv(a, sl, if p1 > 1.0 do 1.0 else p1 end, x, y, z)
     end
   end
 
   @[no_alloc]
   -- Release the button / lose the target: progress resets.
   fn release(i : Inv) : Inv do
-    match i do Inv(c1, c2, c3, c4, c5, c6, c7, c8, c9, sl, _, _, _, _) -> Inv(c1, c2, c3, c4, c5, c6, c7, c8, c9, sl, 0.0, 0, -1, 0) end
+    match i do Inv(a, sl, _, _, _, _) -> Inv(a, sl, 0.0, 0, -1, 0) end
   end
 
   fn is_complete(i : Inv) : Bool do progress(i) >= 1.0 end
 
+  -- ── HUD change detection ────────────────────────────────────────────────────
+
+  pfn key_go(i : Inv, s : Int, acc : Int) : Int do
+    if s >= slots() do acc
+    else key_go(i, s + 1, acc * 31 + item_at(i, s) * 1009 + count_at(i, s))
+    end
+  end
 
   doc "A small integer that changes whenever the HUD needs a rebuild."
   fn hud_key(i : Inv) : Int do
-    match i do
-      Inv(c1, c2, c3, c4, c5, c6, c7, c8, c9, sl, p, _, _, _) ->
-        ((((((((c1 * 100 + c2) * 100 + c3) * 100 + c4) * 100 + c5) * 100 + c6) * 100 + c7) * 100 + c8) * 100 + c9) * 1000 + sl * 20 + float_to_int(p *. 16.0)
-    end
+    key_go(i, 0, 0) * 1000 + sel(i) * 20 + float_to_int(progress(i) *. 16.0)
   end
 
 end

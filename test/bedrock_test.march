@@ -22,10 +22,11 @@ mod CubeForge.Test.Bedrock do
     end
   end
 
-  pfn no_slot_places_it(slot : Int) : Bool do
-    if slot > Inv.slots() do true
-    else if Inv.block_of_slot(slot) == C.bedrock() do false
-    else no_slot_places_it(slot + 1) end end
+  -- Bedrock must never reach any slot, so it can never be selected and placed.
+  pfn no_slot_holds_it(i : CubeForge.Inventory.Inv, s : Int) : Bool do
+    if s >= Inv.slots() do true
+    else if Inv.item_at(i, s) == C.bedrock() do false
+    else no_slot_holds_it(i, s + 1) end end
   end
 
   describe "bedrock floor" do
@@ -60,8 +61,10 @@ mod CubeForge.Test.Bedrock do
       Test.assert_false(C.is_unbreakable(3) || C.is_unbreakable(C.granite()) || C.is_unbreakable(C.water()), "everything else can")
     end
     test "cannot be collected or placed" do
-      Test.assert_eq_int(Inv.slot_of_block(C.bedrock()), 0, "no hotbar slot, so breaking it would yield nothing")
-      Test.assert_true(no_slot_places_it(1), "no hotbar slot places bedrock")
+      Test.assert_eq_int(Inv.yield_of(C.bedrock()), 0, "breaking it would yield nothing")
+      -- harvesting it is a no-op rather than an error, and leaves no trace anywhere
+      let i = Inv.harvest(Inv.new(), C.bedrock())
+      Test.assert_true(no_slot_holds_it(i, 0), "no slot ends up holding bedrock")
     end
   end
 

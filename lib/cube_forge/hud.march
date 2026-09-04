@@ -64,6 +64,15 @@ mod CubeForge.Hud do
   pfn cvert(b : CubeForge.F32Buf.F32Buf, x : Float, y : Float, r : Float, g : Float, bl : Float) : CubeForge.F32Buf.F32Buf do
     b |> B.push3(x, y, 0.0) |> B.push(r) |> B.push(g) |> B.push(bl) |> B.push(1.0) |> B.push(0.0) |> B.push(Vx.plain())
   end
+  -- Same, with an alpha: the HUD is drawn with SRC_ALPHA blending, so this is
+  -- what lets the inventory dim the world instead of erasing it.
+  pfn avert(b : CubeForge.F32Buf.F32Buf, x : Float, y : Float, r : Float, g : Float, bl : Float, a : Float) : CubeForge.F32Buf.F32Buf do
+    b |> B.push3(x, y, 0.0) |> B.push(r) |> B.push(g) |> B.push(bl) |> B.push(1.0) |> B.push(0.0) |> B.push(Vx.pack(Vx.fx_none(), a))
+  end
+  pfn arect(b : CubeForge.F32Buf.F32Buf, x0 : Float, y0 : Float, x1 : Float, y1 : Float, r : Float, g : Float, bl : Float, a : Float) : CubeForge.F32Buf.F32Buf do
+    b |> avert(x0, y0, r, g, bl, a) |> avert(x1, y0, r, g, bl, a) |> avert(x1, y1, r, g, bl, a)
+      |> avert(x0, y0, r, g, bl, a) |> avert(x1, y1, r, g, bl, a) |> avert(x0, y1, r, g, bl, a)
+  end
   pfn crect(b : CubeForge.F32Buf.F32Buf, x0 : Float, y0 : Float, x1 : Float, y1 : Float, r : Float, g : Float, bl : Float) : CubeForge.F32Buf.F32Buf do
     b |> cvert(x0, y0, r, g, bl) |> cvert(x1, y0, r, g, bl) |> cvert(x1, y1, r, g, bl)
       |> cvert(x0, y0, r, g, bl) |> cvert(x1, y1, r, g, bl) |> cvert(x0, y1, r, g, bl)
@@ -84,10 +93,50 @@ mod CubeForge.Hud do
   fn slot_x0(i : Int) : Float do -0.5575 +. int_to_float(i) *. 0.125 end
   fn slot_y0() : Float do -0.97 end
 
+  -- ── Inventory panel geometry ────────────────────────────────────────────────
+  -- The backpack uses the hotbar's column pitch, so a backpack column sits
+  -- directly above the hotbar slot it can be dragged into.
+  fn pack_cols() : Int do 9 end
+  fn pack_rows() : Int do 3 end
+  fn pack_row_pitch() : Float do 0.17 end
+  doc "Bottom edge of backpack row [r], counting 0 as the top row."
+  fn pack_y0(r : Int) : Float do -0.30 -. int_to_float(r) *. pack_row_pitch() end
+
+  doc """
+  Bottom-left corner of slot [s] in the unified index space: 0..8 the hotbar,
+  9..35 the backpack in reading order. Returned as x; use [slot_oy] for y, so
+  that no tuple is allocated (March boxes small aggregates, GAPS.md G28).
+  """
+  fn slot_ox(s : Int) : Float do
+    if s < slots() do slot_x0(s) else slot_x0((s - slots()) % pack_cols()) end
+  end
+  fn slot_oy(s : Int) : Float do
+    if s < slots() do slot_y0() else pack_y0((s - slots()) / pack_cols()) end
+  end
+
+  doc """
+  Slot index under NDC point (nx, ny) while the inventory is open, or -1 for a
+  miss. Gaps between slots are misses, not the nearest neighbour: releasing a
+  drag in a gap must return the stack home rather than silently land somewhere
+  the player did not aim.
+  """
+  fn slot_at(nx : Float, ny : Float, open : Bool) : Int do
+    slot_at_go(nx, ny, 0, if open do slots() + pack_cols() * pack_rows() else slots() end)
+  end
+  pfn slot_at_go(nx : Float, ny : Float, s : Int, n : Int) : Int do
+    if s >= n do -1
+    else
+      let x0 = slot_ox(s)
+      let y0 = slot_oy(s)
+      if nx >= x0 && nx <= x0 +. slot_w() && ny >= y0 && ny <= y0 +. slot_h() do s
+      else slot_at_go(nx, ny, s + 1, n) end
+    end
+  end
+
   -- one slot: background, selection border, count digits
   pfn slot(b : CubeForge.F32Buf.F32Buf, i : Int, selected : Bool, count : Int, show_count : Bool) : CubeForge.F32Buf.F32Buf do
-    let x0 = slot_x0(i)
-    let y0 = slot_y0()
+    let x0 = slot_ox(i)
+    let y0 = slot_oy(i)
     let x1 = x0 +. slot_w()
     let y1 = y0 +. slot_h()
     let e = 0.012
@@ -96,18 +145,30 @@ mod CubeForge.Hud do
     if show_count do emit_digits(b2, digits_of(count, Nil), x0 +. 0.012, y1 -. 0.012, 0.006, 0.008) else b2 end
   end
 
-  -- Untextured HUD: hotbar slots, selection, counts, crosshair, break progress. Rebuilt in place.
-  fn build_hotbar(b : CubeForge.F32Buf.F32Buf, sel : Int, c1 : Int, c2 : Int, c3 : Int, c4 : Int, c5 : Int, c6 : Int, c7 : Int, c8 : Int, c9 : Int, progress : Float) : CubeForge.F32Buf.F32Buf do
+  -- Untextured HUD: slot frames, counts, crosshair, break progress, and — when
+  -- the inventory is open — the dimmed backdrop and the backpack grid behind it.
+  -- Rebuilt in place. [drag_from] is the slot a stack was lifted out of, or -1;
+  -- that slot renders empty because its contents are on the cursor.
+  pfn slots_go(b : CubeForge.F32Buf.F32Buf, inv : CubeForge.Inventory.Inv, sel : Int, drag_from : Int,
+               s : Int, n : Int) : CubeForge.F32Buf.F32Buf do
+    if s >= n do b
+    else
+      let c = if s == drag_from do 0 else CubeForge.Inventory.count_at(inv, s) end
+      slots_go(slot(b, s, s == sel - 1, c, c > 0), inv, sel, drag_from, s + 1, n)
+    end
+  end
+
+  fn build_hotbar(b : CubeForge.F32Buf.F32Buf, inv : CubeForge.Inventory.Inv, progress : Float,
+                  open : Bool, drag_from : Int) : CubeForge.F32Buf.F32Buf do
+    let sel = CubeForge.Inventory.sel(inv)
     let b0 = B.clear(b)
-    let b1 = slot(b0, 0, sel == 1, c1, true)
-    let b2 = slot(b1, 1, sel == 2, c2, true)
-    let b3 = slot(b2, 2, sel == 3, c3, true)
-    let b3d = slot(b3, 3, sel == 4, c4, true)
-    let b3e = slot(b3d, 4, sel == 5, c5, true)
-    let b3f = slot(b3e, 5, sel == 6, c6, true)
-    let b3g = slot(b3f, 6, sel == 7, c7, true)
-    let b3h = slot(b3g, 7, sel == 8, c8, true)
-    let b4 = slot(b3h, 8, sel == 9, c9, true)
+    -- dim the world and lay a panel behind the backpack grid
+    let bp = if open do
+      let d = arect(b0, -1.0, -1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.55)
+      arect(d, -0.62, pack_y0(pack_rows() - 1) -. 0.03, 0.62, pack_y0(0) +. slot_h() +. 0.03, 0.18, 0.18, 0.21, 0.92)
+    else b0 end
+    let n = if open do slots() + pack_cols() * pack_rows() else slots() end
+    let b4 = slots_go(bp, inv, sel, drag_from, 0, n)
     -- crosshair
     let b5 = crect(b4, -0.004, -0.03, 0.004, 0.03, 1.0, 1.0, 1.0)
     let b6 = crect(b5, -0.03, -0.004, 0.03, 0.004, 1.0, 1.0, 1.0)
@@ -118,13 +179,42 @@ mod CubeForge.Hud do
     else b6 end
   end
 
-  doc "Textured HUD: one icon per slot sampling the block's texture layer."
-  fn build_icons(b : CubeForge.F32Buf.F32Buf) : CubeForge.F32Buf.F32Buf do
-    let pad = 0.03
-    let icon = fn (bb, i, layer) -> trect(bb, slot_x0(i) +. pad, slot_y0() +. pad, slot_x0(i) +. slot_w() -. pad, slot_y0() +. slot_h() -. pad, layer)
-    -- slot order: grass, dirt, stone, water, sand, snow, granite -> texture layers
-    B.clear(b) |> icon(0, 0.0) |> icon(1, 2.0) |> icon(2, 3.0) |> icon(3, 1.0)
-               |> icon(4, 4.0) |> icon(5, 5.0) |> icon(6, 6.0) |> icon(7, 8.0) |> icon(8, 12.0)
+  doc """
+  Textured HUD: one icon per non-empty slot, sampling that slot's own block
+  texture. The icon follows the item now, not the slot position — that is the
+  whole point of a draggable inventory.
+  """
+  pfn icons_go(b : CubeForge.F32Buf.F32Buf, inv : CubeForge.Inventory.Inv, drag_from : Int,
+               s : Int, n : Int, pad : Float) : CubeForge.F32Buf.F32Buf do
+    if s >= n do b
+    else
+      let id = CubeForge.Inventory.item_at(inv, s)
+      let b1 = if id == 0 || s == drag_from do b
+               else
+                 let x0 = slot_ox(s)
+                 let y0 = slot_oy(s)
+                 trect(b, x0 +. pad, y0 +. pad, x0 +. slot_w() -. pad, y0 +. slot_h() -. pad,
+                       CubeForge.Texture.layer_for(id))
+               end
+      icons_go(b1, inv, drag_from, s + 1, n, pad)
+    end
+  end
+
+  doc "Half the width of the icon that follows the cursor while dragging."
+  fn drag_half() : Float do 0.045 end
+
+  fn build_icons(b : CubeForge.F32Buf.F32Buf, inv : CubeForge.Inventory.Inv, open : Bool,
+                 drag_from : Int, nx : Float, ny : Float) : CubeForge.F32Buf.F32Buf do
+    let n = if open do slots() + pack_cols() * pack_rows() else slots() end
+    let b0 = icons_go(B.clear(b), inv, drag_from, 0, n, 0.03)
+    -- the lifted stack rides the cursor, drawn last so it is on top
+    if drag_from >= 0 do
+      let id = CubeForge.Inventory.item_at(inv, drag_from)
+      if id == 0 do b0
+      else trect(b0, nx -. drag_half(), ny -. drag_half(), nx +. drag_half(), ny +. drag_half(),
+                 CubeForge.Texture.layer_for(id))
+      end
+    else b0 end
   end
 
   -- 

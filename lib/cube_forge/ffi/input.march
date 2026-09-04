@@ -12,6 +12,9 @@ mod CubeForge.Ffi.Input do
     fn x_in_key_pressed(code: Int): Bool = "cf_in_key_pressed"
     fn x_in_button(b: Int): Bool = "cf_in_button"
     fn x_in_button_pressed(b: Int): Bool = "cf_in_button_pressed"
+    fn x_in_button_released(b: Int): Bool = "cf_in_button_released"
+    fn x_in_mouse_x(): Float = "cf_in_mouse_x"
+    fn x_in_mouse_y(): Float = "cf_in_mouse_y"
     fn x_in_mouse_dx(): Float = "cf_in_mouse_dx"
     fn x_in_mouse_dy(): Float = "cf_in_mouse_dy"
     fn x_in_scroll_dy(): Float = "cf_in_scroll_dy"
@@ -26,6 +29,12 @@ mod CubeForge.Ffi.Input do
   fn button(b : Int) : Bool do x_in_button(b) end
   doc "True if button [b] went down since the last poll (edge, not level)."
   fn button_pressed(b : Int) : Bool do x_in_button_pressed(b) end
+  doc "True if button [b] came up since the last poll (edge, not level)."
+  fn button_released(b : Int) : Bool do x_in_button_released(b) end
+  doc "Cursor x in framebuffer pixels (the shim converts from window coords)."
+  fn mouse_x() : Float do x_in_mouse_x() end
+  doc "Cursor y in framebuffer pixels, measured down from the top."
+  fn mouse_y() : Float do x_in_mouse_y() end
   fn mouse_dx() : Float do x_in_mouse_dx() end
   fn mouse_dy() : Float do x_in_mouse_dy() end
   fn scroll_dy() : Float do x_in_scroll_dy() end
@@ -44,6 +53,7 @@ mod CubeForge.Ffi.Input do
   fn key_escape() : Int do 256 end
   fn key_f() : Int do 70 end
   fn key_m() : Int do 77 end
+  fn key_i() : Int do 73 end
   fn key_1() : Int do 49 end
   fn key_2() : Int do 50 end
   fn key_3() : Int do 51 end

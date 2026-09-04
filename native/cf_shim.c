@@ -46,6 +46,7 @@ typedef struct {
     unsigned char keys_pressed[CF_MAX_KEYS];   /* edge: went down since last poll */
     unsigned char buttons[8];
     unsigned char buttons_pressed[8];   /* edge: went down since last poll */
+    unsigned char buttons_released[8];  /* edge: came up since last poll */
     double scroll_dy;
 } cf_input;
 static cf_input g_in;
@@ -75,7 +76,7 @@ static void on_button(GLFWwindow *w, int b, int action, int mods) {
     (void)w; (void)mods;
     if (b < 0 || b >= 8) return;
     if (action == GLFW_PRESS) { g_in.buttons[b] = 1; g_in.buttons_pressed[b] = 1; }
-    else if (action == GLFW_RELEASE) g_in.buttons[b] = 0;
+    else if (action == GLFW_RELEASE) { g_in.buttons[b] = 0; g_in.buttons_released[b] = 1; }
 }
 static void on_scroll(GLFWwindow *w, double dx, double dy) { (void)w; (void)dx; g_in.scroll_dy += dy; }
 static void on_fb_size(GLFWwindow *w, int width, int height) {
@@ -1000,6 +1001,7 @@ int64_t cf_gfx_dump_bmp(march_value path) {
 void cf_in_poll(void) {
     g_in.mouse_dx = 0; g_in.mouse_dy = 0; g_in.scroll_dy = 0;
     memset(g_in.buttons_pressed, 0, sizeof g_in.buttons_pressed);
+    memset(g_in.buttons_released, 0, sizeof g_in.buttons_released);
     memset(g_in.keys_pressed, 0, sizeof g_in.keys_pressed);
     glfwPollEvents();
 }
@@ -1007,6 +1009,26 @@ int64_t cf_in_key(int64_t k)          { return (k >= 0 && k < CF_MAX_KEYS) ? g_i
 int64_t cf_in_key_pressed(int64_t k)  { return (k >= 0 && k < CF_MAX_KEYS) ? g_in.keys_pressed[k] : 0; }
 int64_t cf_in_button(int64_t b)       { return (b >= 0 && b < 8) ? g_in.buttons[b] : 0; }
 int64_t cf_in_button_pressed(int64_t b){ return (b >= 0 && b < 8) ? g_in.buttons_pressed[b] : 0; }
+int64_t cf_in_button_released(int64_t b){ return (b >= 0 && b < 8) ? g_in.buttons_released[b] : 0; }
+
+/* Cursor position in FRAMEBUFFER pixels.
+ *
+ * GLFW reports the cursor in *window* coordinates, but everything else here
+ * (the viewport, cf_win_fb_w/h) is in framebuffer pixels, and on a Retina
+ * display the two differ by 2x. Converting at this one boundary means March
+ * only ever sees a single coordinate system; doing it later, or forgetting,
+ * puts hit-testing half a screen out and reads like a layout bug rather than a
+ * units bug. Window size is queried rather than cached because a window can be
+ * dragged between displays of different scale factors mid-run. */
+static double cf_cursor_scale(void) {
+    if (!g_win) return 1.0;
+    int ww = 0, wh = 0;
+    glfwGetWindowSize(g_win, &ww, &wh);
+    (void)wh;
+    return (ww > 0 && g_fb_w > 0) ? (double)g_fb_w / (double)ww : 1.0;
+}
+double  cf_in_mouse_x(void)           { return g_in.mouse_x * cf_cursor_scale(); }
+double  cf_in_mouse_y(void)           { return g_in.mouse_y * cf_cursor_scale(); }
 double  cf_in_mouse_dx(void)          { return g_in.mouse_dx; }
 double  cf_in_mouse_dy(void)          { return g_in.mouse_dy; }
 double  cf_in_scroll_dy(void)         { return g_in.scroll_dy; }

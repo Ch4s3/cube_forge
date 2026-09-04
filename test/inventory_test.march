@@ -1,4 +1,5 @@
--- Inventory rules and break-hold progress.
+-- Inventory: slot contents, pickup routing, drag moves, and the conservation
+-- property that would silently duplicate or delete items.
 mod CubeForge.Test.Inventory do
 
   needs IO.Spawn
@@ -6,34 +7,200 @@ mod CubeForge.Test.Inventory do
   import Test
   alias CubeForge.Inventory as Inv
   alias CubeForge.Chunk as C
+  alias CubeForge.Hud as Hud
 
-  describe "Inventory" do
-    test "starts empty with slot 1 selected and cannot place solids" do
+  -- Total count of [item] across every slot, hotbar and backpack.
+  pfn total_of(i : CubeForge.Inventory.Inv, item : Int, s : Int, acc : Int) : Int do
+    if s >= Inv.slots() do acc
+    else total_of(i, item, s + 1, if Inv.item_at(i, s) == item do acc + Inv.count_at(i, s) else acc end) end
+  end
+
+  -- Count of every item summed together, regardless of kind.
+  pfn grand_total(i : CubeForge.Inventory.Inv, s : Int, acc : Int) : Int do
+    if s >= Inv.slots() do acc else grand_total(i, s + 1, acc + Inv.count_at(i, s)) end
+  end
+
+  pfn harvest_n(i : CubeForge.Inventory.Inv, id : Int, n : Int) : CubeForge.Inventory.Inv do
+    if n <= 0 do i else harvest_n(Inv.harvest(i, id), id, n - 1) end
+  end
+
+  -- Fill every hotbar slot with a distinct item so the next pickup must spill.
+  pfn fill_hotbar(i : CubeForge.Inventory.Inv, s : Int) : CubeForge.Inventory.Inv do
+    if s >= Inv.hotbar_slots() do i else fill_hotbar(Inv.set_slot(i, s, 100 + s, 1), s + 1) end
+  end
+
+  pfn fill_all(i : CubeForge.Inventory.Inv, s : Int) : CubeForge.Inventory.Inv do
+    if s >= Inv.slots() do i else fill_all(Inv.set_slot(i, s, 100 + s, 1), s + 1) end
+  end
+
+  -- A deterministic pseudo-random walk of moves. Nothing about which slots it
+  -- picks matters; the point is that no sequence of them changes any total.
+  pfn shuffle(i : CubeForge.Inventory.Inv, seed : Int, n : Int) : CubeForge.Inventory.Inv do
+    if n <= 0 do i
+    else
+      let s1 = (seed * 1103515245 + 12345) % 2147483647
+      let s2 = (s1 * 1103515245 + 12345) % 2147483647
+      let from = (if s1 < 0 do 0 - s1 else s1 end) % Inv.slots()
+      let to = (if s2 < 0 do 0 - s2 else s2 end) % Inv.slots()
+      shuffle(Inv.move_stack(i, from, to), s2, n - 1)
+    end
+  end
+
+  describe "slots" do
+    test "start empty, with slot 1 selected and nothing to place" do
       let i = Inv.new()
-      Test.assert_eq_int(Inv.count(i, 1) + Inv.count(i, 2) + Inv.count(i, 3), 0, "empty")
-      Test.assert_false(Inv.can_place(i), "no grass to place")
-      Test.assert_false(Inv.can_place(Inv.select(i, 4)), "no water collected yet")
+      Test.assert_eq_int(grand_total(i, 0, 0), 0, "nothing held")
+      Test.assert_eq_int(Inv.sel(i), 1, "first hotbar slot selected")
+      Test.assert_false(Inv.can_place(i), "nothing to place")
+      Test.assert_eq_int(Inv.slots(), Inv.hotbar_slots() + Inv.pack_slots(), "36 slots in total")
     end
-    test "harvest adds, consume removes, water yields nothing" do
-      let i = Inv.harvest(Inv.harvest(Inv.harvest(Inv.new(), 3), 3), C.water())
-      Test.assert_eq_int(Inv.count(i, 3), 2, "two stone")
-      let j = Inv.consume(Inv.select(i, 3))
-      Test.assert_eq_int(Inv.count(j, 3), 1, "one left")
-      Test.assert_eq_int(Inv.count(Inv.consume(Inv.select(j, 4)), 3), 1, "consuming water leaves stone alone")
-      let k = Inv.harvest(Inv.harvest(Inv.new(), C.water()), 7)   -- a source and a flow cell
-      Test.assert_eq_int(Inv.count(k, 4), 1, "only the source is collected")
-      Test.assert_true(Inv.can_place(Inv.select(k, 4)), "collected water can be placed")
-      Test.assert_eq_int(Inv.count(Inv.consume(Inv.select(k, 4)), 4), 0, "placing consumes it")
+    test "an emptied slot forgets its item, so no stale id is left behind" do
+      let i = Inv.set_slot(Inv.new(), 0, 3, 1)
+      Test.assert_eq_int(Inv.item_at(i, 0), 3, "holds stone")
+      let j = Inv.set_slot(i, 0, 3, 0)
+      Test.assert_eq_int(Inv.item_at(j, 0), 0, "cleared")
+      Test.assert_true(Inv.is_empty_at(j, 0), "and reads as empty")
     end
-    test "hold accumulates on one target and resets on another" do
-      let i = Inv.hold(Inv.hold(Inv.new(), 1, 2, 3, 0.2), 1, 2, 3, 0.1)
-      Test.assert_true(Inv.progress(i) > 0.74 && Inv.progress(i) < 0.76, "0.3 s of 0.4 s")
-      Test.assert_false(Inv.is_complete(i), "not done yet")
-      let j = Inv.hold(i, 9, 9, 9, 0.1)
-      Test.assert_true(Inv.progress(j) < 0.26, "new target restarts")
-      Test.assert_true(Inv.is_complete(Inv.hold(Inv.hold(j, 9, 9, 9, 0.2), 9, 9, 9, 0.2)), "completes at 1.0")
-      Test.assert_true(Inv.progress(Inv.release(j)) == 0.0, "release resets")
+    test "out-of-range access is a no-op, not a crash" do
+      let i = Inv.new()
+      Test.assert_eq_int(Inv.item_at(i, -1) + Inv.item_at(i, 999), 0, "reads outside give 0")
+      Test.assert_eq_int(grand_total(Inv.set_slot(i, 999, 3, 5), 0, 0), 0, "writes outside are dropped")
     end
+  end
+
+  describe "yields" do
+    test "water collects as a source from any flow level" do
+      Test.assert_eq_int(Inv.yield_of(C.water()), C.water(), "a source")
+      Test.assert_eq_int(Inv.yield_of(7), C.water(), "a mid flow level")
+      Test.assert_eq_int(Inv.yield_of(11), C.water(), "the thinnest flow level")
+    end
+    test "air, bedrock and leaves yield nothing" do
+      Test.assert_eq_int(Inv.yield_of(0), 0, "air")
+      Test.assert_eq_int(Inv.yield_of(C.bedrock()), 0, "bedrock")
+      Test.assert_eq_int(Inv.yield_of(C.oak_leaves()), 0, "leaves crumble")
+      Test.assert_eq_int(Inv.yield_of(C.pine_leaves()), 0, "pine leaves too")
+    end
+    test "ordinary blocks yield themselves" do
+      Test.assert_eq_int(Inv.yield_of(3), 3, "stone")
+      Test.assert_eq_int(Inv.yield_of(C.oak_log()), C.oak_log(), "oak log")
+    end
+  end
+
+  describe "pickup routing" do
+    test "stacks onto a slot already holding that item" do
+      let i = harvest_n(Inv.new(), 3, 5)
+      Test.assert_eq_int(Inv.count_at(i, 0), 5, "all five in one slot")
+      Test.assert_eq_int(grand_total(i, 0, 0), 5, "and nowhere else")
+    end
+    test "a new item takes the first empty hotbar slot" do
+      let i = Inv.harvest(harvest_n(Inv.new(), 3, 2), C.sand())
+      Test.assert_eq_int(Inv.item_at(i, 0), 3, "stone stayed put")
+      Test.assert_eq_int(Inv.item_at(i, 1), C.sand(), "sand took the next slot")
+    end
+    test "spills into the backpack only once the hotbar is full" do
+      let full = fill_hotbar(Inv.new(), 0)
+      Test.assert_eq_int(Inv.slot_for(full, 3), Inv.hotbar_slots(), "first backpack slot")
+      let i = Inv.harvest(full, 3)
+      Test.assert_eq_int(Inv.count_at(i, Inv.hotbar_slots()), 1, "landed in the backpack")
+    end
+    test "tops up a backpack stack rather than starting a new one" do
+      let i = Inv.harvest(Inv.harvest(fill_hotbar(Inv.new(), 0), 3), 3)
+      Test.assert_eq_int(Inv.count_at(i, Inv.hotbar_slots()), 2, "both in the same backpack slot")
+    end
+    test "a completely full inventory drops the block instead of overwriting" do
+      let full = fill_all(Inv.new(), 0)
+      Test.assert_eq_int(Inv.slot_for(full, 3), -1, "nowhere to put it")
+      let i = Inv.harvest(full, 3)
+      Test.assert_eq_int(grand_total(i, 0, 0), grand_total(full, 0, 0), "nothing gained")
+      Test.assert_eq_int(total_of(i, 3, 0, 0), 0, "and the stone was not stored")
+    end
+  end
+
+  describe "moving stacks" do
+    test "moves a whole stack into an empty slot" do
+      let i = Inv.move_stack(harvest_n(Inv.new(), 3, 4), 0, 20)
+      Test.assert_true(Inv.is_empty_at(i, 0), "source emptied")
+      Test.assert_eq_int(Inv.count_at(i, 20), 4, "all four arrived")
+      Test.assert_eq_int(Inv.item_at(i, 20), 3, "as stone")
+    end
+    test "swaps two occupied slots" do
+      let i = Inv.set_slot(Inv.set_slot(Inv.new(), 0, 3, 4), 5, C.sand(), 2)
+      let j = Inv.move_stack(i, 0, 5)
+      Test.assert_eq_int(Inv.item_at(j, 5), 3, "stone moved")
+      Test.assert_eq_int(Inv.count_at(j, 5), 4, "with its count")
+      Test.assert_eq_int(Inv.item_at(j, 0), C.sand(), "sand came back the other way")
+      Test.assert_eq_int(Inv.count_at(j, 0), 2, "with its own count")
+    end
+    test "merges onto a stack of the same item" do
+      let i = Inv.set_slot(Inv.set_slot(Inv.new(), 0, 3, 4), 5, 3, 2)
+      let j = Inv.move_stack(i, 0, 5)
+      Test.assert_eq_int(Inv.count_at(j, 5), 6, "stacks are unbounded, so they merge")
+      Test.assert_true(Inv.is_empty_at(j, 0), "source emptied")
+    end
+    test "a move that hits nothing leaves the inventory untouched" do
+      let i = harvest_n(Inv.new(), 3, 4)
+      Test.assert_eq_int(Inv.count_at(Inv.move_stack(i, 0, -1), 0), 4, "release outside a slot")
+      Test.assert_eq_int(Inv.count_at(Inv.move_stack(i, 0, 999), 0), 4, "or past the end")
+      Test.assert_eq_int(Inv.count_at(Inv.move_stack(i, 0, 0), 0), 4, "or onto itself")
+      Test.assert_eq_int(Inv.count_at(Inv.move_stack(i, 7, 8), 0), 4, "or from an empty slot")
+    end
+  end
+
+  describe "conservation" do
+    -- The property that would silently duplicate or delete items. A handful of
+    -- cases would not catch it; a long random walk over every slot pair does.
+    test "no sequence of moves changes what is held" do
+      let start = Inv.harvest(harvest_n(harvest_n(Inv.new(), 3, 7), C.sand(), 5), C.oak_log())
+      let before = grand_total(start, 0, 0)
+      let end_ = shuffle(start, 12345, 400)
+      Test.assert_eq_int(before, 13, "seven stone, five sand, one log")
+      Test.assert_eq_int(grand_total(end_, 0, 0), before, "the same number of blocks after 400 moves")
+      Test.assert_eq_int(total_of(end_, 3, 0, 0), 7, "still seven stone")
+      Test.assert_eq_int(total_of(end_, C.sand(), 0, 0), 5, "still five sand")
+      Test.assert_eq_int(total_of(end_, C.oak_log(), 0, 0), 1, "still one log")
+    end
+    test "and a different sequence conserves them too" do
+      let start = harvest_n(harvest_n(fill_hotbar(Inv.new(), 0), 3, 9), C.snow(), 4)
+      let before = grand_total(start, 0, 0)
+      Test.assert_eq_int(grand_total(shuffle(start, 999, 400), 0, 0), before, "conserved from a full hotbar too")
+    end
+  end
+
+  describe "hit-testing" do
+    test "finds the hotbar slot under a point inside it" do
+      let x = Hud.slot_ox(3) +. Hud.slot_w() /. 2.0
+      let y = Hud.slot_oy(3) +. Hud.slot_h() /. 2.0
+      Test.assert_eq_int(Hud.slot_at(x, y, false), 3, "centre of hotbar slot 3")
+      Test.assert_eq_int(Hud.slot_at(x, y, true), 3, "and the same with the window open")
+    end
+    test "finds a backpack slot only while the window is open" do
+      let s = Inv.hotbar_slots() + 11
+      let x = Hud.slot_ox(s) +. Hud.slot_w() /. 2.0
+      let y = Hud.slot_oy(s) +. Hud.slot_h() /. 2.0
+      Test.assert_eq_int(Hud.slot_at(x, y, true), s, "backpack slot found when open")
+      Test.assert_eq_int(Hud.slot_at(x, y, false), -1, "and unreachable when closed")
+    end
+    -- A gap must be a miss, not the nearest neighbour: a drag released between
+    -- two slots should go home rather than land somewhere the player did not aim.
+    test "a point in the gap between slots hits nothing" do
+      let gap_x = Hud.slot_ox(3) +. Hud.slot_w() +. 0.004
+      let y = Hud.slot_oy(3) +. Hud.slot_h() /. 2.0
+      Test.assert_eq_int(Hud.slot_at(gap_x, y, true), -1, "between two columns")
+      Test.assert_eq_int(Hud.slot_at(Hud.slot_ox(0) -. 0.01, y, true), -1, "left of the first column")
+    end
+    test "a point out in the world hits nothing" do
+      Test.assert_eq_int(Hud.slot_at(0.0, 0.5, true), -1, "middle of the screen")
+      Test.assert_eq_int(Hud.slot_at(-0.99, 0.99, true), -1, "top-left corner")
+    end
+    test "every slot's own centre resolves back to that slot" do
+      Test.assert_true(centres_ok(0), "all 36 centres round-trip")
+    end
+  end
+
+  pfn centres_ok(s : Int) : Bool do
+    if s >= Inv.slots() do true
+    else if Hud.slot_at(Hud.slot_ox(s) +. Hud.slot_w() /. 2.0, Hud.slot_oy(s) +. Hud.slot_h() /. 2.0, true) == s do centres_ok(s + 1)
+    else false end end
   end
 
 end
