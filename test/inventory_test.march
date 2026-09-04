@@ -148,6 +148,38 @@ mod CubeForge.Test.Inventory do
     end
   end
 
+  -- The exact composition the frame loop performs for a drag: hit-test the
+  -- cursor to a slot, lift on press, hit-test again, move on release. Unit tests
+  -- for slot_at and move_stack pass individually while this composition is
+  -- broken -- a layout change that moves the drawn boxes but not the hit boxes
+  -- would leave both green.
+  pfn drag_between(i : CubeForge.Inventory.Inv, from : Int, to : Int) : CubeForge.Inventory.Inv do
+    let press = Hud.slot_at(Hud.slot_ox(from) +. Hud.slot_w() /. 2.0,
+                            Hud.slot_oy(from, true) +. Hud.slot_h() /. 2.0, true)
+    let release = Hud.slot_at(Hud.slot_ox(to) +. Hud.slot_w() /. 2.0,
+                              Hud.slot_oy(to, true) +. Hud.slot_h() /. 2.0, true)
+    if press < 0 || Inv.is_empty_at(i, press) do i else Inv.move_stack(i, press, release) end
+  end
+
+  describe "drag through the cursor, end to end" do
+    test "a stack dragged from the hotbar row lands in the backpack under it" do
+      let i = harvest_n(Inv.new(), 3, 6)
+      let j = drag_between(i, 0, Inv.hotbar_slots())
+      Test.assert_true(Inv.is_empty_at(j, 0), "hotbar slot emptied")
+      Test.assert_eq_int(Inv.count_at(j, Inv.hotbar_slots()), 6, "all six arrived in the backpack")
+    end
+    test "and comes back the same way" do
+      let i = harvest_n(Inv.new(), 3, 6)
+      let there = drag_between(i, 0, Inv.hotbar_slots() + 4)
+      let back = drag_between(there, Inv.hotbar_slots() + 4, 2)
+      Test.assert_eq_int(Inv.count_at(back, 2), 6, "round trip into a different hotbar slot")
+      Test.assert_true(Inv.is_empty_at(back, Inv.hotbar_slots() + 4), "and the backpack slot is empty again")
+    end
+    test "every slot can be dragged to every row" do
+      Test.assert_true(all_rows_reachable(0), "each of the 36 slots hit-tests back to itself and accepts a stack")
+    end
+  end
+
   describe "conservation" do
     -- The property that would silently duplicate or delete items. A handful of
     -- cases would not catch it; a long random walk over every slot pair does.
@@ -206,6 +238,17 @@ mod CubeForge.Test.Inventory do
     end
     test "every slot's own centre resolves back to that slot" do
       Test.assert_true(centres_ok(0), "all 36 centres round-trip")
+    end
+  end
+
+  -- Drag one stack into slot s and back out, for every s.
+  pfn all_rows_reachable(s : Int) : Bool do
+    if s >= Inv.slots() do true
+    else
+      let i = harvest_n(Inv.new(), 3, 2)
+      let there = drag_between(i, 0, s)
+      let ok = if s == 0 do Inv.count_at(there, 0) == 2 else Inv.count_at(there, s) == 2 && Inv.is_empty_at(there, 0) end
+      if ok do all_rows_reachable(s + 1) else false end
     end
   end
 
