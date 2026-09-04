@@ -648,15 +648,22 @@ mod CubeForge do
         let x = ci % (n * 16)
         let z = ci / (n * 16)
         let h = Biome.height_of(bio, x, z)
-        let base = if Veg.is_decay(e) do Veg.trunk_base(w, x, z, h) else h end
+        let bush = Veg.is_bush(e)
+        -- a bush's leaf is the surface the heightmap sees; a tree's ground is under its trunk
+        let base = if !Veg.is_decay(e) do h else if bush do h - 1 else Veg.trunk_base(w, x, z, h) end end
         let b = Biome.biome_of(bio, x, z)
-        let trunk = if Veg.pine_for(b) do 7 else 5 end
-        let w1 = if Veg.is_decay(e) do Veg.fell(w, x, z, base) else Veg.plant(w, x, z, base, trunk, Veg.pine_for(b)) end
+        -- the box above ground the edit can touch: a trunk and canopy, or one layer of leaves
+        let trunk = if bush do 0 - 1 else if Veg.pine_for(b) do 7 else 5 end end
+        let w1 = if bush do
+          if Veg.is_decay(e) do Veg.unbush(w, x, z, base) else Veg.plant_bush(w, x, z, base) end
+        else
+          if Veg.is_decay(e) do Veg.fell(w, x, z, base) else Veg.plant(w, x, z, base, trunk, Veg.pine_for(b)) end
+        end
         -- relight_marked, not relight_at: the relight can change baked light in
         -- sections the tree's box never touched, and a section whose light moved
         -- but whose mesh was not rebuilt renders stale. The relight reports
         -- exactly which sections it changed; those join the geometry marks.
-        let relit = CubeForge.Light.relight_marked(World.light(w1), w1, x, base + 4, z)
+        let relit = CubeForge.Light.relight_marked(World.light(w1), w1, x, base + (if bush do 1 else 4 end), z)
         let w2 = World.set_light(w1, CubeForge.Light.relit_field(relit))
         sync_occupancy(w2, x, z, base, base + trunk + 2)
         let marks1 = or_marks(mark_box(marks, x - 4, base, z - 4, x + 4, base + trunk + 2, z + 4, n, 0), CubeForge.Light.relit_marks(relit), 0)
@@ -681,6 +688,12 @@ mod CubeForge do
     end
   end
 
+  pfn count_bush(entries : List(Int), acc : Int) : Int do
+    match entries do
+      Nil -> acc
+      Cons(e, rest) -> count_bush(rest, if Veg.is_bush(e) do acc + 1 else acc end)
+    end
+  end
   pfn vegetate(sc, seed : Int, entries : List(Int)) do
     match entries do
       Nil -> sc
@@ -1303,7 +1316,7 @@ mod CubeForge do
             let tv0 = Win.time()
             let vpicks = Veg.candidates(scene_biome(scm), scene_world(scm), seed, frame / tick_period(), 2048, veg_budget)
             let scv = vegetate(scm, seed, vpicks)
-            if autoflow >= 0 && frame % 100 == veg_slot() do println("biome veg: " ++ int_to_string(List.length(vpicks)) ++ " trees in " ++ ms(Win.time() -. tv0)) else () end
+            if autoflow >= 0 && frame % 100 == veg_slot() do println("biome veg: " ++ int_to_string(List.length(vpicks) - count_bush(vpicks, 0)) ++ " trees, " ++ int_to_string(count_bush(vpicks, 0)) ++ " bushes in " ++ ms(Win.time() -. tv0)) else () end
             scv
           else scm end
           -- Pay off the mesh the world owes, a bounded number of sections a

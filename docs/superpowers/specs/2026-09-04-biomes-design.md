@@ -167,8 +167,11 @@ It lands last (§9) and may be reduced to leaves-only if the cost is bad.
 *As built:* felling removes exactly the blocks `Trees.block_of_tree` says the
 tree owns, given its trunk height (measured) and species (from the log id) —
 not a leaf search. Growth plants only at a cell's canonical trunk column.
-Bushes (grassland) are not implemented, so grassland's generated trees are
-felled.
+Bushes follow the same rule: generation's 3x3 leaf clump grows at a 5-block
+bush cell's canonical column where the biome's ground is grass (grassland,
+forest) at generation's 0.22 density, and a ground-level oak leaf decays
+where it is not. A canopy never touches the ground, so "oak leaves on solid
+ground" identifies a bush without a search.
 
 ## 7. Eight biomes, three new blocks
 

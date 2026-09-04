@@ -825,7 +825,17 @@ is a candidate at most once. A tree is felled where its biome holds no trees.
   every flat grass column at 0.45; the biome table keeps trees only in forest,
   taiga and wetland. On a fresh world the temperate dry plain loses its trees
   over the first minutes while forest near the water keeps them —
-  `docs/biome-vegetation.png`. Bushes are not implemented yet.
+  `docs/biome-vegetation.png`.
+- **Bushes (closing the phase).** The same rule at a finer grain: generation's
+  3x3 leaf clump grows at a 5-block bush cell's canonical column where the
+  ground is grass (grassland and forest) at generation's 0.22 density, and a
+  ground-level oak leaf decays where the biome holds no bushes. A canopy's
+  lowest leaves sit three blocks up the trunk, so "oak leaves on solid
+  ground" identifies a bush without any search. Entries carry bit 29 beside
+  the decay bit; the driver relights and rescans a one-layer box. Seed 7 with
+  `CF_VEG_BUDGET=8`, sampled every 100 frames over 3,000: 30 bush actions to 6
+  tree actions, ~6 ms per bush against ~40 ms per tree, and the idle scan
+  stays at 1-2 ms (fps unchanged at budget 0 and 1).
 
 ## G37: what `pmap_n` scaling actually costs (2026-09-04)
 

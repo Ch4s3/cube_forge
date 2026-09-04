@@ -19,6 +19,8 @@ mod CubeForge.Veg do
   fn density(b : Int) : Float do
     if b == Biome.b_forest() do 0.45 else if b == Biome.b_taiga() do 0.25 else if b == Biome.b_wetland() do 0.15 else 0.0 end end end
   end
+  doc "Biomes that hold bushes: the two whose ground is grass, as at generation, where bushes go only on grass."
+  fn wants_bushes(b : Int) : Bool do b == Biome.b_grassland() || b == Biome.b_forest() end
   doc "Pines in the taiga, oaks everywhere else that has trees."
   fn pine_for(b : Int) : Bool do b == Biome.b_taiga() end
   doc "How far around a trunk decay looks for orphaned leaves: the widest canopy plus one."
@@ -89,6 +91,46 @@ mod CubeForge.Veg do
     end
   end
 
+  -- ── Bushes: a 3x3 clump of oak leaves on the ground ──────────────────────
+  -- Column (x, z) is its 5-block bush cell's canonical column and the cell's
+  -- draw is under the generation density. Nested, not `&&` (GAPS G33).
+  pfn cell_says_bush(x : Int, z : Int, seed : Int) : Bool do
+    let cx = x / Trees.bush_cell_size()
+    let cz = z / Trees.bush_cell_size()
+    if Trees.bush_cell_column(cx, cz, seed) == x + 4096 * z do Trees.bush_cell_density(cx, cz, seed) < Trees.bush_density()
+    else false end
+  end
+
+  doc "A bush leaf: oak leaves standing directly on solid ground. A tree's canopy never reaches the ground (its lowest leaves sit three blocks up the trunk), so a ground-level leaf is a bush's."
+  fn has_bush(w : CubeForge.World.World, x : Int, z : Int, h : Int) : Bool do
+    if W.block_at(w, x, h, z) != C.oak_leaves() do false
+    else
+      let below = W.block_at(w, x, h - 1, z)
+      below != 0 && !C.is_foliage(below) && !is_log(below)
+    end
+  end
+
+  doc "Can a bush grow at column (x, z) now: the biome wants bushes, the cell says so, the surface is the biome's own ground with air above, dry and above the sea."
+  fn can_grow_bush(f : CubeForge.Biome.Field, w : CubeForge.World.World, seed : Int, x : Int, z : Int) : Bool do
+    let b = Biome.biome_of(f, x, z)
+    if !wants_bushes(b) do false
+    else
+      let h = Biome.height_of(f, x, z)
+      if h <= C.sea_level() do false
+      else if !cell_says_bush(x, z, seed) do false
+      else if W.block_at(w, x, h, z) != Biome.palette(b) do false
+      else if W.block_at(w, x, h + 1, z) != 0 do false
+      else !Biome.is_wet(f, x, z) end end end end
+    end
+  end
+
+  doc "Should the bush at column (x, z) decay: a ground-level leaf where the biome holds no bushes."
+  fn can_decay_bush(f : CubeForge.Biome.Field, w : CubeForge.World.World, x : Int, z : Int) : Bool do
+    let b = Biome.biome_of(f, x, z)
+    if wants_bushes(b) do false
+    else has_bush(w, x, z, Biome.height_of(f, x, z)) end
+  end
+
   pfn scan_go(f : CubeForge.Biome.Field, w : CubeForge.World.World, seed : Int, n : Int, i : Int, left : Int, budget : Int, acc : List(Int)) : List(Int) do
     if left <= 0 || budget <= 0 do acc
     else
@@ -96,19 +138,23 @@ mod CubeForge.Veg do
       let x = ci % n
       let z = ci / n
       -- growth packs the column as-is; decay packs it with bit 30 set
+      -- bushes pack with bit 29 set as well
       if can_grow(f, w, seed, x, z) do scan_go(f, w, seed, n, i + 1, left - 1, budget - 1, Cons(ci, acc))
       else if can_decay(f, w, x, z) do scan_go(f, w, seed, n, i + 1, left - 1, budget - 1, Cons(ci + 1073741824, acc))
-      else scan_go(f, w, seed, n, i + 1, left - 1, budget, acc) end end
+      else if can_grow_bush(f, w, seed, x, z) do scan_go(f, w, seed, n, i + 1, left - 1, budget - 1, Cons(ci + 536870912, acc))
+      else if can_decay_bush(f, w, x, z) do scan_go(f, w, seed, n, i + 1, left - 1, budget - 1, Cons(ci + 1073741824 + 536870912, acc))
+      else scan_go(f, w, seed, n, i + 1, left - 1, budget, acc) end end end end
     end
   end
 
-  doc "Columns to act on this tick: growth entries are column indices, decay entries have bit 30 set. At most [budget], scanning [scan] columns from where tick [tick] leaves off."
+  doc "Columns to act on this tick: growth entries are column indices, decay entries have bit 30 set, bush entries bit 29. At most [budget], scanning [scan] columns from where tick [tick] leaves off."
   fn candidates(f : CubeForge.Biome.Field, w : CubeForge.World.World, seed : Int, tick : Int, scan : Int, budget : Int) : List(Int) do
     let n = Biome.cols(w)
     scan_go(f, w, seed, n, (tick * scan) % (n * n), scan, budget, Nil)
   end
   fn is_decay(entry : Int) : Bool do entry >= 1073741824 end
-  fn column_of(entry : Int) : Int do if is_decay(entry) do entry - 1073741824 else entry end end
+  fn is_bush(entry : Int) : Bool do (entry / 536870912) % 2 == 1 end
+  fn column_of(entry : Int) : Int do entry % 536870912 end
 
   -- ── World edits: the tree's blocks ─────────────────────────────────────────
   doc "Stamp a tree of [trunk] logs rooted on ground [base] at (tx, tz), only into air. Returns the world."
@@ -148,6 +194,27 @@ mod CubeForge.Veg do
       let want = Trees.block_of_tree(tx, tz, base, trunk, pine, x, y, z)
       let w1 = if y < 256 && C.is_foliage(want) && W.block_at(w, x, y, z) == want do W.set_occupied(W.set_block(w, x, y, z, 0), x, y, z, false) else w end
       unleaf_go(w1, tx, tz, base, trunk, pine, i + 1)
+    end
+  end
+
+  doc "Stamp a bush centred on (x, base + 1, z): the same 3x3 clump generation plants, only into air."
+  fn plant_bush(w : CubeForge.World.World, x : Int, z : Int, base : Int) : CubeForge.World.World do bush_go(w, x, z, base, true, 0) end
+  doc "Remove the bush around (x, z): every ground-level oak leaf in the 3x3, whichever bush it belonged to. Bushes overlap only at their edges, so at worst a neighbour loses an edge leaf."
+  fn unbush(w : CubeForge.World.World, x : Int, z : Int, base : Int) : CubeForge.World.World do bush_go(w, x, z, base, false, 0) end
+  pfn bush_go(w : CubeForge.World.World, bx : Int, bz : Int, base : Int, grow : Bool, i : Int) : CubeForge.World.World do
+    if i >= 9 || base + 1 >= 256 do w
+    else
+      let x = bx - 1 + i % 3
+      let z = bz - 1 + i / 3
+      let y = base + 1
+      let w1 = if grow do
+        -- generation's pattern: the centre plus two thirds of the ring
+        let keep = i == 4 || (x + z + i) % 3 != 0
+        if keep && W.block_at(w, x, y, z) == 0 do W.set_block(w, x, y, z, C.oak_leaves()) else w end
+      else
+        if W.block_at(w, x, y, z) == C.oak_leaves() && !C.is_foliage(W.block_at(w, x, y - 1, z)) do W.set_block(w, x, y, z, 0) else w end
+      end
+      bush_go(w1, bx, bz, base, grow, i + 1)
     end
   end
 
