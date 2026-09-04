@@ -199,7 +199,13 @@ mod CubeForge.Water do
         if C.is_source(r) do st1                                            -- the sea absorbs it
         else
           let rl = if C.is_water(r) do C.level_of(r) else 0 end
-          set_cell(st1, dx, dy, dz, C.id_of_level(if rl + u > 7 do 7 else rl + u end))
+          -- The receiver must be processed next, to fall or spread what it was
+          -- given. set_cell marks a written cell's NEIGHBOURS, which covers the
+          -- receiver only when the giver is itself written -- and a source never
+          -- is. A spring's receivers filled to 7 and then nothing moved again.
+          match set_cell(st1, dx, dy, dz, C.id_of_level(if rl + u > 7 do 7 else rl + u end)) do
+            Step(s2, o2) -> Step(mark(s2, dx, dy, dz), o2)
+          end
         end
       else if dy < 0 || dy >= 256 do st1
       else
@@ -317,11 +323,20 @@ mod CubeForge.Water do
     -- Entries queued outside a tick (bounced overflow) go out first; accepted
     -- units changed a cell the frame loop has not seen, so report those too.
     let queued = match s do Sim(_, _, _, _, _, _, po, _, _) -> po end
-    let s0 = match s do Sim(c, e, q, qh, qn, bm, _, sp, wk) -> mark_list(mark_springs(Sim(c, e, q, qh, qn, bm, Nil, sp, Nil), sp), wk) end
+    let sp = springs(s)
+    let s0 = match s do Sim(c, e, q, qh, qn, bm, _, _, wk) -> mark_list(mark_springs(Sim(c, e, q, qh, qn, bm, Nil, sp, Nil), sp), wk) end
     match run(Step(s0, queued), max_cells_per_tick()) do
-      Step(s1, out) -> Step(s1, if pending(s1) > 0 do Cons(kind_pending() + pending(s1), out) else out end)
+      Step(s1, out) ->
+        -- Springs give again next tick and woken cells draw again next tick, so
+        -- a chunk holding either must stay flagged even when its queue drained:
+        -- the frame loop only ticks flagged chunks, and nothing else would wake it.
+        let live = pending(s1) + List.length(sp) + wake_count(s1)
+        Step(s1, if live > 0 do Cons(kind_pending() + live, out) else out end)
     end
   end
+  pfn wake_count(s : Sim) : Int do match s do Sim(_, _, _, _, _, _, _, _, wk) -> List.length(wk) end end
+  doc "Springs above sea level in this chunk, for the frame loop and tests."
+  fn springs(s : Sim) : List(Int) do match s do Sim(_, _, _, _, _, _, _, sp, _) -> sp end end
 
   doc "A neighbour pushed [u] units across the edge facing [dir] into our cell at [slot]. Add them, capped at 7; any overflow goes straight back as a spill the other way, queued for our next reply, so no unit is ever lost to a stale mirror."
   fn accept_spill(s : Sim, dir : Int, slot : Int, u : Int) : Sim do

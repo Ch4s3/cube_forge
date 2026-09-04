@@ -139,7 +139,12 @@ frames), plus the water tick's cost from its existing verbose print.
 
 Targets: a brook of **15-40 cells**, visibly running, that does not visibly
 grow after settling; the water tick under **2 ms** with every spring active; a
-finite bucket's puddle dry within a couple of minutes. Adjust one knob at a
+finite bucket's puddle dry within a couple of minutes.
+
+*As measured* (`RESULTS.md`): rate 1, evap 16, density 100 -- five springs, the
+actors at 1.4 ms, but the **remesh** of the moving water is ~24 ms a tick and
+scales with spring count. That cost was not in the target and is the number to
+watch. Adjust one knob at a
 time against the terrain map with `CF_NOMOUSE=1 CF_TIME=0`. The defaults that
 land are the ones measured, recorded in `RESULTS.md` with the numbers.
 

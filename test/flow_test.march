@@ -188,6 +188,23 @@ mod CubeForge.Test.Flow do
     end
   end
 
+  describe "a spring keeps its chunk live" do
+    test "the reply carries a pending marker every tick, even with an empty queue" do
+      let c0 = C.set(roof_go(slope_go(C.new(), 0), 0), 8, 71, 8, C.water())
+      let s0 = Water.edited(Water.new_sim(c0, Water.empty_edges()), Water.idx(8, 71, 8), C.water())
+      Test.assert_eq_int(List.length(Water.springs(s0)), 1, "one spring known")
+      let s = run_ticks(s0, 50)
+      let r = Water.tick(s)
+      Test.assert_true(has_pending(Water.step_out(r)), "still flagged after fifty ticks")
+    end
+  end
+  pfn has_pending(out : List(Int)) : Bool do
+    match out do
+      Nil -> false
+      Cons(v, rest) -> if v / 4294967296 == 3 do true else has_pending(rest) end
+    end
+  end
+
   describe "evaporation" do
     test "under a roof, seven units stay seven" do
       let c0 = C.set(roof_go(wall_go(floored(), 0), 0), 7, 71, 7, C.id_of_level(7))
@@ -198,6 +215,31 @@ mod CubeForge.Test.Flow do
       let c0 = C.set(wall_go(floored(), 0), 7, 71, 7, C.id_of_level(7))
       let s = run_ticks(Water.edited(Water.new_sim(c0, Water.empty_edges()), Water.idx(7, 71, 7), C.id_of_level(7)), 800)
       Test.assert_eq_int(Water.volume(s), 0, "open: gone")
+    end
+  end
+
+  pfn probe_ticks(s : CubeForge.Water.Sim, n : Int, i : Int) : CubeForge.Water.Sim do
+    if i >= n do s
+    else
+      let s1 = Water.step_sim(Water.tick(s))
+      if i % 10 == 0 do println("    tick " ++ int_to_string(i) ++ ": volume " ++ int_to_string(Water.volume(s1)) ++ ", water cells " ++ int_to_string(C.count_water(Water.sim_chunk(s1))) ++ ", pending " ++ int_to_string(Water.pending(s1))) else () end
+      probe_ticks(s1, n, i + 1)
+    end
+  end
+  describe "spring probe" do
+    test "the generated spring at 116,90,74 (seed 7, chunk 7,4): surroundings and flow" do
+      let c = C.generate(112, 64, 7)
+      let lx = 4
+      let lz = 10
+      println("    spring cell id " ++ int_to_string(C.get(c, lx, 90, lz)) ++ " below " ++ int_to_string(C.get(c, lx, 89, lz)) ++ " above " ++ int_to_string(C.get(c, lx, 91, lz)))
+      println("    neighbours at y=90: +x " ++ int_to_string(C.get(c, lx + 1, 90, lz)) ++ " -x " ++ int_to_string(C.get(c, lx - 1, 90, lz)) ++ " +z " ++ int_to_string(C.get(c, lx, 90, lz + 1)) ++ " -z " ++ int_to_string(C.get(c, lx, 90, lz - 1)))
+      println("    column tops: +x " ++ int_to_string(CubeForge.Noise.height(117, 74, 7)) ++ " -x " ++ int_to_string(CubeForge.Noise.height(115, 74, 7)) ++ " +z " ++ int_to_string(CubeForge.Noise.height(116, 75, 7)) ++ " -z " ++ int_to_string(CubeForge.Noise.height(116, 73, 7)) ++ " here " ++ int_to_string(CubeForge.Noise.height(116, 74, 7)))
+      let s0 = Water.new_sim(c, Water.empty_edges())
+      println("    springs known: " ++ int_to_string(List.length(Water.springs(s0))))
+      let s = probe_ticks(s0, 60, 0)
+      Test.assert_true(Water.volume(s) > 0, "the spring is still feeding a brook after sixty ticks")
+      Test.assert_true(C.count_water(Water.sim_chunk(s)) > 3, "the water went somewhere: more than the spring and its two neighbours")
+      Test.assert_true(Water.volume(s) < 40, "and evaporation holds it to a brook, not a lake")
     end
   end
 

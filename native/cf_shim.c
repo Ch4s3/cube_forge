@@ -891,6 +891,23 @@ void cf_biome_map_upload(void *biomes, int64_t n) {
     glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(cells * 6 * CF_VERT_FLOATS * (int64_t)sizeof(float)), g_biome_vtx, GL_STATIC_DRAW);
 }
 
+/* ── Springs ────────────────────────────────────────────────────────────────
+ * Every source block above sea level, kept here beside the particle pool that
+ * will bubble at them. March scans once at startup and reports edits. */
+#define CF_MAX_SPRINGS 512
+static int32_t g_springs[CF_MAX_SPRINGS][3];
+static int64_t g_nsprings = 0;
+void cf_spring_set(int64_t x, int64_t y, int64_t z, int64_t on) {
+    for (int64_t i = 0; i < g_nsprings; i++) {
+        if (g_springs[i][0] == x && g_springs[i][1] == y && g_springs[i][2] == z) {
+            if (!on) { g_springs[i][0] = g_springs[g_nsprings-1][0]; g_springs[i][1] = g_springs[g_nsprings-1][1]; g_springs[i][2] = g_springs[g_nsprings-1][2]; g_nsprings--; }
+            return;
+        }
+    }
+    if (on && g_nsprings < CF_MAX_SPRINGS) { g_springs[g_nsprings][0] = (int32_t)x; g_springs[g_nsprings][1] = (int32_t)y; g_springs[g_nsprings][2] = (int32_t)z; g_nsprings++; }
+}
+int64_t cf_spring_count(void) { return g_nsprings; }
+
 /* Precipitation: blended and depth-write-off like water, but also unlit and
  * untextured, so each particle keeps the colour it carries in its uv/layer
  * slots instead of being dimmed by a sun it is supposed to be obscuring. */

@@ -26,6 +26,8 @@ mod CubeForge.Ffi.Window do
     fn x_gfx_begin_frame(r: Float, g: Float, b: Float): Unit = "cf_gfx_begin_frame"
     fn x_gfx_set_weather(fog: Float, overcast: Float, bolt: Float): Unit = "cf_gfx_set_weather"
     fn x_gfx_set_time(t: Float): Unit = "cf_gfx_set_time"
+    fn x_spring_set(x: Int, y: Int, z: Int, flag: Int): Unit = "cf_spring_set"   -- not `on`: reserved (GAPS G65)
+    fn x_spring_count(): Int = "cf_spring_count"
     fn x_gfx_draw_precip(slot: Int, nverts: Int): Unit = "cf_gfx_draw_precip"
     fn x_precip_init(cap: Int): Unit = "cf_precip_init"
     fn x_biome_map_upload(biomes: NativeU8Arr, n: Int): Unit = "cf_biome_map_upload"
@@ -70,6 +72,10 @@ mod CubeForge.Ffi.Window do
   doc "Copy the first [nfloats] floats of [arr] into [slot] at float offset [offset]."
   fn gfx_upload_part(slot : Int, offset : Int, arr : NativeF32Arr, nfloats : Int) : Unit do x_gfx_upload_part(slot, offset, arr, nfloats) end
   fn gfx_begin_frame(r : Float, g : Float, b : Float) : Unit do x_gfx_begin_frame(r, g, b) end
+
+  doc "Tell the shim a spring (a source above sea level) appeared or vanished at (x, y, z)."
+  fn spring_set(x : Int, y : Int, z : Int, present : Bool) : Unit do x_spring_set(x, y, z, if present do 1 else 0 end) end
+  fn spring_count() : Int do x_spring_count() end
 
   doc "Seconds for the water animation."
   fn gfx_set_time(t : Float) : Unit do x_gfx_set_time(t) end

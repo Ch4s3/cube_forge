@@ -826,3 +826,35 @@ is a candidate at most once. A tree is felled where its biome holds no trees.
   taiga and wetland. On a fresh world the temperate dry plain loses its trees
   over the first minutes while forest near the water keeps them —
   `docs/biome-vegetation.png`. Bushes are not implemented yet.
+
+## Springs — generated, balanced against evaporation
+
+`docs/superpowers/specs/2026-09-04-springs-and-flow-design.md`. A spring is a
+source above sea level, generated one per 8-block cell that draws under
+`CF_SPRING_DENSITY` per mille and whose column has slope >= 2 at height >= 72.
+It gives at most `CF_SPRING_RATE` units a tick; thin sky-exposed water
+evaporates one draw in `CF_EVAP` per tick.
+
+**The bug that hid the whole feature:** a spring's receivers were never
+processed. `set_cell` marks a written cell's neighbours, which covers the
+receiver only when the giver is itself written -- and a source never is. Every
+spring filled its two air neighbours to 7 and stopped. `give` now marks the
+receiver explicitly. Found with a probe test on the chunk holding the spring at
+(116,90,74), which is kept as the regression: the brook must still be fed after
+sixty ticks, reach beyond the spring's neighbours, and stay under forty units.
+
+Balance, release build, seed 7, frame ~890, one tick every ten frames:
+
+| rate | evap | density (per mille) | springs | active cells | water actors | apply + remesh |
+|------|------|---------------------|---------|--------------|--------------|----------------|
+| 1 | 16 | 150 | 8 | 112 | 2.0 ms | 27.6 ms (23 sections) |
+| 1 | 32 | 150 | 9 | 218 | 3.5 ms | 44.9 ms (30) |
+| 2 | 16 | 150 | 9 | 205 | 4.1 ms | 36.3 ms (26) |
+| 1 | 8  | 150 | 7 | 56  | 1.3 ms | 23.1 ms (22) |
+| 1 | 16 | **100** | **5** | **87** | **1.4 ms** | **23.7 ms (16)** |
+| 1 | 16 | 60  | 2 | 42  | 0.7 ms | 10.8 ms (7) |
+
+Defaults landed: **rate 1, evap 16, density 100** -- five springs, ~9-cell
+brooks in the probe, actors well under the 2 ms target. The remesh is the honest
+cost of water that keeps moving: about three sections per brook per tick,
+~1.5 ms each. `CF_SPRING_DENSITY` is the lever for it. `docs/spring-brook.png`.

@@ -324,6 +324,26 @@ mod CubeForge do
   end
 
   -- One water tick: call every flagged chunk actor in parallel, apply the replies, remesh what changed.
+  -- Cells still queued across every chunk after a tick: the kind-3 markers' payloads summed.
+  pfn active_cells(replies, acc : Int) : Int do
+    match replies do
+      Nil -> acc
+      Cons(r, rest) -> active_cells(rest, acc + reply_pending(r))
+    end
+  end
+  pfn reply_pending(r) : Int do
+    match r do
+      Ok(out) -> pending_of(out, 0)
+      _ -> 0
+    end
+  end
+  pfn pending_of(out : List(Int), acc : Int) : Int do
+    match out do
+      Nil -> acc
+      Cons(v, rest) -> pending_of(rest, if v / 4294967296 == 3 do acc + v % 4294967296 else acc end)
+    end
+  end
+
   pfn water_tick(sc, workers : Int, verbose : Bool) do
     match sc do
       Scene(w, counts, outline, hit, sel, pids, flags, meshes, bio) ->
@@ -341,7 +361,7 @@ mod CubeForge do
               Applied(w1, counts1, flags2, meshes1, remeshed) ->
                 let t2 = Win.time()
                 if verbose do
-                  println("water tick: " ++ int_to_string(List.length(cis)) ++ " chunks, calls " ++ ms(t1 -. t0) ++ ", apply+remesh " ++ ms(t2 -. t1) ++ " (" ++ int_to_string(remeshed) ++ " sections remeshed), reply sizes " ++ reply_sizes(replies))
+                  println("water tick: " ++ int_to_string(List.length(cis)) ++ " chunks, calls " ++ ms(t1 -. t0) ++ ", apply+remesh " ++ ms(t2 -. t1) ++ " (" ++ int_to_string(remeshed) ++ " sections remeshed), active cells " ++ int_to_string(active_cells(replies, 0)) ++ ", reply sizes " ++ reply_sizes(replies))
                 else () end
                 Scene(w1, counts1, outline, hit, sel, pids, flags2, meshes1, bio)
             end
@@ -425,6 +445,9 @@ mod CubeForge do
         let t0 = Win.time()
         let w0 = World.set_occupied(World.set_block(world, x, y, z, id), x, y, z, CubeForge.Light.occludes(id))
         let bio1 = Biome.note_edit(bio, w0, x, y, z, id)
+        let was_spring = y > Chunk.sea_level() && Chunk.is_source(World.block_at(world, x, y, z))
+        let is_spring = y > Chunk.sea_level() && Chunk.is_source(id)
+        if was_spring != is_spring do Win.spring_set(x, y, z, is_spring) else () end
         Win.gfx_set_voxel(x, y, z, CubeForge.Light.occludes(id))
         let n = World.side(w0)
         -- accessors, not a match: a dotted constructor pattern does not parse (GAPS.md G24/G25)
@@ -555,6 +578,24 @@ mod CubeForge do
   end
 
   -- Water on the surface at (px+3, pz+dz) for dz in [k, 4]: nine columns east of the player.
+  -- Every source above sea level: told to the shim, and its chunk flagged so the
+  -- water actor ticks from the first frame (a chunk with a spring is always live).
+  pfn spring_flags(w : CubeForge.World.World, f : CubeForge.Biome.Field, i : Int, n : Int, flags : NativeIntArr) : NativeIntArr do
+    if i >= n * n * 256 do
+      println("springs: " ++ int_to_string(Win.spring_count()))
+      flags
+    else
+      let x = i % (n * 16)
+      let z = i / (n * 16)
+      let h = Biome.height_of(f, x, z)
+      if h > Chunk.sea_level() && Chunk.is_source(World.block_at(w, x, h, z)) do
+        Win.spring_set(x, h, z, true)
+        println("  spring at " ++ int_to_string(x) ++ "," ++ int_to_string(h) ++ "," ++ int_to_string(z))
+        spring_flags(w, f, i + 1, n, NativeArray.set_int(flags, World.floor_div16(x) + n * World.floor_div16(z), 1))
+      else spring_flags(w, f, i + 1, n, flags) end
+    end
+  end
+
   pfn dig_canal(sc, p : CubeForge.Player.Player, k : Int) do
     if k > 4 do sc
     else
@@ -1383,7 +1424,8 @@ mod CubeForge do
         let tw0 = Win.time()
         let pids = Array.from_list(spawn_water(n * n - 1, n, seed, Nil))
         println("spawned " ++ int_to_string(n * n) ++ " water actors in " ++ ms(Win.time() -. tw0) ++ " (loads run asynchronously)")
-        let scene = Scene(world, counts, F32Buf.new(256), Ray.miss(), Ui(Inv.new(), F32Buf.new(2048), F32Buf.new(256), -1), pids, NativeArray.make_int(n * n, 0), Array.from_list(meshes), Biome.build(world, seed))
+        let biome0 = Biome.build(world, seed)
+        let scene = Scene(world, counts, F32Buf.new(256), Ray.miss(), Ui(Inv.new(), F32Buf.new(2048), F32Buf.new(256), -1), pids, spring_flags(world, biome0, 0, n, NativeArray.make_int(n * n, 0)), Array.from_list(meshes), biome0)
         let fps0 = Fps(t4, 0, 0, F32Buf.new(4096))
         let wxpid = Weather.spawn_weather()
         Weather.send_seed(wxpid, seed)
