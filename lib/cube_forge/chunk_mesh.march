@@ -68,6 +68,54 @@ mod CubeForge.ChunkMesh do
     end
   end
 
+  doc """
+  Rebuild only the opaque pass of section [sy]. Right for a change that swaps one
+  solid block for another of the same opacity -- biome retexturing, where grass
+  becomes sand or gravel. No water cell and no leaf moves, so those two passes
+  would rebuild to what they already hold, and the greedy mesh plus its light
+  lookups are the expensive part of a rebuild.
+  """
+  fn rebuild_section_opaque(m : ChunkMesh, world : CubeForge.World.World, cx : Int, cz : Int, sy : Int, empty : CubeForge.Chunk.Chunk) : ChunkMesh do
+    if sy < 0 || sy >= 16 do m
+    else
+      let c = World.chunk_at(world, cx, cz)
+      let pick = fn (x, z) -> if World.in_bounds(world, x, z) do World.chunk_at(world, x, z) else empty end
+      let n = pick(cx, cz - 1)
+      let s = pick(cx, cz + 1)
+      let e = pick(cx + 1, cz)
+      let w = pick(cx - 1, cz)
+      match m do
+        ChunkMesh(os, ws, fs) ->
+          ChunkMesh(Array.set(os, sy, Mesher.mesh_section_opaque(c, n, s, e, w, World.light(world), World.occupancy(world), sy, int_to_float(16 * cx), int_to_float(16 * cz))), ws, fs)
+      end
+    end
+  end
+
+  doc """
+  Rebuild the opaque and foliage passes of section [sy], leaving water alone.
+  Right for growing or felling a tree: logs are opaque, leaves are foliage, and
+  neither the trunk nor the canopy can move a water cell.
+  """
+  fn rebuild_section_solid(m : ChunkMesh, world : CubeForge.World.World, cx : Int, cz : Int, sy : Int, empty : CubeForge.Chunk.Chunk) : ChunkMesh do
+    if sy < 0 || sy >= 16 do m
+    else
+      let c = World.chunk_at(world, cx, cz)
+      let pick = fn (x, z) -> if World.in_bounds(world, x, z) do World.chunk_at(world, x, z) else empty end
+      let n = pick(cx, cz - 1)
+      let s = pick(cx, cz + 1)
+      let e = pick(cx + 1, cz)
+      let w = pick(cx - 1, cz)
+      let ox = int_to_float(16 * cx)
+      let oz = int_to_float(16 * cz)
+      match m do
+        ChunkMesh(os, ws, fs) ->
+          ChunkMesh(Array.set(os, sy, Mesher.mesh_section_opaque(c, n, s, e, w, World.light(world), World.occupancy(world), sy, ox, oz)),
+                    ws,
+                    Array.set(fs, sy, Mesher.mesh_section_foliage(c, n, s, e, w, World.light(world), World.occupancy(world), sy, ox, oz)))
+      end
+    end
+  end
+
   doc "Rebuild one section (0..15) of chunk (cx, cz)."
   fn rebuild_section(m : ChunkMesh, world : CubeForge.World.World, cx : Int, cz : Int, sy : Int, empty : CubeForge.Chunk.Chunk) : ChunkMesh do
     if sy < 0 || sy >= 16 do m

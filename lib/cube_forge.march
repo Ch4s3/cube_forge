@@ -220,13 +220,55 @@ mod CubeForge do
   end
 
   -- Rebuild every section named in [mask] (bit sy) of chunk (cx, cz); concat+upload once. Returns Remeshed and the count of rebuilt sections.
-  pfn remesh_sections(world : CubeForge.World.World, cx : Int, cz : Int, mask : Int, sy : Int, m : CubeForge.ChunkMesh.ChunkMesh, empty : CubeForge.Chunk.Chunk, done : Int) : CubeForge.ChunkMesh.ChunkMesh do
+  -- ── The mesh oracle ──────────────────────────────────────────────────
+  -- Every vertex of every section of every chunk, hashed. The state hash covers
+  -- blocks and the biome field, which is the wrong oracle for a remesh change: a
+  -- rebuild that skips a pass it should have rebuilt leaves the world identical
+  -- and the screen stale. Verified against that failure: pointing the retexture
+  -- rebuild at a no-op moved this hash and left the other two untouched.
+  pfn hash_f32(a : NativeF32Arr, i : Int, n : Int, h : Int) : Int do
+    if i >= n do h
+    else hash_f32(a, i + 1, n, (h * 131 + float_to_int(NativeArray.get_f32(a, i) *. 64.0) + 8388608) % 1073741789) end
+  end
+  pfn hash_buf(b : CubeForge.F32Buf.F32Buf, h : Int) : Int do
+    hash_f32(F32Buf.storage(b), 0, F32Buf.len(b), (h * 131 + F32Buf.len(b)) % 1073741789)
+  end
+  pfn hash_secs(secs : Array.PVec(CubeForge.F32Buf.F32Buf), sy : Int, h : Int) : Int do
+    if sy >= 16 do h else hash_secs(secs, sy + 1, hash_buf(Array.get(secs, sy), h)) end
+  end
+  pfn mesh_hash_go(meshes, ci : Int, n : Int, h : Int) : Int do
+    if ci >= n * n do h
+    else
+      let m = Array.get(meshes, ci)
+      mesh_hash_go(meshes, ci + 1, n,
+                   hash_secs(CM.foliage_sections(m), 0, hash_secs(CM.water_sections(m), 0, hash_secs(CM.opaque_sections(m), 0, h))))
+    end
+  end
+  fn mesh_hash(meshes, n : Int) : Int do mesh_hash_go(meshes, 0, n, 7) end
+
+  -- Which passes of a section a remesh has to rebuild. An edit that cannot move
+  -- a water cell or a leaf need not pay for those passes: the greedy mesh and
+  -- its per-vertex light lookups are the cost, and they are per pass. The water
+  -- reply path has its own water-only twin below.
+  fn pass_all() : Int do 0 end
+  doc "Opaque only: a solid block swapped for another of the same opacity (biome retexturing)."
+  fn pass_opaque() : Int do 1 end
+  doc "Opaque and foliage, no water: growing or felling a tree."
+  fn pass_solid() : Int do 2 end
+
+  pfn rebuild_for(m : CubeForge.ChunkMesh.ChunkMesh, world : CubeForge.World.World, cx : Int, cz : Int, sy : Int, empty : CubeForge.Chunk.Chunk, passes : Int) : CubeForge.ChunkMesh.ChunkMesh do
+    if passes == pass_opaque() do CM.rebuild_section_opaque(m, world, cx, cz, sy, empty)
+    else if passes == pass_solid() do CM.rebuild_section_solid(m, world, cx, cz, sy, empty)
+    else CM.rebuild_section(m, world, cx, cz, sy, empty) end end
+  end
+
+  pfn remesh_sections(world : CubeForge.World.World, cx : Int, cz : Int, mask : Int, sy : Int, m : CubeForge.ChunkMesh.ChunkMesh, empty : CubeForge.Chunk.Chunk, passes : Int) : CubeForge.ChunkMesh.ChunkMesh do
     if sy >= 16 do m
     else
       -- a changed cell on a section boundary changes the adjacent section's culling too
       let hit = int_and(mask, pow2(sy)) != 0
-      let m1 = if hit do CM.rebuild_section(m, world, cx, cz, sy, empty) else m end
-      remesh_sections(world, cx, cz, mask, sy + 1, m1, empty, done)
+      let m1 = if hit do rebuild_for(m, world, cx, cz, sy, empty, passes) else m end
+      remesh_sections(world, cx, cz, mask, sy + 1, m1, empty, passes)
     end
   end
 
@@ -313,14 +355,14 @@ mod CubeForge do
   -- the mesh, so a section whose light moved shows stale lighting until it is
   -- rebuilt -- and a relight reaches much further than the edited cell.
   pfn remesh_marked(w : CubeForge.World.World, marks : NativeIntArr, ci : Int, n : Int,
-                    counts : NativeIntArr, meshes, empty : CubeForge.Chunk.Chunk) : Remeshed do
+                    counts : NativeIntArr, meshes, empty : CubeForge.Chunk.Chunk, passes : Int) : Remeshed do
     if ci >= n * n do Remeshed(counts, meshes)
     else
       let smask = CubeForge.Light.section_mask(marks, ci % n, ci / n)
-      if smask == 0 do remesh_marked(w, marks, ci + 1, n, counts, meshes, empty)
+      if smask == 0 do remesh_marked(w, marks, ci + 1, n, counts, meshes, empty, passes)
       else
-        match remesh_chunk_sections(w, ci % n, ci / n, smask, counts, meshes, empty) do
-          Remeshed(c1, m1) -> remesh_marked(w, marks, ci + 1, n, c1, m1, empty)
+        match remesh_chunk_sections(w, ci % n, ci / n, smask, counts, meshes, empty, passes) do
+          Remeshed(c1, m1) -> remesh_marked(w, marks, ci + 1, n, c1, m1, empty, passes)
         end
       end
     end
@@ -345,11 +387,11 @@ mod CubeForge do
     if lz == 15 && cz < n - 1 do NativeArray.set_int(m6, CubeForge.Light.mark_slot(cx, cz + 1, sy), 1) else m6 end
   end
 
-  pfn remesh_chunk_sections(w : CubeForge.World.World, cx : Int, cz : Int, smask : Int, counts : NativeIntArr, meshes, empty : CubeForge.Chunk.Chunk) : Remeshed do
+  pfn remesh_chunk_sections(w : CubeForge.World.World, cx : Int, cz : Int, smask : Int, counts : NativeIntArr, meshes, empty : CubeForge.Chunk.Chunk, passes : Int) : Remeshed do
     if !World.in_bounds(w, cx, cz) do Remeshed(counts, meshes)
     else
       let ci = cx + World.side(w) * cz
-      let m1 = remesh_sections(w, cx, cz, smask, 0, Array.get(meshes, ci), empty, 0)
+      let m1 = remesh_sections(w, cx, cz, smask, 0, Array.get(meshes, ci), empty, passes)
       Remeshed(upload_chunk(m1, ci, counts), Array.set(meshes, ci, m1))
     end
   end
@@ -486,7 +528,7 @@ mod CubeForge do
         let relit = CubeForge.Light.relight_marked(World.light(w0), w0, x, y, z)
         let world1 = World.set_light(w0, CubeForge.Light.relit_field(relit))
         let marks = mark_geometry(CubeForge.Light.relit_marks(relit), x, y, z, n)
-        match remesh_marked(world1, marks, 0, n, counts, meshes, Chunk.new()) do
+        match remesh_marked(world1, marks, 0, n, counts, meshes, Chunk.new(), pass_all()) do
           Remeshed(c1, m1) ->
             let t1 = Win.time()
             println((if id == 0 do "broke" else "placed" end) ++ " block at " ++ int_to_string(x) ++ "," ++ int_to_string(y) ++ "," ++ int_to_string(z)
@@ -552,7 +594,7 @@ mod CubeForge do
             let n = World.side(world)
             match veg_go(world, bio, CubeForge.Light.marks_new(), seed, n, entries) do
               Migrated(w1, bio1, marks) ->
-                match remesh_marked(w1, marks, 0, n, counts, meshes, Chunk.new()) do
+                match remesh_marked(w1, marks, 0, n, counts, meshes, Chunk.new(), pass_solid()) do
                   Remeshed(c1, m1) -> Scene(w1, c1, outline, hit, ui, pids, flags, m1, bio1)
                 end
             end
@@ -601,7 +643,7 @@ mod CubeForge do
     match sc do
       Scene(world, counts, outline, hit, ui, pids, flags, meshes, bio) ->
         let n = World.side(world)
-        match remesh_marked(world, all_marks(0, NativeArray.make_int(1024, 0)), 0, n, counts, meshes, Chunk.new()) do
+        match remesh_marked(world, all_marks(0, NativeArray.make_int(1024, 0)), 0, n, counts, meshes, Chunk.new(), pass_all()) do
           Remeshed(c1, m1) -> Scene(world, c1, outline, hit, ui, pids, flags, m1, bio)
         end
     end
@@ -617,7 +659,7 @@ mod CubeForge do
             let n = World.side(world)
             match migrate_go(world, bio, CubeForge.Light.marks_new(), n, cols, Nil) do
               Migrated(w1, bio1, marks) ->
-                match remesh_marked(w1, marks, 0, n, counts, meshes, Chunk.new()) do
+                match remesh_marked(w1, marks, 0, n, counts, meshes, Chunk.new(), pass_opaque()) do
                   Remeshed(c1, m1) -> Scene(w1, c1, outline, hit, ui, pids, flags, m1, bio1)
                 end
             end
@@ -803,6 +845,7 @@ mod CubeForge do
 
   pfn scene_counts(sc) : NativeIntArr do match sc do Scene(_, c, _, _, _, _, _, _, _) -> c end end
   pfn scene_world(sc) : CubeForge.World.World do match sc do Scene(w, _, _, _, _, _, _, _, _) -> w end end
+  pfn scene_meshes(sc) do match sc do Scene(_, _, _, _, _, _, _, m, _) -> m end end
   pfn scene_has_hit(sc) : Bool do match sc do Scene(_, _, _, h, _, _, _, _, _) -> Ray.is_hit(h) end end
   fn scene_hit_string(sc) : String do
     match sc do
@@ -1228,7 +1271,8 @@ mod CubeForge do
             -- voxel, hashed. Resolution-independent, unlike a frame dump, and it
             -- covers the columns the camera cannot see.
             println("  state: biome " ++ int_to_string(Biome.state_hash(scene_biome(sc1), World.side(scene_world(sc1)) * 16))
-                    ++ " world " ++ int_to_string(World.state_hash(scene_world(sc1))))
+                    ++ " world " ++ int_to_string(World.state_hash(scene_world(sc1)))
+                    ++ " mesh " ++ int_to_string(mesh_hash(scene_meshes(sc1), World.side(scene_world(sc1)))))
           else () end
           if frame % 60 == 0 && autowalk do
             println("frame " ++ int_to_string(frame) ++ " player at " ++ V.to_string(Player.position(player1)) ++ " on_ground=" ++ (if Player.on_ground(player1) do "true" else "false" end))

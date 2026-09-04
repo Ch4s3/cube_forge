@@ -67,14 +67,25 @@ mod CubeForge.Veg do
   end
 
   doc "The y of the ground under the tree whose trunk is in column (x, z), searching down from [top]; -1 if no log sits on solid ground within a trunk's height."
-  fn trunk_base(w : CubeForge.World.World, x : Int, z : Int, top : Int) : Int do trunk_go(w, x, z, top, 0) end
-  pfn trunk_go(w : CubeForge.World.World, x : Int, z : Int, y : Int, n : Int) : Int do
+  -- The chunk is fetched once and walked directly rather than going through
+  -- W.block_at, which redoes the chunk-trie lookup on every read. Every read
+  -- here is in one column, so they are all in that one chunk. can_decay calls
+  -- this for every column the tick scans that cannot hold a tree -- 2048 a tick,
+  -- 26 lookups each -- and that was 7.9 ms of the tick.
+  fn trunk_base(w : CubeForge.World.World, x : Int, z : Int, top : Int) : Int do
+    let cx = W.floor_div16(x)
+    let cz = W.floor_div16(z)
+    -- Outside the loaded area every read is air, so no log can be found.
+    if !W.in_bounds(w, cx, cz) do 0 - 1
+    else trunk_go(W.chunk_at(w, cx, cz), W.mod16(x), W.mod16(z), top, 0) end
+  end
+  pfn trunk_go(c : CubeForge.Chunk.Chunk, lx : Int, lz : Int, y : Int, n : Int) : Int do
     if n > 12 || y <= 0 do 0 - 1
     else
-      let id = W.block_at(w, x, y, z)
-      let below = W.block_at(w, x, y - 1, z)
+      let id = C.get_or_air(c, lx, y, lz)
+      let below = C.get_or_air(c, lx, y - 1, lz)
       if is_log(id) && below != 0 && !is_log(below) && !C.is_foliage(below) do y - 1
-      else trunk_go(w, x, z, y - 1, n + 1) end
+      else trunk_go(c, lx, lz, y - 1, n + 1) end
     end
   end
 
