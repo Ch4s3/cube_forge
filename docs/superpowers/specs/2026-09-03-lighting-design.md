@@ -138,10 +138,14 @@ flashlight. The clear colour carries the same ramp so the sky reads as dark navy
 rather than black.
 
 A full day is 1800 seconds (30 minutes) by default; `CF_DAY` overrides it, which
-is what makes night reachable in a screenshot or a headless run. `u_sun` also drives the clear colour so the sky darkens with the world.
-The `mix(0.06, 1.0, u_sun)` floor keeps silhouettes readable at night while
-leaving the flashlight something to do. `cf_win_time()` already exists to drive
-the clock; `F` toggles the flashlight.
+is what makes night reachable in a screenshot or a headless run.
+`cf_win_time()` drives the clock; `F` toggles the flashlight.
+
+**The sun has no direction.** `u_sun` is a scalar: it scales every face by the
+same factor, and the directional component stays the fixed `FACE_SHADE[6]` table
+inherited from the pre-lighting mesher. Sunlight therefore changes brightness
+through the day but never angle, and because the skylight flood is seeded
+straight down each column, overhang shadows never move or lengthen either.
 
 ## 5. Verification — `test/light_test.march`
 
