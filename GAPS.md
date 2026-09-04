@@ -908,7 +908,39 @@ are freed immediately.
 - Cheap to trip over: the whole point of `check` is the fast inner loop, and a
   cross-module signature change is exactly what it should catch.
 
-### G67. Per-element `NativeArray` writes are O(n) on a shared array, so a per-frame simulation is O(n^2)
+### G67. Reading a `NativeArray` in a loop inflates its refcount, permanently
+- Perceus emits an `inc_rc` for each read of a borrowed `NativeU8Arr` inside a hot
+  loop with no matching `dec_rc`, so the array's refcount grows with the number of
+  reads and never comes back down. Measured directly, by using the array as an
+  FFI blit destination afterwards (the shim aborts unless `rc == 1`) and reading
+  the reported count at three sweep sizes:
+
+  | relight box | voxels visited | reported `rc` | per voxel |
+  |---|---|---|---|
+  | 9 x 9 x 9 | 729 | 5 202 | 7.1 |
+  | 17 x 17 x 17 | 4 913 | 44 198 | 9.0 |
+  | 33 x 33 x 33 | 35 937 | 365 754 | 10.2 |
+
+  The count scales with the volume swept, at roughly one increment per neighbour
+  read. This is G31 (no `dec_rc` for `NativeArray` bindings) seen from the other
+  side: there the consequence was a leak, here it is that **a buffer that has been
+  read in a loop can never again be treated as uniquely owned**.
+- What it cost: the skylight sweep runs fourteen propagation passes and needs a
+  read-only source plus a writable destination each pass. The natural fix is to
+  ping-pong two preallocated buffers and re-sync only the slice that was written.
+  That is impossible here — after pass one the source's refcount is in the
+  hundreds of thousands, so it can never become a destination. The code instead
+  allocates and copies a fresh 2 MB prefix on every pass: fourteen 2 MB callocs
+  plus fourteen 2 MB copies per block edit, roughly 60 MB of memory traffic to
+  propagate light around one broken block.
+- No user-level workaround found. `consume` (the G51 fix for an extern returning
+  its borrowed argument) does not help, because the inflation happens across
+  millions of ordinary reads rather than at one call boundary.
+- **Would need:** the `dec_rc` of G31, or better, borrow inference recognising that
+  a `NativeArray` passed only to `get_*` is read-only and needs no refcount
+  traffic at all. The per-read `inc_rc` is also pure overhead in the hot loop.
+
+### G68. Per-element `NativeArray` writes are O(n) on a shared array, so a per-frame simulation is O(n^2)
 - The precipitation pool is 4 floats per particle and its geometry is 54. Written
   in March with `NativeArray.set_float` / `set_f32`, the cost is quadratic in the
   particle count, because each write copies the whole array rather than mutating

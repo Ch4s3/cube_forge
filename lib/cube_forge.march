@@ -62,7 +62,7 @@ mod CubeForge do
         if k == key do u
         else
           let hb1 = Hud.build_hotbar(hb, Inv.sel(inv), Inv.count(inv, 1), Inv.count(inv, 2), Inv.count(inv, 3), Inv.count(inv, 4),
-                                     Inv.count(inv, 5), Inv.count(inv, 6), Inv.count(inv, 7), Inv.progress(inv))
+                                     Inv.count(inv, 5), Inv.count(inv, 6), Inv.count(inv, 7), Inv.count(inv, 8), Inv.count(inv, 9), Inv.progress(inv))
           Win.gfx_upload(252, F32Buf.storage(hb1), F32Buf.len(hb1))
           let ic1 = if key == -1 do
             let i1 = Hud.build_icons(ic)
@@ -76,6 +76,7 @@ mod CubeForge do
   pfn hud_verts(u : Ui) : Int do match u do Ui(_, hb, _, _) -> F32Buf.len(hb) / Vx.floats() end end
   pfn icon_verts(u : Ui) : Int do match u do Ui(_, _, ic, _) -> F32Buf.len(ic) / Vx.floats() end end
   fn water_slot_base() : Int do 64 end
+  fn foliage_slot_base() : Int do 128 end
   fn tick_period() : Int do 10 end
 
   -- ── Water actors ────────────────────────────────────────────────────────────
@@ -191,7 +192,8 @@ mod CubeForge do
         else edge_mask(rest, acc) end
     end
   end
-  pfn pow2(n : Int) : Int do if n <= 0 do 1 else 2 * pow2(n - 1) end end
+  pfn pow2(n : Int) : Int do pow2_go(n, 1) end
+  pfn pow2_go(n : Int, acc : Int) : Int do if n <= 0 do acc else pow2_go(n - 1, 2 * acc) end end
 
   type Applied = Applied(CubeForge.World.World, NativeIntArr, NativeIntArr, Array.PVec(CubeForge.ChunkMesh.ChunkMesh), Int)   -- world, counts, flags, meshes, sections remeshed
 
@@ -275,6 +277,42 @@ mod CubeForge do
     end
   end
 
+  -- Remesh every section any chunk marked dirty. Per-vertex light is baked into
+  -- the mesh, so a section whose light moved shows stale lighting until it is
+  -- rebuilt -- and a relight reaches much further than the edited cell.
+  pfn remesh_marked(w : CubeForge.World.World, marks : NativeIntArr, ci : Int, n : Int,
+                    counts : NativeIntArr, meshes, empty : CubeForge.Chunk.Chunk) : Remeshed do
+    if ci >= n * n do Remeshed(counts, meshes)
+    else
+      let smask = CubeForge.Light.section_mask(marks, ci % n, ci / n)
+      if smask == 0 do remesh_marked(w, marks, ci + 1, n, counts, meshes, empty)
+      else
+        match remesh_chunk_sections(w, ci % n, ci / n, smask, counts, meshes, empty) do
+          Remeshed(c1, m1) -> remesh_marked(w, marks, ci + 1, n, c1, m1, empty)
+        end
+      end
+    end
+  end
+
+  -- The edited cell's own geometry changes even when its light does not: its
+  -- faces, the section above or below when it sits on a section boundary, and
+  -- the neighbouring chunk's culling when it sits on a chunk boundary.
+  pfn mark_geometry(marks : NativeIntArr, x : Int, y : Int, z : Int, n : Int) : NativeIntArr do
+    let cx = World.floor_div16(x)
+    let cz = World.floor_div16(z)
+    let sy = y / 16
+    let ly = y % 16
+    let m1 = NativeArray.set_int(marks, CubeForge.Light.mark_slot(cx, cz, sy), 1)
+    let m2 = if ly == 0 && sy > 0 do NativeArray.set_int(m1, CubeForge.Light.mark_slot(cx, cz, sy - 1), 1) else m1 end
+    let m3 = if ly == 15 && sy < 15 do NativeArray.set_int(m2, CubeForge.Light.mark_slot(cx, cz, sy + 1), 1) else m2 end
+    let lx = World.mod16(x)
+    let lz = World.mod16(z)
+    let m4 = if lx == 0 && cx > 0 do NativeArray.set_int(m3, CubeForge.Light.mark_slot(cx - 1, cz, sy), 1) else m3 end
+    let m5 = if lx == 15 && cx < n - 1 do NativeArray.set_int(m4, CubeForge.Light.mark_slot(cx + 1, cz, sy), 1) else m4 end
+    let m6 = if lz == 0 && cz > 0 do NativeArray.set_int(m5, CubeForge.Light.mark_slot(cx, cz - 1, sy), 1) else m5 end
+    if lz == 15 && cz < n - 1 do NativeArray.set_int(m6, CubeForge.Light.mark_slot(cx, cz + 1, sy), 1) else m6 end
+  end
+
   pfn remesh_chunk_sections(w : CubeForge.World.World, cx : Int, cz : Int, smask : Int, counts : NativeIntArr, meshes, empty : CubeForge.Chunk.Chunk) : Remeshed do
     if !World.in_bounds(w, cx, cz) do Remeshed(counts, meshes)
     else
@@ -310,15 +348,17 @@ mod CubeForge do
     end
   end
 
-  pfn reply_sizes(replies) : String do
+  pfn reply_sizes(replies) : String do reply_sizes_go(replies, "") end
+
+  pfn reply_sizes_go(replies, acc : String) : String do
     match replies do
-      Nil -> ""
+      Nil -> acc
       Cons(r, rest) ->
         let sz = match r do
           Ok(out) -> int_to_string(List.length(out))
           Err(_) -> "err"
         end
-        sz ++ " " ++ reply_sizes(rest)
+        reply_sizes_go(rest, acc ++ sz ++ " ")
     end
   end
 
@@ -351,7 +391,12 @@ mod CubeForge do
     upload_sections(slot, os, 0, 0)
     Win.gfx_upload_begin(water_slot_base() + slot, CM.total_floats(ws))
     upload_sections(water_slot_base() + slot, ws, 0, 0)
-    NativeArray.set_int(NativeArray.set_int(counts, slot, CM.opaque_vertices(m)), water_slot_base() + slot, CM.water_vertices(m))
+    let fs = CM.foliage_sections(m)
+    Win.gfx_upload_begin(foliage_slot_base() + slot, CM.total_floats(fs))
+    upload_sections(foliage_slot_base() + slot, fs, 0, 0)
+    NativeArray.set_int(NativeArray.set_int(NativeArray.set_int(counts, slot, CM.opaque_vertices(m)),
+                                            water_slot_base() + slot, CM.water_vertices(m)),
+                        foliage_slot_base() + slot, CM.foliage_vertices(m))
   end
 
   -- counts + meshes after a remesh
@@ -370,25 +415,6 @@ mod CubeForge do
     end
   end
 
-  -- Remesh around a single edited world cell: its section (plus the adjacent section when on a
-  -- section boundary) and the same section of a neighbour chunk when on a chunk border.
-  pfn remesh_cell(world : CubeForge.World.World, x : Int, y : Int, z : Int, counts : NativeIntArr, meshes, empty : CubeForge.Chunk.Chunk) : Remeshed do
-    let cx = World.floor_div16(x)
-    let cz = World.floor_div16(z)
-    let sy = y / 16
-    let ly = y % 16
-    let lx = World.mod16(x)
-    let lz = World.mod16(z)
-    match remesh_section(world, cx, cz, sy, ly == 0 || ly == 15, counts, meshes, empty) do
-      Remeshed(c1, m1) ->
-        let r2 = if lx == 0 do remesh_section(world, cx - 1, cz, sy, false, c1, m1, empty) else if lx == 15 do remesh_section(world, cx + 1, cz, sy, false, c1, m1, empty) else Remeshed(c1, m1) end end
-        match r2 do
-          Remeshed(c2, m2) ->
-            if lz == 0 do remesh_section(world, cx, cz - 1, sy, false, c2, m2, empty) else if lz == 15 do remesh_section(world, cx, cz + 1, sy, false, c2, m2, empty) else Remeshed(c2, m2) end end
-        end
-    end
-  end
-
   -- Apply a block edit at (x, y, z): set the block, remesh its chunk, and a
   -- neighbour chunk when the block sits on a chunk boundary (its faces are
   -- culled against the neighbour, so the neighbour's mesh changes too).
@@ -396,9 +422,14 @@ mod CubeForge do
     match sc do
       Scene(world, counts, outline, hit, ui, pids, flags, meshes) ->
         let t0 = Win.time()
-        let world1 = World.relight_at(World.set_block(world, x, y, z, id), x, y, z)
+        let w0 = World.set_occupied(World.set_block(world, x, y, z, id), x, y, z, CubeForge.Light.occludes(id))
         Win.gfx_set_voxel(x, y, z, CubeForge.Light.occludes(id))
-        match remesh_cell(world1, x, y, z, counts, meshes, Chunk.new()) do
+        let n = World.side(w0)
+        -- accessors, not a match: a dotted constructor pattern does not parse (GAPS.md G24/G25)
+        let relit = CubeForge.Light.relight_marked(World.light(w0), w0, x, y, z)
+        let world1 = World.set_light(w0, CubeForge.Light.relit_field(relit))
+        let marks = mark_geometry(CubeForge.Light.relit_marks(relit), x, y, z, n)
+        match remesh_marked(world1, marks, 0, n, counts, meshes, Chunk.new()) do
           Remeshed(c1, m1) ->
             let t1 = Win.time()
             println((if id == 0 do "broke" else "placed" end) ++ " block at " ++ int_to_string(x) ++ "," ++ int_to_string(y) ++ "," ++ int_to_string(z)
@@ -424,6 +455,48 @@ mod CubeForge do
       let cz = z + i / 49
       let sc1 = if Chunk.is_source(World.block_at(scene_world(sc), cx, cy, cz)) do edit_block(sc, cx, cy, cz, 0) else sc end
       break_sources_go(sc1, x, y, z, px, py, pz, i + 1)
+    end
+  end
+
+  -- Scripted: break the topmost collidable block strictly below the player's feet.
+  -- Always hits terrain regardless of where the camera points, so the edit cost is
+  -- comparable run to run.
+  pfn break_under(sc, p : CubeForge.Player.Player) do
+    let pos = Player.position(p)
+    let px = float_to_int(Math.floor(V.x(pos)))
+    let pz = float_to_int(Math.floor(V.z(pos)))
+    let y = World.surface_y(scene_world(sc), px, pz)
+    if y < 0 || !World.breakable_at(scene_world(sc), px, y, pz) do sc else edit_block(sc, px, y, pz, 0) end
+  end
+
+  doc "Radius searched for orphaned leaves when a log is broken."
+  fn decay_radius() : Int do 4 end
+
+  -- Remove the leaves a broken log was holding up, then remesh the affected
+  -- region ONCE: the decay touches up to a 9x9x9 box, so remeshing per removed
+  -- leaf would mean dozens of chunk-section rebuilds for a single chop.
+  pfn chop(sc, x : Int, y : Int, z : Int) do
+    match sc do
+      Scene(world, counts, outline, hit, ui, pids, flags, meshes) ->
+        let world1 = World.decay_leaves(world, x, y, z, decay_radius())
+        let world2 = World.relight_at(world1, x, y, z)
+        match remesh_region(world2, x, y, z, counts, meshes, Chunk.new(), 0) do
+          Remeshed(c1, m1) -> Scene(world2, c1, outline, hit, ui, pids, flags, m1)
+        end
+    end
+  end
+
+  -- Rebuild every chunk section the decay box can touch: the 3x3 chunk columns
+  -- around (x, z) and the sections spanning y +- decay_radius().
+  pfn remesh_region(world : CubeForge.World.World, x : Int, y : Int, z : Int, counts : NativeIntArr, meshes, empty : CubeForge.Chunk.Chunk, i : Int) : Remeshed do
+    if i >= 9 do Remeshed(counts, meshes)
+    else
+      let cx = World.floor_div16(x) - 1 + i % 3
+      let cz = World.floor_div16(z) - 1 + i / 3
+      let sy = y / 16
+      match remesh_section(world, cx, cz, sy, true, counts, meshes, empty) do
+        Remeshed(c1, m1) -> remesh_region(world, x, y, z, c1, m1, empty, i + 1)
+      end
     end
   end
 
@@ -463,7 +536,9 @@ mod CubeForge do
         if Inv.is_complete(inv1) do
           let id = World.block_at(world, Ray.bx(hit), Ray.by_(hit), Ray.bz(hit))
           let sc2 = edit_block(sc1, Ray.bx(hit), Ray.by_(hit), Ray.bz(hit), 0)
-          set_inv(sc2, Inv.release(Inv.harvest(inv1, id)))
+          -- chopping a trunk drops the canopy it was holding up
+          let sc3 = if Chunk.is_log(id) do chop(sc2, Ray.bx(hit), Ray.by_(hit), Ray.bz(hit)) else sc2 end
+          set_inv(sc3, Inv.release(Inv.harvest(inv1, id)))
         else if place_now && Ray.is_hit(hit) do
           let px = Ray.bx(hit) + Ray.nx(hit)
           let py = Ray.by_(hit) + Ray.ny(hit)
@@ -491,7 +566,7 @@ mod CubeForge do
   fn inv_string(sc) : String do
     let i = ui_inv(scene_ui(sc))
     "inv grass=" ++ int_to_string(Inv.count(i, 1)) ++ " dirt=" ++ int_to_string(Inv.count(i, 2)) ++ " stone=" ++ int_to_string(Inv.count(i, 3)) ++ " water=" ++ int_to_string(Inv.count(i, 4))
-      ++ " sand=" ++ int_to_string(Inv.count(i, 5)) ++ " snow=" ++ int_to_string(Inv.count(i, 6)) ++ " granite=" ++ int_to_string(Inv.count(i, 7)) ++ " sel=" ++ int_to_string(Inv.sel(i)) ++ " progress=" ++ float_to_string(Inv.progress(i))
+      ++ " sand=" ++ int_to_string(Inv.count(i, 5)) ++ " snow=" ++ int_to_string(Inv.count(i, 6)) ++ " granite=" ++ int_to_string(Inv.count(i, 7)) ++ " oaklog=" ++ int_to_string(Inv.count(i, 8)) ++ " pinelog=" ++ int_to_string(Inv.count(i, 9)) ++ " sel=" ++ int_to_string(Inv.sel(i)) ++ " progress=" ++ float_to_string(Inv.progress(i))
   end
 
   pfn scene_counts(sc) : NativeIntArr do match sc do Scene(_, c, _, _, _, _, _, _) -> c end end
@@ -590,7 +665,9 @@ mod CubeForge do
     else if In.key(In.key_5()) do 5
     else if In.key(In.key_6()) do 6
     else if In.key(In.key_7()) do 7
-    else 0 end end end end end end end
+    else if In.key(In.key_8()) do 8
+    else if In.key(In.key_9()) do 9
+    else 0 end end end end end end end end end
   end
 
   @[no_alloc(assume)]
@@ -644,13 +721,13 @@ mod CubeForge do
 
   -- Frame loop. `max_frames < 0` means run until the window closes.
   -- Run-time knobs read once, outside the frame loop (an Env read allocates).
-  type Knobs = Knobs(Int, Int, String, Bool, Float, Int, Bool, Int, Int, Int, Float, Int, Float, Int, Int)   -- max_frames, dump_frame, dump_path, autowalk, autospin, autoedit frame (<0 = off), autoswim, autoflow frame (<0 = off), workers, automap frame (<0 = off; forces map view on from this frame, for headless verification), day length in seconds, sun angle override in degrees (<0 = follow the clock), shadow reach in blocks (0 = off), weather pin 0..100 (<0 = follow the actor), precipitation pool capacity
+  type Knobs = Knobs(Int, Int, String, Bool, Float, Int, Bool, Int, Int, Int, Float, Int, Float, Bool, Int, Int, Int)   -- max_frames, dump_frame, dump_path, autowalk, autospin, autoedit frame (<0 = off), autoswim, autoflow frame (<0 = off), workers, automap frame (<0 = off; forces map view on from this frame, for headless verification), day length in seconds, sun angle override in degrees (<0 = follow the clock), shadow reach in blocks (0 = off), soft shadow edges, autobreak frame (<0 = off): break the column under the player every 20 frames, for a repeatable edit benchmark, weather pin 0..100 (<0 = follow the actor), precipitation pool capacity
 
   fn frame_loop(f : Frame, k : Knobs, sc, nchunks : Int, proj : NativeFloatArr, map_proj : NativeFloatArr, fps : Fps, wxpid) : Frame do
     match f do
       Frame(frame, last_t, player, sample, view, vp, map_mode, marker, flash, wcache, bcache) ->
         match k do
-        Knobs(max_frames, dump_frame, dump_path, autowalk, autospin, autoedit, autoswim, autoflow, workers, automap, day_len, sun_deg, shadow_dist, weather_pin, precip_cap) ->
+        Knobs(max_frames, dump_frame, dump_path, autowalk, autospin, autoedit, autoswim, autoflow, workers, automap, day_len, sun_deg, shadow_dist, soft_shadows, autobreak, weather_pin, precip_cap) ->
         if Win.should_close() || (max_frames >= 0 && frame >= max_frames) do
           Frame(frame, last_t, player, sample, view, vp, map_mode, marker, flash, wcache, bcache)
         else
@@ -678,8 +755,11 @@ mod CubeForge do
                              if place_water do Chunk.water() else -1 end, if scripted_place do 1 else if scripted_sel > 0 do scripted_sel else selected_key() end end, dt)
           -- CF_AUTOFLOW: break the source again 600 frames after placing it
           let sc0b = if autoflow >= 0 && frame == autoflow + 600 do break_sources_near(sc0, player1) else sc0 end
+          -- CF_AUTOBREAK=<frame>: from that frame, mine straight down one block every 20 frames.
+          -- A repeatable, aim-independent edit benchmark: every break hits real terrain.
+          let sc0c = if autobreak >= 0 && frame >= autobreak && (frame - autobreak) % 20 == 0 do break_under(sc0b, player1) else sc0b end
           -- water simulation tick
-          let sc1 = if frame % tick_period() == 0 do water_tick(sc0b, workers, autoflow >= 0) else sc0b end
+          let sc1 = if frame % tick_period() == 0 do water_tick(sc0c, workers, autoflow >= 0) else sc0c end
           if autoflow >= 0 && frame >= autoflow && (frame - autoflow) % 100 == 0 do
             let cx = World.floor_div16(float_to_int(Math.floor(V.x(Player.position(player1)))))
             let cz = World.floor_div16(float_to_int(Math.floor(V.z(Player.position(player1)))))
@@ -752,10 +832,11 @@ mod CubeForge do
           else () end
           -- The map view is an overhead diagnostic; shadows there would only
           -- obscure the terrain it exists to show.
-          Win.gfx_set_shadow(if map_mode1 do 0.0 else shadow_dist end)
+          Win.gfx_set_shadow(if map_mode1 do 0.0 else shadow_dist end, soft_shadows)
           Win.gfx_set_light(sun, V.x(eye), V.y(eye), V.z(eye), V.x(look), V.y(look), V.z(look), flash_now)
           Win.gfx_set_view_proj(render_vp)
           draw_chunks(scene_counts(sc1), 0, nchunks)
+          draw_foliage(scene_counts(sc1), 0, nchunks)
           draw_water(scene_counts(sc1), 0, nchunks)
           if live > 0 do Win.gfx_draw_precip(Precip.slot(), Precip.vertex_count(live)) else () end
           if scene_has_hit(sc1) do CubeForge.Ffi.Window.gfx_draw_lines(254, Outline.vertex_count()) else () end
@@ -867,6 +948,15 @@ mod CubeForge do
     else
       Win.gfx_draw(i, NativeArray.get_int(counts, i))
       draw_chunks(counts, i + 1, n)
+    end
+  end
+
+  -- Foliage is alpha-cutout, not blended, so it can be drawn before water.
+  pfn draw_foliage(counts : NativeIntArr, i : Int, n : Int) : Unit do
+    if i >= n do ()
+    else
+      Win.gfx_draw_cutout(foliage_slot_base() + i, NativeArray.get_int(counts, foliage_slot_base() + i))
+      draw_foliage(counts, i + 1, n)
     end
   end
 
@@ -987,16 +1077,15 @@ mod CubeForge do
       let world_dark = World.generate(n, seed, workers)
       let t2 = System.monotonic_time()
       -- stage 1b: skylight (needs the finished terrain, including neighbours)
-      let world = World.relight_all(world_dark)
+      let world_lit = World.relight_all(world_dark)
       let t2b = System.monotonic_time()
       println("  skylight flood: " ++ int_to_string(t2b - t2) ++ " ms")
       -- The shadow ray-marcher's view of the world. Built once and handed over;
       -- March keeps no copy, since a block edit only needs one texel.
-      let occ_ms = if headless do 0 else
-        let to0 = System.monotonic_time()
-        Win.gfx_upload_occupancy(CubeForge.Light.occupancy(world), 128, 256, 128)
-        System.monotonic_time() - to0 end
-      if !headless do println("  occupancy upload: " ++ int_to_string(occ_ms) ++ " ms") else () end
+      let to0 = System.monotonic_time()
+      let world = World.rebuild_occupancy(world_lit)
+      if !headless do Win.gfx_upload_occupancy(World.occupancy(world), 128, 256, 128) else () end
+      println("  occupancy: " ++ int_to_string(System.monotonic_time() - to0) ++ " ms")
       -- stage 2: meshing (needs neighbours; runs only after stage 1 completed)
       let meshes = mesh_all(world, n, workers)
       let t3 = System.monotonic_time()
@@ -1014,7 +1103,7 @@ mod CubeForge do
       println("  mesh all (greedy sections): " ++ int_to_string(t3 - t2) ++ " ms wall, " ++ float_to_string(int_to_float(t3 - t2) /. int_to_float(n * n)) ++ " ms per chunk (wall / chunks), " ++ int_to_string(nverts) ++ " vertices (" ++ int_to_string(count_water_verts(meshes, 0)) ++ " water)")
       if headless do ()
       else
-        let counts = upload_meshes(meshes, 0, NativeArray.make_int(2 * water_slot_base(), 0))
+        let counts = upload_meshes(meshes, 0, NativeArray.make_int(3 * water_slot_base(), 0))
         let uq = underwater_quad()
         Win.gfx_upload(253, F32Buf.storage(uq), F32Buf.len(uq))
         Win.gfx_upload_texture(Texture.checkerboard(), Texture.size(), Texture.size(), Texture.layers())
@@ -1040,7 +1129,7 @@ mod CubeForge do
         if Env.get_int("CF_ALLOC_PROBE", 0) == 1 do alloc_probe(world, proj) else () end
         let t4 = Win.time()
         let knobs = Knobs(max_frames, Env.get_int("CF_DUMP_FRAME", 30), Env.get("CF_DUMP", ""), Env.get_int("CF_AUTOWALK", 0) == 1,
-                          int_to_float(Env.get_int("CF_AUTOSPIN", 0)) /. 1000.0 /. Player.mouse_sens(), Env.get_int("CF_AUTOEDIT", -1), autoswim, Env.get_int("CF_AUTOFLOW", -1), workers, Env.get_int("CF_AUTOMAP", -1), int_to_float(Env.get_int("CF_DAY", 1800)), Env.get_int("CF_SUN", -1), int_to_float(Env.get_int("CF_SHADOW_DIST", 64)), Env.get_int("CF_WEATHER", -1), Env.get_int("CF_PRECIP", 4000))
+                          int_to_float(Env.get_int("CF_AUTOSPIN", 0)) /. 1000.0 /. Player.mouse_sens(), Env.get_int("CF_AUTOEDIT", -1), autoswim, Env.get_int("CF_AUTOFLOW", -1), workers, Env.get_int("CF_AUTOMAP", -1), int_to_float(Env.get_int("CF_DAY", 1800)), Env.get_int("CF_SUN", -1), int_to_float(Env.get_int("CF_SHADOW_DIST", 64)), Env.get_int("CF_SHADOW_SOFT", 1) == 1, Env.get_int("CF_AUTOBREAK", -1), Env.get_int("CF_WEATHER", -1), Env.get_int("CF_PRECIP", 4000))
         let tw0 = Win.time()
         let pids = Array.from_list(spawn_water(n * n - 1, n, seed, Nil))
         println("spawned " ++ int_to_string(n * n) ++ " water actors in " ++ ms(Win.time() -. tw0) ++ " (loads run asynchronously)")

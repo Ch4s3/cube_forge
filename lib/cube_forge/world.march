@@ -8,22 +8,39 @@ mod CubeForge.World do
 
   alias CubeForge.Chunk as C
 
-  type World = World(Array.PVec(CubeForge.Chunk.Chunk), NativeU8Arr, Int)   -- chunks, skylight field, side length in chunks
+  type World = World(Array.PVec(CubeForge.Chunk.Chunk), NativeU8Arr, NativeU8Arr, Int)   -- chunks, skylight field, occupancy field, side length in chunks
 
   fn size() : Int do 8 end
 
-  fn side(w : World) : Int do match w do World(_, _, n) -> n end end
+  fn side(w : World) : Int do match w do World(_, _, _, n) -> n end end
 
   doc "The world's skylight field (see CubeForge.Light)."
-  fn light(w : World) : NativeU8Arr do match w do World(_, la, _) -> la end end
+  fn light(w : World) : NativeU8Arr do match w do World(_, la, _, _) -> la end end
+
+  doc "The world's occupancy field: non-zero where a voxel blocks light. Used for ambient occlusion and uploaded to the shadow ray-marcher."
+  fn occupancy(w : World) : NativeU8Arr do match w do World(_, _, o, _) -> o end end
+
+  doc "Replace the occupancy field."
+  fn set_occupancy(w : World, o : NativeU8Arr) : World do match w do World(cs, la, _, n) -> World(cs, la, o, n) end end
+
+  doc "Build the occupancy field from the current blocks."
+  fn rebuild_occupancy(w : World) : World do set_occupancy(w, CubeForge.Light.occupancy(w)) end
+
+  doc "Update one voxel of the occupancy field after a block edit."
+  fn set_occupied(w : World, x : Int, y : Int, z : Int, solid : Bool) : World do
+    if x < 0 || x >= 128 || y < 0 || y >= 256 || z < 0 || z >= 128 do w
+    else match w do World(cs, la, o, n) ->
+      World(cs, la, NativeArray.set_u8(o, CubeForge.Light.occ_index(x, y, z), if solid do CubeForge.Light.occ_solid() else 0 end), n) end
+    end
+  end
 
   doc "Replace the world's skylight field."
-  fn set_light(w : World, la : NativeU8Arr) : World do match w do World(cs, _, n) -> World(cs, la, n) end end
+  fn set_light(w : World, la : NativeU8Arr) : World do match w do World(cs, _, o, n) -> World(cs, la, o, n) end end
 
   @[no_alloc]
   -- Skylight at a world coordinate; 0 outside the world.
   fn light_at(w : World, x : Int, y : Int, z : Int) : Int do
-    match w do World(_, la, _) -> CubeForge.Light.get(la, x, y, z) end
+    match w do World(_, la, _, _) -> CubeForge.Light.get(la, x, y, z) end
   end
 
   doc "Recompute the whole skylight field from scratch."
@@ -41,12 +58,12 @@ mod CubeForge.World do
 
   doc "The chunk at grid (cx, cz); panics if out of bounds."
   fn chunk_at(w : World, cx : Int, cz : Int) : CubeForge.Chunk.Chunk do
-    match w do World(cs, _, n) -> Array.get(cs, cx + n * cz) end
+    match w do World(cs, _, _, n) -> Array.get(cs, cx + n * cz) end
   end
 
   doc "Replace the chunk at grid (cx, cz)."
   fn set_chunk(w : World, cx : Int, cz : Int, c : CubeForge.Chunk.Chunk) : World do
-    match w do World(cs, la, n) -> World(Array.set(cs, cx + n * cz, c), la, n) end
+    match w do World(cs, la, o, n) -> World(Array.set(cs, cx + n * cz, c), la, o, n) end
   end
 
   fn floor_div16(v : Int) : Int do if v >= 0 do v / 16 else (v - 15) / 16 end end
@@ -94,6 +111,44 @@ mod CubeForge.World do
   end
   fn find_water(w : World) : Int do find_water_go(w, 16 * side(w) * 4, side(w)) end   -- start at z = 4, away from the world edge
 
+  -- ── Leaf decay ──────────────────────────────────────────────────────────────
+  -- After a log is broken, leaves with no log left nearby are removed, so chopping
+  -- a trunk does not leave its canopy floating. Purely local: a radius search, no
+  -- connectivity flood, so it costs one pass over a small box.
+
+  doc "Is there a log within [r] blocks of (x, y, z)?"
+  fn log_near(w : World, x : Int, y : Int, z : Int, r : Int) : Bool do log_near_go(w, x, y, z, r, 0) end
+  pfn log_near_go(w : World, x : Int, y : Int, z : Int, r : Int, i : Int) : Bool do
+    let span = 2 * r + 1
+    if i >= span * span * span do false
+    else
+      let dx = i % span - r
+      let dy = (i / span) % span - r
+      let dz = i / (span * span) - r
+      if C.is_log(block_at(w, x + dx, y + dy, z + dz)) do true
+      else log_near_go(w, x, y, z, r, i + 1) end
+    end
+  end
+
+  doc """
+  Remove every leaf within [r] of (x, y, z) that no longer has a log within [r] of
+  itself. Returns the updated world; the caller remeshes the affected region.
+  """
+  fn decay_leaves(w : World, x : Int, y : Int, z : Int, r : Int) : World do decay_go(w, x, y, z, r, 0) end
+  pfn decay_go(w : World, x : Int, y : Int, z : Int, r : Int, i : Int) : World do
+    let span = 2 * r + 1
+    if i >= span * span * span do w
+    else
+      let lx = x + i % span - r
+      let ly = y + (i / span) % span - r
+      let lz = z + i / (span * span) - r
+      let w1 = if C.is_foliage(block_at(w, lx, ly, lz)) && !log_near(w, lx, ly, lz, r) do
+        set_block(w, lx, ly, lz, 0)
+      else w end
+      decay_go(w1, x, y, z, r, i + 1)
+    end
+  end
+
   doc "Topmost collidable block's y at world (x, z), scanning down from 255; -1 if the column is empty."
   fn surface_y(w : World, x : Int, z : Int) : Int do surface_y_go(w, x, z, 255) end
   pfn surface_y_go(w : World, x : Int, z : Int, y : Int) : Int do
@@ -119,12 +174,12 @@ mod CubeForge.World do
   doc "Stage 1: generate every chunk in parallel. Chunks are independent, so this is a plain pmap."
   fn generate(n : Int, seed : Int, workers : Int) : World do
     let chunks = List.pmap_n(coords(n), fn i -> C.generate(16 * (i % n), 16 * (i / n), seed), workers)
-    World(Array.from_list(chunks), CubeForge.Light.new(), n)
+    World(Array.from_list(chunks), CubeForge.Light.new(), CubeForge.Light.new(), n)
   end
 
   fn generate_scalar(n : Int, seed : Int, workers : Int) : World do
     let chunks = List.pmap_n(coords(n), fn i -> C.generate_scalar(16 * (i % n), 16 * (i / n), seed), workers)
-    World(Array.from_list(chunks), CubeForge.Light.new(), n)
+    World(Array.from_list(chunks), CubeForge.Light.new(), CubeForge.Light.new(), n)
   end
 
 end

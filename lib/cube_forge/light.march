@@ -38,7 +38,10 @@ mod CubeForge.Light do
   fn opacity(id : Int) : Int do
     if id == 0 do 0
     else if C.is_water(id) do 2
-    else max_level() end end
+    -- Leaves attenuate rather than block: a canopy casts dappled shade and thin
+    -- foliage still lets light reach the ground beneath it.
+    else if C.is_foliage(id) do 6
+    else max_level() end end end
   end
 
   @[no_alloc]
@@ -157,25 +160,60 @@ mod CubeForge.Light do
     give1(src, d5, w, x, y, z - 1, lv)
   end
 
+  -- Highest y holding a non-air voxel. Everything above it sees unobstructed sky,
+  -- so it is at full light with every neighbour also at full light, can never
+  -- give anything away, and the sweep has no reason to scan it.
+  --
+  -- Non-air, not merely opaque: water is transparent but attenuating, so a lake
+  -- above the highest solid block would leave dimmed voxels above an
+  -- opaque-only bound, and the sweep would skip them.
+  --
+  -- A chunk's flat index runs lx + 16*(lz + 16*ly), so higher indices are higher
+  -- y: scanning one chunk downward from the end stops at its topmost opaque
+  -- voxel. The chunk is fetched once -- World.block_at per voxel here costs more
+  -- than the scan it is meant to save (GAPS.md G64, learned the hard way twice).
+  pfn chunk_top(c : CubeForge.Chunk.Chunk, i : Int) : Int do
+    if i < 0 do 0
+    else if CubeForge.Chunk.get_idx(c, i) != 0 do i / 256
+    else chunk_top(c, i - 1) end end
+  end
+  pfn sky_floor_go(w : CubeForge.World.World, ci : Int, n : Int, acc : Int) : Int do
+    if ci >= n * n do acc
+    else
+      let t = chunk_top(CubeForge.World.chunk_at(w, ci % n, ci / n), 65535)
+      sky_floor_go(w, ci + 1, n, if t > acc do t else acc end)
+    end
+  end
+  doc "One layer above the highest non-air voxel in the world: the sweep never needs to scan past this."
+  fn sky_floor(w : CubeForge.World.World) : Int do
+    let t = sky_floor_go(w, 0, CubeForge.World.side(w), 0) + 1
+    if t > 255 do 255 else t end
+  end
+
   -- One level of the sweep: every voxel at exactly [lv] gives to its neighbours.
-  pfn level_go(src : NativeU8Arr, dst : NativeU8Arr, w : CubeForge.World.World, lv : Int, i : Int) : NativeU8Arr do
-    if i >= 4194304 do dst
-    else if NativeArray.get_u8(src, i) != lv do level_go(src, dst, w, lv, i + 1)
-    else level_go(src, give6(src, dst, w, i % 128, i / 16384, (i / 128) % 128, lv), w, lv, i + 1) end end
+  pfn level_go(src : NativeU8Arr, dst : NativeU8Arr, w : CubeForge.World.World, lv : Int, i : Int, stop : Int) : NativeU8Arr do
+    if i >= stop do dst
+    else if NativeArray.get_u8(src, i) != lv do level_go(src, dst, w, lv, i + 1, stop)
+    else level_go(src, give6(src, dst, w, i % 128, i / 16384, (i / 128) % 128, lv), w, lv, i + 1, stop) end end
   end
 
   -- Sweep levels [lv] down to 2. Each level writes into a FRESH buffer rather
   -- than swapping the previous pair: `src` is read during the level, which
   -- leaves its refcount at 2, and a shared array cannot be a blit destination
   -- (GAPS.md G21). Fifteen 4 MB allocations per flood buys a memcpy per level.
-  pfn sweep_go(src : NativeU8Arr, w : CubeForge.World.World, lv : Int) : NativeU8Arr do
+  -- A fresh destination per level. Rotating two buffers to skip the allocation
+  -- looks obvious and does not work: `src` is read twice per level (once by the
+  -- copy, once by the scan), so its refcount never returns to 1 and cf_u8_blit
+  -- refuses the reuse. A probe that reads the buffer only once DOES rotate
+  -- safely, which is the distinction -- see GAPS.md G67.
+  pfn sweep_go(src : NativeU8Arr, w : CubeForge.World.World, lv : Int, stop : Int) : NativeU8Arr do
     if lv <= 1 do src
-    else sweep_go(level_go(src, copy_field(src, new()), w, lv, 0), w, lv - 1) end
+    else sweep_go(level_go(src, copy_field(src, new()), w, lv, 0, stop), w, lv - 1, stop) end
   end
 
-  doc "Propagate [la] to a fixed point."
+  doc "Propagate [la] to a fixed point, scanning only up to the highest non-air voxel."
   fn spread(la : NativeU8Arr, w : CubeForge.World.World) : NativeU8Arr do
-    sweep_go(la, w, max_level())
+    sweep_go(la, w, max_level(), (sky_floor(w) + 1) * 16384)
   end
 
   doc "Compute the world's skylight from scratch: seed every column, then spread."
@@ -253,8 +291,60 @@ mod CubeForge.Light do
     end
   end
 
-  doc "Repair the skylight field after the block at (ex, ey, ez) changed. [w] is the world after the edit."
-  fn relight_at(la : NativeU8Arr, w : CubeForge.World.World, ex : Int, ey : Int, ez : Int) : NativeU8Arr do
+  -- Lowest y light can reach descending from (x, y, z): the first opaque block
+  -- stops it. Water and leaves attenuate rather than block, so the descent
+  -- continues through them.
+  pfn open_bottom(w : CubeForge.World.World, x : Int, y : Int, z : Int) : Int do
+    if y <= 0 do 0
+    else if is_opaque(CubeForge.World.block_at(w, x, y - 1, z)) do y
+    else open_bottom(w, x, y - 1, z) end end
+  end
+
+
+  -- ── Which sections need remeshing ────────────────────────────────────────
+  --
+  -- Per-vertex light is baked into the mesh, so every section whose light moved
+  -- has to be rebuilt or it keeps showing stale lighting. The marks array has
+  -- one slot per (chunk, section), written 1 when any voxel in it changed.
+  --
+  -- One slot per pair rather than a packed per-chunk bitmask on purpose: a
+  -- bitmask would mean reading the accumulator before OR-ing a bit into it, and
+  -- reading an array before writing it turns every write into a full copy
+  -- (GAPS.md G63). This pass is write-only.
+
+  fn marks_new() : NativeIntArr do NativeArray.make_int(1024, 0) end
+
+  @[no_alloc]
+  fn mark_slot(cx : Int, cz : Int, sy : Int) : Int do cx + 8 * cz + 64 * sy end
+
+  pfn mark_row(m : NativeIntArr, a : NativeU8Arr, b : NativeU8Arr, x : Int, x1 : Int, y : Int, z : Int) : NativeIntArr do
+    if x > x1 do m
+    else if NativeArray.get_u8(a, index(x, y, z)) == NativeArray.get_u8(b, index(x, y, z)) do mark_row(m, a, b, x + 1, x1, y, z)
+    else mark_row(NativeArray.set_int(m, mark_slot(x / 16, z / 16, y / 16), 1), a, b, x + 1, x1, y, z) end end
+  end
+  pfn mark_plane(m : NativeIntArr, a : NativeU8Arr, b : NativeU8Arr, x0 : Int, x1 : Int, y : Int, z : Int, z1 : Int) : NativeIntArr do
+    if z > z1 do m else mark_plane(mark_row(m, a, b, x0, x1, y, z), a, b, x0, x1, y, z + 1, z1) end
+  end
+  pfn mark_box(m : NativeIntArr, a : NativeU8Arr, b : NativeU8Arr, x0 : Int, x1 : Int, y : Int, y1 : Int, z0 : Int, z1 : Int) : NativeIntArr do
+    if y > y1 do m else mark_box(mark_plane(m, a, b, x0, x1, y, z0, z1), a, b, x0, x1, y + 1, y1, z0, z1) end
+  end
+
+  doc "The 16-bit section mask for chunk (cx, cz), read out of a marks array."
+  fn section_mask(m : NativeIntArr, cx : Int, cz : Int) : Int do sec_mask_go(m, cx, cz, 0, 0) end
+  pfn sec_mask_go(m : NativeIntArr, cx : Int, cz : Int, sy : Int, acc : Int) : Int do
+    if sy >= 16 do acc
+    else if NativeArray.get_int(m, mark_slot(cx, cz, sy)) != 0 do sec_mask_go(m, cx, cz, sy + 1, acc + sec_bit(sy))
+    else sec_mask_go(m, cx, cz, sy + 1, acc) end end
+  end
+  pfn sec_bit(sy : Int) : Int do if sy <= 0 do 1 else 2 * sec_bit(sy - 1) end end
+
+  -- A repaired light field together with the sections whose light changed.
+  type Relit = Relit(NativeU8Arr, NativeIntArr)
+  fn relit_field(r : Relit) : NativeU8Arr do match r do Relit(f, _) -> f end end
+  fn relit_marks(r : Relit) : NativeIntArr do match r do Relit(_, m) -> m end end
+
+  doc "Repair the skylight field after the block at (ex, ey, ez) changed, reporting which sections moved. [w] is the world after the edit."
+  fn relight_marked(la : NativeU8Arr, w : CubeForge.World.World, ex : Int, ey : Int, ez : Int) : Relit do
     let r = relight_radius()
     let cx0 = clampi(ex - r, 0, 127)
     let cx1 = clampi(ex + r, 0, 127)
@@ -265,7 +355,12 @@ mod CubeForge.Light do
     -- If full sky light does not already reach the voxel just above the edit,
     -- the column below is interrupted higher up and cannot change; lateral
     -- spread is then the only effect, and that is bounded by the radius.
-    let cy0 = if get(la, ex, ey + 1, ez) >= max_level() do 0 else clampi(ey - r, 0, 255) end
+    -- ...but only as far down as light can actually travel. Skylight descends
+    -- from the edit until the first opaque block; below that the column cannot
+    -- change at all, and only lateral spread reaches it, which the radius already
+    -- bounds. Taking 0 unconditionally made the box 126 layers tall instead of ~31.
+    let cy0 = if get(la, ex, ey + 1, ez) >= max_level() do clampi(open_bottom(w, ex, ey, ez) - r, 0, 255)
+              else clampi(ey - r, 0, 255) end
     let above = copy_field(la, new())
     let la1 = zero_box_go(la, cx0, cx1, cy0, cy1, cz0, cz1)
     let la2 = seed_box_go(la1, w, above, cx0, cx1 - cx0 + 1, cz0, cy1, cy0, 0, (cx1 - cx0 + 1) * (cz1 - cz0 + 1))
@@ -282,7 +377,15 @@ mod CubeForge.Light do
     let swept = box_sweep_go(la2, w, max_level(), sx0, sx1, sy0, sy1, sz0, sz1, plen)
     -- Overlay the swept prefix onto the untouched upper field. la2 was read by
     -- the sweep, so it cannot itself be the destination (GAPS.md G21).
-    CubeForge.Ffi.Window.u8_blit(copy_field(la2, new()), 0, swept, 0, plen)
+    let out = CubeForge.Ffi.Window.u8_blit(copy_field(la2, new()), 0, swept, 0, plen)
+    -- Mark over the SCAN box, not the cleared box: the sweep may also write into
+    -- the one-voxel ring around it.
+    Relit(out, mark_box(marks_new(), above, out, sx0, sx1, sy0, sy1, sz0, sz1))
+  end
+
+  doc "Repair the skylight field, discarding the dirty-section marks."
+  fn relight_at(la : NativeU8Arr, w : CubeForge.World.World, ex : Int, ey : Int, ez : Int) : NativeU8Arr do
+    relit_field(relight_marked(la, w, ex, ey, ez))
   end
 
   -- ── Occupancy: the shadow ray-marcher's view of the world ─────────────────
@@ -311,20 +414,20 @@ mod CubeForge.Light do
   end
 
   -- One chunk's 65536 voxels, with the chunk fetched once (GAPS.md G64).
-  pfn occ_chunk_go(o : NativeU8Arr, c : CubeForge.Chunk.Chunk, cx : Int, cz : Int, i : Int) : NativeU8Arr do
-    if i >= 65536 do o
+  pfn occ_chunk_go(o : NativeU8Arr, c : CubeForge.Chunk.Chunk, cx : Int, cz : Int, i : Int, stop : Int) : NativeU8Arr do
+    if i >= stop do o
     else
       let lx = i % 16
       let ly = i / 256
       let lz = (i / 16) % 16
       let v = if occludes(C.get_idx(c, i)) do occ_solid() else 0 end
-      occ_chunk_go(NativeArray.set_u8(o, occ_index(16 * cx + lx, ly, 16 * cz + lz), v), c, cx, cz, i + 1)
+      occ_chunk_go(NativeArray.set_u8(o, occ_index(16 * cx + lx, ly, 16 * cz + lz), v), c, cx, cz, i + 1, stop)
     end
   end
 
-  pfn occ_go(o : NativeU8Arr, w : CubeForge.World.World, ci : Int, n : Int) : NativeU8Arr do
+  pfn occ_go(o : NativeU8Arr, w : CubeForge.World.World, ci : Int, n : Int, stop : Int) : NativeU8Arr do
     if ci >= n * n do o
-    else occ_go(occ_chunk_go(o, CubeForge.World.chunk_at(w, ci % n, ci / n), ci % n, ci / n, 0), w, ci + 1, n)
+    else occ_go(occ_chunk_go(o, CubeForge.World.chunk_at(w, ci % n, ci / n), ci % n, ci / n, 0, stop), w, ci + 1, n, stop)
     end
   end
 
@@ -333,7 +436,10 @@ mod CubeForge.Light do
 
   doc "The world's occupancy field: occ_solid() where a voxel blocks light, 0 elsewhere. Built for upload, not retained."
   fn occupancy(w : CubeForge.World.World) : NativeU8Arr do
-    occ_go(new(), w, 0, CubeForge.World.side(w))
+    -- A chunk's flat index is ordered by y, so stopping past the highest non-air
+    -- layer skips the empty sky. The buffer starts zeroed, which is exactly the
+    -- right answer up there.
+    occ_go(new(), w, 0, CubeForge.World.side(w), (sky_floor(w) + 1) * 256)
   end
 
 end

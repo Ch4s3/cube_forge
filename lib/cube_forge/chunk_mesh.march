@@ -14,10 +14,12 @@ mod CubeForge.ChunkMesh do
   alias CubeForge.World as World
   alias CubeForge.Vertex as Vx
 
-  type ChunkMesh = ChunkMesh(Array.PVec(CubeForge.F32Buf.F32Buf), Array.PVec(CubeForge.F32Buf.F32Buf))
+  type ChunkMesh = ChunkMesh(Array.PVec(CubeForge.F32Buf.F32Buf), Array.PVec(CubeForge.F32Buf.F32Buf), Array.PVec(CubeForge.F32Buf.F32Buf))
 
-  fn opaque_sections(m : ChunkMesh) : Array.PVec(CubeForge.F32Buf.F32Buf) do match m do ChunkMesh(o, _) -> o end end
-  fn water_sections(m : ChunkMesh) : Array.PVec(CubeForge.F32Buf.F32Buf) do match m do ChunkMesh(_, w) -> w end end
+  fn opaque_sections(m : ChunkMesh) : Array.PVec(CubeForge.F32Buf.F32Buf) do match m do ChunkMesh(o, _, _) -> o end end
+  fn water_sections(m : ChunkMesh) : Array.PVec(CubeForge.F32Buf.F32Buf) do match m do ChunkMesh(_, w, _) -> w end end
+  doc "Alpha-cutout foliage (leaves)."
+  fn foliage_sections(m : ChunkMesh) : Array.PVec(CubeForge.F32Buf.F32Buf) do match m do ChunkMesh(_, _, f) -> f end end
 
   pfn total_go(secs : Array.PVec(CubeForge.F32Buf.F32Buf), i : Int, acc : Int) : Int do
     if i >= 16 do acc else total_go(secs, i + 1, acc + B.len(Array.get(secs, i))) end
@@ -27,8 +29,8 @@ mod CubeForge.ChunkMesh do
 
   -- Sections of chunk (cx, cz) built in order 0..15.
   pfn build_sections(world : CubeForge.World.World, cx : Int, cz : Int, empty : CubeForge.Chunk.Chunk, sy : Int,
-                     os : List(CubeForge.F32Buf.F32Buf), ws : List(CubeForge.F32Buf.F32Buf)) : ChunkMesh do
-    if sy < 0 do ChunkMesh(Array.from_list(os), Array.from_list(ws))
+                     os : List(CubeForge.F32Buf.F32Buf), ws : List(CubeForge.F32Buf.F32Buf), fs : List(CubeForge.F32Buf.F32Buf)) : ChunkMesh do
+    if sy < 0 do ChunkMesh(Array.from_list(os), Array.from_list(ws), Array.from_list(fs))
     else
       let c = World.chunk_at(world, cx, cz)
       let pick = fn (x, z) -> if World.in_bounds(world, x, z) do World.chunk_at(world, x, z) else empty end
@@ -39,14 +41,15 @@ mod CubeForge.ChunkMesh do
       let ox = int_to_float(16 * cx)
       let oz = int_to_float(16 * cz)
       build_sections(world, cx, cz, empty, sy - 1,
-                     Cons(Mesher.mesh_section_opaque(c, n, s, e, w, World.light(world), sy, ox, oz), os),
-                     Cons(Mesher.mesh_section_water(c, n, s, e, w, sy, ox, oz), ws))
+                     Cons(Mesher.mesh_section_opaque(c, n, s, e, w, World.light(world), World.occupancy(world), sy, ox, oz), os),
+                     Cons(Mesher.mesh_section_water(c, n, s, e, w, sy, ox, oz), ws),
+                     Cons(Mesher.mesh_section_foliage(c, n, s, e, w, World.light(world), World.occupancy(world), sy, ox, oz), fs))
     end
   end
 
   doc "Mesh every section of chunk (cx, cz)."
   fn build(world : CubeForge.World.World, cx : Int, cz : Int, empty : CubeForge.Chunk.Chunk) : ChunkMesh do
-    build_sections(world, cx, cz, empty, 15, Nil, Nil)
+    build_sections(world, cx, cz, empty, 15, Nil, Nil, Nil)
   end
 
   doc "Rebuild one section (0..15) of chunk (cx, cz)."
@@ -62,14 +65,16 @@ mod CubeForge.ChunkMesh do
       let ox = int_to_float(16 * cx)
       let oz = int_to_float(16 * cz)
       match m do
-        ChunkMesh(os, ws) ->
-          ChunkMesh(Array.set(os, sy, Mesher.mesh_section_opaque(c, n, s, e, w, World.light(world), sy, ox, oz)),
-                    Array.set(ws, sy, Mesher.mesh_section_water(c, n, s, e, w, sy, ox, oz)))
+        ChunkMesh(os, ws, fs) ->
+          ChunkMesh(Array.set(os, sy, Mesher.mesh_section_opaque(c, n, s, e, w, World.light(world), World.occupancy(world), sy, ox, oz)),
+                    Array.set(ws, sy, Mesher.mesh_section_water(c, n, s, e, w, sy, ox, oz)),
+                    Array.set(fs, sy, Mesher.mesh_section_foliage(c, n, s, e, w, World.light(world), World.occupancy(world), sy, ox, oz)))
       end
     end
   end
 
   fn opaque_vertices(m : ChunkMesh) : Int do total_floats(opaque_sections(m)) / Vx.floats() end
   fn water_vertices(m : ChunkMesh) : Int do total_floats(water_sections(m)) / Vx.floats() end
+  fn foliage_vertices(m : ChunkMesh) : Int do total_floats(foliage_sections(m)) / Vx.floats() end
 
 end

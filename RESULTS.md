@@ -250,7 +250,7 @@ run approximates an uncontended one.
 The pool and its geometry live in the C shim rather than in March. In March the
 step alone ran 4000 particles at **5.9 fps** and the geometry build was SIGKILLed
 for memory: `NativeArray` writes copy the whole array when it is not uniquely
-owned, so both loops are O(n^2). See GAPS.md G67.
+owned, so both loops are O(n^2). See GAPS.md G68.
 
 Vertex layout went 8 -> 9 floats (packed effect + alpha), +12.5% vertex memory,
 about 1 MB at a full 217k-vertex world.
@@ -301,3 +301,267 @@ the single-level one at `CF_SUN` 12, 30 and 60, and after both a block break and
 a block place (`CF_AUTOEDIT`), which is what exercises the coarse-cell counts.
 
 New knobs: `CF_WIDTH`, `CF_HEIGHT`, `CF_FULLSCREEN=1`, `CF_VSYNC=0`.
+## M6 — vegetation (trees and bushes)
+
+Oak and pine, planted as cubes with alpha-cutout leaves. Placement is
+cell-based and depends only on the cell and the seed, never on which chunk is
+asking, so two chunks that share a tree agree on it without communicating.
+
+Measured against a build of the immediately preceding commit (`9cd1ffb`), same
+seed, same machine:
+
+| measure | before vegetation | after |
+|---|---|---|
+| world vertices (64 chunks) | 249 252 | **259 608** (+4.2%) |
+| mesh all 64 chunks, headless | 1 892 ms | **1 909–1 922 ms** (+1%) |
+| frame rate | 59.6 (vsync) | 59.1–59.6 (vsync, unchanged) |
+| live objects per frame | 1 | **1** (unchanged) |
+
+**Correction.** This section first reported vegetation as a 5.5x startup
+regression, 350 ms to 1.9 s. That was wrong: the 350 ms figure was stale, from
+several features earlier, and I compared against it instead of measuring. The
+1.9 s was already there before a single tree existed. Vegetation costs about
+4% more vertices and 1% more meshing time. The lesson is the ordinary one —
+a remembered number is not a baseline.
+
+### The culling rule
+
+A face exists when the neighbour is see-through **and** the pair is not
+leaf-against-leaf:
+
+```
+face_visible(id, nb) = see_through(nb) && !(is_foliage(id) && is_foliage(nb))
+```
+
+Without the second clause every interior face of a canopy is emitted and a
+tree becomes a solid brick of quads. Leaves still count as see-through for
+everything else, so stone behind a canopy and a trunk seen through the gaps
+both still draw. Three tests pin each half of that rule; getting it wrong in
+either direction is invisible in a screenshot from the outside.
+
+### What the tests caught
+
+- **Two hotbar slots rendered identically.** Oak and pine logs both pointed at
+  texture layer 8, so slots 8 and 9 were the same pixels — found by scanning
+  the dumped frame at each of the nine slot centres, not by looking at it.
+  Pine now has its own darker bark layer (12).
+- **A one-cell seed check proves nothing.** Asserting that cell (3, 4) differs
+  between two seeds passes trivially when neither seed puts a tree there. The
+  test now compares the layout across 256 cells.
+
+## Block-edit cost: where the 26 ms actually went
+
+Breaking a block took 25–29 ms, over a frame's budget at 60 fps. The obvious
+suspect was the greedy remesh, and the obvious suspect was wrong.
+
+`CF_AUTOBREAK=<frame>` mines straight down one block every 20 frames. It always
+hits real terrain regardless of where the camera points, so the cost is
+comparable between runs — an aim-independent edit benchmark.
+
+| phase | time | share |
+|---|---|---|
+| skylight relight | **22.3 ms** | 85% |
+| greedy section remesh | 3.8 ms | 14% |
+| chunk VBO upload | 0.25 ms | 1% |
+| occupancy texel update | 0.017 ms | ~0 |
+
+Inside the relight, the propagation sweep was 20 of those 22 ms. Its box was
+**126 y-layers tall** for an edit at y=109.
+
+### The fix: bound the box by how far light can actually go
+
+The box reached y=0 whenever full skylight touched the voxel above the edit,
+on the reasoning that capping a sky column can darken everything beneath it.
+True, but only as far as the column is actually open: skylight descends until
+the first opaque block, and below that only lateral spread matters, which the
+radius already bounds. `Light.open_bottom` walks down to that block and the box
+starts a radius below it.
+
+| | before | after |
+|---|---|---|
+| box y-range (edit at y=109) | 0..125 (126 layers) | 93..125 (33 layers) |
+| sweep | 20.0 ms | **9.9 ms** |
+| whole edit | 26.5 ms | **16.0 ms** (median over 15 breaks) |
+
+A 40% cut, and it is a tightening of a bound rather than an approximation: the
+four existing equals-a-full-re-flood tests still pass, and a new one caps a
+40-block shaft — deeper than the relight radius, so it only passes if the bound
+follows the open column all the way down — and still matches a full re-flood.
+
+### The fix that March would not allow
+
+Halving the box did not halve the sweep, because a fixed cost remains: each of
+the fourteen propagation passes allocates and copies a fresh 2 MB prefix, about
+60 MB of memory traffic per broken block. The passes only ever write one
+y-slice, so the right structure is two preallocated buffers, ping-ponged, with
+only the written slice re-synced between passes.
+
+That is unimplementable in March today. Reading a `NativeArray` in a loop
+inflates its refcount by roughly one per read and never decrements, so after a
+single pass the source buffer's refcount is in the hundreds of thousands and it
+can never be used as a write destination again. Measured and written up as
+GAPS.md **G67**; the numbers there come from the shim's uniqueness guard
+reporting the count at three different sweep sizes.
+
+So the remaining ~10 ms stays until either that refcount bug is fixed or the
+sweep moves into the C shim. The first is the point of this project; the second
+would be routing around the problem silently, which is not.
+
+### Frame cost, uncapped (`CF_VSYNC=0`)
+
+Every earlier figure in this file was taken with vsync on and is therefore
+pinned to the display, not a measure of headroom. `CF_VSYNC=0` uncaps it.
+800x600, `CF_SEED=7`, sun at 45 degrees:
+
+| configuration | fps | ms/frame |
+|---|---|---|
+| shadows off | 1315 | 0.76 |
+| shadow reach 24 | 1321 | 0.76 |
+| shadow reach 64 (default) | 965 | 1.04 |
+| shadow reach 300 | 680 | 1.47 |
+| map view, whole world drawn top-down | 1361 | 0.73 |
+
+The frame budget at 60 Hz is 16.7 ms and the frame costs **1 ms**, so the
+renderer uses about 6% of it. Shadows are the single largest item at 0.28 ms
+for the default reach.
+
+**The map view row is the interesting one for culling questions.** It draws all
+64 chunks at once and runs as fast as the first-person view, which says the
+renderer is not draw-call or geometry bound — 128 draw calls and 244k vertices
+are nowhere near a limit. Occlusion culling would remove work that is not
+costing anything. What time there is goes to fragment work, so if this ever
+does need optimising, drawing chunks front-to-back (so early-Z rejects hidden
+fragments before the shadow trace runs) targets the real cost, and frustum
+culling — which does not exist yet either — is the cheaper first step. Both
+become worthwhile when chunk streaming raises the chunk count; neither is worth
+doing at 8x8.
+
+### Stale lighting after an edit (fixed)
+
+Per-vertex light is baked into the mesh, but the edit path only remeshed the
+edited cell's section (plus neighbours on a boundary), while `relight_at`
+changes light across a far wider box. Everything else kept stale lighting until
+something forced a rebuild.
+
+Measured before the fix, counting sections whose light actually moved against
+the one section being remeshed:
+
+| edit | sections whose light changed | sections remeshed |
+|---|---|---|
+| break a surface block | 0 | 1 |
+| place a block at y=90 | 2 | 1 |
+| place a block high in open air | **5** | 1 |
+| 3-block platform | **5** | 1 |
+
+`relight_marked` now returns a dirty `(chunk, section)` mask alongside the
+repaired field, and the edit remeshes exactly those. A block edit measures
+17-30 ms end to end, still dominated by the relight rather than the extra
+sections (~1.2 ms each). Blindly remeshing the whole relight box would have
+been ~173 ms, which is why the mask is worth having.
+
+The mask is one slot per (chunk, section) rather than a packed per-chunk
+bitmask: a bitmask means reading the accumulator before OR-ing into it, and
+reading an array before writing it turns every write into a full copy (G63).
+The mark pass is write-only; the 16-bit masks are derived in a separate read.
+
+The invariant is pinned by a test: for the edit that reaches furthest (a block
+placed high in open air, darkening the column beneath it), no voxel changes
+light in a section the mask failed to flag.
+
+### Soft shadows and the reach fade
+
+`trace` now returns the distance to the occluder rather than a yes/no, so a
+shadow whose caster sits near the reach limit fades out instead of ending in a
+hard line where the trace gives up.
+
+Soft edges spread four rays over a small cone (`SOFT_SPREAD` 0.035 rad),
+rotated per pixel so the samples read as softness rather than four bands.
+Because the rays diverge, the penumbra widens with distance from the caster on
+its own -- no separate penumbra estimate needed. `CF_SHADOW_SOFT=0` reverts to
+one ray.
+
+Measured at 800x600 with a low sun (`CF_SUN=75`), which is the expensive case
+because rays travel further before escaping:
+
+| | fps | ms/frame |
+|---|---|---|
+| hard, 1 ray | 501 | 2.0 |
+| soft, 4 rays | 206 | 4.9 |
+
+2.4x the frame cost, and only 2.6% of pixels change by more than 4/255 -- the
+gain is real but small, chiefly removing hard-edged shadow bands. It is on by
+default because 4.9 ms still fits a 16.7 ms budget comfortably.
+
+**Caveat worth knowing:** these numbers are at an 800x600 framebuffer. On a
+retina backing store (1600x1200, which this window sometimes gets) the shadow
+cost is per-pixel and would be roughly 4x, putting soft shadows near the 60 Hz
+budget. That case has not been measured. `CF_SHADOW_SOFT=0` halves the cost if
+it bites.
+
+### Ambient occlusion across chunk boundaries (fixed)
+
+AO needs the diagonal neighbour of a face corner, and that voxel can leave the
+chunk on BOTH axes at once, landing in a diagonal chunk the mesher is not given.
+`nb_get_d` read it as air, softening occlusion on the four corner columns of
+every chunk.
+
+The fix was not to pass nine chunks. `World` now retains the occupancy field it
+was already building for the shadow ray-marcher, and the mesher reads occluders
+from it. Occupancy is world-space, so the seam is gone by construction and
+`nb_get_d` is deleted rather than extended. It also unifies the two notions of
+"solid": the mesher's occluder test and the shadow marcher's are now literally
+the same bytes.
+
+Cost: the 4 MB occupancy field is kept rather than built and dropped, and a
+block edit updates one byte of it alongside the GPU texel.
+
+## Lighting performance: bounding the sweep by the sky
+
+Profiling the flood (debug build) put the cost in one place:
+
+| phase | ms | share |
+|---|---|---|
+| `seed_all` | 127 | 7% |
+| **`spread` (the level sweep)** | **1721** | **90%** |
+| 14 x per-level alloc+copy | 56 | 3% |
+
+The sweep ran fourteen passes over all 4,194,304 voxels. Half of them were empty
+sky: `sky_floor` for this world is **127 of 256**, and every voxel above it is at
+full light with every neighbour also at full light, so it matched level 15 and
+called `give6` on six neighbours that could not be improved.
+
+Bounding every sweep pass at one layer above the highest **non-air** voxel:
+
+| | before | after |
+|---|---|---|
+| skylight flood (release) | 718 ms | **271 ms** (2.6x) |
+| occupancy build (release) | 69 ms | **49 ms** |
+| `spread` (debug) | 1721 ms | 611 ms |
+
+Non-air rather than opaque is load-bearing. Water is transparent but
+attenuating, so a lake sitting above the highest solid block would leave dimmed
+voxels above an opaque-only bound and the sweep would skip them. A test covers
+exactly that shape.
+
+The bound is computed by scanning each chunk's flat index downward -- that index
+runs `lx + 16*(lz + 16*ly)`, so higher indices are higher y and the scan stops at
+the chunk's topmost non-air voxel. The first attempt used `World.block_at` per
+voxel and made the flood *slower* (1721 -> 3998 ms), which is G64 a second time:
+that call re-derives chunk coordinates and walks a PVec trie, and it has no place
+in a bulk loop.
+
+### What did not work
+
+Rotating two preallocated buffers instead of allocating a fresh destination per
+pass would halve the copy traffic, since `copy_prefix` zeroes a buffer with
+`make_u8` and then overwrites every byte of it. A probe that reads a buffer once
+per iteration rotates safely. The sweep reads its source **twice** per pass, once
+for the copy and once for the scan, and `cf_u8_blit` then refuses the reuse with
+`rc=12196853`. That is G67 exactly: reads inflate the refcount permanently, at
+roughly one increment per read, so a buffer that has been swept can never again
+be uniquely owned. Left as a fresh allocation per pass, with the reasoning
+recorded at the call site.
+
+Per-edit relight is unchanged at 13-21 ms, and remains dominated by that same
+copy traffic (24 ms of a 43 ms debug relight is the fourteen prefix copies).
+G67 is what stands between it and a 2x improvement.

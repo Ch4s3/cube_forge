@@ -1,0 +1,218 @@
+-- Vegetation: deterministic placement, chunk-boundary agreement, the biome rule,
+-- the alpha-cutout culling rule, and leaf decay.
+-- Helpers are module-level: `pfn` is rejected inside `describe`/`test` (GAPS.md G59).
+mod CubeForge.Test.Trees do
+
+  needs IO.Spawn
+  import Test
+  alias CubeForge.Chunk as C
+  alias CubeForge.Trees as T
+  alias CubeForge.Noise as N
+  alias CubeForge.World as W
+
+  pfn count_ids(c : CubeForge.Chunk.Chunk, i : Int, want_foliage : Bool, want_log : Bool, acc : Int) : Int do
+    if i >= 65536 do acc
+    else
+      let id = C.get_idx(c, i)
+      let hit = (want_foliage && C.is_foliage(id)) || (want_log && C.is_log(id))
+      count_ids(c, i + 1, want_foliage, want_log, if hit do acc + 1 else acc end)
+    end
+  end
+
+  -- Every block the tree stamper would write, checked against whichever of the two
+  -- chunks owns that column. A chunk only fills air, so a block the tree wanted but
+  -- terrain already occupies is fine; a *missing* block in an air column is a half-tree.
+  pfn tree_spans_agree(tx : Int, tz : Int, base : Int, trunk : Int, pine : Bool,
+                       left : CubeForge.Chunk.Chunk, right : CubeForge.Chunk.Chunk,
+                       lx0 : Int, rx0 : Int, wz0 : Int, i : Int) : Bool do
+    if i >= 9 * 9 * 12 do true
+    else
+      let x = tx - 4 + i % 9
+      let z = tz - 4 + (i / 9) % 9
+      let y = base + 1 + i / 81
+      let want = T.block_of_tree(tx, tz, base, trunk, pine, x, y, z)
+      if want == 0 || y < 0 || y >= 256 || z < wz0 || z >= wz0 + 16 do
+        tree_spans_agree(tx, tz, base, trunk, pine, left, right, lx0, rx0, wz0, i + 1)
+      else
+        let got = if x >= lx0 && x < lx0 + 16 do C.get_or_air(left, x - lx0, y, z - wz0)
+                  else if x >= rx0 && x < rx0 + 16 do C.get_or_air(right, x - rx0, y, z - wz0)
+                  else want end end
+        -- either the tree block is there, or terrain already owned the cell
+        if got == want || (got != 0 && !C.is_foliage(got) && !C.is_log(got)) do
+          tree_spans_agree(tx, tz, base, trunk, pine, left, right, lx0, rx0, wz0, i + 1)
+        else false end
+      end
+    end
+  end
+
+  -- A tree whose trunk sits within the canopy radius of a chunk edge, so its
+  -- blocks are split across two independently generated chunks.
+  pfn find_edge_tree(seed : Int, cell : Int, limit : Int) : Int do
+    if cell >= limit do -1
+    else
+      let col = T.tree_at_cell(cell % 16, cell / 16, seed)
+      if col < 0 do find_edge_tree(seed, cell + 1, limit)
+      else
+        let tx = col % 4096
+        if tx % 16 <= 2 || tx % 16 >= 13 do col else find_edge_tree(seed, cell + 1, limit) end
+      end
+    end
+  end
+
+  -- Do two seeds disagree about any cell? (Comparing one cell is not enough:
+  -- most cells hold no tree under either seed.)
+  pfn differs_by_seed(a : Int, b : Int, cell : Int, limit : Int) : Bool do
+    if cell >= limit do false
+    else if T.tree_at_cell(cell % 16, cell / 16, a) != T.tree_at_cell(cell % 16, cell / 16, b) do true
+    else differs_by_seed(a, b, cell + 1, limit) end end
+  end
+
+  pfn count_cells(seed : Int, cell : Int, limit : Int, acc : Int) : Int do
+    if cell >= limit do acc
+    else count_cells(seed, cell + 1, limit, if T.tree_at_cell(cell % 16, cell / 16, seed) >= 0 do acc + 1 else acc end) end
+  end
+
+  pfn all_plants_on_grass(seed : Int, cell : Int, limit : Int) : Bool do
+    if cell >= limit do true
+    else
+      let col = T.tree_at_cell(cell % 16, cell / 16, seed)
+      if col < 0 do all_plants_on_grass(seed, cell + 1, limit)
+      else
+        let tx = col % 4096
+        let tz = col / 4096
+        let h = N.height(tx, tz, seed)
+        if C.surface_id(h, N.slope(tx, tz, seed)) == 1 && h > C.sea_level() do all_plants_on_grass(seed, cell + 1, limit)
+        else false end
+      end
+    end
+  end
+
+  describe "placement" do
+    test "is deterministic for a seed and moves with the seed" do
+      Test.assert_eq_int(T.tree_at_cell(3, 4, 7), T.tree_at_cell(3, 4, 7), "same cell and seed gives the same tree")
+      Test.assert_true(differs_by_seed(7, 8, 0, 256), "a different seed lays out different trees")
+    end
+    test "only ever plants on flat grass above sea level" do
+      Test.assert_true(all_plants_on_grass(5, 0, 256), "never on sand, snow, granite, water or a slope")
+      Test.assert_true(all_plants_on_grass(11, 0, 256), "and the same for another seed")
+    end
+    test "density is neither empty nor a forest of every cell" do
+      let n = count_cells(5, 0, 256, 0)
+      Test.assert_true(n > 0, "some cells hold a tree")
+      Test.assert_true(n < 256, "not every cell does")
+    end
+    test "a generated chunk contains both trunks and leaves" do
+      let c = C.generate(48, 32, 5)
+      let c2 = C.generate(64, 48, 5)
+      Test.assert_true(count_ids(c, 0, true, false, 0) + count_ids(c2, 0, true, false, 0) > 0, "leaves exist")
+      Test.assert_true(count_ids(c, 0, false, true, 0) + count_ids(c2, 0, false, true, 0) > 0, "logs exist")
+    end
+  end
+
+  describe "chunk boundaries" do
+    -- The property that would break silently, leaving half-trees at chunk seams:
+    -- the two chunks sharing a tree agree on it with no communication between them.
+    test "a tree straddling a chunk border is complete from both sides" do
+      let col = find_edge_tree(5, 0, 256)
+      Test.assert_true(col >= 0, "found a tree near a chunk border")
+      let tx = col % 4096
+      let tz = col / 4096
+      let base = N.height(tx, tz, 5)
+      let trunk = T.trunk_height(tx, tz, 5)
+      let pine = T.is_pine(base)
+      let rx0 = (tx / 16) * 16
+      let lx0 = rx0 - 16
+      let wz0 = (tz / 16) * 16
+      let left = C.generate(lx0, wz0, 5)
+      let right = C.generate(rx0, wz0, 5)
+      Test.assert_true(tree_spans_agree(tx, tz, base, trunk, pine, left, right, lx0, rx0, wz0, 0),
+                       "every tree block is present in whichever chunk owns its column")
+    end
+    test "regenerating a chunk reproduces it exactly" do
+      let a = C.generate(48, 32, 5)
+      let b = C.generate(48, 32, 5)
+      Test.assert_eq_int(count_ids(a, 0, true, true, 0), count_ids(b, 0, true, true, 0), "same vegetation both times")
+    end
+  end
+
+  describe "cutout culling" do
+    test "leaves are see-through, so what is behind them still renders" do
+      Test.assert_true(CubeForge.Mesher.face_visible(3, C.oak_leaves()), "stone against leaves shows its face")
+      Test.assert_true(CubeForge.Mesher.face_visible(C.oak_leaves(), 0), "leaves against air show their face")
+      Test.assert_true(CubeForge.Mesher.face_visible(C.oak_leaves(), C.water()), "and leaves against water")
+    end
+    test "but leaf-against-leaf faces are culled" do
+      Test.assert_false(CubeForge.Mesher.face_visible(C.oak_leaves(), C.oak_leaves()), "no interior canopy faces")
+      Test.assert_false(CubeForge.Mesher.face_visible(C.oak_leaves(), C.pine_leaves()), "nor between species")
+      Test.assert_false(CubeForge.Mesher.face_visible(3, 3), "solid against solid is still culled")
+      -- a trunk seen through the gaps in a cutout canopy must still draw
+      Test.assert_true(CubeForge.Mesher.face_visible(C.oak_log(), C.oak_leaves()), "but a trunk behind leaves is not culled")
+    end
+    test "foliage and opaque blocks go to different meshes" do
+      Test.assert_eq_int(CubeForge.Mesher.category_of(C.oak_leaves()), CubeForge.Mesher.cat_foliage(), "leaves are foliage")
+      Test.assert_eq_int(CubeForge.Mesher.category_of(C.pine_leaves()), CubeForge.Mesher.cat_foliage(), "pine leaves too")
+      Test.assert_eq_int(CubeForge.Mesher.category_of(C.oak_log()), CubeForge.Mesher.cat_opaque(), "logs are opaque")
+      Test.assert_eq_int(CubeForge.Mesher.category_of(3), CubeForge.Mesher.cat_opaque(), "and so is stone")
+    end
+  end
+
+  -- Flat index of the first log in a chunk, or -1.
+  pfn find_log_idx(c : CubeForge.Chunk.Chunk, i : Int) : Int do
+    if i >= 65536 do -1
+    else if C.is_log(C.get_idx(c, i)) do i
+    else find_log_idx(c, i + 1) end end
+  end
+
+  -- Break the whole trunk column from the bottom up, running decay after each
+  -- block the way the game's chop() does.
+  pfn chop_column(w : CubeForge.World.World, x : Int, y : Int, z : Int, n : Int) : CubeForge.World.World do
+    if n <= 0 do w
+    else if !C.is_log(W.block_at(w, x, y, z)) do w
+    else chop_column(W.decay_leaves(W.set_block(w, x, y, z, 0), x, y, z, 4), x, y + 1, z, n - 1) end end
+  end
+
+  describe "leaf decay" do
+    -- End to end on a real generated tree, through the same World calls the game
+    -- uses when you break a trunk.
+    test "chopping a real tree's trunk takes its canopy with it" do
+      let c = C.generate(64, 48, 5)
+      let w0 = W.set_chunk(W.generate(1, 5, 1), 0, 0, c)
+      let idx = find_log_idx(c, 0)
+      Test.assert_true(idx >= 0, "the generated chunk has a trunk")
+      let x = idx % 16
+      let z = (idx / 16) % 16
+      let y = idx / 256
+      let leaves_before = count_ids(c, 0, true, false, 0)
+      Test.assert_true(leaves_before > 0, "and a canopy")
+      -- one block is not enough: the rest of the trunk still holds the canopy up
+      let w1 = W.decay_leaves(W.set_block(w0, x, y, z, 0), x, y, z, 4)
+      Test.assert_eq_int(count_ids(W.chunk_at(w1, 0, 0), 0, true, false, 0), leaves_before,
+                         "the canopy stays while the rest of the trunk stands")
+      let w2 = chop_column(w0, x, y, z, 12)
+      Test.assert_true(count_ids(W.chunk_at(w2, 0, 0), 0, true, false, 0) < leaves_before,
+                       "and falls once the whole trunk is gone")
+    end
+    test "leaves left with no log in range are removed" do
+      let w0 = W.generate(1, 5, 1)
+      let w1 = W.set_block(w0, 5, 100, 5, C.oak_leaves())
+      Test.assert_false(W.log_near(w1, 5, 100, 5, 4), "no log anywhere near it")
+      let w2 = W.decay_leaves(w1, 5, 100, 5, 4)
+      Test.assert_eq_int(W.block_at(w2, 5, 100, 5), 0, "the orphaned leaf is gone")
+    end
+    test "leaves are kept while a log is still within range" do
+      let w0 = W.generate(1, 5, 1)
+      let w1 = W.set_block(W.set_block(w0, 4, 100, 4, C.oak_log()), 5, 100, 4, C.oak_leaves())
+      Test.assert_true(W.log_near(w1, 5, 100, 4, 4), "the log is in range")
+      let w2 = W.decay_leaves(w1, 5, 100, 4, 4)
+      Test.assert_eq_int(W.block_at(w2, 5, 100, 4), C.oak_leaves(), "kept")
+    end
+    test "decay only reaches leaves, not the terrain around them" do
+      let w0 = W.generate(1, 5, 1)
+      let y = W.surface_y(w0, 6, 6)
+      let before = W.block_at(w0, 6, y, 6)
+      let w1 = W.decay_leaves(w0, 6, y, 6, 4)
+      Test.assert_eq_int(W.block_at(w1, 6, y, 6), before, "the ground is untouched")
+    end
+  end
+
+end

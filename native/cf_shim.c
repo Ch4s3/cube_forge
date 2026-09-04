@@ -95,13 +95,14 @@ int64_t cf_win_open(int64_t w, int64_t h, march_value title) {
     if (!g_win) { fprintf(stderr, "cf: glfwCreateWindow failed\n"); glfwTerminate(); return 0; }
     glfwMakeContextCurrent(g_win);
     if (!gladLoadGL(glfwGetProcAddress)) { fprintf(stderr, "cf: gladLoadGL failed\n"); return 0; }
-    /* Vsync on by default; CF_VSYNC=0 turns it off so a benchmark measures the
-     * renderer rather than the display's refresh rate. */
-    { const char *v = getenv("CF_VSYNC"); glfwSwapInterval(v && v[0] == '0' ? 0 : 1); }
+    /* CF_VSYNC=0 uncaps the frame rate, so frame cost can actually be measured;
+     * with vsync on every timing is pinned to the display refresh. */
+    glfwSwapInterval(getenv("CF_VSYNC") && atoi(getenv("CF_VSYNC")) == 0 ? 0 : 1);
     /* CF_FULLSCREEN=1 moves the window onto the primary monitor at its current
-     * video mode, which on a Retina display means a framebuffer twice the size
-     * in each axis -- four times the fragments of the same window in points. */
-    if (getenv("CF_FULLSCREEN") && getenv("CF_FULLSCREEN")[0] == '1') {
+     * video mode. Note this takes GLFW's video mode, not the panel's native
+     * backing store, so on this Retina display it is 1920x1200 rather than
+     * 3456x2234 -- CF_WIDTH/CF_HEIGHT reach a larger framebuffer than this does. */
+    if (getenv("CF_FULLSCREEN") && atoi(getenv("CF_FULLSCREEN")) == 1) {
         GLFWmonitor *m = glfwGetPrimaryMonitor();
         const GLFWvidmode *mode = m ? glfwGetVideoMode(m) : NULL;
         if (mode) glfwSetWindowMonitor(g_win, m, 0, 0, mode->width, mode->height, mode->refreshRate);
@@ -174,9 +175,10 @@ static const char *FS =
     "uniform vec3 u_sundir;\n"
     "uniform vec3 u_moondir;\n"
     "uniform int u_unlit;\n"
+    "uniform int u_cutout;\n"
     "uniform sampler3D u_occ;\n"
-    "uniform sampler3D u_occ_c;\n"
     "uniform float u_shadow;\n"
+    "uniform float u_soft;\n"
     "uniform float u_fog_density;\n"
     "uniform vec3  u_fog_color;\n"
     "uniform float u_overcast;\n"
@@ -211,67 +213,67 @@ static const char *FS =
      * and for knowing when a ray has left the world. */
     "const vec3 WORLD = vec3(128.0, 256.0, 128.0);\n"
     "const int  MAX_STEPS = 256;\n"
-    "const float CS = 8.0;\n"                 /* coarse cell size, matching CF_OCC_CS */
-    "const int  MAX_COARSE = 40;\n"
-    /* Amanatides-Woo voxel DDA. Returns 1.0 when the ray reaches maxDist without
-     * hitting an occluder, 0.0 when something blocks it. Exact on axis-aligned
-     * voxels: no depth bias, no acne, no peter-panning. */
-    /* Fine DDA restricted to the parametric span [t0, t1]. Returns 0.0 if an
-     * occluder blocks the ray inside that span. */
-    "float trace_fine(vec3 p, vec3 dir, float t0, float t1){\n"
-    "  vec3  q   = p + dir * t0;\n"
-    "  ivec3 v   = ivec3(floor(q));\n"
+    "const float SOFT_SPREAD = 0.035;\n"
+    /* Amanatides-Woo voxel DDA. Returns the distance at which the ray first
+     * meets an occluder, or 1e30 when it reaches maxDist unobstructed. Exact on
+     * axis-aligned voxels: no depth bias, no acne, no peter-panning.
+     *
+     * A two-level version of this (an 8x8x8 coarse occupancy level to skip empty
+     * air, ~4x faster) is in 9fa19c7 on the weather branch. It is NOT here: it
+     * disagrees with this trace on a ~190-pixel strip in the bottom-left corner
+     * at CF_SUN=12 CF_SHADOW_SOFT=0, missing an occluder. Forcing every coarse
+     * cell occupied still reproduces it, so the fault is in splitting the DDA
+     * into per-cell spans, not in the coarse data. See todos.md. */
+    "float traceDist(vec3 p, vec3 dir, float maxDist){\n"
+    "  ivec3 v   = ivec3(floor(p));\n"
     "  ivec3 stp = ivec3(sign(dir));\n"
+    /* An axis the ray does not move along must never step: its tMax stays at
+     * infinity so min() never selects it. */
     "  bvec3 moving = greaterThan(abs(dir), vec3(1e-8));\n"
     "  vec3  den    = mix(vec3(1.0), dir, moving);\n"
-    "  vec3  tMax   = mix(vec3(1e30), (vec3(v) + step(0.0, dir) - q) / den, moving);\n"
+    /* Distance to the next voxel boundary per axis. step(0,dir) picks the far
+     * face heading positive and the near face heading negative. */
+    "  vec3  tMax   = mix(vec3(1e30), (vec3(v) + step(0.0, dir) - p) / den, moving);\n"
     "  vec3  tDelta = mix(vec3(1e30), 1.0 / abs(den), moving);\n"
-    /* The cell the span starts in has to be tested before any stepping: the
-     * coarse cell was entered here, and its first voxel may be the occluder. */
-    "  if (v.x >= 0 && v.y >= 0 && v.z >= 0 && v.x < int(WORLD.x) && v.y < int(WORLD.y) && v.z < int(WORLD.z))\n"
-    "    if (texture(u_occ, (vec3(v) + 0.5) / WORLD).r > 0.5) return 0.0;\n"
-    "  float span = t1 - t0;\n"
     "  for (int i = 0; i < MAX_STEPS; i++){\n"
     "    float tNow = min(tMax.x, min(tMax.y, tMax.z));\n"
-    "    if (tNow > span) return 1.0;\n"
-    "    if (tMax.x <= tMax.y && tMax.x <= tMax.z)      { v.x += stp.x; tMax.x += tDelta.x; }\n"
-    "    else if (tMax.y <= tMax.z)                     { v.y += stp.y; tMax.y += tDelta.y; }\n"
-    "    else                                           { v.z += stp.z; tMax.z += tDelta.z; }\n"
-    "    if (v.x < 0 || v.y < 0 || v.z < 0 || v.x >= int(WORLD.x) || v.y >= int(WORLD.y) || v.z >= int(WORLD.z)) return 1.0;\n"
-    "    if (texture(u_occ, (vec3(v) + 0.5) / WORLD).r > 0.5) return 0.0;\n"
+    "    if (tNow > maxDist) return 1e30;\n"
+    "    if (tMax.x <= tMax.y && tMax.x <= tMax.z) { v.x += stp.x; tMax.x += tDelta.x; }\n"
+    "    else if (tMax.y <= tMax.z)                { v.y += stp.y; tMax.y += tDelta.y; }\n"
+    "    else                                      { v.z += stp.z; tMax.z += tDelta.z; }\n"
+    /* Out of the world means the ray escaped to the sky. */
+    "    if (v.x < 0 || v.y < 0 || v.z < 0 || v.x >= int(WORLD.x) || v.y >= int(WORLD.y) || v.z >= int(WORLD.z)) return 1e30;\n"
+    "    if (texture(u_occ, (vec3(v) + 0.5) / WORLD).r > 0.5) return tNow;\n"
     "  }\n"
-    "  return 1.0;\n"
+    "  return 1e30;\n"
     "}\n"
-    /* Two-level Amanatides-Woo. The outer DDA walks 8x8x8 cells and only drops
-     * into the fine grid for cells that contain something, so a ray crossing
-     * open air covers eight blocks per texture fetch instead of one. The result
-     * is identical to the single-level trace -- a coarse cell is marked exactly
-     * when it holds a solid voxel -- it just gets there with far fewer steps. */
-    "float trace(vec3 p, vec3 dir, float maxDist){\n"
+    "float shadowOf(float hit, float maxDist){\n"
+    "  if (hit > maxDist) return 1.0;\n"
+    "  return smoothstep(0.75, 1.0, hit / maxDist);\n"
+    "}\n"
+    "float hash12(vec2 v){ return fract(sin(dot(v, vec2(12.9898, 78.233))) * 43758.5453); }\n"
+    /* Hard shadows are one ray. Soft shadows spread four over a small cone:
+     * because the rays diverge, the penumbra widens with distance from the
+     * caster on its own, which is what real soft shadows do. The cone is rotated
+     * per pixel so four samples read as softness rather than as four bands. */
+    "float shadow(vec3 p, vec3 dir, float maxDist){\n"
     "  if (u_shadow <= 0.0) return 1.0;\n"
-    "  vec3  CW  = ceil(WORLD / CS);\n"
-    "  ivec3 c   = ivec3(floor(p / CS));\n"
-    "  ivec3 cstp = ivec3(sign(dir));\n"
-    "  bvec3 cmov = greaterThan(abs(dir), vec3(1e-8));\n"
-    "  vec3  cden = mix(vec3(1.0), dir, cmov);\n"
-    "  vec3  ctMax = mix(vec3(1e30), ((vec3(c) + step(0.0, dir)) * CS - p) / cden, cmov);\n"
-    "  vec3  ctDelta = mix(vec3(1e30), vec3(CS) / abs(cden), cmov);\n"
-    "  float tEnter = 0.0;\n"
-    "  for (int i = 0; i < MAX_COARSE; i++){\n"
-    "    if (tEnter > maxDist) return 1.0;\n"
-    "    if (c.x < 0 || c.y < 0 || c.z < 0 || c.x >= int(CW.x) || c.y >= int(CW.y) || c.z >= int(CW.z)) return 1.0;\n"
-    "    float tExit = min(ctMax.x, min(ctMax.y, ctMax.z));\n"
-    "    if (texture(u_occ_c, (vec3(c) + 0.5) / CW).r > 0.5)\n"
-    "      if (trace_fine(p, dir, tEnter, min(tExit, maxDist)) < 0.5) return 0.0;\n"
-    "    tEnter = tExit;\n"
-    "    if (ctMax.x <= ctMax.y && ctMax.x <= ctMax.z)  { c.x += cstp.x; ctMax.x += ctDelta.x; }\n"
-    "    else if (ctMax.y <= ctMax.z)                   { c.y += cstp.y; ctMax.y += ctDelta.y; }\n"
-    "    else                                           { c.z += cstp.z; ctMax.z += ctDelta.z; }\n"
+    "  if (u_soft < 0.5) return shadowOf(traceDist(p, dir, maxDist), maxDist);\n"
+    "  vec3 up = abs(dir.y) < 0.9 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);\n"
+    "  vec3 t1 = normalize(cross(dir, up));\n"
+    "  vec3 t2 = cross(dir, t1);\n"
+    "  float a0 = hash12(gl_FragCoord.xy) * 6.2831853;\n"
+    "  float acc = 0.0;\n"
+    "  for (int k = 0; k < 4; k++){\n"
+    "    float a = a0 + float(k) * 1.5707963;\n"
+    "    vec3 d = normalize(dir + (t1 * cos(a) + t2 * sin(a)) * SOFT_SPREAD);\n"
+    "    acc += shadowOf(traceDist(p, d, maxDist), maxDist);\n"
     "  }\n"
-    "  return 1.0;\n"
+    "  return acc * 0.25;\n"
     "}\n"
     "void main(){\n"
     "  vec4 t = (u_use_tex == 1) ? texture(u_tex, vec3(v_uv, v_layer)) : vec4(v_uv, v_layer, 1.0);\n"
+    "  if (u_cutout == 1 && t.a < 0.5) discard;\n"
     "  float moon = clamp((MOON_UNTIL - u_sun) / MOON_UNTIL, 0.0, 1.0);\n"
     /* Cloud does not remove light, it diffuses it: ambient rises as the direct
      * term falls, which is why an overcast day is flat rather than dark.
@@ -302,8 +304,8 @@ static const char *FS =
     "  float fogf = 1.0 - exp(-fogd);\n"
     "  bool  lit_matters = u_overcast < 0.98 && fogf < 0.98;\n"
     "  if (v_shade > 0.001 && lit_matters) {\n"
-    "    if (inten > 0.0 && ndls > 0.0)      shad = trace(origin, u_sundir,  u_shadow);\n"
-    "    else if (moon > 0.0 && ndlm > 0.0)  shad = trace(origin, u_moondir, u_shadow);\n"
+    "    if (inten > 0.0 && ndls > 0.0)      shad = shadow(origin, u_sundir,  u_shadow);\n"
+    "    else if (moon > 0.0 && ndlm > 0.0)  shad = shadow(origin, u_moondir, u_shadow);\n"
     "  }\n"
     /* Under cloud the sun is a source the size of the sky, so its shadows wash
      * out. Softening the trace toward 1.0 is a cheat, not scattering, but it
@@ -321,7 +323,7 @@ static const char *FS =
     "  float flash = u_flash * spot * max(dot(v_normal, Ln), 0.0) / (1.0 + 0.02 * d2);\n"
     /* The flashlight gets its own trace, toward the eye, and only when it would
      * contribute anything at all. */
-    "  if (flash > 0.001) flash *= trace(origin, Ln, min(sqrt(d2), u_shadow));\n"
+    "  if (flash > 0.001) flash *= shadow(origin, Ln, min(sqrt(d2), u_shadow));\n"
     "  vec3  world = baked + vec3(flash);\n"
     /* Overlays (HUD, outline, map marker) share this program but are not part of
      * the world: they keep their own vertex shade and skip lighting entirely. */
@@ -353,25 +355,15 @@ static GLuint compile(GLenum kind, const char *src) {
 #define CF_MAX_MESHES 256
 static GLuint g_vbo[CF_MAX_MESHES];
 static GLint  g_u_use_tex = -1;
+static GLint  g_u_cutout = -1;
 static GLint  g_u_sun = -1, g_u_eye = -1, g_u_dir = -1, g_u_flash = -1;
 static GLint  g_u_sundir = -1, g_u_moondir = -1, g_u_unlit = -1;
-static GLint  g_u_occ = -1, g_u_shadow = -1;
-/* Coarse occupancy: one texel per 8x8x8 block of voxels, set when ANY voxel in
- * it is solid. The shadow DDA steps this first and skips eight blocks at a time
- * through empty air, which is what most sun rays from an open field traverse.
- * `g_occ_count` is the per-cell solid count, so a block edit can flip a coarse
- * texel back off exactly rather than conservatively -- it is 16 KB, unlike the
- * 4 MB fine copy the shadow design deliberately does not retain. */
-#define CF_OCC_CS 8
-static GLuint    g_occ_c = 0;
-static uint16_t *g_occ_count = NULL;
-static int       g_occ_cw = 0, g_occ_ch = 0, g_occ_cd = 0;
-static GLint  g_u_occ_c = -1;
 static GLint  g_u_fog_density = -1, g_u_fog_color = -1, g_u_overcast = -1, g_u_bolt = -1;
 /* The clear colour, kept so the fog can reuse it: fog colour IS sky colour,
  * so distant geometry dissolves into the horizon instead of popping at the
  * far plane, and the two can never drift apart. */
 static float  g_fog_rgb[3] = {0.0f, 0.0f, 0.0f};
+static GLint  g_u_occ = -1, g_u_shadow = -1, g_u_soft = -1;
 static GLuint g_tex = 0;
 
 int64_t cf_gfx_init(void) {
@@ -384,6 +376,7 @@ int64_t cf_gfx_init(void) {
     g_u_vp = glGetUniformLocation(g_prog, "u_vp");
     g_u_tex = glGetUniformLocation(g_prog, "u_tex");
     g_u_use_tex = glGetUniformLocation(g_prog, "u_use_tex");
+    g_u_cutout = glGetUniformLocation(g_prog, "u_cutout");
     g_u_sun = glGetUniformLocation(g_prog, "u_sun");
     g_u_eye = glGetUniformLocation(g_prog, "u_eye");
     g_u_dir = glGetUniformLocation(g_prog, "u_dir");
@@ -393,7 +386,7 @@ int64_t cf_gfx_init(void) {
     g_u_unlit = glGetUniformLocation(g_prog, "u_unlit");
     g_u_occ = glGetUniformLocation(g_prog, "u_occ");
     g_u_shadow = glGetUniformLocation(g_prog, "u_shadow");
-    g_u_occ_c = glGetUniformLocation(g_prog, "u_occ_c");
+    g_u_soft = glGetUniformLocation(g_prog, "u_soft");
     g_u_fog_density = glGetUniformLocation(g_prog, "u_fog_density");
     g_u_fog_color = glGetUniformLocation(g_prog, "u_fog_color");
     g_u_overcast = glGetUniformLocation(g_prog, "u_overcast");
@@ -404,6 +397,7 @@ int64_t cf_gfx_init(void) {
     glUseProgram(g_prog);
     glUniform1i(g_u_tex, 0);
     glUniform1i(g_u_use_tex, 0);
+    glUniform1i(g_u_cutout, 0);
     return 1;
 }
 
@@ -508,44 +502,9 @@ void cf_gfx_upload_occupancy(void *arr, int64_t w, int64_t h, int64_t d) {
     glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
-
-    /* Coarse level. Occupancy is indexed x + 128 * (y + 256 * z), matching
-     * CubeForge.Light.occ_index. */
-    g_occ_cw = (int)((w + CF_OCC_CS - 1) / CF_OCC_CS);
-    g_occ_ch = (int)((h + CF_OCC_CS - 1) / CF_OCC_CS);
-    g_occ_cd = (int)((d + CF_OCC_CS - 1) / CF_OCC_CS);
-    free(g_occ_count);
-    g_occ_count = (uint16_t *)calloc((size_t)g_occ_cw * g_occ_ch * g_occ_cd, sizeof(uint16_t));
-    unsigned char *coarse = (unsigned char *)calloc((size_t)g_occ_cw * g_occ_ch * g_occ_cd, 1);
-    const unsigned char *fine = (const unsigned char *)narr_data(arr);
-    for (int64_t z = 0; z < d; z++)
-        for (int64_t y = 0; y < h; y++)
-            for (int64_t x = 0; x < w; x++)
-                if (fine[x + w * (y + h * z)]) {
-                    size_t ci = (size_t)(x / CF_OCC_CS)
-                              + (size_t)g_occ_cw * ((size_t)(y / CF_OCC_CS)
-                              + (size_t)g_occ_ch * (size_t)(z / CF_OCC_CS));
-                    g_occ_count[ci]++;
-                    coarse[ci] = 255;
-                }
-    if (!g_occ_c) glGenTextures(1, &g_occ_c);
-    glActiveTexture(GL_TEXTURE2);
-    glBindTexture(GL_TEXTURE_3D, g_occ_c);
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    glTexImage3D(GL_TEXTURE_3D, 0, GL_R8, g_occ_cw, g_occ_ch, g_occ_cd, 0,
-                 GL_RED, GL_UNSIGNED_BYTE, coarse);
-    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
-    free(coarse);
-    glActiveTexture(GL_TEXTURE0);
-    if (getenv("CF_DEBUG")) fprintf(stderr, "cf: coarse occupancy %dx%dx%d\n", g_occ_cw, g_occ_ch, g_occ_cd);
     glActiveTexture(GL_TEXTURE0);
     glUseProgram(g_prog);
     glUniform1i(g_u_occ, 1);
-    glUniform1i(g_u_occ_c, 2);
 }
 
 /* One voxel changed: a single texel beats rebuilding 4 MB. */
@@ -558,24 +517,6 @@ void cf_gfx_set_voxel(int64_t x, int64_t y, int64_t z, int64_t solid) {
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
     glTexSubImage3D(GL_TEXTURE_3D, 0, (GLint)x, (GLint)y, (GLint)z, 1, 1, 1,
                     GL_RED, GL_UNSIGNED_BYTE, &v);
-    /* Keep the coarse level exact. The count is what makes a break able to clear
-     * a coarse texel: without it, breaking a block could only ever be treated
-     * conservatively and the cell would stay marked solid forever. */
-    if (g_occ_count && g_occ_c) {
-        size_t ci = (size_t)(x / CF_OCC_CS)
-                  + (size_t)g_occ_cw * ((size_t)(y / CF_OCC_CS)
-                  + (size_t)g_occ_ch * (size_t)(z / CF_OCC_CS));
-        uint16_t before = g_occ_count[ci];
-        if (solid) g_occ_count[ci]++;
-        else if (g_occ_count[ci]) g_occ_count[ci]--;
-        if ((before > 0) != (g_occ_count[ci] > 0)) {
-            unsigned char cv = g_occ_count[ci] ? 255 : 0;
-            glActiveTexture(GL_TEXTURE2);
-            glBindTexture(GL_TEXTURE_3D, g_occ_c);
-            glTexSubImage3D(GL_TEXTURE_3D, 0, (GLint)(x / CF_OCC_CS), (GLint)(y / CF_OCC_CS),
-                            (GLint)(z / CF_OCC_CS), 1, 1, 1, GL_RED, GL_UNSIGNED_BYTE, &cv);
-        }
-    }
     glActiveTexture(GL_TEXTURE0);
 }
 
@@ -591,6 +532,19 @@ void cf_gfx_draw_translucent(int64_t slot, int64_t nverts) {
     glEnable(GL_CULL_FACE);
     glDepthMask(GL_TRUE);
     glDisable(GL_BLEND);
+}
+
+/* Foliage: alpha-cutout. Depth test and writes stay on and nothing is blended —
+ * the shader discards texels below the alpha threshold — so leaves need no sort
+ * order and may be drawn before water. Culling is off so a canopy is solid from
+ * both sides where its faces survive the cutout. */
+void cf_gfx_draw_cutout(int64_t slot, int64_t nverts) {
+    if (slot < 0 || slot >= CF_MAX_MESHES || nverts <= 0) return;
+    glUniform1i(g_u_cutout, 1);
+    glDisable(GL_CULL_FACE);
+    cf_gfx_draw(slot, nverts);
+    glEnable(GL_CULL_FACE);
+    glUniform1i(g_u_cutout, 0);
 }
 
 /* Draw a mesh slot with vertex colour (untextured path) and the CURRENT view-
@@ -862,11 +816,12 @@ void cf_gfx_set_light(double sun, double ex, double ey, double ez,
 
 /* Direction TO the sun and TO the moon, in world space. Normalised here so the
  * caller can pass a raw arc position. Called once per frame with set_light. */
-/* Shadow reach in blocks; 0 disables the trace entirely. */
-void cf_gfx_set_shadow(double dist) {
+/* Shadow reach in blocks (0 disables the trace) and whether to soften edges. */
+void cf_gfx_set_shadow(double dist, int64_t soft) {
     if (!g_prog) return;
     glUseProgram(g_prog);
     glUniform1f(g_u_shadow, (float)dist);
+    glUniform1f(g_u_soft, soft ? 1.0f : 0.0f);
 }
 
 void cf_gfx_set_sky(double sx, double sy, double sz, double mx, double my, double mz) {
