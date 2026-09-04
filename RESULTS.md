@@ -239,20 +239,22 @@ Oak and pine, planted as cubes with alpha-cutout leaves. Placement is
 cell-based and depends only on the cell and the seed, never on which chunk is
 asking, so two chunks that share a tree agree on it without communicating.
 
+Measured against a build of the immediately preceding commit (`9cd1ffb`), same
+seed, same machine:
+
 | measure | before vegetation | after |
 |---|---|---|
-| world vertices (64 chunks) | 102 038 | **259 608** (20 856 water) |
-| mesh all 64 chunks, headless | 350 ms | **1 909–1 922 ms** (~30 ms/chunk) |
+| world vertices (64 chunks) | 249 252 | **259 608** (+4.2%) |
+| mesh all 64 chunks, headless | 1 892 ms | **1 909–1 922 ms** (+1%) |
 | frame rate | 59.6 (vsync) | 59.1–59.6 (vsync, unchanged) |
 | live objects per frame | 1 | **1** (unchanged) |
 
-The meshing cost is the honest headline: **a 5.5x startup regression**, from
-0.35 s to 1.9 s for the whole world. It is startup-only — frame rate and
-per-frame allocation are untouched — but it is real, and it is not the leaf
-geometry alone. Foliage is a separate greedy pass over every section, so a
-world with trees pays for two mask sweeps where it used to pay for one, and
-canopies are exactly the shape greedy meshing handles worst: scattered
-single blocks that merge into nothing.
+**Correction.** This section first reported vegetation as a 5.5x startup
+regression, 350 ms to 1.9 s. That was wrong: the 350 ms figure was stale, from
+several features earlier, and I compared against it instead of measuring. The
+1.9 s was already there before a single tree existed. Vegetation costs about
+4% more vertices and 1% more meshing time. The lesson is the ordinary one —
+a remembered number is not a baseline.
 
 ### The culling rule
 
@@ -278,6 +280,64 @@ either direction is invisible in a screenshot from the outside.
 - **A one-cell seed check proves nothing.** Asserting that cell (3, 4) differs
   between two seeds passes trivially when neither seed puts a tree there. The
   test now compares the layout across 256 cells.
+
+## Block-edit cost: where the 26 ms actually went
+
+Breaking a block took 25–29 ms, over a frame's budget at 60 fps. The obvious
+suspect was the greedy remesh, and the obvious suspect was wrong.
+
+`CF_AUTOBREAK=<frame>` mines straight down one block every 20 frames. It always
+hits real terrain regardless of where the camera points, so the cost is
+comparable between runs — an aim-independent edit benchmark.
+
+| phase | time | share |
+|---|---|---|
+| skylight relight | **22.3 ms** | 85% |
+| greedy section remesh | 3.8 ms | 14% |
+| chunk VBO upload | 0.25 ms | 1% |
+| occupancy texel update | 0.017 ms | ~0 |
+
+Inside the relight, the propagation sweep was 20 of those 22 ms. Its box was
+**126 y-layers tall** for an edit at y=109.
+
+### The fix: bound the box by how far light can actually go
+
+The box reached y=0 whenever full skylight touched the voxel above the edit,
+on the reasoning that capping a sky column can darken everything beneath it.
+True, but only as far as the column is actually open: skylight descends until
+the first opaque block, and below that only lateral spread matters, which the
+radius already bounds. `Light.open_bottom` walks down to that block and the box
+starts a radius below it.
+
+| | before | after |
+|---|---|---|
+| box y-range (edit at y=109) | 0..125 (126 layers) | 93..125 (33 layers) |
+| sweep | 20.0 ms | **9.9 ms** |
+| whole edit | 26.5 ms | **16.0 ms** (median over 15 breaks) |
+
+A 40% cut, and it is a tightening of a bound rather than an approximation: the
+four existing equals-a-full-re-flood tests still pass, and a new one caps a
+40-block shaft — deeper than the relight radius, so it only passes if the bound
+follows the open column all the way down — and still matches a full re-flood.
+
+### The fix that March would not allow
+
+Halving the box did not halve the sweep, because a fixed cost remains: each of
+the fourteen propagation passes allocates and copies a fresh 2 MB prefix, about
+60 MB of memory traffic per broken block. The passes only ever write one
+y-slice, so the right structure is two preallocated buffers, ping-ponged, with
+only the written slice re-synced between passes.
+
+That is unimplementable in March today. Reading a `NativeArray` in a loop
+inflates its refcount by roughly one per read and never decrements, so after a
+single pass the source buffer's refcount is in the hundreds of thousands and it
+can never be used as a write destination again. Measured and written up as
+GAPS.md **G67**; the numbers there come from the shim's uniqueness guard
+reporting the count at three different sweep sizes.
+
+So the remaining ~10 ms stays until either that refcount bug is fixed or the
+sweep moves into the C shim. The first is the point of this project; the second
+would be routing around the problem silently, which is not.
 
 ### Frame cost, uncapped (`CF_VSYNC=0`)
 

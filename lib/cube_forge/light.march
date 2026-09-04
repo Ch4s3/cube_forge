@@ -256,6 +256,16 @@ mod CubeForge.Light do
     end
   end
 
+  -- Lowest y light can reach descending from (x, y, z): the first opaque block
+  -- stops it. Water and leaves attenuate rather than block, so the descent
+  -- continues through them.
+  pfn open_bottom(w : CubeForge.World.World, x : Int, y : Int, z : Int) : Int do
+    if y <= 0 do 0
+    else if is_opaque(CubeForge.World.block_at(w, x, y - 1, z)) do y
+    else open_bottom(w, x, y - 1, z) end end
+  end
+
+
   -- ── Which sections need remeshing ────────────────────────────────────────
   --
   -- Per-vertex light is baked into the mesh, so every section whose light moved
@@ -310,7 +320,12 @@ mod CubeForge.Light do
     -- If full sky light does not already reach the voxel just above the edit,
     -- the column below is interrupted higher up and cannot change; lateral
     -- spread is then the only effect, and that is bounded by the radius.
-    let cy0 = if get(la, ex, ey + 1, ez) >= max_level() do 0 else clampi(ey - r, 0, 255) end
+    -- ...but only as far down as light can actually travel. Skylight descends
+    -- from the edit until the first opaque block; below that the column cannot
+    -- change at all, and only lateral spread reaches it, which the radius already
+    -- bounds. Taking 0 unconditionally made the box 126 layers tall instead of ~31.
+    let cy0 = if get(la, ex, ey + 1, ez) >= max_level() do clampi(open_bottom(w, ex, ey, ez) - r, 0, 255)
+              else clampi(ey - r, 0, 255) end
     let above = copy_field(la, new())
     let la1 = zero_box_go(la, cx0, cx1, cy0, cy1, cz0, cz1)
     let la2 = seed_box_go(la1, w, above, cx0, cx1 - cx0 + 1, cz0, cy1, cy0, 0, (cx1 - cx0 + 1) * (cz1 - cz0 + 1))

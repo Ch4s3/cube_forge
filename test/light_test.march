@@ -34,6 +34,11 @@ mod CubeForge.Test.Light do
   end
 
 
+  -- Clear a vertical shaft of [n] blocks downward from (x, ytop, z).
+  pfn dig_shaft(w : CubeForge.World.World, x : Int, ytop : Int, z : Int, n : Int) : CubeForge.World.World do
+    if n <= 0 do w else dig_shaft(CubeForge.World.set_block(w, x, ytop, z, 0), x, ytop - 1, z, n - 1) end
+  end
+
   -- First index where the two light fields differ, or -1 when they agree.
   pfn near(a : Float, b : Float) : Bool do Math.abs(a -. b) < 0.0001 end
 
@@ -193,6 +198,19 @@ mod CubeForge.Test.Light do
       let inc = L.relight_at(CubeForge.World.light(w1), w1, 40, 100, 40)
       Test.assert_eq_int(first_difference(inc, L.flood(w1)), -1, "incremental equals full re-flood")
       Test.assert_eq_int(L.get(inc, 41, 99, 40), 0, "the gallery went dark")
+    end
+
+    -- The relight box is bounded below by how far light can actually descend
+    -- from the edit (see Light.open_bottom). A shaft far deeper than the relight
+    -- radius is the case that bound has to get right: capping it must darken the
+    -- whole shaft, not just the 15 blocks under the cap.
+    test "capping a shaft deeper than the relight radius matches a full re-flood" do
+      let w0 = CubeForge.World.relight_all(dig_shaft(slab_world(100), 40, 100, 40, 40))
+      Test.assert_eq_int(CubeForge.World.light_at(w0, 40, 62, 40), L.max_level(), "the shaft floor is lit before the cap")
+      let w1 = CubeForge.World.set_block(w0, 40, 100, 40, 3)
+      let inc = L.relight_at(CubeForge.World.light(w1), w1, 40, 100, 40)
+      Test.assert_eq_int(first_difference(inc, L.flood(w1)), -1, "incremental equals full re-flood")
+      Test.assert_eq_int(L.get(inc, 40, 62, 40), 0, "the shaft floor 38 blocks down went dark")
     end
 
     test "an edit at a chunk boundary matches a full re-flood" do

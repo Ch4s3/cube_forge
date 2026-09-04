@@ -15,13 +15,6 @@ mod CubeForge.Chunk do
     x + 16 * (z + 16 * y)
   end
 
-  doc "Same index with runtime dimensions (what a no-const-generics world forces)."
-  fn index_dyn(sx : {Int | _ > 0}, sy : {Int | _ > 0}, sz : {Int | _ > 0},
-               x : {Int | 0 <= _ && _ < sx}, y : {Int | 0 <= _ && _ < sy}, z : {Int | 0 <= _ && _ < sz})
-      : {Int | 0 <= _ && _ < sx * sy * sz} do
-    x + sx * (z + sz * y)
-  end
-
   fn new() : Chunk do Chunk(NativeArray.make_u8(65536, 0)) end
 
   @[no_alloc]

@@ -184,7 +184,8 @@ mod CubeForge do
         else edge_mask(rest, acc) end
     end
   end
-  pfn pow2(n : Int) : Int do if n <= 0 do 1 else 2 * pow2(n - 1) end end
+  pfn pow2(n : Int) : Int do pow2_go(n, 1) end
+  pfn pow2_go(n : Int, acc : Int) : Int do if n <= 0 do acc else pow2_go(n - 1, 2 * acc) end end
 
   type Applied = Applied(CubeForge.World.World, NativeIntArr, NativeIntArr, Array.PVec(CubeForge.ChunkMesh.ChunkMesh), Int)   -- world, counts, flags, meshes, sections remeshed
 
@@ -339,15 +340,17 @@ mod CubeForge do
     end
   end
 
-  pfn reply_sizes(replies) : String do
+  pfn reply_sizes(replies) : String do reply_sizes_go(replies, "") end
+
+  pfn reply_sizes_go(replies, acc : String) : String do
     match replies do
-      Nil -> ""
+      Nil -> acc
       Cons(r, rest) ->
         let sz = match r do
           Ok(out) -> int_to_string(List.length(out))
           Err(_) -> "err"
         end
-        sz ++ " " ++ reply_sizes(rest)
+        reply_sizes_go(rest, acc ++ sz ++ " ")
     end
   end
 
@@ -445,6 +448,17 @@ mod CubeForge do
       let sc1 = if Chunk.is_source(World.block_at(scene_world(sc), cx, cy, cz)) do edit_block(sc, cx, cy, cz, 0) else sc end
       break_sources_go(sc1, x, y, z, px, py, pz, i + 1)
     end
+  end
+
+  -- Scripted: break the topmost collidable block strictly below the player's feet.
+  -- Always hits terrain regardless of where the camera points, so the edit cost is
+  -- comparable run to run.
+  pfn break_under(sc, p : CubeForge.Player.Player) do
+    let pos = Player.position(p)
+    let px = float_to_int(Math.floor(V.x(pos)))
+    let pz = float_to_int(Math.floor(V.z(pos)))
+    let y = World.surface_y(scene_world(sc), px, pz)
+    if y < 0 || !World.breakable_at(scene_world(sc), px, y, pz) do sc else edit_block(sc, px, y, pz, 0) end
   end
 
   doc "Radius searched for orphaned leaves when a log is broken."
@@ -682,13 +696,13 @@ mod CubeForge do
 
   -- Frame loop. `max_frames < 0` means run until the window closes.
   -- Run-time knobs read once, outside the frame loop (an Env read allocates).
-  type Knobs = Knobs(Int, Int, String, Bool, Float, Int, Bool, Int, Int, Int, Float, Int, Float, Bool)   -- max_frames, dump_frame, dump_path, autowalk, autospin, autoedit frame (<0 = off), autoswim, autoflow frame (<0 = off), workers, automap frame (<0 = off; forces map view on from this frame, for headless verification), day length in seconds, sun angle override in degrees (<0 = follow the clock), shadow reach in blocks (0 = off), soft shadow edges
+  type Knobs = Knobs(Int, Int, String, Bool, Float, Int, Bool, Int, Int, Int, Float, Int, Float, Bool, Int)   -- max_frames, dump_frame, dump_path, autowalk, autospin, autoedit frame (<0 = off), autoswim, autoflow frame (<0 = off), workers, automap frame (<0 = off; forces map view on from this frame, for headless verification), day length in seconds, sun angle override in degrees (<0 = follow the clock), shadow reach in blocks (0 = off), soft shadow edges, autobreak frame (<0 = off): break the column under the player every 20 frames, for a repeatable edit benchmark
 
   fn frame_loop(f : Frame, k : Knobs, sc, nchunks : Int, proj : NativeFloatArr, map_proj : NativeFloatArr, fps : Fps) : Frame do
     match f do
       Frame(frame, last_t, player, sample, view, vp, map_mode, marker, flash) ->
         match k do
-        Knobs(max_frames, dump_frame, dump_path, autowalk, autospin, autoedit, autoswim, autoflow, workers, automap, day_len, sun_deg, shadow_dist, soft_shadows) ->
+        Knobs(max_frames, dump_frame, dump_path, autowalk, autospin, autoedit, autoswim, autoflow, workers, automap, day_len, sun_deg, shadow_dist, soft_shadows, autobreak) ->
         if Win.should_close() || (max_frames >= 0 && frame >= max_frames) do
           Frame(frame, last_t, player, sample, view, vp, map_mode, marker, flash)
         else
@@ -716,8 +730,11 @@ mod CubeForge do
                              if place_water do Chunk.water() else -1 end, if scripted_place do 1 else if scripted_sel > 0 do scripted_sel else selected_key() end end, dt)
           -- CF_AUTOFLOW: break the source again 600 frames after placing it
           let sc0b = if autoflow >= 0 && frame == autoflow + 600 do break_sources_near(sc0, player1) else sc0 end
+          -- CF_AUTOBREAK=<frame>: from that frame, mine straight down one block every 20 frames.
+          -- A repeatable, aim-independent edit benchmark: every break hits real terrain.
+          let sc0c = if autobreak >= 0 && frame >= autobreak && (frame - autobreak) % 20 == 0 do break_under(sc0b, player1) else sc0b end
           -- water simulation tick
-          let sc1 = if frame % tick_period() == 0 do water_tick(sc0b, workers, autoflow >= 0) else sc0b end
+          let sc1 = if frame % tick_period() == 0 do water_tick(sc0c, workers, autoflow >= 0) else sc0c end
           if autoflow >= 0 && frame >= autoflow && (frame - autoflow) % 100 == 0 do
             let cx = World.floor_div16(float_to_int(Math.floor(V.x(Player.position(player1)))))
             let cz = World.floor_div16(float_to_int(Math.floor(V.z(Player.position(player1)))))
@@ -1051,7 +1068,7 @@ mod CubeForge do
         if Env.get_int("CF_ALLOC_PROBE", 0) == 1 do alloc_probe(world, proj) else () end
         let t4 = Win.time()
         let knobs = Knobs(max_frames, Env.get_int("CF_DUMP_FRAME", 30), Env.get("CF_DUMP", ""), Env.get_int("CF_AUTOWALK", 0) == 1,
-                          int_to_float(Env.get_int("CF_AUTOSPIN", 0)) /. 1000.0 /. Player.mouse_sens(), Env.get_int("CF_AUTOEDIT", -1), autoswim, Env.get_int("CF_AUTOFLOW", -1), workers, Env.get_int("CF_AUTOMAP", -1), int_to_float(Env.get_int("CF_DAY", 1800)), Env.get_int("CF_SUN", -1), int_to_float(Env.get_int("CF_SHADOW_DIST", 64)), Env.get_int("CF_SHADOW_SOFT", 1) == 1)
+                          int_to_float(Env.get_int("CF_AUTOSPIN", 0)) /. 1000.0 /. Player.mouse_sens(), Env.get_int("CF_AUTOEDIT", -1), autoswim, Env.get_int("CF_AUTOFLOW", -1), workers, Env.get_int("CF_AUTOMAP", -1), int_to_float(Env.get_int("CF_DAY", 1800)), Env.get_int("CF_SUN", -1), int_to_float(Env.get_int("CF_SHADOW_DIST", 64)), Env.get_int("CF_SHADOW_SOFT", 1) == 1, Env.get_int("CF_AUTOBREAK", -1))
         let tw0 = Win.time()
         let pids = Array.from_list(spawn_water(n * n - 1, n, seed, Nil))
         println("spawned " ++ int_to_string(n * n) ++ " water actors in " ++ ms(Win.time() -. tw0) ++ " (loads run asynchronously)")
