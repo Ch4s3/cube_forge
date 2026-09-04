@@ -73,9 +73,9 @@ mod CubeForge.Test.Biome do
     test "distance to water is Chebyshev and capped at the reach" do
       let w = CubeForge.World.set_block(flat_world(70), 64, 70, 64, C.water())
       let d = Biome.distances(Biome.build(w, 7), w)
-      Test.assert_eq_int(NativeArray.get_int(d, 64 + 128 * 64), 0, "on the water")
-      Test.assert_eq_int(NativeArray.get_int(d, 67 + 128 * 66), 3, "Chebyshev: max(3, 2)")
-      Test.assert_eq_int(NativeArray.get_int(d, 0), Biome.reach(), "far away is capped")
+      Test.assert_eq_int(NativeArray.get_u8(d, 64 + 128 * 64), 0, "on the water")
+      Test.assert_eq_int(NativeArray.get_u8(d, 67 + 128 * 66), 3, "Chebyshev: max(3, 2)")
+      Test.assert_eq_int(NativeArray.get_u8(d, 0), Biome.reach(), "far away is capped")
     end
 
     test "a dry temperate flat world is grassland; beside water it is beach" do
@@ -84,6 +84,63 @@ mod CubeForge.Test.Biome do
       Test.assert_eq_int(Biome.biome_of(f, 65, 64), Biome.b_beach(), "next to the water")
       let far = Biome.biome_of(f, 5, 5)
       Test.assert_true(far == Biome.b_grassland() || far == Biome.b_tundra() || far == Biome.b_desert(), "far away is one of the dry biomes")
+    end
+  end
+
+  pfn tick_n(f : CubeForge.Biome.Field, w : CubeForge.World.World, n : Int, rate : Float) : CubeForge.Biome.Field do
+    if n <= 0 do f else tick_n(Biome.tick(f, w, 7, rate), w, n - 1, rate) end
+  end
+
+  describe "Biome.note_edit" do
+    test "keeps the heightmap equal to a full rescan across edits" do
+      let w0 = flat_world(70)
+      let f0 = Biome.build(w0, 7)
+      let w1 = CubeForge.World.set_block(w0, 10, 70, 10, 3)
+      let f1 = Biome.note_edit(f0, w1, 10, 70, 10, 3)
+      let w2 = CubeForge.World.set_block(w1, 20, 69, 20, 0)
+      let f2 = Biome.note_edit(f1, w2, 20, 69, 20, 0)
+      let w3 = CubeForge.World.set_block(w2, 30, 40, 30, 0)
+      let f3 = Biome.note_edit(f2, w3, 30, 40, 30, 0)
+      Test.assert_eq_int(Biome.height_of(f3, 10, 10), Biome.height_of(Biome.build(w3, 7), 10, 10), "raised column agrees")
+      Test.assert_eq_int(Biome.height_of(f3, 20, 20), Biome.height_of(Biome.build(w3, 7), 20, 20), "lowered column agrees")
+      Test.assert_eq_int(Biome.height_of(f3, 30, 30), Biome.height_of(Biome.build(w3, 7), 30, 30), "untouched surface agrees")
+    end
+  end
+
+  describe "Biome.tick" do
+    test "a canal turns its banks from dry to wet, gradually" do
+      let w0 = flat_world(66)
+      let f0 = Biome.build(w0, 7)
+      let before = Biome.biome_of(f0, 68, 60)
+      let w1 = CubeForge.World.set_block(CubeForge.World.set_block(CubeForge.World.set_block(w0, 64, 65, 58, C.water()), 64, 65, 60, C.water()), 64, 65, 62, C.water())
+      let f1 = Biome.note_edit(Biome.note_edit(Biome.note_edit(f0, w1, 64, 65, 58, C.water()), w1, 64, 65, 60, C.water()), w1, 64, 65, 62, C.water())
+      let f2 = Biome.tick(f1, w1, 7, Biome.default_rate())
+      Test.assert_eq_int(Biome.biome_of(f2, 68, 60), before, "no snap after one tick")
+      let f3 = tick_n(f2, w1, 200, 0.05)
+      Test.assert_true(Biome.biome_of(f3, 68, 60) != before, "the bank changed biome")
+    end
+
+    test "levelling a peak leaves alpine" do
+      let w0 = flat_world(100)
+      let f0 = Biome.build(w0, 7)
+      Test.assert_eq_int(Biome.biome_of(f0, 40, 40), Biome.b_alpine(), "starts alpine")
+      let w1 = CubeForge.World.set_block(w0, 40, 99, 40, 0)
+      let f1 = Biome.note_edit(f0, w1, 40, 99, 40, 0)
+      Test.assert_eq_int(Biome.height_of(f1, 40, 40), 98, "surface dropped")
+      let w2 = CubeForge.World.set_block(CubeForge.World.set_block(CubeForge.World.set_block(CubeForge.World.set_block(w1, 40, 98, 40, 0), 40, 97, 40, 0), 40, 96, 40, 0), 40, 95, 40, 0)
+      let f3 = Biome.note_edit(Biome.note_edit(Biome.note_edit(Biome.note_edit(f1, w2, 40, 98, 40, 0), w2, 40, 97, 40, 0), w2, 40, 96, 40, 0), w2, 40, 95, 40, 0)
+      let f4 = tick_n(f3, w2, 40, 0.05)
+      Test.assert_true(Biome.biome_of(f4, 40, 40) != Biome.b_alpine(), "no longer alpine")
+    end
+
+    test "does not flap: a flipped column stays flipped" do
+      let w0 = flat_world(66)
+      let w1 = CubeForge.World.set_block(w0, 64, 65, 60, C.water())
+      let f0 = Biome.note_edit(Biome.build(w0, 7), w1, 64, 65, 60, C.water())
+      let f1 = tick_n(f0, w1, 300, 0.05)
+      let b1 = Biome.biome_of(f1, 66, 60)
+      let f2 = tick_n(f1, w1, 300, 0.05)
+      Test.assert_eq_int(Biome.biome_of(f2, 66, 60), b1, "stable once settled")
     end
   end
 

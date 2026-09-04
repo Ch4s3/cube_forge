@@ -88,18 +88,18 @@ mod CubeForge.Biome do
     end
   end
 
-  -- ── Multi-source BFS: Chebyshev distance to the nearest water column ──────
-  -- Distance array and ring queue travel together in a Bfs cell and are ALWAYS
-  -- threaded, never written and discarded: a NativeArray write returns the array
-  -- it wrote, which is a fresh copy whenever March judges the input shared
-  -- (GAPS G68), so `let _ = set_int(...)` silently loses the write.
-  type Bfs = Bfs(NativeIntArr, NativeIntArr, Int)   -- distances, queue, queue length
-
-  pfn seed_go(ws : NativeU8Arr, n : Int, i : Int, b : Bfs) : Bfs do
-    if i >= n * n do b
-    else if NativeArray.get_u8(ws, i) == 1 do
-      match b do Bfs(d, q, qn) -> seed_go(ws, n, i + 1, Bfs(NativeArray.set_int(d, i, 0), NativeArray.set_int(q, qn, i), qn + 1)) end
-    else seed_go(ws, n, i + 1, b) end end
+  -- ── Distance to water: a level sweep, the light-field idiom ─────────────
+  -- Not a queue. A queue and its distance array wrapped in a cell gave both a
+  -- refcount of 2, so every push copied 640 KB: twenty passes cost 10.8 GB
+  -- (GAPS G68). This is level_go from light.march instead: one array, threaded
+  -- through every write, never wrapped, reads borrowed. Level lv marks the
+  -- unvisited 8-neighbours of every column at distance lv as lv + 1. Edges are
+  -- unit cost, so the first visit is the exact Chebyshev distance. Unvisited
+  -- columns keep reach(), which is also the cap -- the two are the same value.
+  pfn seed_go(ws : NativeU8Arr, n : Int, i : Int, d : NativeU8Arr) : NativeU8Arr do
+    if i >= n * n do d
+    else if NativeArray.get_u8(ws, i) == 1 do seed_go(ws, n, i + 1, NativeArray.set_u8(d, i, 0))
+    else seed_go(ws, n, i + 1, d) end end
   end
 
   -- dx, dz for neighbour k of 8: the 3x3 ring minus the centre, row by row.
@@ -112,60 +112,56 @@ mod CubeForge.Biome do
     kk / 3 - 1
   end
 
-  -- Relax the eight neighbours of column (x, z); push any whose distance improved.
-  pfn relax(b : Bfs, n : Int, x : Int, z : Int, nd : Int, k : Int) : Bfs do
-    if k >= 8 do b
+  -- Mark the unvisited neighbours of (x, z) with [nd].
+  pfn mark8(d : NativeU8Arr, n : Int, x : Int, z : Int, nd : Int, k : Int) : NativeU8Arr do
+    if k >= 8 do d
     else
       let nx = x + ndx(k)
       let nz = z + ndz(k)
-      if nx < 0 || nz < 0 || nx >= n || nz >= n do relax(b, n, x, z, nd, k + 1)
+      if nx < 0 || nz < 0 || nx >= n || nz >= n do mark8(d, n, x, z, nd, k + 1)
       else
         let j = nx + n * nz
-        match b do
-          Bfs(d, q, qn) ->
-            if nd < NativeArray.get_int(d, j) do
-              relax(Bfs(NativeArray.set_int(d, j, nd), NativeArray.set_int(q, qn, j), qn + 1), n, x, z, nd, k + 1)
-            else relax(b, n, x, z, nd, k + 1) end
-        end
+        if NativeArray.get_u8(d, j) == reach() do mark8(NativeArray.set_u8(d, j, nd), n, x, z, nd, k + 1)
+        else mark8(d, n, x, z, nd, k + 1) end
       end
     end
   end
 
-  pfn bfs_go(b : Bfs, qh : Int, n : Int) : NativeIntArr do
-    match b do
-      Bfs(d, q, qn) ->
-        if qh >= qn do d
-        else
-          let i = NativeArray.get_int(q, qh)
-          let nd = NativeArray.get_int(d, i) + 1
-          if nd >= reach() do bfs_go(b, qh + 1, n)
-          else bfs_go(relax(b, n, i % n, i / n, nd, 0), qh + 1, n) end
-        end
-    end
+  pfn level_go(d : NativeU8Arr, n : Int, lv : Int, i : Int) : NativeU8Arr do
+    if i >= n * n do d
+    else if NativeArray.get_u8(d, i) != lv do level_go(d, n, lv, i + 1)
+    else level_go(mark8(d, n, i % n, i / n, lv + 1, 0), n, lv, i + 1) end end
   end
 
-  doc "Chebyshev distance to the nearest water column, capped at reach(). Fresh arrays every call (GAPS G68)."
-  fn distances(f : Field, w : CubeForge.World.World) : NativeIntArr do
+  pfn sweep_go(d : NativeU8Arr, n : Int, lv : Int) : NativeU8Arr do
+    if lv >= reach() - 1 do d
+    else sweep_go(level_go(d, n, lv, 0), n, lv + 1) end
+  end
+
+  doc "Chebyshev distance to the nearest water column, capped at reach(). A fresh array every call, threaded through every write (GAPS G68)."
+  fn distances(f : Field, w : CubeForge.World.World) : NativeU8Arr do
     let n = cols(w)
     match f do
-      Field(_, ws, _, _, _, _) ->
-        -- every column can be pushed at most reach() times; size the ring generously
-        bfs_go(seed_go(ws, n, 0, Bfs(NativeArray.make_int(n * n, reach()), NativeArray.make_int(n * n * 4, 0), 0)), 0, n)
+      Field(_, ws, _, _, _, _) -> sweep_go(seed_go(ws, n, 0, NativeArray.make_u8(n * n, reach())), n, 0)
     end
   end
 
   -- Classify every column from its targets, writing the eased axes AT target
   -- (a fresh world starts fully classified; easing is for changes).
-  pfn classify_all(f : Field, seed : Int, d : NativeIntArr, n : Int, i : Int,
+  -- Sources arrive as plain parameters, matched out of the Field ONCE by the
+  -- caller: destructuring the variant inside the loop re-bumps every inner
+  -- array's refcount per iteration, which is what level_go in light.march
+  -- avoids and what turned each write into a whole-array copy here.
+  pfn classify_all(hs : NativeU8Arr, seed : Int, d : NativeU8Arr, n : Int, i : Int,
                    ta : NativeFloatArr, ma : NativeFloatArr, bs : NativeU8Arr) : Field do
-    if i >= n * n do match f do Field(hs, ws, _, _, _, hold) -> Field(hs, ws, ta, ma, bs, hold) end
+    if i >= n * n do Field(hs, NativeArray.make_u8(0, 0), ta, ma, bs, NativeArray.make_u8(n * n, 0))
     else
-      let h = height_of(f, i % n, i / n)
-      let dist = NativeArray.get_int(d, i)
+      let h = NativeArray.get_u8(hs, i)
+      let dist = NativeArray.get_u8(d, i)
       let t = temp_target(i % n, i / n, seed, h)
       let m = moisture_target(dist)
       let b = classify(t, m, h, dist)
-      classify_all(f, seed, d, n, i + 1, NativeArray.set_float(ta, i, t), NativeArray.set_float(ma, i, m), NativeArray.set_u8(bs, i, b))
+      classify_all(hs, seed, d, n, i + 1, NativeArray.set_float(ta, i, t), NativeArray.set_float(ma, i, m), NativeArray.set_u8(bs, i, b))
     end
   end
 
@@ -174,7 +170,12 @@ mod CubeForge.Biome do
     let n = cols(w)
     let f0 = scan_go(w, n, CubeForge.Light.sky_floor(w), 0, NativeArray.make_u8(n * n, 0), NativeArray.make_u8(n * n, 0))
     let d = distances(f0, w)
-    classify_all(f0, seed, d, n, 0, NativeArray.make_float(n * n, 0.0), NativeArray.make_float(n * n, 0.0), NativeArray.make_u8(n * n, 0))
+    match f0 do
+      Field(hs, ws, _, _, _, _) ->
+        match classify_all(hs, seed, d, n, 0, NativeArray.make_float(n * n, 0.0), NativeArray.make_float(n * n, 0.0), NativeArray.make_u8(n * n, 0)) do
+          Field(hs1, _, ta, ma, bs, hold) -> Field(hs1, ws, ta, ma, bs, hold)
+        end
+    end
   end
 
   fn height_of(f : Field, wx : Int, wz : Int) : Int do
@@ -184,5 +185,74 @@ mod CubeForge.Biome do
     match f do Field(_, _, _, _, bs, _) -> NativeArray.get_u8(bs, wx + 128 * wz) end
   end
   fn field_biomes(f : Field) : NativeU8Arr do match f do Field(_, _, _, _, bs, _) -> bs end end
+
+
+  fn default_rate() : Float do 1.0 /. 10800.0 end
+  fn hold_ticks() : Int do 30 end
+
+  pfn copy_go(src : NativeU8Arr, dst : NativeU8Arr, i : Int, n : Int) : NativeU8Arr do
+    if i >= n do dst else copy_go(src, NativeArray.set_u8(dst, i, NativeArray.get_u8(src, i)), i + 1, n) end
+  end
+  pfn copy_u8(a : NativeU8Arr, n : Int) : NativeU8Arr do copy_go(a, NativeArray.make_u8(n, 0), 0, n) end
+
+  doc "A block changed at (x, y, z). Only that column's surface and water flag can change, and only if the edit is at or above the current surface -- O(1) apart from the copy the Scene's shared reference forces (GAPS G68)."
+  fn note_edit(f : Field, w : CubeForge.World.World, x : Int, y : Int, z : Int, id : Int) : Field do
+    let n = cols(w)
+    if x < 0 || z < 0 || x >= n || z >= n do f
+    else
+      match f do
+        Field(hs, ws, ta, ma, bs, hold) ->
+          let i = x + n * z
+          let cur = NativeArray.get_u8(hs, i)
+          let h1 = if y > cur && id != 0 do y
+                   else if y == cur && id == 0 do surface_go(w, x, z, y - 1)
+                   else cur end end
+          let hs1 = NativeArray.set_u8(copy_u8(hs, n * n), i, h1)
+          let ws1 = NativeArray.set_u8(copy_u8(ws, n * n), i, if wet_at(w, x, z, h1) do 1 else 0 end)
+          Field(hs1, ws1, ta, ma, bs, hold)
+      end
+    end
+  end
+
+  pfn ease(cur : Float, target : Float, rate : Float) : Float do
+    let d = target -. cur
+    if d > rate do cur +. rate else if d < 0.0 -. rate do cur -. rate else target end end
+  end
+
+  pfn tick_go(hs : NativeU8Arr, ta0 : NativeFloatArr, ma0 : NativeFloatArr, bs0 : NativeU8Arr, hold0 : NativeU8Arr,
+              seed : Int, rate : Float, d : NativeU8Arr, n : Int, i : Int,
+              ta : NativeFloatArr, ma : NativeFloatArr, bs : NativeU8Arr, hold : NativeU8Arr) : Field do
+    if i >= n * n do Field(hs, NativeArray.make_u8(0, 0), ta, ma, bs, hold)
+    else
+      let h = NativeArray.get_u8(hs, i)
+      let dist = NativeArray.get_u8(d, i)
+      let t = ease(NativeArray.get_float(ta0, i), temp_target(i % n, i / n, seed, h), rate)
+      let m = ease(NativeArray.get_float(ma0, i), moisture_target(dist), rate)
+      let raw = classify(t, m, h, dist)
+      let cur = NativeArray.get_u8(bs0, i)
+      -- The hold counter: flip only after hold_ticks() consecutive disagreements,
+      -- so a column parked on a threshold cannot alternate every tick.
+      let hc = if raw == cur do 0 else NativeArray.get_u8(hold0, i) + 1 end
+      let b1 = if hc >= hold_ticks() do raw else cur end
+      let hc1 = if b1 == raw do 0 else hc end
+      tick_go(hs, ta0, ma0, bs0, hold0, seed, rate, d, n, i + 1,
+              NativeArray.set_float(ta, i, t), NativeArray.set_float(ma, i, m),
+              NativeArray.set_u8(bs, i, b1), NativeArray.set_u8(hold, i, hc1))
+    end
+  end
+
+  doc "One tick: recompute distances, ease both axes toward their targets by [rate], reclassify behind the hold counter. Writes fresh arrays."
+  fn tick(f : Field, w : CubeForge.World.World, seed : Int, rate : Float) : Field do
+    let n = cols(w)
+    let d = distances(f, w)
+    match f do
+      Field(hs, ws, ta0, ma0, bs0, hold0) ->
+        match tick_go(hs, ta0, ma0, bs0, hold0, seed, rate, d, n, 0,
+                      NativeArray.make_float(n * n, 0.0), NativeArray.make_float(n * n, 0.0),
+                      NativeArray.make_u8(n * n, 0), NativeArray.make_u8(n * n, 0)) do
+          Field(hs1, _, ta, ma, bs, hold) -> Field(hs1, ws, ta, ma, bs, hold)
+        end
+    end
+  end
 
 end
