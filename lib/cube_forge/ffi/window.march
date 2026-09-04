@@ -27,7 +27,7 @@ mod CubeForge.Ffi.Window do
     fn x_gfx_set_view_proj(m: NativeF32Arr): Unit = "cf_gfx_set_view_proj"
     fn x_gfx_set_light(sun: Float, ex: Float, ey: Float, ez: Float, dx: Float, dy: Float, dz: Float, flash: Int): Unit = "cf_gfx_set_light"
     fn x_gfx_set_sky(sx: Float, sy: Float, sz: Float, mx: Float, my: Float, mz: Float): Unit = "cf_gfx_set_sky"
-    fn x_gfx_set_shadow(dist: Float): Unit = "cf_gfx_set_shadow"
+    fn x_gfx_set_shadow(dist: Float, soft: Int): Unit = "cf_gfx_set_shadow"
     fn x_gfx_upload_occupancy(occ: NativeU8Arr, w: Int, h: Int, d: Int): Unit = "cf_gfx_upload_occupancy"
     fn x_gfx_set_voxel(x: Int, y: Int, z: Int, solid: Int): Unit = "cf_gfx_set_voxel"
     fn x_gfx_draw(slot: Int, nverts: Int): Unit = "cf_gfx_draw"
@@ -77,8 +77,8 @@ mod CubeForge.Ffi.Window do
     x_gfx_set_sky(sx, sy, sz, mx, my, mz)
   end
 
-  doc "Shadow reach in blocks; 0 disables the shadow trace."
-  fn gfx_set_shadow(dist : Float) : Unit do x_gfx_set_shadow(dist) end
+  doc "Shadow reach in blocks (0 disables the trace) and whether to soften shadow edges."
+  fn gfx_set_shadow(dist : Float, soft : Bool) : Unit do x_gfx_set_shadow(dist, if soft do 1 else 0 end) end
 
   doc "Upload the world occupancy field (1 byte per voxel) as the shadow ray-marcher's 3D texture."
   fn gfx_upload_occupancy(occ : NativeU8Arr, w : Int, h : Int, d : Int) : Unit do x_gfx_upload_occupancy(occ, w, h, d) end

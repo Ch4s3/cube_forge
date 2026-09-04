@@ -339,3 +339,33 @@ The mark pass is write-only; the 16-bit masks are derived in a separate read.
 The invariant is pinned by a test: for the edit that reaches furthest (a block
 placed high in open air, darkening the column beneath it), no voxel changes
 light in a section the mask failed to flag.
+
+### Soft shadows and the reach fade
+
+`trace` now returns the distance to the occluder rather than a yes/no, so a
+shadow whose caster sits near the reach limit fades out instead of ending in a
+hard line where the trace gives up.
+
+Soft edges spread four rays over a small cone (`SOFT_SPREAD` 0.035 rad),
+rotated per pixel so the samples read as softness rather than four bands.
+Because the rays diverge, the penumbra widens with distance from the caster on
+its own -- no separate penumbra estimate needed. `CF_SHADOW_SOFT=0` reverts to
+one ray.
+
+Measured at 800x600 with a low sun (`CF_SUN=75`), which is the expensive case
+because rays travel further before escaping:
+
+| | fps | ms/frame |
+|---|---|---|
+| hard, 1 ray | 501 | 2.0 |
+| soft, 4 rays | 206 | 4.9 |
+
+2.4x the frame cost, and only 2.6% of pixels change by more than 4/255 -- the
+gain is real but small, chiefly removing hard-edged shadow bands. It is on by
+default because 4.9 ms still fits a 16.7 ms budget comfortably.
+
+**Caveat worth knowing:** these numbers are at an 800x600 framebuffer. On a
+retina backing store (1600x1200, which this window sometimes gets) the shadow
+cost is per-pixel and would be roughly 4x, putting soft shadows near the 60 Hz
+budget. That case has not been measured. `CF_SHADOW_SOFT=0` halves the cost if
+it bites.

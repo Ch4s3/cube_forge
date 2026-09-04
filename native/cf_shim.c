@@ -164,6 +164,7 @@ static const char *FS =
     "uniform int u_cutout;\n"
     "uniform sampler3D u_occ;\n"
     "uniform float u_shadow;\n"
+    "uniform float u_soft;\n"
     "out vec4 o_color;\n"
     /* The beam shape never varies at runtime, only its position, aim and
      * on/off state, so the cone half-angles are constants rather than uniforms. */
@@ -194,11 +195,13 @@ static const char *FS =
      * and for knowing when a ray has left the world. */
     "const vec3 WORLD = vec3(128.0, 256.0, 128.0);\n"
     "const int  MAX_STEPS = 256;\n"
+    "const float SOFT_SPREAD = 0.035;\n"
     /* Amanatides-Woo voxel DDA. Returns 1.0 when the ray reaches maxDist without
      * hitting an occluder, 0.0 when something blocks it. Exact on axis-aligned
      * voxels: no depth bias, no acne, no peter-panning. */
-    "float trace(vec3 p, vec3 dir, float maxDist){\n"
-    "  if (u_shadow <= 0.0) return 1.0;\n"
+    /* Returns the distance at which the ray first meets an occluder, or 1e30
+     * when it reaches maxDist unobstructed. */
+    "float traceDist(vec3 p, vec3 dir, float maxDist){\n"
     "  ivec3 v   = ivec3(floor(p));\n"
     "  ivec3 stp = ivec3(sign(dir));\n"
     /* An axis the ray does not move along must never step: its tMax stays at
@@ -211,16 +214,41 @@ static const char *FS =
     "  vec3  tDelta = mix(vec3(1e30), 1.0 / abs(den), moving);\n"
     "  for (int i = 0; i < MAX_STEPS; i++){\n"
     "    float tNow = min(tMax.x, min(tMax.y, tMax.z));\n"
-    "    if (tNow > maxDist) return 1.0;\n"
-    "    if (tMax.x <= tMax.y && tMax.x <= tMax.z)      { v.x += stp.x; tMax.x += tDelta.x; }\n"
-    "    else if (tMax.y <= tMax.z)                     { v.y += stp.y; tMax.y += tDelta.y; }\n"
-    "    else                                           { v.z += stp.z; tMax.z += tDelta.z; }\n"
-    /* Leaving the world sideways or out of the top means the ray escaped; out
-     * of the bottom cannot happen for a light above, but is treated the same. */
-    "    if (v.x < 0 || v.y < 0 || v.z < 0 || v.x >= int(WORLD.x) || v.y >= int(WORLD.y) || v.z >= int(WORLD.z)) return 1.0;\n"
-    "    if (texture(u_occ, (vec3(v) + 0.5) / WORLD).r > 0.5) return 0.0;\n"
+    "    if (tNow > maxDist) return 1e30;\n"
+    "    if (tMax.x <= tMax.y && tMax.x <= tMax.z) { v.x += stp.x; tMax.x += tDelta.x; }\n"
+    "    else if (tMax.y <= tMax.z)                { v.y += stp.y; tMax.y += tDelta.y; }\n"
+    "    else                                      { v.z += stp.z; tMax.z += tDelta.z; }\n"
+    /* Out of the world means the ray escaped to the sky. */
+    "    if (v.x < 0 || v.y < 0 || v.z < 0 || v.x >= int(WORLD.x) || v.y >= int(WORLD.y) || v.z >= int(WORLD.z)) return 1e30;\n"
+    "    if (texture(u_occ, (vec3(v) + 0.5) / WORLD).r > 0.5) return tNow;\n"
     "  }\n"
-    "  return 1.0;\n"
+    "  return 1e30;\n"
+    "}\n"
+    /* A shadow whose caster sits near the reach limit fades out rather than
+     * ending in a hard line across the terrain where the trace gives up. */
+    "float shadowOf(float hit, float maxDist){\n"
+    "  if (hit > maxDist) return 1.0;\n"
+    "  return smoothstep(0.75, 1.0, hit / maxDist);\n"
+    "}\n"
+    "float hash12(vec2 v){ return fract(sin(dot(v, vec2(12.9898, 78.233))) * 43758.5453); }\n"
+    /* Hard shadows are one ray. Soft shadows spread four over a small cone:
+     * because the rays diverge, the penumbra widens with distance from the
+     * caster on its own, which is what real soft shadows do. The cone is rotated
+     * per pixel so four samples read as softness rather than as four bands. */
+    "float shadow(vec3 p, vec3 dir, float maxDist){\n"
+    "  if (u_shadow <= 0.0) return 1.0;\n"
+    "  if (u_soft < 0.5) return shadowOf(traceDist(p, dir, maxDist), maxDist);\n"
+    "  vec3 up = abs(dir.y) < 0.9 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);\n"
+    "  vec3 t1 = normalize(cross(dir, up));\n"
+    "  vec3 t2 = cross(dir, t1);\n"
+    "  float a0 = hash12(gl_FragCoord.xy) * 6.2831853;\n"
+    "  float acc = 0.0;\n"
+    "  for (int k = 0; k < 4; k++){\n"
+    "    float a = a0 + float(k) * 1.5707963;\n"
+    "    vec3 d = normalize(dir + (t1 * cos(a) + t2 * sin(a)) * SOFT_SPREAD);\n"
+    "    acc += shadowOf(traceDist(p, d, maxDist), maxDist);\n"
+    "  }\n"
+    "  return acc * 0.25;\n"
     "}\n"
     "void main(){\n"
     "  vec4 t = (u_use_tex == 1) ? texture(u_tex, vec3(v_uv, v_layer)) : vec4(v_uv, v_layer, 1.0);\n"
@@ -238,8 +266,8 @@ static const char *FS =
     "  vec3  origin = v_world + v_normal * 0.5;\n"
     "  float shad = 1.0;\n"
     "  if (v_shade > 0.001) {\n"
-    "    if (inten > 0.0 && ndls > 0.0)      shad = trace(origin, u_sundir,  u_shadow);\n"
-    "    else if (moon > 0.0 && ndlm > 0.0)  shad = trace(origin, u_moondir, u_shadow);\n"
+    "    if (inten > 0.0 && ndls > 0.0)      shad = shadow(origin, u_sundir,  u_shadow);\n"
+    "    else if (moon > 0.0 && ndlm > 0.0)  shad = shadow(origin, u_moondir, u_shadow);\n"
     "  }\n"
     "  vec3  sky  = sunc * (inten * (amb + DIRECT * ndls * shad))\n"
     "             + MOON_TINT * (MOON_LEVEL * moon * (amb + DIRECT * ndlm * shad));\n"
@@ -251,7 +279,7 @@ static const char *FS =
     "  float flash = u_flash * spot * max(dot(v_normal, Ln), 0.0) / (1.0 + 0.02 * d2);\n"
     /* The flashlight gets its own trace, toward the eye, and only when it would
      * contribute anything at all. */
-    "  if (flash > 0.001) flash *= trace(origin, Ln, min(sqrt(d2), u_shadow));\n"
+    "  if (flash > 0.001) flash *= shadow(origin, Ln, min(sqrt(d2), u_shadow));\n"
     "  vec3  world = baked + vec3(flash);\n"
     /* Overlays (HUD, outline, map marker) share this program but are not part of
      * the world: they keep their own vertex shade and skip lighting entirely. */
@@ -272,7 +300,7 @@ static GLint  g_u_use_tex = -1;
 static GLint  g_u_cutout = -1;
 static GLint  g_u_sun = -1, g_u_eye = -1, g_u_dir = -1, g_u_flash = -1;
 static GLint  g_u_sundir = -1, g_u_moondir = -1, g_u_unlit = -1;
-static GLint  g_u_occ = -1, g_u_shadow = -1;
+static GLint  g_u_occ = -1, g_u_shadow = -1, g_u_soft = -1;
 static GLuint g_tex = 0;
 
 int64_t cf_gfx_init(void) {
@@ -295,6 +323,7 @@ int64_t cf_gfx_init(void) {
     g_u_unlit = glGetUniformLocation(g_prog, "u_unlit");
     g_u_occ = glGetUniformLocation(g_prog, "u_occ");
     g_u_shadow = glGetUniformLocation(g_prog, "u_shadow");
+    g_u_soft = glGetUniformLocation(g_prog, "u_soft");
     if (getenv("CF_DEBUG")) fprintf(stderr, "cf: uniforms occ=%d shadow=%d sundir=%d unlit=%d\n", g_u_occ, g_u_shadow, g_u_sundir, g_u_unlit);
     glGenVertexArrays(1, &g_vao);
     glGenBuffers(CF_MAX_MESHES, g_vbo);
@@ -557,11 +586,12 @@ void cf_gfx_set_light(double sun, double ex, double ey, double ez,
 
 /* Direction TO the sun and TO the moon, in world space. Normalised here so the
  * caller can pass a raw arc position. Called once per frame with set_light. */
-/* Shadow reach in blocks; 0 disables the trace entirely. */
-void cf_gfx_set_shadow(double dist) {
+/* Shadow reach in blocks (0 disables the trace) and whether to soften edges. */
+void cf_gfx_set_shadow(double dist, int64_t soft) {
     if (!g_prog) return;
     glUseProgram(g_prog);
     glUniform1f(g_u_shadow, (float)dist);
+    glUniform1f(g_u_soft, soft ? 1.0f : 0.0f);
 }
 
 void cf_gfx_set_sky(double sx, double sy, double sz, double mx, double my, double mz) {
