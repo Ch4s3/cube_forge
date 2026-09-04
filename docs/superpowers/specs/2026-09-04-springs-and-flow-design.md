@@ -51,9 +51,16 @@ follow-up in `todos.md`, not built here.
 
 ## 3. Evaporation
 
-A volume cell at **level 1 with sky above it** loses its unit with probability
-`1 / evap` each time it is processed, `evap` default 16, knob `CF_EVAP`. Sources
-never evaporate. Deeper water never evaporates directly; it thins first.
+A volume cell at **level 1 with sky above it** — nothing but air all the way to
+the top of the world — loses its unit with probability `1 / evap` **once per
+tick**, `evap` default 16, knob `CF_EVAP`. Sources never evaporate. Deeper water
+never evaporates directly; it thins first.
+
+*As built:* a thin cell that survives its draw is put on a wake list and
+re-marked at the start of the next tick, not re-queued immediately — re-queuing
+let it be drawn dozens of times within one tick and a puddle dried in one. The
+same once-a-tick marking is how a spring gives exactly `spring_rate` a tick:
+neighbours never re-mark a spring; `tick` does, once.
 
 Two effects: a brook reaches a length instead of a valley, and stray puddles
 dry. The hash is `Noise.hash2` on the cell and the tick, so it is deterministic

@@ -67,7 +67,8 @@ mod CubeForge.Test.Flow do
 
   describe "Sim.tick" do
     test "a closed basin conserves seven placed units" do
-      let c0 = C.set(wall_go(floored(), 0), 7, 71, 7, C.id_of_level(7))
+      -- roofed: open sky evaporates thin water by design (see "evaporation")
+      let c0 = C.set(roof_go(wall_go(floored(), 0), 0), 7, 71, 7, C.id_of_level(7))
       let s0 = Water.edited(Water.new_sim(c0, Water.empty_edges()), Water.idx(7, 71, 7), C.id_of_level(7))
       Test.assert_eq_int(Water.volume(s0), 7, "before any tick")
       let s1 = run_ticks(s0, 1)
@@ -79,8 +80,9 @@ mod CubeForge.Test.Flow do
       Test.assert_true(max_level(Water.sim_chunk(s40), 0, 0) <= 7, "no cell over seven")
     end
 
-    test "seven units on an open floor settle as seven cells of level 1 and stop" do
-      let s0 = Water.edited(Water.new_sim(C.set(floored(), 8, 71, 8, C.id_of_level(7)), Water.empty_edges()), Water.idx(8, 71, 8), C.id_of_level(7))
+    test "seven units on a floor settle as seven cells of level 1 and stop" do
+      -- roofed, so the shape is tested without evaporation eating the result
+      let s0 = Water.edited(Water.new_sim(roof_go(C.set(floored(), 8, 71, 8, C.id_of_level(7)), 0), Water.empty_edges()), Water.idx(8, 71, 8), C.id_of_level(7))
       let s = run_ticks(s0, 40)
       let c = Water.sim_chunk(s)
       Test.assert_eq_int(Water.volume(s), 7, "volume kept")
@@ -90,7 +92,7 @@ mod CubeForge.Test.Flow do
     end
     test "water falls down a shaft and pools at the bottom, volume kept" do
       -- a shaft next to the placed block: air from y = 70 down to y = 63, stone at y = 62
-      let c = C.set(C.set(C.set(floored(), 8, 71, 8, C.id_of_level(7)), 9, 70, 8, 0), 9, 62, 8, 3)
+      let c = roof_go(C.set(C.set(C.set(floored(), 8, 71, 8, C.id_of_level(7)), 9, 70, 8, 0), 9, 62, 8, 3), 0)
       let s = run_ticks(Water.edited(Water.new_sim(c, Water.empty_edges()), Water.idx(8, 71, 8), C.id_of_level(7)), 60)
       let ch = Water.sim_chunk(s)
       Test.assert_eq_int(Water.volume(s), 7, "volume kept")
@@ -156,10 +158,53 @@ mod CubeForge.Test.Flow do
     end
   end
 
+  -- A floor that steps down one block per column toward +x from x = 8: a slope.
+  pfn slope_go(c : CubeForge.Chunk.Chunk, i : Int) : CubeForge.Chunk.Chunk do
+    if i >= 256 do c
+    else
+      let x = i % 16
+      let z = i / 16
+      let top = if x <= 8 do 70 else 70 - (x - 8) end
+      slope_go(slope_col(c, x, z, top, 60), i + 1)
+    end
+  end
+  pfn slope_col(c : CubeForge.Chunk.Chunk, x : Int, z : Int, top : Int, y : Int) : CubeForge.Chunk.Chunk do
+    if y > top do c else slope_col(C.set(c, x, y, z, 3), x, z, top, y + 1) end
+  end
+  -- The basin, roofed at y = 72 so nothing inside is open to the sky.
+  pfn roof_go(c : CubeForge.Chunk.Chunk, i : Int) : CubeForge.Chunk.Chunk do
+    if i >= 256 do c else roof_go(C.set(c, i % 16, 72, i / 16, 3), i + 1) end
+  end
+
+  describe "springs are a trickle" do
+    test "a source on a slope gives at most spring_rate() a tick" do
+      let c0 = C.set(slope_go(C.new(), 0), 8, 71, 8, C.water())
+      let s0 = Water.edited(Water.new_sim(c0, Water.empty_edges()), Water.idx(8, 71, 8), C.water())
+      let s1 = run_ticks(s0, 1)
+      Test.assert_true(Water.volume(s1) <= Water.spring_rate(), "one tick, at most the rate")
+      let s10 = run_ticks(s1, 9)
+      Test.assert_true(Water.volume(s10) <= 10 * Water.spring_rate(), "ten ticks, at most ten times the rate")
+      Test.assert_true(Water.volume(s10) > 0, "but it does flow")
+    end
+  end
+
+  describe "evaporation" do
+    test "under a roof, seven units stay seven" do
+      let c0 = C.set(roof_go(wall_go(floored(), 0), 0), 7, 71, 7, C.id_of_level(7))
+      let s = run_ticks(Water.edited(Water.new_sim(c0, Water.empty_edges()), Water.idx(7, 71, 7), C.id_of_level(7)), 400)
+      Test.assert_eq_int(Water.volume(s), 7, "roofed: conserved")
+    end
+    test "open to the sky, a puddle dries up" do
+      let c0 = C.set(wall_go(floored(), 0), 7, 71, 7, C.id_of_level(7))
+      let s = run_ticks(Water.edited(Water.new_sim(c0, Water.empty_edges()), Water.idx(7, 71, 7), C.id_of_level(7)), 800)
+      Test.assert_eq_int(Water.volume(s), 0, "open: gone")
+    end
+  end
+
   describe "volume across a chunk edge" do
     test "seven units placed at x = 15 end up shared with the chunk to the east, total unchanged" do
-      let ca = C.set(floored(), 15, 71, 8, C.id_of_level(7))
-      let cb = floored()
+      let ca = roof_go(C.set(floored(), 15, 71, 8, C.id_of_level(7)), 0)
+      let cb = roof_go(floored(), 0)
       let a0 = Water.edited(Water.new_sim(ca, Water.load_edge(Water.empty_edges(), 2, cb)), Water.idx(15, 71, 8), C.id_of_level(7))
       let b0 = Water.new_sim(cb, Water.load_edge(Water.empty_edges(), 3, ca))
       let p1 = tick_pair(a0, b0, 1)

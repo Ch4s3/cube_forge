@@ -71,10 +71,10 @@ mod CubeForge.Test.Inventory do
   end
 
   describe "yields" do
-    test "water collects as a source from any flow level" do
-      Test.assert_eq_int(Inv.yield_of(C.water()), C.water(), "a source")
-      Test.assert_eq_int(Inv.yield_of(7), C.water(), "a mid flow level")
-      Test.assert_eq_int(Inv.yield_of(11), C.water(), "the thinnest flow level")
+    test "any flow level collects as seven finite units; only a source is a spring" do
+      Test.assert_eq_int(Inv.yield_of(C.water()), C.water(), "a source is a spring")
+      Test.assert_eq_int(Inv.yield_of(7), C.id_of_level(7), "a mid flow level")
+      Test.assert_eq_int(Inv.yield_of(11), C.id_of_level(7), "the thinnest flow level")
     end
     test "air, bedrock and leaves yield nothing" do
       Test.assert_eq_int(Inv.yield_of(0), 0, "air")
@@ -256,6 +256,14 @@ mod CubeForge.Test.Inventory do
     if s >= Inv.slots() do true
     else if Hud.slot_at(Hud.slot_ox(s) +. Hud.slot_w() /. 2.0, Hud.slot_oy(s, true) +. Hud.slot_h() /. 2.0, true) == s do centres_ok(s + 1)
     else false end end
+  end
+
+
+  describe "Inventory.yield_of" do
+    test "water collects finite, a spring collects as a spring" do
+      Test.assert_eq_int(CubeForge.Inventory.yield_of(CubeForge.Chunk.id_of_level(3)), CubeForge.Chunk.id_of_level(7), "any puddle is seven units")
+      Test.assert_eq_int(CubeForge.Inventory.yield_of(CubeForge.Chunk.water()), CubeForge.Chunk.water(), "a source is a spring")
+    end
   end
 
 end
