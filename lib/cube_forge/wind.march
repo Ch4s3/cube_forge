@@ -1,0 +1,56 @@
+-- Wind — one gust curve, shared by everything that needs to know how hard it
+-- is blowing.
+--
+-- Stateless on purpose. Two octaves of interpolated value noise over the tick
+-- counter give a curve that gusts, is seeded, is deterministic, and needs
+-- nothing threaded through the frame or held in an actor. It is the single
+-- source of truth: the mountain bed and the leaf bed read the same function,
+-- so the leaves can never rustle while the peaks are silent.
+--
+-- Smoothstep interpolation is what makes the continuity bound below true. A
+-- smoothstep's slope peaks at 1.5/period, so the largest step this curve can
+-- take is the weighted sum of the two octaves' peak slopes, doubled because
+-- the gust is mapped from 0..1 onto -1..1.
+mod CubeForge.Wind do
+
+  alias CubeForge.Noise as N
+
+  doc "Tick period of the slow octave: the weather-scale swell."
+  fn slow_period() : Int do 64 end
+  doc "Tick period of the fast octave: the gust inside the swell."
+  fn fast_period() : Int do 16 end
+  fn slow_weight() : Float do 0.7 end
+  fn fast_weight() : Float do 0.3 end
+
+  doc "Baseline strength in weather [wx]: a clear day still has a breeze."
+  fn base(wx : Float) : Float do 0.15 +. 0.55 *. wx end
+  doc "How far a gust swings either side of the baseline in weather [wx]."
+  fn amp(wx : Float) : Float do 0.12 +. 0.25 *. wx end
+
+  doc "The largest change in strength one tick can produce. The continuity property in the tests is stated against exactly this: two smoothstep octaves, each peaking at 1.5/period, doubled by the -1..1 mapping and scaled by the widest amplitude."
+  fn max_step() : Float do
+    2.0 *. amp(1.0) *. (slow_weight() *. 1.5 /. int_to_float(slow_period())
+                        +. fast_weight() *. 1.5 /. int_to_float(fast_period()))
+  end
+
+  -- One octave: value noise on a lattice of [period] ticks, smoothstepped.
+  pfn octave(tick : Int, seed : Int, period : Int, salt : Int) : Float do
+    let i = tick / period
+    let f = int_to_float(tick - i * period) /. int_to_float(period)
+    N.lerp(N.hash2(i, salt, seed), N.hash2(i + 1, salt, seed), N.smooth(f))
+  end
+
+  doc "The raw gust curve 0..1, before weather scales it."
+  fn gust(tick : Int, seed : Int) : Float do
+    slow_weight() *. octave(tick, seed, slow_period(), 811)
+    +. fast_weight() *. octave(tick, seed, fast_period(), 907)
+  end
+
+  pfn clamp01(v : Float) : Float do if v < 0.0 do 0.0 else if v > 1.0 do 1.0 else v end end end
+
+  doc "Wind strength 0..1 at [tick] for a world seeded [seed] under weather intensity [wx]."
+  fn at(tick : Int, seed : Int, wx : Float) : Float do
+    clamp01(base(wx) +. amp(wx) *. (2.0 *. gust(tick, seed) -. 1.0))
+  end
+
+end

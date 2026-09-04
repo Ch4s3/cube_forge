@@ -1,0 +1,205 @@
+-- The mixer policy: every gain a real gain, snow and water muffling the world
+-- monotonically, and a note schedule that never breaks a row in half.
+mod CubeForge.Test.Audio do
+
+  -- Capability ceiling (GAPS G41): this test only calls pure functions, but the
+  -- ceiling charges it for everything reachable through Biome.
+  needs IO.Spawn
+  needs IO.Clock
+  needs IO.Console
+  needs IO.Process
+  import Test
+  alias CubeForge.Audio as Audio
+  alias CubeForge.Biome as Biome
+
+  -- A coarse sweep of the whole input space, 1728 combinations, decoded from
+  -- one index so the scan can be a single recursion.
+  pfn three(k : Int) : Float do if k == 0 do 0.0 else if k == 1 do 0.5 else 1.0 end end end
+  pfn combos() : Int do 1728 end
+  pfn mix_at(i : Int) : CubeForge.Audio.Mix do
+    Audio.mix(i % 8, three((i / 8) % 3), three((i / 24) % 3), three((i / 72) % 3),
+          int_to_float((i / 216) % 2), int_to_float((i / 432) % 2), (i / 864) % 2 == 1)
+  end
+
+  pfn bad_gain(g : Float) : Bool do g < 0.0 || g > 1.0 end
+
+  pfn gains_out_of_range(i : Int) : Int do
+    if i >= combos() do -1
+    else
+      let m = mix_at(i)
+      let bad = bad_gain(Audio.rain_of(m)) || bad_gain(Audio.wind_of(m)) || bad_gain(Audio.leaves_of(m))
+                || bad_gain(Audio.water_of(m)) || bad_gain(Audio.music_of(m))
+      if bad do i else gains_out_of_range(i + 1) end
+    end
+  end
+
+  pfn cutoff_out_of_range(i : Int) : Int do
+    if i >= combos() do -1
+    else
+      let c = Audio.cutoff_of(mix_at(i))
+      if c < 100.0 || c > 20000.0 do i else cutoff_out_of_range(i + 1) end
+    end
+  end
+
+  -- Underwater must silence the surface beds, whatever else is going on.
+  pfn surface_heard_underwater(i : Int) : Int do
+    if i >= combos() do -1
+    else
+      let m = mix_at(864 + (i % 864))
+      let loud = Audio.rain_of(m) > 0.02 || Audio.wind_of(m) > 0.02 || Audio.leaves_of(m) > 0.02
+      if loud do i else surface_heard_underwater(i + 1) end
+    end
+  end
+
+  -- Cutoff must never rise as snow thickens.
+  pfn cutoff_rises_with_snow(k : Int, prev : Float) : Int do
+    if k > 100 do -1
+    else
+      let c = Audio.cutoff(int_to_float(k) /. 100.0, false)
+      if c > prev +. 0.0001 do k else cutoff_rises_with_snow(k + 1, c) end
+    end
+  end
+
+  -- The biome table must answer for all eight ids.
+  pfn table_break(b : Int) : Int do
+    if b >= 8 do -1
+    else
+      let bad = Audio.form_of(b) < 0 || Audio.form_of(b) > 3
+                || Audio.transpose_of(b) < 0 || Audio.transpose_of(b) > 11
+                || Audio.octave_of(b) < 3 || Audio.octave_of(b) > 6
+                || Audio.rate_of(b) < 4 || Audio.rate_of(b) > 14
+                || Audio.timbre_of(b) < 0 || Audio.timbre_of(b) > 4
+      if bad do b else table_break(b + 1) end
+    end
+  end
+
+  -- Walk the schedule, firing whenever due, and report the tick at which the
+  -- form changed while the row was part-stated.
+  pfn form_change_mid_row(s : CubeForge.Audio.Sched, tick : Int, n : Int, seed : Int) : Int do
+    if tick >= n do -1
+    else if !Audio.due(s, tick) do form_change_mid_row(s, tick + 1, n, seed)
+    else
+      -- the biome under the listener changes every tick, as violently as it can
+      let want_form = tick % 4
+      let want_t = tick % 12
+      let s1 = Audio.advance(s, tick, 8, want_form, want_t, seed)
+      let mid = Audio.index_of(s) != 11
+      let changed = Audio.form_of_sched(s1) != Audio.form_of_sched(s) || Audio.transpose_of_sched(s1) != Audio.transpose_of_sched(s)
+      if mid && changed do tick else form_change_mid_row(s1, tick + 1, n, seed) end end end
+  end
+
+  -- Every position of the row is visited in order, 0..11 and round again.
+  pfn index_out_of_order(s : CubeForge.Audio.Sched, tick : Int, n : Int, seed : Int) : Int do
+    if tick >= n do -1
+    else if !Audio.due(s, tick) do index_out_of_order(s, tick + 1, n, seed)
+    else
+      let s1 = Audio.advance(s, tick, 8, 0, 0, seed)
+      if Audio.index_of(s1) != (Audio.index_of(s) + 1) % 12 do tick
+      else index_out_of_order(s1, tick + 1, n, seed) end end end
+  end
+
+  -- How many notes fire in [n] ticks at rate [rate].
+  pfn notes_in(s : CubeForge.Audio.Sched, tick : Int, n : Int, rate : Int, seed : Int, acc : Int) : Int do
+    if tick >= n do acc
+    else if !Audio.due(s, tick) do notes_in(s, tick + 1, n, rate, seed, acc)
+    else notes_in(Audio.advance(s, tick, rate, 0, 0, seed), tick + 1, n, rate, seed, acc + 1) end end
+  end
+
+  describe "Audio.mix" do
+    test "every gain is a real gain across the whole input space" do
+      Test.assert_eq_int(gains_out_of_range(0), -1, "all 1728 combinations stay in 0..1")
+    end
+
+    test "the cutoff is always an audible frequency" do
+      Test.assert_eq_int(cutoff_out_of_range(0), -1, "all 1728 combinations stay in 100..20000 Hz")
+    end
+
+    test "snow silences the rain" do
+      let wet = Audio.mix(Biome.b_grassland(), 1.0, 0.5, 0.0, 0.5, 0.5, false)
+      let snowy = Audio.mix(Biome.b_grassland(), 1.0, 0.5, 1.0, 0.5, 0.5, false)
+      Test.assert_true(Audio.rain_of(wet) > 0.3, "rain is heard in a storm")
+      Test.assert_true(Audio.rain_of(snowy) < 0.001, "snow falls silently")
+    end
+
+    test "a desert stays drier than a wetland under the same storm" do
+      let desert = Audio.mix(Biome.b_desert(), 1.0, 0.5, 0.0, 0.5, 0.5, false)
+      let wetland = Audio.mix(Biome.b_wetland(), 1.0, 0.5, 0.0, 0.5, 0.5, false)
+      Test.assert_true(Audio.rain_of(desert) < Audio.rain_of(wetland), "precip_scale reaches the mix")
+    end
+
+    test "the surface goes quiet under water" do
+      Test.assert_eq_int(surface_heard_underwater(0), -1, "no surface bed survives submersion")
+    end
+
+    test "the underwater bed is only heard under water" do
+      Test.assert_true(Audio.water_of(Audio.mix(Biome.b_beach(), 0.5, 0.5, 0.0, 0.5, 0.5, true)) > 0.3, "heard below")
+      Test.assert_true(Audio.water_of(Audio.mix(Biome.b_beach(), 0.5, 0.5, 0.0, 0.5, 0.5, false)) < 0.001, "silent above")
+    end
+
+    test "the mountain bed needs both wind and exposure" do
+      Test.assert_true(Audio.wind_of(Audio.mix(Biome.b_alpine(), 0.5, 1.0, 0.0, 1.0, 0.0, false)) > 0.3, "windy peak")
+      Test.assert_true(Audio.wind_of(Audio.mix(Biome.b_alpine(), 0.5, 1.0, 0.0, 0.0, 0.0, false)) < 0.001, "windy cave is silent")
+      Test.assert_true(Audio.wind_of(Audio.mix(Biome.b_alpine(), 0.5, 0.0, 0.0, 1.0, 0.0, false)) < 0.001, "still peak is silent")
+    end
+
+    test "leaves need both wind and leaves" do
+      Test.assert_true(Audio.leaves_of(Audio.mix(Biome.b_forest(), 0.0, 1.0, 0.0, 0.2, 1.0, false)) > 0.3, "windy forest")
+      Test.assert_true(Audio.leaves_of(Audio.mix(Biome.b_forest(), 0.0, 0.0, 0.0, 0.2, 1.0, false)) < 0.001, "still forest is silent")
+      Test.assert_true(Audio.leaves_of(Audio.mix(Biome.b_desert(), 0.0, 1.0, 0.0, 0.2, 0.0, false)) < 0.001, "no leaves, no rustle")
+    end
+  end
+
+  describe "Audio.cutoff" do
+    test "clear air is not filtered" do
+      Test.assert_true(Audio.cutoff(0.0, false) > 15000.0, "wide open")
+    end
+
+    test "falls as the snow thickens and never rises" do
+      Test.assert_eq_int(cutoff_rises_with_snow(0, 100000.0), -1, "monotonic in snow")
+      Test.assert_true(Audio.cutoff(1.0, false) < 6000.0, "full snow is muffled")
+    end
+
+    test "water muffles harder than snow, and does not compound with it" do
+      Test.assert_true(Audio.cutoff(0.0, true) < Audio.cutoff(1.0, false), "under water is duller than under snow")
+      Test.assert_true(Math.abs(Audio.cutoff(1.0, true) -. Audio.cutoff(0.0, true)) < 0.0001, "snow adds nothing below the surface")
+    end
+  end
+
+  describe "Audio biome table" do
+    test "answers for all eight biomes" do
+      Test.assert_eq_int(table_break(0), -1, "every id in range")
+    end
+
+    test "different biomes really do sound different" do
+      Test.assert_true(Audio.octave_of(Biome.b_alpine()) != Audio.octave_of(Biome.b_forest()), "alpine sits above forest")
+      Test.assert_true(Audio.form_of(Biome.b_desert()) != Audio.form_of(Biome.b_grassland()), "desert and grassland take different forms")
+      Test.assert_true(Audio.rate_of(Biome.b_wetland()) > Audio.rate_of(Biome.b_desert()), "a wetland is busier than a desert")
+    end
+  end
+
+  describe "Audio.advance" do
+    test "never changes form or transposition mid-row" do
+      Test.assert_eq_int(form_change_mid_row(Audio.sched_start(0), 0, 6000, 42), -1,
+                         "the row is always finished before the biome is adopted")
+    end
+
+    test "states all twelve positions in order" do
+      Test.assert_eq_int(index_out_of_order(Audio.sched_start(0), 0, 6000, 42), -1, "0..11 and round again")
+    end
+
+    test "fires notes at roughly the requested rate" do
+      -- 6 ticks a second, so 3600 ticks is ten minutes; at 6 notes a minute
+      -- that is about 60 notes, at 12 about 120.
+      let slow = notes_in(Audio.sched_start(0), 0, 3600, 6, 42, 0)
+      let fast = notes_in(Audio.sched_start(0), 0, 3600, 12, 42, 0)
+      Test.assert_true(slow > 40 && slow < 80, "about sixty notes at rate 6")
+      Test.assert_true(fast > 90 && fast < 150, "about a hundred and twenty at rate 12")
+    end
+
+    test "spaces notes out rather than bunching them" do
+      Test.assert_true(Audio.gap_ticks(8, 100, 42) >= Audio.min_gap(), "never faster than the floor")
+      Test.assert_true(Audio.gap_ticks(8, 100, 42) <= Audio.max_gap(), "never slower than the ceiling")
+    end
+  end
+
+end
