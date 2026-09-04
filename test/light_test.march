@@ -6,6 +6,17 @@ mod CubeForge.Test.Light do
   alias CubeForge.Light as L
   alias CubeForge.Chunk as C
 
+
+  pfn air_chunks(i : Int, acc : List(CubeForge.Chunk.Chunk)) : List(CubeForge.Chunk.Chunk) do
+    if i < 0 do acc else air_chunks(i - 1, Cons(C.new(), acc)) end
+  end
+
+  -- An 8x8 world of entirely empty chunks (no terrain), so seeding tests see
+  -- only the blocks they place themselves.
+  pfn air_world() : CubeForge.World.World do
+    CubeForge.World.World(Array.from_list(air_chunks(63, Nil)), 8)
+  end
+
   describe "Light.index" do
     test "corners map to the ends of the flat range" do
       Test.assert_eq_int(L.index(0, 0, 0), 0, "origin")
@@ -53,6 +64,43 @@ mod CubeForge.Test.Light do
       let q3 = L.q_pop(q2)
       Test.assert_eq_int(L.q_peek(q3), 30, "third")
       Test.assert_true(L.q_empty(L.q_pop(q3)), "drained")
+    end
+  end
+
+  describe "Light.seed_all" do
+    test "an all-air world is fully lit from top to bottom" do
+      let w = air_world()
+      let la = L.seed_all(L.new(), w)
+      Test.assert_eq_int(L.get(la, 40, 255, 40), L.max_level(), "top of the column")
+      Test.assert_eq_int(L.get(la, 40, 128, 40), L.max_level(), "middle of the column")
+      Test.assert_eq_int(L.get(la, 40, 0, 40), L.max_level(), "bottom of the column")
+    end
+
+    test "a solid block darkens everything beneath it" do
+      let w = CubeForge.World.set_block(air_world(), 40, 100, 40, 3)
+      let la = L.seed_all(L.new(), w)
+      Test.assert_eq_int(L.get(la, 40, 101, 40), L.max_level(), "above the block is lit")
+      Test.assert_eq_int(L.get(la, 40, 100, 40), 0, "the block itself is dark")
+      Test.assert_eq_int(L.get(la, 40, 99, 40), 0, "directly beneath is dark")
+      Test.assert_eq_int(L.get(la, 41, 99, 40), L.max_level(), "the next column over is untouched")
+    end
+
+    test "water attenuates two per voxel" do
+      let w0 = CubeForge.World.set_block(air_world(), 40, 100, 40, C.water())
+      let w1 = CubeForge.World.set_block(w0, 40, 99, 40, C.water())
+      let la = L.seed_all(L.new(), w1)
+      Test.assert_eq_int(L.get(la, 40, 101, 40), 15, "above the water")
+      Test.assert_eq_int(L.get(la, 40, 100, 40), 13, "one water voxel")
+      Test.assert_eq_int(L.get(la, 40, 99, 40), 11, "two water voxels")
+      Test.assert_eq_int(L.get(la, 40, 98, 40), 11, "air below keeps the dimmed level")
+    end
+  end
+
+  describe "Light.seed_column_q" do
+    test "every lit voxel of a column is enqueued" do
+      let w = CubeForge.World.set_block(air_world(), 40, 100, 40, 3)
+      let q = L.seed_column_q(L.queue_new(), w, 40, 40, 255, L.max_level())
+      Test.assert_eq_int(L.q_len(q), 155, "y 101..255 above the block")
     end
   end
 

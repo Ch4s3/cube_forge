@@ -76,4 +76,56 @@ mod CubeForge.Light do
     NativeArray.set_int(NativeArray.set_int(q, 1048576, 0), 1048577, 0)
   end
 
+  -- ── Seeding: sunlight down each column ────────────────────────────────────
+
+  @[no_alloc]
+  -- Light level a column reaches at [y], given it arrived carrying [lv].
+  -- 0 once the column is blocked or fully absorbed.
+  pfn column_step(w : CubeForge.World.World, x : Int, y : Int, z : Int, lv : Int) : Int do
+    let id = CubeForge.World.block_at(w, x, y, z)
+    if is_opaque(id) do 0
+    else
+      let l = lv - opacity(id)
+      if l <= 0 do 0 else l end
+    end
+  end
+
+  pfn seed_column_go(la : NativeU8Arr, w : CubeForge.World.World, x : Int, z : Int, y : Int, lv : Int) : NativeU8Arr do
+    if y < 0 do la
+    else
+      let l = column_step(w, x, y, z, lv)
+      if l <= 0 do la
+      else seed_column_go(NativeArray.set_u8(la, index(x, y, z), l), w, x, z, y - 1, l) end
+    end
+  end
+
+  doc "Seed the sunlight column at (x, z) into [la], writing from [y] down."
+  fn seed_column(la : NativeU8Arr, w : CubeForge.World.World, x : Int, z : Int, y : Int, lv : Int) : NativeU8Arr do
+    seed_column_go(la, w, x, z, y, lv)
+  end
+
+  pfn seed_column_q_go(q : NativeIntArr, w : CubeForge.World.World, x : Int, z : Int, y : Int, lv : Int) : NativeIntArr do
+    if y < 0 do q
+    else
+      let l = column_step(w, x, y, z, lv)
+      if l <= 0 do q
+      else seed_column_q_go(q_push(q, index(x, y, z)), w, x, z, y - 1, l) end
+    end
+  end
+
+  doc "Enqueue the same voxels seed_column writes, for the spread pass."
+  fn seed_column_q(q : NativeIntArr, w : CubeForge.World.World, x : Int, z : Int, y : Int, lv : Int) : NativeIntArr do
+    seed_column_q_go(q, w, x, z, y, lv)
+  end
+
+  pfn seed_all_go(la : NativeU8Arr, w : CubeForge.World.World, i : Int) : NativeU8Arr do
+    if i >= 16384 do la
+    else seed_all_go(seed_column_go(la, w, i % 128, i / 128, 255, max_level()), w, i + 1) end
+  end
+
+  doc "Seed every column of the world."
+  fn seed_all(la : NativeU8Arr, w : CubeForge.World.World) : NativeU8Arr do
+    seed_all_go(la, w, 0)
+  end
+
 end
