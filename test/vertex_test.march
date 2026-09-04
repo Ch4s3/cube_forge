@@ -1,0 +1,37 @@
+-- Vertex fx word: the packed effect + alpha carried in the 9th float.
+mod CubeForge.Test.Vertex do
+
+  import Test
+  alias CubeForge.Vertex as Vx
+
+  -- Every alpha step, at three effect values, must survive a round trip.
+  pfn alpha_roundtrip(e : Int, i : Int) : Int do
+    if i > 255 do -1
+    else
+      let a = int_to_float(i) /. 255.0
+      let p = Vx.pack(e, a)
+      if Vx.effect_of(p) != e do i
+      else if Math.abs(Vx.alpha_of(p) -. a) > 0.0001 do i
+      else alpha_roundtrip(e, i + 1) end end
+    end
+  end
+
+  describe "Vertex.pack" do
+    test "round-trips every alpha step at low, mid and high effects" do
+      Test.assert_eq_int(alpha_roundtrip(0, 0), -1, "effect 0")
+      Test.assert_eq_int(alpha_roundtrip(1, 0), -1, "effect 1 (precipitation)")
+      Test.assert_eq_int(alpha_roundtrip(65535, 0), -1, "effect at the 16-bit ceiling")
+    end
+
+    test "plain() is effect 0, fully opaque" do
+      Test.assert_eq_int(Vx.effect_of(Vx.plain()), 0, "no effect")
+      Test.assert_true(Math.abs(Vx.alpha_of(Vx.plain()) -. 1.0) < 0.0001, "alpha 1")
+      Test.assert_true(Math.abs(Vx.plain() -. 255.0) < 0.0001, "the literal every emit site pushes")
+    end
+
+    test "the layout is nine floats" do
+      Test.assert_eq_int(Vx.floats(), 9, "pos3 + uv2 + layer + shade + face + fx")
+    end
+  end
+
+end

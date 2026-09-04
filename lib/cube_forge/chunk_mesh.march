@@ -12,6 +12,7 @@ mod CubeForge.ChunkMesh do
   alias CubeForge.F32Buf as B
   alias CubeForge.Mesher as Mesher
   alias CubeForge.World as World
+  alias CubeForge.Vertex as Vx
 
   type ChunkMesh = ChunkMesh(Array.PVec(CubeForge.F32Buf.F32Buf), Array.PVec(CubeForge.F32Buf.F32Buf))
 
@@ -68,7 +69,7 @@ mod CubeForge.ChunkMesh do
     end
   end
 
-  fn opaque_vertices(m : ChunkMesh) : Int do total_floats(opaque_sections(m)) / 8 end
-  fn water_vertices(m : ChunkMesh) : Int do total_floats(water_sections(m)) / 8 end
+  fn opaque_vertices(m : ChunkMesh) : Int do total_floats(opaque_sections(m)) / Vx.floats() end
+  fn water_vertices(m : ChunkMesh) : Int do total_floats(water_sections(m)) / Vx.floats() end
 
 end

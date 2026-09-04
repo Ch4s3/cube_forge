@@ -241,7 +241,7 @@ mod CubeForge.Test.Light do
   -- Scan a mesh buffer for the shade of the first vertex with face index [f].
   pfn shade_of_face(b : CubeForge.F32Buf.F32Buf, f : Float, i : Int, n : Int) : Float do
     if i >= n do -1.0
-    else if near(Test.assert_some(B.get(b, i * 8 + 7), "face"), f) do Test.assert_some(B.get(b, i * 8 + 6), "shade")
+    else if near(Test.assert_some(B.get(b, i * CubeForge.Vertex.floats() + 7), "face"), f) do Test.assert_some(B.get(b, i * CubeForge.Vertex.floats() + 6), "shade")
     else shade_of_face(b, f, i + 1, n) end end
   end
 

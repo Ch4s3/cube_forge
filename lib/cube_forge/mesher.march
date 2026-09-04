@@ -8,6 +8,7 @@ mod CubeForge.Mesher do
 
   alias CubeForge.F32Buf as B
   alias CubeForge.Chunk as C
+  alias CubeForge.Vertex as Vx
 
   -- Face index, resolved in the vertex shader to a normal (for the flashlight)
   -- and to the directional multiplier that used to be baked in here.
@@ -62,7 +63,7 @@ mod CubeForge.Mesher do
   pfn t2z(d : Int) : Int do if d <= 1 do 1 else 0 end end
 
   pfn vert(b : CubeForge.F32Buf.F32Buf, x : Float, y : Float, z : Float, u : Float, v : Float, layer : Float, shade : Float, face : Float) : CubeForge.F32Buf.F32Buf do
-    b |> B.push3(x, y, z) |> B.push(u) |> B.push(v) |> B.push(layer) |> B.push(shade) |> B.push(face)
+    b |> B.push3(x, y, z) |> B.push(u) |> B.push(v) |> B.push(layer) |> B.push(shade) |> B.push(face) |> B.push(Vx.plain())
   end
 
   -- Two triangles from four corners given counter-clockwise as seen from outside.
@@ -483,7 +484,7 @@ mod CubeForge.Mesher do
     water_section_go(B.new(256), c, n, s, e, w, sy * 4096, (sy + 1) * 4096, ox, oz)
   end
 
-  doc "Vertices in a mesh buffer (7 floats each)."
-  fn vertex_count(b : CubeForge.F32Buf.F32Buf) : Int do B.len(b) / 8 end
+  doc "Vertices in a mesh buffer (9 floats each)."
+  fn vertex_count(b : CubeForge.F32Buf.F32Buf) : Int do B.len(b) / Vx.floats() end
 
 end

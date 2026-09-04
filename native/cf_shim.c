@@ -117,11 +117,13 @@ void    cf_win_close(void)        { if (g_win) { glfwDestroyWindow(g_win); g_win
 void    cf_win_request_close(void){ if (g_win) glfwSetWindowShouldClose(g_win, 1); }
 
 /* ── GL: shader program + one VAO shared by every mesh ──────────────────────
- * Vertex layout (8 floats): pos.xyz, uv, layer, shade, face.
+ * Vertex layout (9 floats): pos.xyz, uv, layer, shade, face, fx.
+ * `fx` packs an effect id and an alpha: effect * 256 + alpha*255, exact
+ * because floats hold integers to 2^24. Effect 1 is precipitation.
  * `face` is 0..5 (+y -y +x -x +z -z); the vertex shader turns it into a normal
  * for the flashlight and into the directional multiplier that used to be baked
  * into `shade` by the mesher.                                                  */
-#define CF_VERT_FLOATS 8
+#define CF_VERT_FLOATS 9
 static GLuint g_prog = 0, g_vao = 0;
 static GLint  g_u_vp = -1, g_u_tex = -1;
 
@@ -132,9 +134,10 @@ static const char *VS =
     "layout(location=2) in float a_layer;\n"
     "layout(location=3) in float a_shade;\n"
     "layout(location=4) in float a_face;\n"
+    "layout(location=5) in float a_fx;\n"
     "uniform mat4 u_vp;\n"
     "out vec2 v_uv; out float v_layer; out float v_shade;\n"
-    "out vec3 v_world; out vec3 v_normal;\n"
+    "out vec3 v_world; out vec3 v_normal; out float v_fx;\n"
     "const vec3 NORMALS[6] = vec3[6](vec3(0,1,0), vec3(0,-1,0), vec3(1,0,0), vec3(-1,0,0), vec3(0,0,1), vec3(0,0,-1));\n"
     "void main(){\n"
     "  int f = int(a_face + 0.5);\n"
@@ -145,11 +148,12 @@ static const char *VS =
      * moves, computed per fragment. */
     "  v_shade = a_shade;\n"
     "  v_world = a_pos; v_normal = NORMALS[f];\n"
+    "  v_fx = a_fx;\n"
     "}\n";
 static const char *FS =
     "#version 330 core\n"
     "in vec2 v_uv; in float v_layer; in float v_shade;\n"
-    "in vec3 v_world; in vec3 v_normal;\n"
+    "in vec3 v_world; in vec3 v_normal; in float v_fx;\n"
     "uniform sampler2DArray u_tex;\n"
     "uniform int u_use_tex;\n"
     "uniform float u_sun;\n"
@@ -345,6 +349,7 @@ void cf_gfx_draw(int64_t slot, int64_t nverts) {
     glEnableVertexAttribArray(2); glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, stride, (void *)(5 * 4));
     glEnableVertexAttribArray(3); glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, stride, (void *)(6 * 4));
     glEnableVertexAttribArray(4); glVertexAttribPointer(4, 1, GL_FLOAT, GL_FALSE, stride, (void *)(7 * 4));
+    glEnableVertexAttribArray(5); glVertexAttribPointer(5, 1, GL_FLOAT, GL_FALSE, stride, (void *)(8 * 4));
     glDrawArrays(GL_TRIANGLES, 0, (GLsizei)nverts);
     if (getenv("CF_DEBUG")) { fprintf(stderr, "cf: draw slot=%lld nverts=%lld glerr=%d prog=%u vao=%u\n", (long long)slot, (long long)nverts, (int)glGetError(), g_prog, g_vao); }
 }
@@ -465,6 +470,7 @@ void cf_gfx_draw_lines(int64_t slot, int64_t nverts) {
     glEnableVertexAttribArray(2); glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, stride, (void *)(5 * 4));
     glEnableVertexAttribArray(3); glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, stride, (void *)(6 * 4));
     glEnableVertexAttribArray(4); glVertexAttribPointer(4, 1, GL_FLOAT, GL_FALSE, stride, (void *)(7 * 4));
+    glEnableVertexAttribArray(5); glVertexAttribPointer(5, 1, GL_FLOAT, GL_FALSE, stride, (void *)(8 * 4));
     glDrawArrays(GL_LINES, 0, (GLsizei)nverts);
     glUniform1i(g_u_use_tex, g_tex ? 1 : 0);
     cf_unlit_end();

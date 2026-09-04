@@ -6,13 +6,14 @@
 mod CubeForge.Marker do
 
   alias CubeForge.F32Buf as B
+  alias CubeForge.Vertex as Vx
 
   doc "Height the marker floats at (above the 256-voxel-tall world)."
   fn y() : Float do 260.0 end
   fn half_size() : Float do 1.5 end
 
   pfn v(b : CubeForge.F32Buf.F32Buf, x : Float, y : Float, z : Float, r : Float, g : Float, bl : Float) : CubeForge.F32Buf.F32Buf do
-    b |> B.push3(x, y, z) |> B.push(r) |> B.push(g) |> B.push(bl) |> B.push(1.0) |> B.push(0.0)
+    b |> B.push3(x, y, z) |> B.push(r) |> B.push(g) |> B.push(bl) |> B.push(1.0) |> B.push(0.0) |> B.push(Vx.plain())
   end
 
   doc "Rebuild [b] (cleared in place) with a flat marker quad centred over (px, pz)."

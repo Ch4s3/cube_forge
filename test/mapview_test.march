@@ -29,7 +29,7 @@ mod CubeForge.Test.MapView do
   describe "Marker" do
     test "is a flat quad of 6 vertices centred on (px, pz) at the fixed marker height" do
       let m = Marker.build(B.new(64), 12.5, -7.0)
-      Test.assert_eq_int(B.len(m) / 7, 6, "6 vertices")
+      Test.assert_eq_int(B.len(m) / CubeForge.Vertex.floats(), 6, "6 vertices")
       -- first vertex is the (x0, z0) corner: px - half, pz - half
       Test.assert_true(near(Test.assert_some(B.get(m, 0), "x0"), 12.5 -. Marker.half_size()), "x0 corner")
       Test.assert_true(near(Test.assert_some(B.get(m, 2), "z0"), -7.0 -. Marker.half_size()), "z0 corner")

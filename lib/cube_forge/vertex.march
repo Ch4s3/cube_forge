@@ -1,0 +1,37 @@
+-- The 9th vertex float: an effect id and an alpha packed into one number.
+--
+--   packed = effect * 256 + round(alpha * 255)
+--
+-- Floats hold integers exactly up to 2^24, so this is lossless: 16 bits of
+-- effect and 8 of alpha. The obvious alternative — effect in the integer part,
+-- alpha in the fraction — collides at alpha = 1.0, which is the single most
+-- common value in the whole mesh. This does not.
+mod CubeForge.Vertex do
+
+  doc "Floats per vertex: pos.xyz, uv, layer, shade, face, fx."
+  fn floats() : Int do 9 end
+
+  doc "Effect: ordinary geometry, lit and fogged as usual."
+  fn fx_none() : Int do 0 end
+
+  doc "Effect: precipitation — alpha-blended and NOT fogged, since it is the thing making the fog."
+  fn fx_precip() : Int do 1 end
+
+  doc "Pack an effect id and an alpha 0..1 into the fx float."
+  fn pack(effect : Int, alpha : Float) : Float do
+    let a = if alpha < 0.0 do 0.0 else if alpha > 1.0 do 1.0 else alpha end end
+    int_to_float(effect * 256 + float_to_int(a *. 255.0 +. 0.5))
+  end
+
+  doc "The effect id in a packed fx float."
+  fn effect_of(p : Float) : Int do float_to_int(p +. 0.5) / 256 end
+
+  doc "The alpha 0..1 in a packed fx float."
+  fn alpha_of(p : Float) : Float do
+    int_to_float(float_to_int(p +. 0.5) % 256) /. 255.0
+  end
+
+  doc "The fx value every non-precipitation vertex carries: effect 0, alpha 1."
+  fn plain() : Float do 255.0 end
+
+end

@@ -28,6 +28,7 @@ mod CubeForge do
   alias CubeForge.Water as Water
   alias CubeForge.ChunkMesh as CM
   alias CubeForge.Inventory as Inv
+  alias CubeForge.Vertex as Vx
 
   fn ms(seconds : Float) : String do float_to_string(seconds *. 1000.0) ++ "ms" end
 
@@ -65,8 +66,8 @@ mod CubeForge do
         end
     end
   end
-  pfn hud_verts(u : Ui) : Int do match u do Ui(_, hb, _, _) -> F32Buf.len(hb) / 8 end end
-  pfn icon_verts(u : Ui) : Int do match u do Ui(_, _, ic, _) -> F32Buf.len(ic) / 8 end end
+  pfn hud_verts(u : Ui) : Int do match u do Ui(_, hb, _, _) -> F32Buf.len(hb) / Vx.floats() end end
+  pfn icon_verts(u : Ui) : Int do match u do Ui(_, _, ic, _) -> F32Buf.len(ic) / Vx.floats() end end
   fn water_slot_base() : Int do 64 end
   fn tick_period() : Int do 10 end
 
@@ -511,7 +512,7 @@ mod CubeForge do
         end
     end
   end
-  pfn fps_hud_verts(f : Fps) : Int do match f do Fps(_, _, _, hud) -> F32Buf.len(hud) / 8 end end
+  pfn fps_hud_verts(f : Fps) : Int do match f do Fps(_, _, _, hud) -> F32Buf.len(hud) / Vx.floats() end end
 
   pfn axis(neg : Bool, pos : Bool) : Float do
     if pos && !neg do 1.0 else if neg && !pos do -1.0 else 0.0 end end
@@ -820,7 +821,7 @@ mod CubeForge do
 
   -- Full-screen quad in NDC for the underwater tint: layer 1 (water), shade 0.6. Built once.
   pfn underwater_quad() : CubeForge.F32Buf.F32Buf do
-    let v = fn (b, x, y, u, t) -> b |> F32Buf.push3(x, y, 0.0) |> F32Buf.push(u) |> F32Buf.push(t) |> F32Buf.push(Texture.water_layer()) |> F32Buf.push(0.6) |> F32Buf.push(0.0)
+    let v = fn (b, x, y, u, t) -> b |> F32Buf.push3(x, y, 0.0) |> F32Buf.push(u) |> F32Buf.push(t) |> F32Buf.push(Texture.water_layer()) |> F32Buf.push(0.6) |> F32Buf.push(0.0) |> F32Buf.push(Vx.plain())
     F32Buf.new(64) |> v(-1.0, -1.0, 0.0, 0.0) |> v(1.0, -1.0, 4.0, 0.0) |> v(1.0, 1.0, 4.0, 3.0)
                    |> v(-1.0, -1.0, 0.0, 0.0) |> v(1.0, 1.0, 4.0, 3.0) |> v(-1.0, 1.0, 0.0, 3.0)
   end
