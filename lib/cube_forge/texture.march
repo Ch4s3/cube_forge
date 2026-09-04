@@ -52,23 +52,83 @@ mod CubeForge.Texture do
     end
   end
 
+  -- Bark: vertical streaks. The cut end: concentric rings.
+  -- Bark: vertical streaks. [r], [g], [b] are the base tone, so oak and pine
+  -- get visibly different trunks (they were the same layer, which made the two
+  -- log hotbar slots indistinguishable).
+  pfn bark_tinted_go(a : NativeU8Arr, layer : Int, i : Int, r : Int, g : Int, b : Int) : NativeU8Arr do
+    if i >= 256 do a
+    else
+      let x = i % 16
+      let d = (x * 7 + (i / 16) * 3) % 24 - 12
+      bark_tinted_go(put_rgba(a, layer * 1024 + i * 4, r + d, g + d, b + d, 255), layer, i + 1, r, g, b)
+    end
+  end
+
+  pfn bark_go(a : NativeU8Arr, layer : Int, i : Int) : NativeU8Arr do
+    if i >= 256 do a
+    else
+      let x = i % 16
+      let y = i / 16
+      let d = ((x * 5 + (y / 3) * 3) % 4) * 7 - 10
+      bark_go(put_rgba(a, layer * 1024 + i * 4, 104 + d, 76 + d, 48 + d, 255), layer, i + 1)
+    end
+  end
+  pfn rings_go(a : NativeU8Arr, layer : Int, i : Int) : NativeU8Arr do
+    if i >= 256 do a
+    else
+      let x = i % 16 - 8
+      let y = i / 16 - 8
+      let r = float_to_int(Math.sqrt(int_to_float(x * x + y * y)))
+      let d = if r % 2 == 0 do 12 else -6 end
+      rings_go(put_rgba(a, layer * 1024 + i * 4, 156 + d, 124 + d, 84 + d, 255), layer, i + 1)
+    end
+  end
+
+  -- Leaves: a cutout texture. Roughly a fifth of the texels are fully transparent,
+  -- so a canopy reads as foliage rather than a solid block; the shader discards them.
+  pfn leaves_go(a : NativeU8Arr, layer : Int, i : Int, r : Int, g : Int, b : Int) : NativeU8Arr do
+    if i >= 256 do a
+    else
+      let x = i % 16
+      let y = i / 16
+      let h = (x * 7 + y * 13 + x * y * 3) % 11
+      let d = ((x * 3 + y * 5) % 5) * 8 - 16
+      let alpha = if h < 2 do 0 else 255 end
+      leaves_go(put_rgba(a, layer * 1024 + i * 4, r + d, g + d, b + d, alpha), layer, i + 1, r, g, b)
+    end
+  end
+
   doc """
   16x16 RGBA texture array, layer-major: 0 grass, 1 water, 2 dirt, 3 stone,
-  4 sand, 5 snow, 6 granite, 7 bedrock.
+  4 sand, 5 snow, 6 granite, 7 bedrock, 8 oak bark, 9 cut end, 10 oak leaves,
+  11 pine leaves, 12 pine bark.
   """
   fn checkerboard() : NativeU8Arr do
-    let a0 = checker_go(NativeArray.make_u8(8 * 16 * 16 * 4, 0), 0)
+    let a0 = checker_go(NativeArray.make_u8(13 * 16 * 16 * 4, 0), 0)
     let a1 = water_go(a0, 0)
     let a2 = speckle_go(a1, 2, 0, 134, 96, 67)
     let a3 = speckle_go(a2, 3, 0, 128, 128, 132)
     let a4 = speckle_go(a3, 4, 0, 219, 203, 146)
     let a5 = speckle_go(a4, 5, 0, 242, 246, 250)
     let a6 = speckle_go(a5, 6, 0, 150, 141, 138)
-    speckle_go(a6, 7, 0, 46, 44, 48)
+    let a7 = speckle_go(a6, 7, 0, 46, 44, 48)
+    let a8 = bark_go(a7, 8, 0)
+    let a9 = rings_go(a8, 9, 0)
+    let a10 = leaves_go(a9, 10, 0, 62, 128, 54)
+    let a11 = leaves_go(a10, 11, 0, 38, 92, 68)
+    bark_tinted_go(a11, 12, 0, 74, 56, 42)
   end
 
-  fn layers() : Int do 8 end
+  fn layers() : Int do 13 end
   fn water_layer() : Float do 1.0 end
+  doc "Texture layer for a block id on face direction [d] (0 +y, 1 -y, 2 +x, 3 -x, 4 +z, 5 -z)."
+  fn layer_for_face(id : Int, d : Int) : Float do
+    if id == 16 do (if d <= 1 do 9.0 else 8.0 end)          -- oak log: rings on the cut ends, bark on the sides
+    else if id == 18 do (if d <= 1 do 9.0 else 12.0 end)     -- pine log: darker bark
+    else layer_for(id) end end
+  end
+
   doc "Texture layer for a block id."
   fn layer_for(id : Int) : Float do
     if id == 2 do 2.0
@@ -78,7 +138,11 @@ mod CubeForge.Texture do
     else if id == 13 do 5.0
     else if id == 14 do 6.0
     else if id == 15 do 7.0
-    else 0.0 end end end end end end end
+    else if id == 16 do 8.0
+    else if id == 18 do 12.0
+    else if id == 17 do 10.0
+    else if id == 19 do 11.0
+    else 0.0 end end end end end end end end end end end
   end
 
 end

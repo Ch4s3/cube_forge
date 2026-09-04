@@ -161,6 +161,7 @@ static const char *FS =
     "uniform vec3 u_sundir;\n"
     "uniform vec3 u_moondir;\n"
     "uniform int u_unlit;\n"
+    "uniform int u_cutout;\n"
     "uniform sampler3D u_occ;\n"
     "uniform float u_shadow;\n"
     "out vec4 o_color;\n"
@@ -223,6 +224,7 @@ static const char *FS =
     "}\n"
     "void main(){\n"
     "  vec4 t = (u_use_tex == 1) ? texture(u_tex, vec3(v_uv, v_layer)) : vec4(v_uv, v_layer, 1.0);\n"
+    "  if (u_cutout == 1 && t.a < 0.5) discard;\n"
     "  float moon = clamp((MOON_UNTIL - u_sun) / MOON_UNTIL, 0.0, 1.0);\n"
     "  float amb  = AMB + AMB_UP * v_normal.y;\n"
     "  float ndls = max(dot(v_normal, u_sundir),  0.0);\n"
@@ -267,6 +269,7 @@ static GLuint compile(GLenum kind, const char *src) {
 #define CF_MAX_MESHES 256
 static GLuint g_vbo[CF_MAX_MESHES];
 static GLint  g_u_use_tex = -1;
+static GLint  g_u_cutout = -1;
 static GLint  g_u_sun = -1, g_u_eye = -1, g_u_dir = -1, g_u_flash = -1;
 static GLint  g_u_sundir = -1, g_u_moondir = -1, g_u_unlit = -1;
 static GLint  g_u_occ = -1, g_u_shadow = -1;
@@ -282,6 +285,7 @@ int64_t cf_gfx_init(void) {
     g_u_vp = glGetUniformLocation(g_prog, "u_vp");
     g_u_tex = glGetUniformLocation(g_prog, "u_tex");
     g_u_use_tex = glGetUniformLocation(g_prog, "u_use_tex");
+    g_u_cutout = glGetUniformLocation(g_prog, "u_cutout");
     g_u_sun = glGetUniformLocation(g_prog, "u_sun");
     g_u_eye = glGetUniformLocation(g_prog, "u_eye");
     g_u_dir = glGetUniformLocation(g_prog, "u_dir");
@@ -297,6 +301,7 @@ int64_t cf_gfx_init(void) {
     glUseProgram(g_prog);
     glUniform1i(g_u_tex, 0);
     glUniform1i(g_u_use_tex, 0);
+    glUniform1i(g_u_cutout, 0);
     return 1;
 }
 
@@ -429,6 +434,19 @@ void cf_gfx_draw_translucent(int64_t slot, int64_t nverts) {
     glEnable(GL_CULL_FACE);
     glDepthMask(GL_TRUE);
     glDisable(GL_BLEND);
+}
+
+/* Foliage: alpha-cutout. Depth test and writes stay on and nothing is blended —
+ * the shader discards texels below the alpha threshold — so leaves need no sort
+ * order and may be drawn before water. Culling is off so a canopy is solid from
+ * both sides where its faces survive the cutout. */
+void cf_gfx_draw_cutout(int64_t slot, int64_t nverts) {
+    if (slot < 0 || slot >= CF_MAX_MESHES || nverts <= 0) return;
+    glUniform1i(g_u_cutout, 1);
+    glDisable(GL_CULL_FACE);
+    cf_gfx_draw(slot, nverts);
+    glEnable(GL_CULL_FACE);
+    glUniform1i(g_u_cutout, 0);
 }
 
 /* Draw a mesh slot with vertex colour (untextured path) and the CURRENT view-

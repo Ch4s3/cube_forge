@@ -1,0 +1,122 @@
+-- Trees — oak and pine trees and bushes, placed as a pure function of world
+-- coordinates.
+--
+-- Chunks generate independently, but a tree near a chunk edge spills its canopy
+-- into the neighbour. Rather than communicate, placement is derived from a hash
+-- of the tree CELL: the world is divided into fixed cells, each cell holds at
+-- most one tree at a hashed position, and a chunk draws every tree whose cell
+-- lies within `max_radius()` of it. Two neighbouring chunks therefore derive
+-- byte-identical trees for the blocks they share (see trees_test).
+mod CubeForge.Trees do
+
+  alias CubeForge.Chunk as C
+  alias CubeForge.Noise as N
+
+  doc "Side of a tree cell, in blocks: at most one tree per cell, so trees are spaced."
+  fn cell_size() : Int do 8 end
+  doc "Side of a bush cell: bushes are denser than trees."
+  fn bush_cell_size() : Int do 5 end
+  doc "Widest canopy radius; a chunk must consider tree cells this far outside it."
+  fn max_radius() : Int do 3 end
+  doc "Above this height oaks give way to pines."
+  fn treeline() : Int do 84 end
+
+  -- A hash in [0, 1) for a cell and a purpose, independent of the terrain hash.
+  pfn cell_hash(cx : Int, cz : Int, seed : Int, salt : Int) : Float do
+    N.hash2(cx * 7919 + salt * 104729, cz * 6271 + salt * 15485863, seed + 5081)
+  end
+
+  -- ── Which cells hold a tree ─────────────────────────────────────────────────
+
+  doc """
+  Trunk column of the tree in cell (cx, cz), packed as x + 4096 * z, or -1 when
+  the cell has no tree. Depends only on the cell and the seed, never on which
+  chunk is asking.
+  """
+  fn tree_at_cell(cx : Int, cz : Int, seed : Int) : Int do
+    let density = cell_hash(cx, cz, seed, 1)
+    -- ~45% of cells hold a tree; the rest stay open ground
+    if density > 0.45 do -1
+    else
+      let ox = float_to_int(cell_hash(cx, cz, seed, 2) *. int_to_float(cell_size()))
+      let oz = float_to_int(cell_hash(cx, cz, seed, 3) *. int_to_float(cell_size()))
+      let wx = cx * cell_size() + ox
+      let wz = cz * cell_size() + oz
+      if plantable(wx, wz, seed) do wx + 4096 * wz else -1 end
+    end
+  end
+
+  doc "A column can hold a plant only on flat grass above the water line."
+  fn plantable(wx : Int, wz : Int, seed : Int) : Bool do
+    let h = N.height(wx, wz, seed)
+    let slope = N.slope(wx, wz, seed)
+    -- grass only: never sand, snow, granite or under water
+    C.surface_id(h, slope) == 1 && h > C.sea_level() && slope <= 1
+  end
+
+  doc "Species for a trunk at height [h]: pine above the treeline, oak below."
+  fn is_pine(h : Int) : Bool do h >= treeline() end
+
+  doc "Trunk height for the tree at (wx, wz)."
+  fn trunk_height(wx : Int, wz : Int, seed : Int) : Int do
+    let h = N.height(wx, wz, seed)
+    if is_pine(h) do 6 + float_to_int(cell_hash(wx, wz, seed, 4) *. 3.0)
+    else 4 + float_to_int(cell_hash(wx, wz, seed, 5) *. 3.0) end
+  end
+
+  -- ── Canopy shape ────────────────────────────────────────────────────────────
+  -- Both shapes are described as a predicate over the offset from the trunk top,
+  -- so the same function answers "is there a leaf here" for any chunk.
+
+  doc """
+  Block a tree contributes at world (x, y, z), or 0. [tx, tz] is the trunk column,
+  [base] the ground height it stands on. Pure, so any chunk can ask about any tree.
+  """
+  fn block_of_tree(tx : Int, tz : Int, base : Int, trunk : Int, pine : Bool, x : Int, y : Int, z : Int) : Int do
+    let dx = x - tx
+    let dz = z - tz
+    let dy = y - base
+    if dx == 0 && dz == 0 && dy >= 1 && dy <= trunk do
+      if pine do C.pine_log() else C.oak_log() end
+    else
+      let leaf = if pine do pine_leaf_at(dx, dy, dz, trunk) else oak_leaf_at(dx, dy, dz, trunk) end
+      if leaf do (if pine do C.pine_leaves() else C.oak_leaves() end) else 0 end
+    end
+  end
+
+  -- Oak: a rounded blob centred just below the trunk top.
+  pfn oak_leaf_at(dx : Int, dy : Int, dz : Int, trunk : Int) : Bool do
+    let cy = dy - (trunk - 1)
+    let r = abs_i(dx) + abs_i(dz) + abs_i(cy) * 2
+    dy >= trunk - 2 && dy <= trunk + 1 && r <= 4 && !(abs_i(dx) == 2 && abs_i(dz) == 2)
+  end
+
+  -- Pine: a narrow cone, widest low and tapering to a tip.
+  pfn pine_leaf_at(dx : Int, dy : Int, dz : Int, trunk : Int) : Bool do
+    if dy < 2 || dy > trunk + 1 do false
+    else
+      -- radius shrinks with height, and every other layer is pulled in for a tiered look
+      let up = trunk + 1 - dy
+      let radius = if up <= 0 do 0 else if up >= 5 do 2 else (up + 1) / 2 end end
+      let ring = if dy % 2 == 0 do radius else radius - 1 end
+      abs_i(dx) + abs_i(dz) <= ring
+    end
+  end
+
+  pfn abs_i(v : Int) : Int do if v < 0 do 0 - v else v end end
+
+  -- ── Bushes ──────────────────────────────────────────────────────────────────
+
+  doc "Bush column in bush cell (cx, cz), packed x + 4096 * z, or -1."
+  fn bush_at_cell(cx : Int, cz : Int, seed : Int) : Int do
+    if cell_hash(cx, cz, seed, 11) > 0.22 do -1
+    else
+      let ox = float_to_int(cell_hash(cx, cz, seed, 12) *. int_to_float(bush_cell_size()))
+      let oz = float_to_int(cell_hash(cx, cz, seed, 13) *. int_to_float(bush_cell_size()))
+      let wx = cx * bush_cell_size() + ox
+      let wz = cz * bush_cell_size() + oz
+      if plantable(wx, wz, seed) do wx + 4096 * wz else -1 end
+    end
+  end
+
+end

@@ -54,7 +54,7 @@ mod CubeForge do
         if k == key do u
         else
           let hb1 = Hud.build_hotbar(hb, Inv.sel(inv), Inv.count(inv, 1), Inv.count(inv, 2), Inv.count(inv, 3), Inv.count(inv, 4),
-                                     Inv.count(inv, 5), Inv.count(inv, 6), Inv.count(inv, 7), Inv.progress(inv))
+                                     Inv.count(inv, 5), Inv.count(inv, 6), Inv.count(inv, 7), Inv.count(inv, 8), Inv.count(inv, 9), Inv.progress(inv))
           Win.gfx_upload(252, F32Buf.storage(hb1), F32Buf.len(hb1))
           let ic1 = if key == -1 do
             let i1 = Hud.build_icons(ic)
@@ -68,6 +68,7 @@ mod CubeForge do
   pfn hud_verts(u : Ui) : Int do match u do Ui(_, hb, _, _) -> F32Buf.len(hb) / 8 end end
   pfn icon_verts(u : Ui) : Int do match u do Ui(_, _, ic, _) -> F32Buf.len(ic) / 8 end end
   fn water_slot_base() : Int do 64 end
+  fn foliage_slot_base() : Int do 128 end
   fn tick_period() : Int do 10 end
 
   -- ── Water actors ────────────────────────────────────────────────────────────
@@ -343,7 +344,12 @@ mod CubeForge do
     upload_sections(slot, os, 0, 0)
     Win.gfx_upload_begin(water_slot_base() + slot, CM.total_floats(ws))
     upload_sections(water_slot_base() + slot, ws, 0, 0)
-    NativeArray.set_int(NativeArray.set_int(counts, slot, CM.opaque_vertices(m)), water_slot_base() + slot, CM.water_vertices(m))
+    let fs = CM.foliage_sections(m)
+    Win.gfx_upload_begin(foliage_slot_base() + slot, CM.total_floats(fs))
+    upload_sections(foliage_slot_base() + slot, fs, 0, 0)
+    NativeArray.set_int(NativeArray.set_int(NativeArray.set_int(counts, slot, CM.opaque_vertices(m)),
+                                            water_slot_base() + slot, CM.water_vertices(m)),
+                        foliage_slot_base() + slot, CM.foliage_vertices(m))
   end
 
   -- counts + meshes after a remesh
@@ -419,6 +425,37 @@ mod CubeForge do
     end
   end
 
+  doc "Radius searched for orphaned leaves when a log is broken."
+  fn decay_radius() : Int do 4 end
+
+  -- Remove the leaves a broken log was holding up, then remesh the affected
+  -- region ONCE: the decay touches up to a 9x9x9 box, so remeshing per removed
+  -- leaf would mean dozens of chunk-section rebuilds for a single chop.
+  pfn chop(sc, x : Int, y : Int, z : Int) do
+    match sc do
+      Scene(world, counts, outline, hit, ui, pids, flags, meshes) ->
+        let world1 = World.decay_leaves(world, x, y, z, decay_radius())
+        let world2 = World.relight_at(world1, x, y, z)
+        match remesh_region(world2, x, y, z, counts, meshes, Chunk.new(), 0) do
+          Remeshed(c1, m1) -> Scene(world2, c1, outline, hit, ui, pids, flags, m1)
+        end
+    end
+  end
+
+  -- Rebuild every chunk section the decay box can touch: the 3x3 chunk columns
+  -- around (x, z) and the sections spanning y +- decay_radius().
+  pfn remesh_region(world : CubeForge.World.World, x : Int, y : Int, z : Int, counts : NativeIntArr, meshes, empty : CubeForge.Chunk.Chunk, i : Int) : Remeshed do
+    if i >= 9 do Remeshed(counts, meshes)
+    else
+      let cx = World.floor_div16(x) - 1 + i % 3
+      let cz = World.floor_div16(z) - 1 + i / 3
+      let sy = y / 16
+      match remesh_section(world, cx, cz, sy, true, counts, meshes, empty) do
+        Remeshed(c1, m1) -> remesh_region(world, x, y, z, c1, m1, empty, i + 1)
+      end
+    end
+  end
+
   -- Would placing a block at (x, y, z) overlap the player's box?
   pfn overlaps_player(p : CubeForge.Player.Player, x : Int, y : Int, z : Int) : Bool do
     let pos = Player.position(p)
@@ -455,7 +492,9 @@ mod CubeForge do
         if Inv.is_complete(inv1) do
           let id = World.block_at(world, Ray.bx(hit), Ray.by_(hit), Ray.bz(hit))
           let sc2 = edit_block(sc1, Ray.bx(hit), Ray.by_(hit), Ray.bz(hit), 0)
-          set_inv(sc2, Inv.release(Inv.harvest(inv1, id)))
+          -- chopping a trunk drops the canopy it was holding up
+          let sc3 = if Chunk.is_log(id) do chop(sc2, Ray.bx(hit), Ray.by_(hit), Ray.bz(hit)) else sc2 end
+          set_inv(sc3, Inv.release(Inv.harvest(inv1, id)))
         else if place_now && Ray.is_hit(hit) do
           let px = Ray.bx(hit) + Ray.nx(hit)
           let py = Ray.by_(hit) + Ray.ny(hit)
@@ -483,7 +522,7 @@ mod CubeForge do
   fn inv_string(sc) : String do
     let i = ui_inv(scene_ui(sc))
     "inv grass=" ++ int_to_string(Inv.count(i, 1)) ++ " dirt=" ++ int_to_string(Inv.count(i, 2)) ++ " stone=" ++ int_to_string(Inv.count(i, 3)) ++ " water=" ++ int_to_string(Inv.count(i, 4))
-      ++ " sand=" ++ int_to_string(Inv.count(i, 5)) ++ " snow=" ++ int_to_string(Inv.count(i, 6)) ++ " granite=" ++ int_to_string(Inv.count(i, 7)) ++ " sel=" ++ int_to_string(Inv.sel(i)) ++ " progress=" ++ float_to_string(Inv.progress(i))
+      ++ " sand=" ++ int_to_string(Inv.count(i, 5)) ++ " snow=" ++ int_to_string(Inv.count(i, 6)) ++ " granite=" ++ int_to_string(Inv.count(i, 7)) ++ " oaklog=" ++ int_to_string(Inv.count(i, 8)) ++ " pinelog=" ++ int_to_string(Inv.count(i, 9)) ++ " sel=" ++ int_to_string(Inv.sel(i)) ++ " progress=" ++ float_to_string(Inv.progress(i))
   end
 
   pfn scene_counts(sc) : NativeIntArr do match sc do Scene(_, c, _, _, _, _, _, _) -> c end end
@@ -565,7 +604,9 @@ mod CubeForge do
     else if In.key(In.key_5()) do 5
     else if In.key(In.key_6()) do 6
     else if In.key(In.key_7()) do 7
-    else 0 end end end end end end end
+    else if In.key(In.key_8()) do 8
+    else if In.key(In.key_9()) do 9
+    else 0 end end end end end end end end end
   end
 
   @[no_alloc(assume)]
@@ -699,6 +740,7 @@ mod CubeForge do
           Win.gfx_set_light(sun, V.x(eye), V.y(eye), V.z(eye), V.x(look), V.y(look), V.z(look), flash_now)
           Win.gfx_set_view_proj(render_vp)
           draw_chunks(scene_counts(sc1), 0, nchunks)
+          draw_foliage(scene_counts(sc1), 0, nchunks)
           draw_water(scene_counts(sc1), 0, nchunks)
           if scene_has_hit(sc1) do CubeForge.Ffi.Window.gfx_draw_lines(254, Outline.vertex_count()) else () end
           -- the underwater screen tint only makes sense from the real first-person eye
@@ -807,6 +849,15 @@ mod CubeForge do
     else
       Win.gfx_draw(i, NativeArray.get_int(counts, i))
       draw_chunks(counts, i + 1, n)
+    end
+  end
+
+  -- Foliage is alpha-cutout, not blended, so it can be drawn before water.
+  pfn draw_foliage(counts : NativeIntArr, i : Int, n : Int) : Unit do
+    if i >= n do ()
+    else
+      Win.gfx_draw_cutout(foliage_slot_base() + i, NativeArray.get_int(counts, foliage_slot_base() + i))
+      draw_foliage(counts, i + 1, n)
     end
   end
 
@@ -953,7 +1004,7 @@ mod CubeForge do
       println("  mesh all (greedy sections): " ++ int_to_string(t3 - t2) ++ " ms wall, " ++ float_to_string(int_to_float(t3 - t2) /. int_to_float(n * n)) ++ " ms per chunk (wall / chunks), " ++ int_to_string(nverts) ++ " vertices (" ++ int_to_string(count_water_verts(meshes, 0)) ++ " water)")
       if headless do ()
       else
-        let counts = upload_meshes(meshes, 0, NativeArray.make_int(2 * water_slot_base(), 0))
+        let counts = upload_meshes(meshes, 0, NativeArray.make_int(3 * water_slot_base(), 0))
         let uq = underwater_quad()
         Win.gfx_upload(253, F32Buf.storage(uq), F32Buf.len(uq))
         Win.gfx_upload_texture(Texture.checkerboard(), Texture.size(), Texture.size(), Texture.layers())

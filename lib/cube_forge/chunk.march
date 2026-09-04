@@ -69,6 +69,14 @@ mod CubeForge.Chunk do
   fn granite() : Int do 14 end
   doc "Bedrock: the world floor. Unbreakable, so nothing can be mined through into the void."
   fn bedrock() : Int do 15 end
+  doc "Tree trunks and foliage. Leaves are alpha-cutout: see-through, but their shared faces are culled."
+  fn oak_log() : Int do 16 end
+  fn oak_leaves() : Int do 17 end
+  fn pine_log() : Int do 18 end
+  fn pine_leaves() : Int do 19 end
+  fn is_log(id : Int) : Bool do id == oak_log() || id == pine_log() end
+  fn is_foliage(id : Int) : Bool do id == oak_leaves() || id == pine_leaves() end
+
   doc "Blocks the player cannot break."
   fn is_unbreakable(id : Int) : Bool do id == bedrock() end
   doc "Thickness of the bedrock floor, at y = 0 .. bedrock_depth() - 1."
@@ -154,7 +162,102 @@ mod CubeForge.Chunk do
   end
 
   doc "Generate the chunk whose world origin is (wx0, wz0) from the noise heightmap."
-  fn generate(wx0 : Int, wz0 : Int, seed : Int) : Chunk do fill_noise_go(new(), 0, wx0, wz0, seed) end
+  fn generate(wx0 : Int, wz0 : Int, seed : Int) : Chunk do plant(fill_noise_go(new(), 0, wx0, wz0, seed), wx0, wz0, seed) end
+
+  -- ── Vegetation ──────────────────────────────────────────────────────────────
+  -- A tree near a chunk edge spills its canopy into the neighbour, so a chunk
+  -- must draw every tree whose CELL lies within the widest canopy radius of it.
+  -- Placement is a pure function of the cell, so both chunks write identical
+  -- blocks for the part of a tree they share.
+
+  pfn floor_div(a : Int, b : Int) : Int do if a >= 0 do a / b else (a - b + 1) / b end end
+
+  -- Write one tree's blocks that land inside this chunk.
+  pfn stamp_tree(c : Chunk, wx0 : Int, wz0 : Int, tx : Int, tz : Int, base : Int, trunk : Int, pine : Bool, i : Int) : Chunk do
+    -- the tree occupies a 9x9 column footprint around its trunk, trunk + 2 tall
+    if i >= 9 * 9 * 12 do c
+    else
+      let x = tx - 4 + i % 9
+      let z = tz - 4 + (i / 9) % 9
+      let y = base + 1 + i / 81
+      let lx = x - wx0
+      let lz = z - wz0
+      if lx < 0 || lx >= 16 || lz < 0 || lz >= 16 || y < 0 || y >= 256 do
+        stamp_tree(c, wx0, wz0, tx, tz, base, trunk, pine, i + 1)
+      else
+        let id = CubeForge.Trees.block_of_tree(tx, tz, base, trunk, pine, x, y, z)
+        -- only grow into air, so a tree never eats terrain or another trunk
+        let c1 = if id != 0 && get(c, lx, y, lz) == 0 do set(c, lx, y, lz, id) else c end
+        stamp_tree(c1, wx0, wz0, tx, tz, base, trunk, pine, i + 1)
+      end
+    end
+  end
+
+  pfn stamp_bush(c : Chunk, wx0 : Int, wz0 : Int, bx : Int, bz : Int, base : Int, i : Int) : Chunk do
+    if i >= 9 do c
+    else
+      let x = bx - 1 + i % 3
+      let z = bz - 1 + i / 3
+      let lx = x - wx0
+      let lz = z - wz0
+      let centre = i == 4
+      let keep = centre || (x + z + i) % 3 != 0
+      if lx < 0 || lx >= 16 || lz < 0 || lz >= 16 || !keep do stamp_bush(c, wx0, wz0, bx, bz, base, i + 1)
+      else
+        let y = base + 1
+        let c1 = if y < 256 && get(c, lx, y, lz) == 0 do set(c, lx, y, lz, oak_leaves()) else c end
+        stamp_bush(c1, wx0, wz0, bx, bz, base, i + 1)
+      end
+    end
+  end
+
+  -- Every tree cell overlapping this chunk expanded by the canopy radius.
+  pfn plant_trees_go(c : Chunk, wx0 : Int, wz0 : Int, seed : Int, i : Int, cx0 : Int, cz0 : Int, span : Int) : Chunk do
+    if i >= span * span do c
+    else
+      let cx = cx0 + i % span
+      let cz = cz0 + i / span
+      let col = CubeForge.Trees.tree_at_cell(cx, cz, seed)
+      if col < 0 do plant_trees_go(c, wx0, wz0, seed, i + 1, cx0, cz0, span)
+      else
+        let tx = col % 4096
+        let tz = col / 4096
+        let base = CubeForge.Noise.height(tx, tz, seed)
+        let trunk = CubeForge.Trees.trunk_height(tx, tz, seed)
+        let pine = CubeForge.Trees.is_pine(base)
+        plant_trees_go(stamp_tree(c, wx0, wz0, tx, tz, base, trunk, pine, 0), wx0, wz0, seed, i + 1, cx0, cz0, span)
+      end
+    end
+  end
+
+  pfn plant_bushes_go(c : Chunk, wx0 : Int, wz0 : Int, seed : Int, i : Int, cx0 : Int, cz0 : Int, span : Int) : Chunk do
+    if i >= span * span do c
+    else
+      let cx = cx0 + i % span
+      let cz = cz0 + i / span
+      let col = CubeForge.Trees.bush_at_cell(cx, cz, seed)
+      if col < 0 do plant_bushes_go(c, wx0, wz0, seed, i + 1, cx0, cz0, span)
+      else
+        let bx = col % 4096
+        let bz = col / 4096
+        plant_bushes_go(stamp_bush(c, wx0, wz0, bx, bz, CubeForge.Noise.height(bx, bz, seed), 0), wx0, wz0, seed, i + 1, cx0, cz0, span)
+      end
+    end
+  end
+
+  doc "Plant the trees and bushes that reach into the chunk at world origin (wx0, wz0)."
+  fn plant(c : Chunk, wx0 : Int, wz0 : Int, seed : Int) : Chunk do
+    let r = CubeForge.Trees.max_radius()
+    let ts = CubeForge.Trees.cell_size()
+    let tc0 = floor_div(wx0 - r, ts)
+    let tcz0 = floor_div(wz0 - r, ts)
+    let tspan = floor_div(wx0 + 15 + r, ts) - tc0 + 1
+    let bs = CubeForge.Trees.bush_cell_size()
+    let bc0 = floor_div(wx0 - 1, bs)
+    let bcz0 = floor_div(wz0 - 1, bs)
+    let bspan = floor_div(wx0 + 16, bs) - bc0 + 1
+    plant_bushes_go(plant_trees_go(c, wx0, wz0, seed, 0, tc0, tcz0, tspan), wx0, wz0, seed, 0, bc0, bcz0, bspan)
+  end
 
   -- Scalar reference generator (same terrain), for timing the 4-wide path against.
   pfn fill_scalar_go(c : Chunk, i : Int, wx0 : Int, wz0 : Int, seed : Int) : Chunk do
@@ -165,6 +268,6 @@ mod CubeForge.Chunk do
       fill_scalar_go(fill_terrain_column(c, x, z, wx0 + x, wz0 + z, seed, CubeForge.Noise.height(wx0 + x, wz0 + z, seed)), i + 1, wx0, wz0, seed)
     end
   end
-  fn generate_scalar(wx0 : Int, wz0 : Int, seed : Int) : Chunk do fill_scalar_go(new(), 0, wx0, wz0, seed) end
+  fn generate_scalar(wx0 : Int, wz0 : Int, seed : Int) : Chunk do plant(fill_scalar_go(new(), 0, wx0, wz0, seed), wx0, wz0, seed) end
 
 end

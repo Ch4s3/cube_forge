@@ -233,6 +233,52 @@ Both produced plausible-looking output — the first darkened almost everything,
 the second nothing — which is why the sun-angle sweep above is the check that
 matters rather than a single screenshot.
 
+## M6 — vegetation (trees and bushes)
+
+Oak and pine, planted as cubes with alpha-cutout leaves. Placement is
+cell-based and depends only on the cell and the seed, never on which chunk is
+asking, so two chunks that share a tree agree on it without communicating.
+
+| measure | before vegetation | after |
+|---|---|---|
+| world vertices (64 chunks) | 102 038 | **259 608** (20 856 water) |
+| mesh all 64 chunks, headless | 350 ms | **1 909–1 922 ms** (~30 ms/chunk) |
+| frame rate | 59.6 (vsync) | 59.1–59.6 (vsync, unchanged) |
+| live objects per frame | 1 | **1** (unchanged) |
+
+The meshing cost is the honest headline: **a 5.5x startup regression**, from
+0.35 s to 1.9 s for the whole world. It is startup-only — frame rate and
+per-frame allocation are untouched — but it is real, and it is not the leaf
+geometry alone. Foliage is a separate greedy pass over every section, so a
+world with trees pays for two mask sweeps where it used to pay for one, and
+canopies are exactly the shape greedy meshing handles worst: scattered
+single blocks that merge into nothing.
+
+### The culling rule
+
+A face exists when the neighbour is see-through **and** the pair is not
+leaf-against-leaf:
+
+```
+face_visible(id, nb) = see_through(nb) && !(is_foliage(id) && is_foliage(nb))
+```
+
+Without the second clause every interior face of a canopy is emitted and a
+tree becomes a solid brick of quads. Leaves still count as see-through for
+everything else, so stone behind a canopy and a trunk seen through the gaps
+both still draw. Three tests pin each half of that rule; getting it wrong in
+either direction is invisible in a screenshot from the outside.
+
+### What the tests caught
+
+- **Two hotbar slots rendered identically.** Oak and pine logs both pointed at
+  texture layer 8, so slots 8 and 9 were the same pixels — found by scanning
+  the dumped frame at each of the nine slot centres, not by looking at it.
+  Pine now has its own darker bark layer (12).
+- **A one-cell seed check proves nothing.** Asserting that cell (3, 4) differs
+  between two seeds passes trivially when neither seed puts a tree there. The
+  test now compares the layout across 256 cells.
+
 ### Frame cost, uncapped (`CF_VSYNC=0`)
 
 Every earlier figure in this file was taken with vsync on and is therefore
