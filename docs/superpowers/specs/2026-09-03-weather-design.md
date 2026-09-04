@@ -140,7 +140,7 @@ uploaded per frame — the same order as the world's own upload, and the reason
 
 The pool breaks the property that a given frame index renders identically,
 which `CF_DUMP_FRAME` relies on. Bought back in two moves: the respawn LCG is
-seeded from the world seed, and when `CF_MAX_FRAMES` is set the integration
+seeded from the world seed, and when `CF_FRAMES` is set the integration
 uses a fixed `1/60` dt instead of the wall clock. Headless dumps stay
 reproducible byte-for-byte.
 
