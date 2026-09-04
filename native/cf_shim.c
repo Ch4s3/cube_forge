@@ -42,6 +42,7 @@ typedef struct {
     double mouse_x, mouse_y;        /* latest cursor position */
     double mouse_dx, mouse_dy;      /* accumulated since last poll */
     unsigned char keys[CF_MAX_KEYS];
+    unsigned char keys_pressed[CF_MAX_KEYS];   /* edge: went down since last poll */
     unsigned char buttons[8];
     unsigned char buttons_pressed[8];   /* edge: went down since last poll */
     double scroll_dy;
@@ -52,7 +53,7 @@ static int g_have_mouse = 0;
 static void on_key(GLFWwindow *w, int key, int sc, int action, int mods) {
     (void)w; (void)sc; (void)mods;
     if (key < 0 || key >= CF_MAX_KEYS) return;
-    if (action == GLFW_PRESS) g_in.keys[key] = 1;
+    if (action == GLFW_PRESS) { g_in.keys[key] = 1; g_in.keys_pressed[key] = 1; }
     else if (action == GLFW_RELEASE) g_in.keys[key] = 0;
 }
 static void on_cursor(GLFWwindow *w, double x, double y) {
@@ -252,6 +253,17 @@ void cf_gfx_draw_translucent(int64_t slot, int64_t nverts) {
     glDisable(GL_BLEND);
 }
 
+/* Draw a mesh slot with vertex colour (untextured path) and the CURRENT view-
+ * projection and depth state — for a world-space overlay that should obey
+ * normal depth testing (e.g. a marker floating above all possible terrain,
+ * so it is naturally visible without disabling the depth test). */
+void cf_gfx_draw_marker(int64_t slot, int64_t nverts) {
+    if (slot < 0 || slot >= CF_MAX_MESHES || nverts <= 0) return;
+    glUniform1i(g_u_use_tex, 0);
+    cf_gfx_draw(slot, nverts);
+    glUniform1i(g_u_use_tex, g_tex ? 1 : 0);
+}
+
 /* Draw a mesh slot as GL_LINES with the current view-projection, untextured,
  * depth test off so a selection outline is never hidden by the face it sits on. */
 void cf_gfx_draw_lines(int64_t slot, int64_t nverts) {
@@ -339,9 +351,11 @@ int64_t cf_gfx_dump_bmp(march_value path) {
 void cf_in_poll(void) {
     g_in.mouse_dx = 0; g_in.mouse_dy = 0; g_in.scroll_dy = 0;
     memset(g_in.buttons_pressed, 0, sizeof g_in.buttons_pressed);
+    memset(g_in.keys_pressed, 0, sizeof g_in.keys_pressed);
     glfwPollEvents();
 }
 int64_t cf_in_key(int64_t k)          { return (k >= 0 && k < CF_MAX_KEYS) ? g_in.keys[k] : 0; }
+int64_t cf_in_key_pressed(int64_t k)  { return (k >= 0 && k < CF_MAX_KEYS) ? g_in.keys_pressed[k] : 0; }
 int64_t cf_in_button(int64_t b)       { return (b >= 0 && b < 8) ? g_in.buttons[b] : 0; }
 int64_t cf_in_button_pressed(int64_t b){ return (b >= 0 && b < 8) ? g_in.buttons_pressed[b] : 0; }
 double  cf_in_mouse_dx(void)          { return g_in.mouse_dx; }

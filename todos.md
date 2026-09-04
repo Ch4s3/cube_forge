@@ -10,6 +10,8 @@ Planned, not started. One entry per feature; each gets its own design doc under
 
 - [x] **Hotbar + inventory + hold-to-break** — done 2026-09-03 (`docs/superpowers/specs/2026-09-03-hotbar-inventory-design.md`).
 
+- [x] **Ground-level spawn + collectable water + top-down map view + swim-underwater targeting fixes** — done 2026-09-03.
+
 ## Engine
 
 - [ ] **Main-thread pinning runtime patch** (GAPS.md G15) — chip spawned, in progress in a separate session.

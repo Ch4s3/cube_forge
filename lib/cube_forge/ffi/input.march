@@ -9,6 +9,7 @@ mod CubeForge.Ffi.Input do
   extern "cf_shim" : Cap(Input) do
     fn x_in_poll(): Unit = "cf_in_poll"
     fn x_in_key(code: Int): Bool = "cf_in_key"
+    fn x_in_key_pressed(code: Int): Bool = "cf_in_key_pressed"
     fn x_in_button(b: Int): Bool = "cf_in_button"
     fn x_in_button_pressed(b: Int): Bool = "cf_in_button_pressed"
     fn x_in_mouse_dx(): Float = "cf_in_mouse_dx"
@@ -20,6 +21,8 @@ mod CubeForge.Ffi.Input do
   doc "Pump the event queue; resets the per-frame mouse deltas first."
   fn poll() : Unit do x_in_poll() end
   fn key(code : Int) : Bool do x_in_key(code) end
+  doc "True if key [code] went down since the last poll (edge, not level)."
+  fn key_pressed(code : Int) : Bool do x_in_key_pressed(code) end
   fn button(b : Int) : Bool do x_in_button(b) end
   doc "True if button [b] went down since the last poll (edge, not level)."
   fn button_pressed(b : Int) : Bool do x_in_button_pressed(b) end
@@ -39,6 +42,7 @@ mod CubeForge.Ffi.Input do
   fn key_space() : Int do 32 end
   fn key_shift() : Int do 340 end
   fn key_escape() : Int do 256 end
+  fn key_m() : Int do 77 end
   fn key_1() : Int do 49 end
   fn key_2() : Int do 50 end
   fn key_3() : Int do 51 end

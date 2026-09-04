@@ -50,6 +50,18 @@ mod CubeForge.Math.Mat4 do
     mul_fill(a, b, NativeArray.make_float(16, 0.0), 0)
   end
 
+  doc "Right-handed orthographic projection (GL clip space, z in [-1, 1])."
+  fn orthographic(left : Float, right : Float, bottom : Float, top : Float, near : Float, far : Float) : NativeFloatArr do
+    let a = NativeArray.make_float(16, 0.0)
+    let a1 = NativeArray.set_float(a, 0, 2.0 /. (right -. left))
+    let a2 = NativeArray.set_float(a1, 5, 2.0 /. (top -. bottom))
+    let a3 = NativeArray.set_float(a2, 10, -2.0 /. (far -. near))
+    let a4 = NativeArray.set_float(a3, 12, 0.0 -. (right +. left) /. (right -. left))
+    let a5 = NativeArray.set_float(a4, 13, 0.0 -. (top +. bottom) /. (top -. bottom))
+    let a6 = NativeArray.set_float(a5, 14, 0.0 -. (far +. near) /. (far -. near))
+    NativeArray.set_float(a6, 15, 1.0)
+  end
+
   doc "Right-handed perspective projection (GL clip space, z in [-1, 1])."
   fn perspective(fov_y_rad : Float, aspect : Float, near : Float, far : Float) : NativeFloatArr do
     let f = 1.0 /. Math.tan(fov_y_rad /. 2.0)

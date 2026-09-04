@@ -793,3 +793,26 @@ are freed immediately.
 - A helper function written next to the tests that use it, inside
   `describe "…" do … end`, is `I got stuck here` at the `pfn`. Helpers must
   be module-level, so a test file's helpers and tests cannot be grouped.
+
+---
+
+## Top-down map view notes
+
+### G60. `forge test` silently drops a test file that fails to compile — false green
+- `test/mapview_test.march` had a trailing comma (`Marker.build(B.new(64), 12.5, -7.0, )`),
+  a plain parse error (`march --check` on the file reports it immediately).
+  `forge test` printed no error, no warning, nothing: it silently excluded
+  the whole file's tests from the run and reported `Finished: 27 tests, 0
+  failures` — the same count as before the file existed. The suite looked
+  green while an entire file, including tests for a feature just added, ran
+  zero assertions. Caught only because I cross-checked the test count against
+  `grep -c "  test \""` across `test/*.march`.
+- This is already a filed march compiler issue
+  (`specs/todos/2026-08-17-forge-test-silent-skip-on-compile-failure.md` in
+  the March repo, filed independently before this project hit it) — recorded
+  here because it is exactly the failure mode that makes a test suite
+  untrustworthy: a typo silently shrinks coverage instead of failing the
+  build.
+- **Would need:** `forge test` to treat any test file that fails to compile
+  as a hard error (or at minimum print a per-file warning naming the file
+  and the count of tests it could not run), never a silent partial run.
