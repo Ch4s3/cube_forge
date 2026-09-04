@@ -81,10 +81,17 @@ hotbar so the dragged stack is on top.
 
 ## Layout
 
-Both grids are centred. The backpack is 9 columns by 3 rows using the hotbar's
-existing 0.125 NDC pitch, so a slot is the same size in both and a column lines
-up with the hotbar slot beneath it. The panel is a dark translucent rect behind
-both grids, with the world dimmed under it.
+While the panel is open the hotbar is drawn as its **top row** and the strip at
+the bottom of the screen is hidden. Everything is then one contiguous four-row
+grid, so moving a stack between the backpack and the hotbar is a drag of one row
+rather than a reach to the bottom of the screen. An extra gap under the top row
+keeps the active slots reading as their own group.
+
+The backpack is 9 columns by 3 rows sharing the hotbar's 0.125 NDC pitch, so
+every column lines up top to bottom and a backpack slot sits directly under the
+hotbar slot it drags into. Closed, the hotbar returns to the bottom strip
+unchanged. The panel is a dark translucent rect behind the grid, with the world
+dimmed under it.
 
 ## Testing
 

@@ -9,6 +9,8 @@ mod CubeForge.Test.Inventory do
   alias CubeForge.Chunk as C
   alias CubeForge.Hud as Hud
 
+  pfn near(a : Float, b : Float) : Bool do Math.abs(a -. b) < 0.0001 end
+
   -- Total count of [item] across every slot, hotbar and backpack.
   pfn total_of(i : CubeForge.Inventory.Inv, item : Int, s : Int, acc : Int) : Int do
     if s >= Inv.slots() do acc
@@ -167,16 +169,26 @@ mod CubeForge.Test.Inventory do
   end
 
   describe "hit-testing" do
-    test "finds the hotbar slot under a point inside it" do
+    test "finds the hotbar slot under a point inside it, in either layout" do
+      -- closed, the hotbar is the strip at the bottom of the screen
+      let yc = Hud.slot_oy(3, false) +. Hud.slot_h() /. 2.0
       let x = Hud.slot_ox(3) +. Hud.slot_w() /. 2.0
-      let y = Hud.slot_oy(3) +. Hud.slot_h() /. 2.0
-      Test.assert_eq_int(Hud.slot_at(x, y, false), 3, "centre of hotbar slot 3")
-      Test.assert_eq_int(Hud.slot_at(x, y, true), 3, "and the same with the window open")
+      Test.assert_eq_int(Hud.slot_at(x, yc, false), 3, "centre of hotbar slot 3, closed")
+      -- open, the same slot has moved into the panel's top row
+      let yo = Hud.slot_oy(3, true) +. Hud.slot_h() /. 2.0
+      Test.assert_eq_int(Hud.slot_at(x, yo, true), 3, "and is found at its panel position when open")
+      Test.assert_true(yo > yc, "the panel row sits above the bottom strip")
+    end
+    -- The hotbar is the panel's top row, so a backpack column must sit directly
+    -- under the hotbar slot it drags into.
+    test "backpack columns line up under their hotbar slot" do
+      Test.assert_true(near(Hud.slot_ox(Inv.hotbar_slots() + 3), Hud.slot_ox(3)), "column 3 lines up")
+      Test.assert_true(Hud.slot_oy(Inv.hotbar_slots() + 3, true) < Hud.slot_oy(3, true), "and sits below it")
     end
     test "finds a backpack slot only while the window is open" do
       let s = Inv.hotbar_slots() + 11
       let x = Hud.slot_ox(s) +. Hud.slot_w() /. 2.0
-      let y = Hud.slot_oy(s) +. Hud.slot_h() /. 2.0
+      let y = Hud.slot_oy(s, true) +. Hud.slot_h() /. 2.0
       Test.assert_eq_int(Hud.slot_at(x, y, true), s, "backpack slot found when open")
       Test.assert_eq_int(Hud.slot_at(x, y, false), -1, "and unreachable when closed")
     end
@@ -184,7 +196,7 @@ mod CubeForge.Test.Inventory do
     -- two slots should go home rather than land somewhere the player did not aim.
     test "a point in the gap between slots hits nothing" do
       let gap_x = Hud.slot_ox(3) +. Hud.slot_w() +. 0.004
-      let y = Hud.slot_oy(3) +. Hud.slot_h() /. 2.0
+      let y = Hud.slot_oy(3, true) +. Hud.slot_h() /. 2.0
       Test.assert_eq_int(Hud.slot_at(gap_x, y, true), -1, "between two columns")
       Test.assert_eq_int(Hud.slot_at(Hud.slot_ox(0) -. 0.01, y, true), -1, "left of the first column")
     end
@@ -199,7 +211,7 @@ mod CubeForge.Test.Inventory do
 
   pfn centres_ok(s : Int) : Bool do
     if s >= Inv.slots() do true
-    else if Hud.slot_at(Hud.slot_ox(s) +. Hud.slot_w() /. 2.0, Hud.slot_oy(s) +. Hud.slot_h() /. 2.0, true) == s do centres_ok(s + 1)
+    else if Hud.slot_at(Hud.slot_ox(s) +. Hud.slot_w() /. 2.0, Hud.slot_oy(s, true) +. Hud.slot_h() /. 2.0, true) == s do centres_ok(s + 1)
     else false end end
   end
 
