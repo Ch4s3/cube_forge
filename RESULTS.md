@@ -878,3 +878,34 @@ Two March traps on the way: `&&` does not short-circuit (G33), so a
 to the bottom of a test world with no floor -- nested `if` now; and the shaft
 test's world had a single stone block as its "floor", off which water fell to
 y = 0 -- a full layer now.
+
+## Water-only section rebuilds
+
+Every water reply used to rebuild all three passes (opaque, water, foliage) of
+each touched section, so a brook that never settles re-meshed its terrain
+forever. `CM.rebuild_section_water` rebuilds only the water pass, and the
+reply path (`remesh_sections_water` and friends, with the same ±1-section and
+neighbour-chunk widening) uses it. Edits, felling, migration and growth still
+take the full rebuild, since they change opaque blocks and baked light.
+
+Measured with `CF_WORKERS=1`, seed 5, five springs at rate 1: the remesh
+share of a water tick fell from 27-36 ms to 3.5-5 ms; the canal tick
+(`CF_AUTOCANAL`) from 25 ms to 2.4 ms.
+
+Staleness check: `CF_REMESH_ALL_AT=<frame>` rebuilds every section of every
+chunk (the ground truth) and, for one instrumented run, reported any section
+whose rebuilt buffer differed from the stored one. Frame 890 on the brook
+world (seed 5) and on a canal world with no springs (finite water that spreads
+and dries): **0 pixels differ and 0 sections change** between the water-only
+build and the full rebuild.
+
+The check took a detour worth recording. Unpinned, a full rebuild and the
+plain run differed by ~5,000 pixels of 1-7 level speckle on lit slopes, and
+two plain runs by 400-1,500 -- which looked like stale baked light. The
+buffers were bit-identical; the sun was not. The sun angle comes from wall
+time, and a rebuild stalls a frame for a few hundred ms, so every "stale
+geometry" delta was the sun moving. **Frame comparisons need `CF_SUN` as
+well as `CF_TIME`**; with both pinned the brook world is deterministic run to
+run, so the earlier note that springs make runs nondeterministic was the
+same mistake. Separately, a launch occasionally exits 0 without writing the
+dump; the harness now retries.

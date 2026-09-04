@@ -52,6 +52,22 @@ mod CubeForge.ChunkMesh do
     build_sections(world, cx, cz, empty, 15, Nil, Nil, Nil)
   end
 
+  doc "Rebuild only the water pass of section [sy]. Right for a change that touches nothing but water: opaque faces cull against water and air alike (Mesher.see_through), so a water cell appearing, moving or draining changes no opaque or foliage face -- and the full rebuild was redoing the greedy mesh and its light lookups for every moving cell."
+  fn rebuild_section_water(m : ChunkMesh, world : CubeForge.World.World, cx : Int, cz : Int, sy : Int, empty : CubeForge.Chunk.Chunk) : ChunkMesh do
+    if sy < 0 || sy >= 16 do m
+    else
+      let c = World.chunk_at(world, cx, cz)
+      let pick = fn (x, z) -> if World.in_bounds(world, x, z) do World.chunk_at(world, x, z) else empty end
+      let n = pick(cx, cz - 1)
+      let s = pick(cx, cz + 1)
+      let e = pick(cx + 1, cz)
+      let w = pick(cx - 1, cz)
+      match m do
+        ChunkMesh(os, ws, fs) -> ChunkMesh(os, Array.set(ws, sy, Mesher.mesh_section_water(c, n, s, e, w, sy, int_to_float(16 * cx), int_to_float(16 * cz))), fs)
+      end
+    end
+  end
+
   doc "Rebuild one section (0..15) of chunk (cx, cz)."
   fn rebuild_section(m : ChunkMesh, world : CubeForge.World.World, cx : Int, cz : Int, sy : Int, empty : CubeForge.Chunk.Chunk) : ChunkMesh do
     if sy < 0 || sy >= 16 do m
