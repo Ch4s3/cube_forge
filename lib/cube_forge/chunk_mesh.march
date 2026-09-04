@@ -52,51 +52,23 @@ mod CubeForge.ChunkMesh do
     build_sections(world, cx, cz, empty, 15, Nil, Nil, Nil)
   end
 
-  doc "Rebuild only the water pass of section [sy]. Right for a change that touches nothing but water: opaque faces cull against water and air alike (Mesher.see_through), so a water cell appearing, moving or draining changes no opaque or foliage face -- and the full rebuild was redoing the greedy mesh and its light lookups for every moving cell."
+  doc "Rebuild only the water pass of section [sy]."
   fn rebuild_section_water(m : ChunkMesh, world : CubeForge.World.World, cx : Int, cz : Int, sy : Int, empty : CubeForge.Chunk.Chunk) : ChunkMesh do
-    if sy < 0 || sy >= 16 do m
-    else
-      let c = World.chunk_at(world, cx, cz)
-      let pick = fn (x, z) -> if World.in_bounds(world, x, z) do World.chunk_at(world, x, z) else empty end
-      let n = pick(cx, cz - 1)
-      let s = pick(cx, cz + 1)
-      let e = pick(cx + 1, cz)
-      let w = pick(cx - 1, cz)
-      match m do
-        ChunkMesh(os, ws, fs) -> ChunkMesh(os, Array.set(ws, sy, Mesher.mesh_section_water(c, n, s, e, w, sy, int_to_float(16 * cx), int_to_float(16 * cz))), fs)
-      end
-    end
+    rebuild_section_sel(m, world, cx, cz, sy, empty, false, true, false)
   end
 
   doc """
-  Rebuild only the opaque pass of section [sy]. Right for a change that swaps one
-  solid block for another of the same opacity -- biome retexturing, where grass
-  becomes sand or gravel. No water cell and no leaf moves, so those two passes
-  would rebuild to what they already hold, and the greedy mesh plus its light
-  lookups are the expensive part of a rebuild.
-  """
-  fn rebuild_section_opaque(m : ChunkMesh, world : CubeForge.World.World, cx : Int, cz : Int, sy : Int, empty : CubeForge.Chunk.Chunk) : ChunkMesh do
-    if sy < 0 || sy >= 16 do m
-    else
-      let c = World.chunk_at(world, cx, cz)
-      let pick = fn (x, z) -> if World.in_bounds(world, x, z) do World.chunk_at(world, x, z) else empty end
-      let n = pick(cx, cz - 1)
-      let s = pick(cx, cz + 1)
-      let e = pick(cx + 1, cz)
-      let w = pick(cx - 1, cz)
-      match m do
-        ChunkMesh(os, ws, fs) ->
-          ChunkMesh(Array.set(os, sy, Mesher.mesh_section_opaque(c, n, s, e, w, World.light(world), World.occupancy(world), sy, int_to_float(16 * cx), int_to_float(16 * cz))), ws, fs)
-      end
-    end
-  end
+  Rebuild the chosen passes of section [sy]. An edit that cannot move a water
+  cell or a leaf need not pay for those passes: the greedy mesh and its
+  per-vertex light lookups are the cost, and they are per pass.
 
-  doc """
-  Rebuild the opaque and foliage passes of section [sy], leaving water alone.
-  Right for growing or felling a tree: logs are opaque, leaves are foliage, and
-  neither the trunk nor the canopy can move a water cell.
+  Retexturing swaps a solid block for another of the same opacity, so it needs
+  opaque alone. Growing or felling a tree needs opaque and foliage. A water cell
+  appearing, moving or draining needs water alone, since opaque faces cull
+  against water and air alike (Mesher.see_through).
   """
-  fn rebuild_section_solid(m : ChunkMesh, world : CubeForge.World.World, cx : Int, cz : Int, sy : Int, empty : CubeForge.Chunk.Chunk) : ChunkMesh do
+  fn rebuild_section_sel(m : ChunkMesh, world : CubeForge.World.World, cx : Int, cz : Int, sy : Int, empty : CubeForge.Chunk.Chunk,
+                         do_opaque : Bool, do_water : Bool, do_foliage : Bool) : ChunkMesh do
     if sy < 0 || sy >= 16 do m
     else
       let c = World.chunk_at(world, cx, cz)
@@ -109,32 +81,16 @@ mod CubeForge.ChunkMesh do
       let oz = int_to_float(16 * cz)
       match m do
         ChunkMesh(os, ws, fs) ->
-          ChunkMesh(Array.set(os, sy, Mesher.mesh_section_opaque(c, n, s, e, w, World.light(world), World.occupancy(world), sy, ox, oz)),
-                    ws,
-                    Array.set(fs, sy, Mesher.mesh_section_foliage(c, n, s, e, w, World.light(world), World.occupancy(world), sy, ox, oz)))
+          ChunkMesh(if do_opaque do Array.set(os, sy, Mesher.mesh_section_opaque(c, n, s, e, w, World.light(world), World.occupancy(world), sy, ox, oz)) else os end,
+                    if do_water do Array.set(ws, sy, Mesher.mesh_section_water(c, n, s, e, w, sy, ox, oz)) else ws end,
+                    if do_foliage do Array.set(fs, sy, Mesher.mesh_section_foliage(c, n, s, e, w, World.light(world), World.occupancy(world), sy, ox, oz)) else fs end)
       end
     end
   end
 
-  doc "Rebuild one section (0..15) of chunk (cx, cz)."
+  doc "Rebuild all three passes of one section (0..15) of chunk (cx, cz)."
   fn rebuild_section(m : ChunkMesh, world : CubeForge.World.World, cx : Int, cz : Int, sy : Int, empty : CubeForge.Chunk.Chunk) : ChunkMesh do
-    if sy < 0 || sy >= 16 do m
-    else
-      let c = World.chunk_at(world, cx, cz)
-      let pick = fn (x, z) -> if World.in_bounds(world, x, z) do World.chunk_at(world, x, z) else empty end
-      let n = pick(cx, cz - 1)
-      let s = pick(cx, cz + 1)
-      let e = pick(cx + 1, cz)
-      let w = pick(cx - 1, cz)
-      let ox = int_to_float(16 * cx)
-      let oz = int_to_float(16 * cz)
-      match m do
-        ChunkMesh(os, ws, fs) ->
-          ChunkMesh(Array.set(os, sy, Mesher.mesh_section_opaque(c, n, s, e, w, World.light(world), World.occupancy(world), sy, ox, oz)),
-                    Array.set(ws, sy, Mesher.mesh_section_water(c, n, s, e, w, sy, ox, oz)),
-                    Array.set(fs, sy, Mesher.mesh_section_foliage(c, n, s, e, w, World.light(world), World.occupancy(world), sy, ox, oz)))
-      end
-    end
+    rebuild_section_sel(m, world, cx, cz, sy, empty, true, true, true)
   end
 
   fn opaque_vertices(m : ChunkMesh) : Int do total_floats(opaque_sections(m)) / Vx.floats() end
