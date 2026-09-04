@@ -14,7 +14,7 @@ mod CubeForge.Test.Light do
   -- An 8x8 world of entirely empty chunks (no terrain), so seeding tests see
   -- only the blocks they place themselves.
   pfn air_world() : CubeForge.World.World do
-    CubeForge.World.World(Array.from_list(air_chunks(63, Nil)), 8)
+    CubeForge.World.World(Array.from_list(air_chunks(63, Nil)), L.new(), 8)
   end
 
 
@@ -29,7 +29,7 @@ mod CubeForge.Test.Light do
     if i < 0 do acc else slab_chunks(i - 1, y, Cons(slab_cells(C.new(), 0, y), acc)) end
   end
   pfn slab_world(y : Int) : CubeForge.World.World do
-    CubeForge.World.World(Array.from_list(slab_chunks(63, y, Nil)), 8)
+    CubeForge.World.World(Array.from_list(slab_chunks(63, y, Nil)), L.new(), 8)
   end
 
   describe "Light.index" do
@@ -114,6 +114,14 @@ mod CubeForge.Test.Light do
       Test.assert_eq_int(L.get(la, 40, 101, 40), 15, "above the slab")
       Test.assert_eq_int(L.get(la, 40, 99, 40), 0, "below the slab")
       Test.assert_eq_int(L.get(la, 40, 0, 40), 0, "far below the slab")
+    end
+  end
+
+  describe "World light field" do
+    test "a generated world is lit above the terrain and dark underneath" do
+      let w = CubeForge.World.relight_all(CubeForge.World.generate(8, 1, 1))
+      Test.assert_eq_int(CubeForge.World.light_at(w, 40, 255, 40), 15, "open sky")
+      Test.assert_eq_int(CubeForge.World.light_at(w, 40, 0, 40), 0, "bedrock depth is dark")
     end
   end
 

@@ -8,11 +8,26 @@ mod CubeForge.World do
 
   alias CubeForge.Chunk as C
 
-  type World = World(Array.PVec(CubeForge.Chunk.Chunk), Int)   -- chunks, side length in chunks
+  type World = World(Array.PVec(CubeForge.Chunk.Chunk), NativeU8Arr, Int)   -- chunks, skylight field, side length in chunks
 
   fn size() : Int do 8 end
 
-  fn side(w : World) : Int do match w do World(_, n) -> n end end
+  fn side(w : World) : Int do match w do World(_, _, n) -> n end end
+
+  doc "The world's skylight field (see CubeForge.Light)."
+  fn light(w : World) : NativeU8Arr do match w do World(_, la, _) -> la end end
+
+  doc "Replace the world's skylight field."
+  fn set_light(w : World, la : NativeU8Arr) : World do match w do World(cs, _, n) -> World(cs, la, n) end end
+
+  @[no_alloc]
+  -- Skylight at a world coordinate; 0 outside the world.
+  fn light_at(w : World, x : Int, y : Int, z : Int) : Int do
+    match w do World(_, la, _) -> CubeForge.Light.get(la, x, y, z) end
+  end
+
+  doc "Recompute the whole skylight field from scratch."
+  fn relight_all(w : World) : World do set_light(w, CubeForge.Light.flood(w)) end
 
   fn in_bounds(w : World, cx : Int, cz : Int) : Bool do
     let n = side(w)
@@ -21,12 +36,12 @@ mod CubeForge.World do
 
   doc "The chunk at grid (cx, cz); panics if out of bounds."
   fn chunk_at(w : World, cx : Int, cz : Int) : CubeForge.Chunk.Chunk do
-    match w do World(cs, n) -> Array.get(cs, cx + n * cz) end
+    match w do World(cs, _, n) -> Array.get(cs, cx + n * cz) end
   end
 
   doc "Replace the chunk at grid (cx, cz)."
   fn set_chunk(w : World, cx : Int, cz : Int, c : CubeForge.Chunk.Chunk) : World do
-    match w do World(cs, n) -> World(Array.set(cs, cx + n * cz, c), n) end
+    match w do World(cs, la, n) -> World(Array.set(cs, cx + n * cz, c), la, n) end
   end
 
   fn floor_div16(v : Int) : Int do if v >= 0 do v / 16 else (v - 15) / 16 end end
@@ -89,12 +104,12 @@ mod CubeForge.World do
   doc "Stage 1: generate every chunk in parallel. Chunks are independent, so this is a plain pmap."
   fn generate(n : Int, seed : Int, workers : Int) : World do
     let chunks = List.pmap_n(coords(n), fn i -> C.generate(16 * (i % n), 16 * (i / n), seed), workers)
-    World(Array.from_list(chunks), n)
+    World(Array.from_list(chunks), CubeForge.Light.new(), n)
   end
 
   fn generate_scalar(n : Int, seed : Int, workers : Int) : World do
     let chunks = List.pmap_n(coords(n), fn i -> C.generate_scalar(16 * (i % n), 16 * (i / n), seed), workers)
-    World(Array.from_list(chunks), n)
+    World(Array.from_list(chunks), CubeForge.Light.new(), n)
   end
 
 end
