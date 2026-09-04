@@ -35,21 +35,21 @@ mod CubeForge.Test.Greedy do
   describe "greedy sections" do
     test "a flat slab is one quad per face direction it exposes" do
       let e = C.new()
-      let b = Mesher.mesh_section_opaque(slab_go(C.new(), 0), e, e, e, e, 0, 0.0, 0.0)
+      let b = Mesher.mesh_section_opaque(slab_go(C.new(), 0), e, e, e, e, CubeForge.Light.new(), 0, 0.0, 0.0)
       -- top: 1 quad, bottom: 1 quad, four sides: 1 quad each (neighbours are empty chunks) = 6 quads
       Test.assert_eq_int(B.len(b) / 48, 6, "6 merged quads")
       Test.assert_true(near(total_area(b), 256.0 *. 2.0 +. 16.0 *. 4.0), "area matches the naive face count")
     end
     test "a checkerboard slab cannot merge its top" do
       let e = C.new()
-      let b = Mesher.mesh_section_opaque(checker_go(C.new(), 0), e, e, e, e, 0, 0.0, 0.0)
+      let b = Mesher.mesh_section_opaque(checker_go(C.new(), 0), e, e, e, e, CubeForge.Light.new(), 0, 0.0, 0.0)
       -- 256 top + 256 bottom + 4 sides of 16 cells each that alternate (16 quads per side)
       Test.assert_eq_int(B.len(b) / 48, 256 + 256 + 64, "no merging across different ids")
     end
     test "greedy covers the same face area as the naive mesher" do
       let c = C.test_terrain()
       let e = C.new()
-      let greedy = Mesher.mesh_section_opaque(c, e, e, e, e, 4, 0.0, 0.0)
+      let greedy = Mesher.mesh_section_opaque(c, e, e, e, e, CubeForge.Light.new(), 4, 0.0, 0.0)
       let naive = Mesher.mesh_with_neighbors(c, e, e, e, e, 0.0, 0.0)
       -- naive: count faces of section 4 only (y in 64..79) by scanning vertex y
       Test.assert_true(total_area(greedy) > 0.0, "section 4 has faces")

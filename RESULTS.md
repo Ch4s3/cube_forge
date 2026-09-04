@@ -135,3 +135,36 @@ next step (todos.md, greedy meshing).
 | extern wrappers marked `@[no_alloc(assume)]` | 2 |
 
 Build, tests (25), lint and the windowed run are unchanged with the attributes in place.
+
+## Lighting (skylight flood-fill, smooth per-vertex light + AO)
+
+Release build, headless, 8x8 chunks.
+
+| measure | before lighting | after |
+|---|---|---|
+| world vertices | 74 610 (44 364 opaque + 30 246 water) | **112 038** (81 792 opaque + 30 246 water) |
+| opaque vertices | 44 364 | **81 792** (+84%) |
+| full-world skylight flood | — | **521 ms** (one-off, at startup) |
+| incremental relight per block edit | — | **~50 ms** debug / ~22 ms release |
+| mesh all 64 chunks | 755 ms | 1 676 ms |
+
+The opaque vertex rise is the accepted cost of smooth lighting: the greedy mask
+key now carries the four per-corner light/AO values, so two faces merge only
+when their block *and* all four corners agree. As argued in the design doc this
+is self-limiting rather than arbitrary — cell A's right-hand corners are
+computed from the same voxels as cell B's left-hand corners, so key equality
+forces all four corners equal, and merging survives exactly across uniformly-lit
+regions. Large stone walls at light 0 and open plains at light 15 still merge
+fully; the cost is concentrated at lighting gradients.
+
+Two findings dominated the flood's cost and are written up in GAPS.md:
+
+- **G59** — G21 (a borrowed read before a consuming update turns FBIP into a
+  full copy) makes a BFS queue over a `NativeU8Arr` impossible: a 1M-iteration
+  read-then-write probe reached a 229 GB peak footprint. Propagation is a
+  level-synchronous downward sweep instead, where every pass reads one array and
+  writes a different one. `cf_u8_blit` and an early-out before the chunk lookup
+  took the lighting tests from 49 s to 21 s.
+- **G60** — `World.block_at` per voxel (chunk coords re-derived plus a PVec trie
+  walk, 727 ns each) was 179 ms of the relight's 217 ms. Hoisting the chunk out
+  of the column loop cut seeding 15x and the full flood from 1 724 ms to 521 ms.

@@ -3,6 +3,7 @@ mod CubeForge.Test.Light do
 
   needs IO.Spawn   -- capability ceiling, as in test/water_test.march (GAPS.md G41)
   import Test
+  alias CubeForge.F32Buf as B
   alias CubeForge.Light as L
   alias CubeForge.Chunk as C
 
@@ -34,6 +35,8 @@ mod CubeForge.Test.Light do
 
 
   -- First index where the two light fields differ, or -1 when they agree.
+  pfn near(a : Float, b : Float) : Bool do Math.abs(a -. b) < 0.0001 end
+
   pfn first_diff_go(a : NativeU8Arr, b : NativeU8Arr, i : Int) : Int do
     if i >= 4194304 do -1
     else if NativeArray.get_u8(a, i) != NativeArray.get_u8(b, i) do i
@@ -172,6 +175,84 @@ mod CubeForge.Test.Light do
       let w1 = CubeForge.World.set_block(w0, 0, 80, 127, 3)
       let inc = L.relight_at(CubeForge.World.light(w1), w1, 0, 80, 127)
       Test.assert_eq_int(first_difference(inc, L.flood(w1)), -1, "incremental equals full re-flood")
+    end
+  end
+
+  describe "Mesher.corner_ao" do
+    test "the standard occlusion table" do
+      Test.assert_eq_int(CubeForge.Mesher.corner_ao(false, false, false), 3, "fully open")
+      Test.assert_eq_int(CubeForge.Mesher.corner_ao(false, false, true), 2, "diagonal only")
+      Test.assert_eq_int(CubeForge.Mesher.corner_ao(true, false, false), 2, "one side")
+      Test.assert_eq_int(CubeForge.Mesher.corner_ao(false, true, false), 2, "other side")
+      Test.assert_eq_int(CubeForge.Mesher.corner_ao(true, false, true), 1, "one side and the diagonal")
+      Test.assert_eq_int(CubeForge.Mesher.corner_ao(false, true, true), 1, "other side and the diagonal")
+      Test.assert_eq_int(CubeForge.Mesher.corner_ao(true, true, false), 0, "both sides override the diagonal")
+      Test.assert_eq_int(CubeForge.Mesher.corner_ao(true, true, true), 0, "both sides, fully closed")
+    end
+  end
+
+  describe "Mesher corner packing" do
+    test "light and AO round-trip through the six-bit corner" do
+      Test.assert_eq_int(CubeForge.Mesher.pack_corner(15, 3), 63, "brightest, unoccluded")
+      Test.assert_eq_int(CubeForge.Mesher.pack_corner(0, 0), 0, "darkest, fully occluded")
+      Test.assert_eq_int(CubeForge.Mesher.pack_corner(11, 2) % 16, 11, "light in the low nibble")
+      Test.assert_eq_int(CubeForge.Mesher.pack_corner(11, 2) / 16, 2, "AO above it")
+    end
+
+    test "the key round-trips a block id and four corners" do
+      let k = CubeForge.Mesher.key_of(3, 63, 0, 17, 40)
+      Test.assert_eq_int(CubeForge.Mesher.key_id(k), 3, "id")
+      Test.assert_eq_int(CubeForge.Mesher.key_c0(k), 63, "c0")
+      Test.assert_eq_int(CubeForge.Mesher.key_c1(k), 0, "c1")
+      Test.assert_eq_int(CubeForge.Mesher.key_c2(k), 17, "c2")
+      Test.assert_eq_int(CubeForge.Mesher.key_c3(k), 40, "c3")
+    end
+
+    test "full sky and no occlusion is full brightness" do
+      Test.assert_true(near(CubeForge.Mesher.corner_shade(CubeForge.Mesher.pack_corner(15, 3)), 1.0), "1.0")
+      Test.assert_true(near(CubeForge.Mesher.corner_shade(CubeForge.Mesher.pack_corner(0, 3)), 0.0), "dark stays dark")
+      Test.assert_true(near(CubeForge.Mesher.corner_shade(CubeForge.Mesher.pack_corner(15, 0)), 0.55), "fully occluded corner")
+    end
+  end
+
+  describe "Mesher.should_flip" do
+    test "flips only when the default diagonal is the darker pair" do
+      Test.assert_false(CubeForge.Mesher.should_flip(1.0, 1.0, 1.0, 1.0), "uniform does not flip")
+      Test.assert_true(CubeForge.Mesher.should_flip(0.0, 1.0, 1.0, 1.0), "a lone dark corner on c0 flips")
+      Test.assert_false(CubeForge.Mesher.should_flip(1.0, 0.0, 1.0, 1.0), "a lone dark corner on c1 does not")
+    end
+  end
+
+  -- Scan a mesh buffer for the shade of the first vertex with face index [f].
+  pfn shade_of_face(b : CubeForge.F32Buf.F32Buf, f : Float, i : Int, n : Int) : Float do
+    if i >= n do -1.0
+    else if near(Test.assert_some(B.get(b, i * 8 + 7), "face"), f) do Test.assert_some(B.get(b, i * 8 + 6), "shade")
+    else shade_of_face(b, f, i + 1, n) end end
+  end
+
+  describe "Mesher reads the skylight field" do
+    test "a slab is lit on top and black underneath" do
+      -- Every chunk carries the same stone layer at y = 8, so nothing leaks in
+      -- sideways: above the slab is open sky, below it is sealed.
+      let w = CubeForge.World.relight_all(slab_world(8))
+      let c = CubeForge.World.chunk_at(w, 2, 2)
+      let b = CubeForge.Mesher.mesh_section_opaque(c, c, c, c, c, CubeForge.World.light(w), 0, 32.0, 32.0)
+      let n = CubeForge.Mesher.vertex_count(b)
+      Test.assert_true(n > 0, "the slab meshed to something")
+      -- face 0 is +y (the sunlit top), face 1 is -y (the sealed underside)
+      Test.assert_true(near(shade_of_face(b, 0.0, 0, n), 1.0), "top face is full brightness")
+      Test.assert_true(near(shade_of_face(b, 1.0, 0, n), 0.0), "underside is black")
+    end
+
+    test "opening a shaft lights the ceiling around it" do
+      let w0 = CubeForge.World.relight_all(CubeForge.World.set_block(slab_world(8), 34, 8, 34, 0))
+      let c = CubeForge.World.chunk_at(w0, 2, 2)
+      let b = CubeForge.Mesher.mesh_section_opaque(c, c, c, c, c, CubeForge.World.light(w0), 0, 32.0, 32.0)
+      let n = CubeForge.Mesher.vertex_count(b)
+      -- the underside is no longer uniformly black: light now reaches it
+      Test.assert_true(shade_of_face(b, 1.0, 0, n) >= 0.0, "underside still meshes")
+      Test.assert_true(CubeForge.World.light_at(w0, 35, 7, 34) > 0, "light spilled under the slab")
+      Test.assert_eq_int(CubeForge.World.light_at(w0, 34, 7, 34), 15, "directly under the shaft is full")
     end
   end
 
