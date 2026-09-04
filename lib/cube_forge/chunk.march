@@ -67,6 +67,12 @@ mod CubeForge.Chunk do
   fn snow() : Int do 13 end
   doc "Granite: the rock exposed on cliff faces, distinct from the stone you mine underground."
   fn granite() : Int do 14 end
+  doc "Bedrock: the world floor. Unbreakable, so nothing can be mined through into the void."
+  fn bedrock() : Int do 15 end
+  doc "Blocks the player cannot break."
+  fn is_unbreakable(id : Int) : Bool do id == bedrock() end
+  doc "Thickness of the bedrock floor, at y = 0 .. bedrock_depth() - 1."
+  fn bedrock_depth() : Int do 3 end
 
   doc """
   Surface block for a column of height [h] whose steepest neighbour differs by
@@ -97,7 +103,10 @@ mod CubeForge.Chunk do
   pfn fill_column_mat(c : Chunk, x : Int, z : Int, y : Int, top : Int, surface : Int, sub : Int) : Chunk do
     if y > top do fill_water(c, x, z, top + 1)
     else
-      let id = if y == top do surface else if y > top - 4 do sub else 3 end end
+      let id = if y < bedrock_depth() do bedrock()
+               else if y == top do surface
+               else if y > top - 4 do sub
+               else 3 end end end
       fill_column_mat(set(c, x, y, z, id), x, z, y + 1, top, surface, sub)
     end
   end

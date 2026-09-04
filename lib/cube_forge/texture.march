@@ -54,19 +54,20 @@ mod CubeForge.Texture do
 
   doc """
   16x16 RGBA texture array, layer-major: 0 grass, 1 water, 2 dirt, 3 stone,
-  4 sand, 5 snow, 6 granite.
+  4 sand, 5 snow, 6 granite, 7 bedrock.
   """
   fn checkerboard() : NativeU8Arr do
-    let a0 = checker_go(NativeArray.make_u8(7 * 16 * 16 * 4, 0), 0)
+    let a0 = checker_go(NativeArray.make_u8(8 * 16 * 16 * 4, 0), 0)
     let a1 = water_go(a0, 0)
     let a2 = speckle_go(a1, 2, 0, 134, 96, 67)
     let a3 = speckle_go(a2, 3, 0, 128, 128, 132)
     let a4 = speckle_go(a3, 4, 0, 219, 203, 146)
     let a5 = speckle_go(a4, 5, 0, 242, 246, 250)
-    speckle_go(a5, 6, 0, 150, 141, 138)
+    let a6 = speckle_go(a5, 6, 0, 150, 141, 138)
+    speckle_go(a6, 7, 0, 46, 44, 48)
   end
 
-  fn layers() : Int do 7 end
+  fn layers() : Int do 8 end
   fn water_layer() : Float do 1.0 end
   doc "Texture layer for a block id."
   fn layer_for(id : Int) : Float do
@@ -76,7 +77,8 @@ mod CubeForge.Texture do
     else if id == 12 do 4.0
     else if id == 13 do 5.0
     else if id == 14 do 6.0
-    else 0.0 end end end end end end
+    else if id == 15 do 7.0
+    else 0.0 end end end end end end end
   end
 
 end
