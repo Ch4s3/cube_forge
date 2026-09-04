@@ -183,7 +183,8 @@ mod CubeForge do
         else edge_mask(rest, acc) end
     end
   end
-  pfn pow2(n : Int) : Int do if n <= 0 do 1 else 2 * pow2(n - 1) end end
+  pfn pow2(n : Int) : Int do pow2_go(n, 1) end
+  pfn pow2_go(n : Int, acc : Int) : Int do if n <= 0 do acc else pow2_go(n - 1, 2 * acc) end end
 
   type Applied = Applied(CubeForge.World.World, NativeIntArr, NativeIntArr, Array.PVec(CubeForge.ChunkMesh.ChunkMesh), Int)   -- world, counts, flags, meshes, sections remeshed
 
@@ -302,15 +303,17 @@ mod CubeForge do
     end
   end
 
-  pfn reply_sizes(replies) : String do
+  pfn reply_sizes(replies) : String do reply_sizes_go(replies, "") end
+
+  pfn reply_sizes_go(replies, acc : String) : String do
     match replies do
-      Nil -> ""
+      Nil -> acc
       Cons(r, rest) ->
         let sz = match r do
           Ok(out) -> int_to_string(List.length(out))
           Err(_) -> "err"
         end
-        sz ++ " " ++ reply_sizes(rest)
+        reply_sizes_go(rest, acc ++ sz ++ " ")
     end
   end
 
