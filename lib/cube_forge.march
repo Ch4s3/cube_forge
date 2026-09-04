@@ -1247,6 +1247,11 @@ mod CubeForge do
     end
   end
 
+  pfn mesh_reps(world : CubeForge.World.World, n : Int, workers : Int, reps : Int, acc : Int) : Int do
+    if reps <= 0 do acc
+    else mesh_reps(world, n, workers, reps - 1, acc + count_verts(mesh_all(world, n, workers), 0)) end
+  end
+
   fn mesh_all(world : CubeForge.World.World, n : Int, workers : Int) : List(CubeForge.ChunkMesh.ChunkMesh) do
     let empty = Chunk.new()
     List.pmap_n(World.coords(n), fn i -> CM.build(world, i % n, i / n, empty), workers)
@@ -1336,6 +1341,14 @@ mod CubeForge do
       if !headless do Win.gfx_upload_occupancy(World.occupancy(world), 128, 256, 128) else () end
       println("  occupancy: " ++ int_to_string(System.monotonic_time() - to0) ++ " ms")
       -- stage 2: meshing (needs neighbours; runs only after stage 1 completed)
+      -- CF_MESH_REPS>0 re-meshes the whole world that many extra times, purely
+      -- to widen the sampling window for the G37 scaling investigation.
+      let reps = Env.get_int("CF_MESH_REPS", 0)
+      if reps > 0 do
+        let tr0 = System.monotonic_time()
+        let rv = mesh_reps(world, n, workers, reps, 0)
+        println("  mesh reps: " ++ int_to_string(reps) ++ " x, " ++ int_to_string(System.monotonic_time() - tr0) ++ " ms total, verts " ++ int_to_string(rv))
+      else () end
       let meshes = mesh_all(world, n, workers)
       let t3 = System.monotonic_time()
       let nverts = count_verts(meshes, 0)

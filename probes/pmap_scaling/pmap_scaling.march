@@ -1,0 +1,111 @@
+-- G37 probe: why does `List.pmap_n` stop scaling past ~4 scheduler threads?
+--
+-- Four bodies, all run through the SAME pmap_n over the same 64-element list
+-- with the same worker count, differing only in what the per-task body touches:
+--
+--   A  pure arithmetic, no allocation, nothing captured from the heap
+--   B  A + repeated `Array.get` on a shared PVec captured by the closure
+--      (the shape of `World.chunk_at` inside the mesher)
+--   C  A + allocation in the body (cons cells), exercising `march_alloc`
+--   D  A + repeated `NativeArray.get_u8` on a shared native array
+--
+-- If A is flat past 4 threads the ceiling is the scheduler itself; if only B
+-- (or D) is flat it is RC/cache traffic on the shared value; if only C is flat
+-- it is the allocator.
+mod PmapScaling do
+
+  needs IO.Console
+  needs IO.Spawn
+  needs IO.Process
+
+  -- A pure integer burn, tuned so one call is a few ms.
+  pfn burn(n : Int, acc : Int) : Int do
+    if n <= 0 do acc
+    else burn(n - 1, (acc * 1103515245 + 12345) % 2147483647) end
+  end
+
+  -- B: walk a shared persistent vector, `iters` reads.
+  pfn burn_pvec(v : Array.PVec(Int), n : Int, i : Int, acc : Int) : Int do
+    if n <= 0 do acc
+    else burn_pvec(v, n - 1, i, acc + Array.get(v, (acc + n) % 4096)) end
+  end
+
+  -- C: allocate `n` cons cells and sum them back.
+  pfn build(n : Int, acc : List(Int)) : List(Int) do
+    if n <= 0 do acc else build(n - 1, Cons(n, acc)) end
+  end
+  pfn sum(xs : List(Int), acc : Int) : Int do
+    match xs do
+      Nil -> acc
+      Cons(x, rest) -> sum(rest, acc + x)
+    end
+  end
+
+  -- D: read a shared native array.
+  pfn burn_native(a : NativeU8Arr, n : Int, acc : Int) : Int do
+    if n <= 0 do acc
+    else burn_native(a, n - 1, acc + NativeArray.get_u8(a, (acc + n) % 65536)) end
+  end
+
+  -- F: exactly the shape of `CubeForge.Chunk`: a single-field wrapper around a
+  -- native array, read through the wrapper. Compare against D, which reads the
+  -- same array directly. Same memory, same sharing; the only difference is the
+  -- field extraction that Perceus brackets with an inc/dec.
+  type Cell = Cell(NativeU8Arr)
+  pfn cell_get(c : Cell, i : Int) : Int do
+    match c do Cell(a) -> NativeArray.get_u8(a, i) end
+  end
+  pfn burn_cell(c : Cell, n : Int, acc : Int) : Int do
+    if n <= 0 do acc
+    else burn_cell(c, n - 1, acc + cell_get(c, (acc + n) % 65536)) end
+  end
+
+  -- E: same reads as B, but each task builds its OWN vector first, so nothing
+  -- is shared between workers. B vs E isolates sharing from the read algorithm.
+  pfn burn_pvec_priv(n : Int, i : Int) : Int do
+    let v = Array.from_list(range(1, 4096))
+    burn_pvec(v, n, i, i)
+  end
+
+  pfn range_acc(lo : Int, hi : Int, acc : List(Int)) : List(Int) do
+    if lo > hi do acc else range_acc(lo, hi - 1, Cons(hi, acc)) end
+  end
+  pfn range(lo : Int, hi : Int) : List(Int) do range_acc(lo, hi, Nil) end
+
+  pfn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn), _p : Cap(IO.Process)) : Unit do
+    let mode = Env.get("MODE", "A")
+    let workers = Env.get_int("WORKERS", 14)
+    let iters = Env.get_int("ITERS", 300000)
+    let tasks = Env.get_int("TASKS", 64)
+    let xs = range(1, tasks)
+
+    let shared_v = Array.from_list(range(1, 4096))
+    let shared_a = NativeArray.make_u8(65536, 7)
+    let shared_c = Cell(NativeArray.make_u8(65536, 7))
+
+    let t0 = System.monotonic_time()
+    let out =
+      if mode == "A" do
+        List.pmap_n(xs, fn i -> burn(iters, i), workers)
+      else if mode == "B" do
+        List.pmap_n(xs, fn i -> burn_pvec(shared_v, iters, i, i), workers)
+      else if mode == "C" do
+        List.pmap_n(xs, fn i -> sum(build(iters / 100, Nil), i), workers)
+      else if mode == "D" do
+        List.pmap_n(xs, fn i -> burn_native(shared_a, iters, i), workers)
+      else if mode == "E" do
+        List.pmap_n(xs, fn i -> burn_pvec_priv(iters, i), workers)
+      else
+        List.pmap_n(xs, fn i -> burn_cell(shared_c, iters, i), workers)
+      end end end end end
+    let t1 = System.monotonic_time()
+
+    println(mode ++ " workers=" ++ int_to_string(workers)
+            ++ " scheds=" ++ int_to_string(Env.get_int("MARCH_NUM_SCHEDULERS", 4))
+            ++ " tasks=" ++ int_to_string(tasks)
+            ++ " iters=" ++ int_to_string(iters)
+            ++ " wall=" ++ int_to_string(t1 - t0) ++ "ms"
+            ++ " checksum=" ++ int_to_string(sum(out, 0)))
+  end
+
+end

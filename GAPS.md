@@ -512,6 +512,11 @@ frees it. See `probes/probe_leak2` case (i) for the two-field control.
   world), the global allocator lock behind `march_alloc` for the ~5
   F32Buf growth steps per chunk, or `List.pmap_n`'s chunking handing all 64
   elements to a handful of tasks. Not root-caused here.
+- **Root-caused 2026-09-04** — see "G37 root-caused" at the end of this file.
+  It was three separate causes (G71, G72, G73), and the third — an inc/dec pair
+  emitted for every field read of a borrowed variant — is the one that caps the
+  mesher. The "8 and 14 threads do not improve further" observation was an
+  artifact: the runtime silently ran 4 threads in all three cases.
 
 ---
 
@@ -1101,3 +1106,166 @@ Both found building the biome field, both variants of G68.
   the array that was written; it must always be threaded.
 - **Would need:** a lint on a discarded `NativeArray.set_*` result, and ideally
   a warning when an array reachable from a variant field is written.
+
+---
+
+## G37 root-caused (2026-09-04)
+
+G37 recorded that chunk meshing gained only ~1.25–1.6x from `List.pmap_n` and
+that 8 or 14 scheduler threads did not beat 4. That single symptom turned out
+to be three independent causes, below. All numbers were taken on an M3 Max
+(10 performance + 4 efficiency cores) that was **under heavy external load
+(load average 100–130)** from unrelated compiler builds, so absolute times are
+inflated; every claim rests on a ratio between two configurations measured
+back to back, never on an absolute.
+
+The probe is `probes/pmap_scaling/pmap_scaling.march`: one `List.pmap_n` over
+the same 64-element list with the same worker count, and six interchangeable
+task bodies that differ only in what they touch.
+
+### G71. `MARCH_NUM_SCHEDULERS` is a compile-time constant that the environment variable can only *lower*, silently
+`runtime/march_scheduler.h:70` defines `MARCH_NUM_SCHEDULERS` as **4** unless
+overridden with `-D` at build time, and `march_sched_init` applies the
+environment variable as
+
+```c
+if (n >= 1 && n <= MARCH_NUM_SCHEDULERS) g_num_scheds = n;
+```
+
+so `MARCH_NUM_SCHEDULERS=14` is **ignored without a word** and the process runs
+4 scheduler threads. `sample` on a run that asked for 14 shows 5 threads (main
+plus four schedulers); the same binary from a runtime built with
+`-DMARCH_NUM_SCHEDULERS=16` shows 15.
+
+This invalidates every "8 and 14 don't help" measurement in `RESULTS.md` and in
+G37 itself: 4, 8 and 14 were all *the same configuration*. On the pure-arithmetic
+body the plateau disappears entirely once the cap is raised:
+
+| scheduler threads | default runtime (cap 4) | runtime built with cap 16 |
+|---|---|---|
+| 1 | 2034 ms | 1597 ms |
+| 4 | 466 ms | 345 ms |
+| 10 | (silently 4) 481 ms | **135 ms** |
+| 14 | (silently 4) 660 ms | 140 ms |
+
+**11.8x on 14 threads**, against an apparent ceiling of 4.4x. The clamp itself
+is not wrong — `g_scheds` is a fixed-size array — but a request the runtime
+cannot honour must not be discarded in silence.
+- **Would need:** either size the scheduler table from the environment at
+  `march_sched_init`, or keep the compile-time bound and warn on stderr when the
+  environment asks for more than it. A raised default (`System.cpu_count()`
+  clamped to a larger maximum) would also stop 4 being the de-facto limit of
+  every parallel March program on a 14-core machine.
+
+### G72. Every allocation and every free bumps one global atomic counter, so allocation-heavy work gets *slower* with more threads
+`march_alloc` and the RC free paths unconditionally execute
+
+```c
+#define MARCH_ALLOC_BUMP() atomic_fetch_add_explicit(&march_live_alloc_count, 1, memory_order_relaxed)
+#define MARCH_FREE_BUMP()  atomic_fetch_sub_explicit(&march_live_alloc_count, 1, memory_order_relaxed)
+```
+
+— a read-modify-write on **one cache line** shared by every thread in the
+process, on the hottest path there is. It is not behind a debug flag; it backs
+the `march_live_allocs()` leak gauge, which this project uses every session.
+
+Allocation-heavy body (`build` + `sum` over cons cells), cap-16 runtime:
+
+| scheduler threads | with the counter | counter compiled out |
+|---|---|---|
+| 1 | 63 ms | 55 ms |
+| 4 | 172 ms | 29 ms |
+| 10 | 183 ms | 16 ms |
+| 14 | 185 ms | **16 ms** |
+
+With the counter, allocation-heavy parallel work is **3x slower on 14 threads
+than on 1**. Without it, the same code speeds up 3.4x — and the 14-thread case
+is **11.6x faster**. Deleting two atomic increments is the difference between
+anti-scaling and scaling.
+
+In cube_forge this moved `march_alloc` from the single largest March symbol in
+the mesh profile (10 552 samples) to outside the top 25, and whole-world meshing
+from 1.6x to 2.1x on 14 threads.
+- **Would need:** a per-thread counter summed on read. The gauge's only consumer
+  reads it between frames, so exactness under concurrency is not required —
+  and it is not achieved today either, since `relaxed` gives no ordering.
+
+### G73. Reading a field of a *borrowed* variant still emits an inc/dec pair — which makes shared-data reads anti-parallel
+This is the cause of the mesher's own ceiling, and the most serious of the three.
+
+`CubeForge.Chunk` is `Chunk(NativeU8Arr)` and `Chunk.get` is a read:
+
+```march
+fn get(c : Chunk, x : Int, y : Int, z : Int) : Int do
+  match c do Chunk(a) -> NativeArray.get_u8(a, index(x, y, z)) end
+end
+```
+
+Borrow inference gets this right — `MARCH_DEBUG_BORROW=1` reports
+`CubeForge.Chunk.get(c:borrow, …)`, and likewise `nb_get`, `face_key` and
+`fill_mask` all take their five chunks and two fields as `borrow`. But the
+emitted IR for that one array read is:
+
+```llvm
+%fv1792 = load ptr, ptr %fp1791, align 8      ; project the field
+call void @march_incrc_local(ptr %ld1793)     ; ← dup the projected array
+%cr1807 = call i64 @native_u8_arr_get(ptr %ld1805, i64 %ld1806)
+call void @march_decrc_local(ptr %ld1808)     ; ← drop it again
+```
+
+The parent is borrowed and provably alive for the whole call; the projected
+value is used only at a borrowed argument position and never escapes. The pair
+is pure overhead. And under the scheduler it is not even cheap: `march_incrc_local`
+checks `march_sched_in_scheduler()` — a `_Thread_local` read — and then
+**always defers to the atomic `march_incrc`**, so inside `pmap_n` there is no
+non-atomic RC at all.
+
+An atomic read-modify-write on an object *shared between workers* is a cache
+line in exclusive state bouncing between cores. Two probe bodies read the
+identical shared `NativeU8Arr` the identical number of times; the only
+difference is whether the read goes through a one-field wrapper:
+
+| scheduler threads | raw shared array | same array behind `Cell(NativeU8Arr)` |
+|---|---|---|
+| 1 | 476 ms | 2 761 ms |
+| 4 | 122 ms | 5 297 ms |
+| 10 | 82 ms | 9 873 ms |
+| 14 | **95 ms (5.8x)** | **11 188 ms (0.25x)** |
+
+Direct reads speed up 5.8x. The same reads through a wrapper get **4x slower**
+as threads are added, and at 14 threads are **136x** slower than the direct
+form. The wrapper costs 5.8x even single-threaded.
+
+The same effect explains why a shared `Array.PVec` does not parallelize at all
+(1.12x on 14 threads) while a private one built per task does (3.4x): a
+`PVec`'s trie nodes and 32-element leaves are all `Cons` cells, so a single
+`Array.get` dups and drops a dozen shared headers. (Separately, `Array.get`
+calls `lst_len(tail)` on every read and `lst_nth` at every level, so it is
+~560 ns — a linked-list walk, not the O(log₃₂ n) the docs claim.)
+
+The mesher reads voxels through `Chunk.get` and shares five chunks with every
+neighbouring task, so every voxel of every chunk RMWs a header that other
+workers are reading at the same moment.
+- **Would need:** elide the dup/drop when a field is projected out of a
+  *borrowed* scrutinee and the projected binding is only consumed at borrowed
+  positions within the arm. This is the same class as the G67 fix (which added
+  the `NativeArray` accessors to `extern_borrow_table`), one level up: there the
+  borrowed thing was an argument, here it is a projection.
+- **Workaround available today:** hoist the field out once and thread the raw
+  array through the hot path, which is what `Light` already had to do for a
+  different reason (G64).
+
+### What the profile looks like now
+`sample` over the mesh loop (`CF_MESH_REPS`, added for this investigation),
+14 real scheduler threads, allocation counter removed, by top-of-stack samples:
+
+| | samples |
+|---|---|
+| refcounting (`march_incrc`/`decrc`/`_local`, `march_sched_in_scheduler`, `_tlv_get_addr`) | ~27 600 |
+| the mesher itself (`face_key`, `nb_get`, `fill_mask`, `push`, `section_has`) | ~9 000 |
+| libmalloc | ~3 800 |
+
+**The mesher spends three times as long refcounting as meshing.** Raising the
+preemption quantum from 1 ms to 50 ms changed nothing (390 → 360 ms at 4
+threads), so the `sigprocmask`/`_sigtramp` traffic in the profile is
+`swapcontext`'s signal-mask save/restore, not the preemption daemon.

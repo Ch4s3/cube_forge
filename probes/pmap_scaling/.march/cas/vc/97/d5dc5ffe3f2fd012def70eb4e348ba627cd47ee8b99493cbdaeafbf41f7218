@@ -1,0 +1,7 @@
+sat
+len$vals	0
+expr	(Lead Elem!val!0 6 (StrVal Elem!val!1))
+n	0
+i	(- 1)
+lead_n	0
+idx	(- 1)

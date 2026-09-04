@@ -826,3 +826,40 @@ is a candidate at most once. A tree is felled where its biome holds no trees.
   taiga and wetland. On a fresh world the temperate dry plain loses its trees
   over the first minutes while forest near the water keeps them —
   `docs/biome-vegetation.png`. Bushes are not implemented yet.
+
+## G37: what `pmap_n` scaling actually costs (2026-09-04)
+
+Machine under heavy external load (load average 100–130) throughout, so every
+number below is a ratio between two configurations measured back to back.
+Probe: `probes/pmap_scaling/pmap_scaling.march`, one `pmap_n` over 64 tasks,
+interchangeable bodies. Runtime built with `-DMARCH_NUM_SCHEDULERS=16`, because
+the stock runtime silently caps at 4 (GAPS.md G71).
+
+| body | 1 thread | 14 threads | speedup |
+|---|---|---|---|
+| A pure arithmetic | 1 597 ms | 140 ms | **11.8x** |
+| D shared `NativeU8Arr`, read directly | 476 ms | 95 ms | **5.8x** |
+| E private `Array.PVec` | 134 603 ms | 39 482 ms | 3.4x |
+| C cons-cell allocation | 63 ms | 185 ms | **0.34x** |
+| B shared `Array.PVec` | 108 401 ms | 96 577 ms | 1.12x |
+| F shared array behind a one-field wrapper | 2 761 ms | 11 188 ms | **0.25x** |
+
+D against F is the load-bearing comparison: same array, same sharing, same
+number of reads, and the only difference is a `match` that projects the array
+out of a wrapper. B against E is the same story with the sharing varied instead
+of the projection.
+
+Removing the global allocation counter (GAPS.md G72) turns C from 0.34x into
+3.4x and makes its 14-thread case 11.6x faster.
+
+Whole-world meshing, same machine, both changes where noted:
+
+| | 1 | 4 | 8 | 14 |
+|---|---|---|---|---|
+| stock (cap 4: 8 and 14 are really 4) | 628 | 390 | 392 | 393 |
+| cap raised to 16 | 620 | 390 | 408 | 434 |
+| cap 16 + no global alloc counter | 618 | 335 | 302 | **297** |
+
+Raising the cap alone does nothing for the mesher, because its ceiling is G73,
+not the thread count. The remaining gap to the ~44 ms a perfect 14x would give
+is the refcount traffic on the shared chunks.
