@@ -1,0 +1,69 @@
+-- The HUD glyph table. A duplicated or empty mask is invisible in a screenshot
+-- — two hotbar slots rendered identically for a whole session in M6 because of
+-- exactly that — so the table is checked here rather than by looking at it.
+mod CubeForge.Test.Font do
+
+  needs IO.Spawn
+  needs IO.Console
+  import Test
+  alias CubeForge.Hud as Hud
+  alias CubeForge.F32Buf as B
+
+  -- ASCII code of the [i]th printable glyph we claim to support: 0-9 then A-Z.
+  pfn code_of(i : Int) : Int do if i < 10 do 48 + i else 65 + (i - 10) end end
+  fn glyph_count() : Int do 36 end
+
+  pfn all_nonzero(i : Int) : Bool do
+    if i >= glyph_count() do true
+    else if Hud.glyph_for(code_of(i)) == 0 do false
+    else all_nonzero(i + 1) end end
+  end
+
+  -- Every mask differs from every other. O(n^2) over 36 entries.
+  pfn distinct_from(i : Int, j : Int) : Bool do
+    if j >= glyph_count() do true
+    else if Hud.glyph_for(code_of(i)) == Hud.glyph_for(code_of(j)) do false
+    else distinct_from(i, j + 1) end end
+  end
+  pfn all_distinct(i : Int) : Bool do
+    if i >= glyph_count() do true
+    else if distinct_from(i, i + 1) do all_distinct(i + 1)
+    else false end end
+  end
+
+  -- Number of floats emit_text appends for [t].
+  pfn text_floats(t : String) : Int do
+    B.len(Hud.emit_text(B.new(4096), t, -0.5, 0.5, 0.01, 0.02))
+  end
+
+  describe "glyph table" do
+    test "every digit and letter has a mask" do
+      Test.assert_true(all_nonzero(0), "no glyph is blank")
+    end
+    test "no two glyphs render identically" do
+      Test.assert_true(all_distinct(0), "all 36 masks are distinct")
+    end
+    test "unsupported characters are blank, not garbage" do
+      Test.assert_eq_int(Hud.glyph_for(32), 0, "space")
+      Test.assert_eq_int(Hud.glyph_for(63), 0, "question mark")
+      Test.assert_eq_int(Hud.glyph_for(97), 0, "lowercase a")
+    end
+  end
+
+  describe "emit_text" do
+    test "a word emits exactly its letters' pixels" do
+      Test.assert_eq_int(text_floats("AB"), text_floats("A") + text_floats("B"), "AB = A + B")
+    end
+    test "a space advances without emitting" do
+      Test.assert_eq_int(text_floats("A A"), 2 * text_floats("A"), "the space adds no geometry")
+    end
+    test "an empty string emits nothing" do
+      Test.assert_eq_int(text_floats(""), 0, "no vertices")
+    end
+    test "width counts every character, blank or not" do
+      Test.assert_true(Hud.text_width("NEW GAME", 0.01) > Hud.text_width("QUIT", 0.01), "longer label is wider")
+      Test.assert_true(Math.abs(Hud.text_width("AB", 0.01) -. 0.08) < 0.0001, "two glyphs at 4px advance")
+    end
+  end
+
+end

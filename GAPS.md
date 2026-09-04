@@ -1269,3 +1269,58 @@ workers are reading at the same moment.
 preemption quantum from 1 ms to 50 ms changed nothing (390 → 360 ms at 4
 threads), so the `sigprocmask`/`_sigtramp` traffic in the profile is
 `swapcontext`'s signal-mask save/restore, not the preemption daemon.
+
+---
+
+## M7 notes — the escape menu
+
+### G74. A `test_setup` block silently deletes every test in the file
+`forge test` accepts
+
+```march
+mod CubeForge.Test.Font do
+  test_setup do () end
+  describe "glyph table" do
+    test "every digit and letter has a mask" do … end
+  end
+end
+```
+
+without an error, a warning, or any other output — and then runs **none of the
+tests in that module**. Removing the one line takes the suite from 153 tests to
+160; putting it back takes it from 160 to 153. Nothing in the run says the file
+was skipped.
+
+This is the second time this project has reported the wrong test count. The
+first was stale build artifacts; this one is worse, because the file compiles,
+`forge check` passes, `forge lint --strict` passes, and the only symptom is a
+number that a human has to have memorised.
+- **Would need:** either honour `test_setup` (whatever its intended semantics)
+  or reject it. A file that defines tests and runs none of them should be an
+  error. Failing that, `forge test` should print the modules it collected, so a
+  vanished file is visible.
+
+### G75. There is no `Actor.stop`, so an actor is a permanent allocation
+`Actor` exposes `cast`, `call`, `reply`, `register`, `send_after` and
+`cancel_timer`, but nothing that stops an actor. `forge search -d "stop actor"`
+finds nothing.
+
+A cube_forge session runs 64 water actors and one weather actor. The obvious
+implementation of "new game" — build a new world and spawn its actors — would
+therefore leak the previous 65 on every restart, with no way in the language to
+reclaim them.
+
+The feature is written the other way round instead: the pool is created once, in
+`main`, and every session reseeds the existing actors with `Water.send_load` and
+`Weather.send_seed`. That happens to be the better design here (it avoids 65
+spawns per restart), but it is not a design that was chosen freely — a program
+whose actors genuinely have per-session lifetimes has no answer at all.
+- **Would need:** `Actor.stop(pid)` (and a defined semantics for messages already
+  in the mailbox), or a supervisor-scoped lifetime that ends when the scope does.
+
+### Not a March gap: the VBO slot collision
+The menu first drew nothing because it uploaded to slot 250, which
+`Marker.slot()` already owns, and drew it through the textured path. Both were
+my own bugs. `lib/cube_forge.march` now carries the full slot map as a comment
+next to `menu_slot()`, since the shim's slots are one flat array and a
+double-booked slot fails silently.

@@ -863,3 +863,67 @@ Whole-world meshing, same machine, both changes where noted:
 Raising the cap alone does nothing for the mesher, because its ceiling is G73,
 not the thread count. The remaining gap to the ~44 ms a perfect 14x would give
 is the refcount traffic on the shared chunks.
+
+## M7 — escape menu (2026-09-04)
+
+`Esc` opens a menu over the dimmed world with NEW GAME, an editable SEED field
+and QUIT. The window, GL context, texture, camera projections and the actor pool
+outlive a session; a new game rebuilds the world, the meshes and the player.
+
+### Verification
+
+**The restarted world is the world that seed makes.** `CF_AUTOMENU=<frame>`
+opens the menu, types `424242` into the seed field and starts a new game five
+frames later:
+
+```
+seed 7 (CF_SEED)
+  mesh all (greedy sections): 450 ms wall, 231534 vertices (27192 water)
+new game, seed 424242
+ran 26 frames …
+seed 424242 (set CF_SEED to reproduce)
+  mesh all (greedy sections): 488 ms wall, 252108 vertices (31044 water)
+```
+
+and a *fresh process* at `CF_SEED=424242` produces **252108 vertices (31044
+water)** — identical. That is the property that breaks if the session rebuild
+misses a piece of state.
+
+**The text says what it claims to say.** Rather than looking at the screenshot,
+the dumped frame is sampled at the centre of every 3x5 glyph cell the renderer
+should have filled, and the resulting bitmasks are decoded back through the font
+table:
+
+```
+item 0: rendered = 'NEW GAME'   expected 'NEW GAME'   OK
+item 1: rendered = 'QUIT'       expected 'QUIT'       OK
+seed label: rendered = 'SEED'
+seed field reads: 424242
+```
+
+The panel is opaque (80 sampled interior pixels take three adjacent shades of
+one colour) and the rest of the screen dims (242,191,140 → 109,86,63 above the
+panel).
+
+### Two bugs this shook out, both silent
+
+- **A double-booked VBO slot.** The menu uploaded to 250, which the map-view
+  player marker already owns, and drew it through the textured path instead of
+  the colour path. Nothing errored: `glGetError` stayed 0 and the debug trace
+  showed the upload and the draw of all 1272 vertices. The slot map is now a
+  comment in the source, because the shim's slots are one flat array.
+- **A dump overwritten by the next session.** `CF_DUMP_FRAME` fires once per
+  *session*, so a scripted restart dumped twice to the same path and every pixel
+  measurement was really being taken on session two, with the menu closed. The
+  verification run now ends before the restart fires. Two rounds of pixel
+  analysis were wasted on the wrong image.
+
+### A regression this exposed, which is not the menu's
+
+The frame loop is allocating **173 live objects per frame**, not the 1 recorded
+above. Measured at `git stash` on the commit before this work and after it:
+identical, 17349 objects over frames 100-200 in both, and unchanged by
+`CF_SUN`, `CF_WEATHER` or whether the menu is open. So it predates the menu and
+arrived with one of biomes, weather or vegetation. The "1 per frame" figures
+earlier in this file are stale for the current build; the number is not
+re-measured per feature, which is how it went unnoticed. Not chased here.

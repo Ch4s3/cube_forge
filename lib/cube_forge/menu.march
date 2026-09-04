@@ -1,0 +1,82 @@
+-- The escape menu: NEW GAME, an editable seed, and QUIT.
+--
+-- State and geometry only — no I/O and no world access, so the whole thing is
+-- unit-testable. The frame loop reads the state, `Hud` draws it, and both take
+-- their coordinates from the accessors here so that the drawn boxes and the
+-- hit-tested boxes cannot drift apart.
+mod CubeForge.Menu do
+
+  -- Menu(open?, seed under edit, item the cursor is over)
+  type Menu = Menu(Bool, Int, Int)
+
+  doc "The world generator masks its seed to 30 bits; the field will not exceed that."
+  fn max_seed() : Int do 1073741823 end
+
+  fn item_new_game() : Int do 0 end
+  fn item_quit() : Int do 1 end
+  fn items() : Int do 2 end
+
+  fn new(seed : Int) : Menu do Menu(false, seed, -1) end
+
+  fn is_open(m : Menu) : Bool do match m do Menu(o, _, _) -> o end end
+  fn seed(m : Menu) : Int do match m do Menu(_, s, _) -> s end end
+  fn focused(m : Menu) : Int do match m do Menu(_, _, f) -> f end end
+
+  fn set_open(m : Menu, o : Bool) : Menu do match m do Menu(_, s, f) -> Menu(o, s, f) end end
+  fn set_focus(m : Menu, f : Int) : Menu do match m do Menu(o, s, _) -> Menu(o, s, f) end end
+  fn set_seed(m : Menu, s : Int) : Menu do match m do Menu(o, _, f) -> Menu(o, s, f) end end
+
+  doc """
+  Append a decimal digit to the seed. A digit that would push the value past
+  [max_seed] is ignored rather than wrapping or truncating, so the field can
+  never show a number the generator would not accept.
+  """
+  fn append_digit(m : Menu, d : Int) : Menu do
+    if d < 0 || d > 9 do m
+    else
+      let next = seed(m) * 10 + d
+      if next > max_seed() do m else set_seed(m, next) end
+    end
+  end
+
+  doc "Remove the last digit. Deleting the only digit leaves 0, not an empty field."
+  fn backspace(m : Menu) : Menu do set_seed(m, seed(m) / 10) end
+
+  doc "Replace the seed with a fresh one derived from [entropy] (a clock reading)."
+  fn reroll(m : Menu, entropy : Int) : Menu do
+    set_seed(m, int_and(entropy * 2654435761 + 40503, max_seed()))
+  end
+
+  -- ── Geometry (NDC) ────────────────────────────────────────────────────────
+  -- One source for both drawing and hit-testing.
+
+  fn panel_x0() : Float do -0.36 end
+  fn panel_x1() : Float do 0.36 end
+  fn panel_y0() : Float do -0.34 end
+  fn panel_y1() : Float do 0.36 end
+
+  fn item_w() : Float do 0.44 end
+  fn item_h() : Float do 0.13 end
+  fn item_x0() : Float do -0.22 end
+  doc "Bottom edge of item [i]; items run downward from the top of the panel."
+  fn item_y0(i : Int) : Float do 0.08 -. int_to_float(i) *. 0.18 end
+
+  doc "The seed field sits below the last item."
+  fn seed_y0() : Float do item_y0(items() - 1) -. 0.19 end
+  fn seed_x0() : Float do item_x0() end
+
+  doc "Which item (x, y) is over, or -1. Coordinates are NDC, y up."
+  fn item_at(x : Float, y : Float) : Int do item_at_go(x, y, 0) end
+  pfn item_at_go(x : Float, y : Float, i : Int) : Int do
+    if i >= items() do -1
+    else if x >= item_x0() && x <= item_x0() +. item_w()
+            && y >= item_y0(i) && y <= item_y0(i) +. item_h() do i
+    else item_at_go(x, y, i + 1) end end
+  end
+
+  doc "The label drawn on item [i]."
+  fn label(i : Int) : String do
+    if i == item_new_game() do "NEW GAME" else "QUIT" end
+  end
+
+end
