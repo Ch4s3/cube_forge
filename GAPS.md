@@ -819,7 +819,7 @@ are freed immediately.
 
 ## Lighting notes (skylight flood-fill)
 
-### G61. G21 rules out a BFS queue over a NativeArray; level-synchronous sweeps are the workaround
+### G63. G21 rules out a BFS queue over a NativeArray; level-synchronous sweeps are the workaround
 - A light BFS must read `la[n]` to decide whether the neighbour is darker and
   then write `la[n]`. G21 makes that a full 4 MB copy **per write**: a probe of
   1M read-then-write iterations on a 4 MB `NativeU8Arr` reached a 229 GB peak
@@ -849,7 +849,7 @@ are freed immediately.
   before the write does not keep the array live). With it, the queue-based BFS
   in the design doc would be directly expressible and strictly faster.
 
-### G62. `World.block_at` in a per-voxel loop is the hidden cost of any voxel sweep
+### G64. `World.block_at` in a per-voxel loop is the hidden cost of any voxel sweep
 - The bounded relight spent **179 ms of its 217 ms in column seeding alone** —
   961 columns of 256 voxels, each voxel calling `World.block_at`, which
   re-derives the chunk coordinates and walks the `Array.PVec` trie every time.
@@ -862,7 +862,7 @@ are freed immediately.
   that walks voxels in bulk. Every future bulk pass (meshing, save/load, chunk
   streaming) should fetch the chunk once and index it directly.
 
-### G63. Two more identifiers that are silently reserved: `by` and `on`
+### G65. Two more identifiers that are silently reserved: `by` and `on`
 - `pfn corner_pack(..., by : Int, bz : Int)` and `let on = st % 2` both produce a
   bare `parse error` pointing at the identifier, with no indication that the name
   is the problem. Renaming to `avy` and `lamp` fixed each immediately.
@@ -876,7 +876,7 @@ are freed immediately.
 - **Would need:** a reserved-word list in the error (``on` is reserved`), and the
   parser naming the construct it rejected.
 
-### G64. `forge check` does not catch an arity/type mismatch across modules
+### G66. `forge check` does not catch an arity/type mismatch across modules
 - Task 7 changed `Mesher.mesh_section_opaque` from 8 parameters to 9, inserting a
   `NativeU8Arr` where `chunk_mesh.march` was still passing an `Int`. `forge check`
   reported **0 errors** on `lib/`; only `forge build` caught it, at the clang stage.

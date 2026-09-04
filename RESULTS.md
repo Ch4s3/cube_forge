@@ -161,12 +161,12 @@ fully; the cost is concentrated at lighting gradients.
 
 Two findings dominated the flood's cost and are written up in GAPS.md:
 
-- **G61** — G21 (a borrowed read before a consuming update turns FBIP into a
+- **G63** — G21 (a borrowed read before a consuming update turns FBIP into a
   full copy) makes a BFS queue over a `NativeU8Arr` impossible: a 1M-iteration
   read-then-write probe reached a 229 GB peak footprint. Propagation is a
   level-synchronous downward sweep instead, where every pass reads one array and
   writes a different one. `cf_u8_blit` and an early-out before the chunk lookup
   took the lighting tests from 49 s to 21 s.
-- **G62** — `World.block_at` per voxel (chunk coords re-derived plus a PVec trie
+- **G64** — `World.block_at` per voxel (chunk coords re-derived plus a PVec trie
   walk, 727 ns each) was 179 ms of the relight's 217 ms. Hoisting the chunk out
   of the column loop cut seeding 15x and the full flood from 1 724 ms to 521 ms.

@@ -16,7 +16,7 @@ Planned, not started. One entry per feature; each gets its own design doc under
 
 - [ ] **Main-thread pinning runtime patch** (GAPS.md G15) — chip spawned, in progress in a separate session.
 - [x] **Greedy meshing + sections + `blit` stdlib candidate** — done 2026-09-03 (`docs/superpowers/specs/2026-09-03-greedy-sections-blit-design.md`): 6x fewer vertices, section remesh 3–5x faster; blit exists as `cf_f32_blit` + `F32Buf.append`.
-- [x] **Lighting** — done 2026-09-03 (`docs/superpowers/specs/2026-09-03-lighting-design.md`, plan `docs/superpowers/plans/2026-09-03-lighting.md`): flood-fill skylight, smooth per-vertex light + AO with quad flip packed into the greedy key, bounded incremental relight, a moving sun and moon on a 30-minute cycle with warm low-angle light and tinted moonlight (`CF_DAY`, `CF_SUN`), camera flashlight (F, `CF_FLASH`). Vertex layout 7 -> 8 floats. GAPS G61/G62.
+- [x] **Lighting** — done 2026-09-03 (`docs/superpowers/specs/2026-09-03-lighting-design.md`, plan `docs/superpowers/plans/2026-09-03-lighting.md`): flood-fill skylight, smooth per-vertex light + AO with quad flip packed into the greedy key, bounded incremental relight, a moving sun and moon on a 30-minute cycle with warm low-angle light and tinted moonlight (`CF_DAY`, `CF_SUN`), camera flashlight (F, `CF_FLASH`). Vertex layout 7 -> 8 floats. GAPS G63/G64.
 - [ ] **Texture atlas via stb_image** — real block textures; needs `Bytes` across FFI fixed first (GAPS.md G8).
 - [ ] **Chunk streaming with actors** — infinite world, chunk lifecycle as actor state, supervision under load.
 - [ ] **Save/load through the CAS** — persistence keyed by BLAKE3 chunk hashes.
