@@ -141,11 +141,34 @@ A full day is 1800 seconds (30 minutes) by default; `CF_DAY` overrides it, which
 is what makes night reachable in a screenshot or a headless run.
 `cf_win_time()` drives the clock; `F` toggles the flashlight.
 
-**The sun has no direction.** `u_sun` is a scalar: it scales every face by the
-same factor, and the directional component stays the fixed `FACE_SHADE[6]` table
-inherited from the pre-lighting mesher. Sunlight therefore changes brightness
-through the day but never angle, and because the skylight flood is seeded
-straight down each column, overhang shadows never move or lengthen either.
+**The sun moves** (added after the first pass shipped). `FACE_SHADE[6]` is gone:
+the directional term is a real `N·L` against `u_sundir`, which rides a great
+circle through the day — overhead at noon, `+x` at dusk, `-x` at dawn, with a
+constant `z` tilt so north and south faces are not lit identically all day.
+`u_moondir` is the opposite end of the same arc, so the moon climbs as the sun
+sets. `sun_level` *is* that arc's height clamped at the horizon, so the level and
+the direction can never disagree about when it is dark.
+
+Two things the first cut got wrong and this fixes:
+
+- **Height is not intensity.** Using `u_sun` as the brightness multiplier faded
+  the whole world as `cos θ` and swallowed golden hour. Intensity now holds at
+  full until the sun is near the horizon (`SET_AT`); the *angle* does the
+  dimming, which is what makes a low sun rake across vertical faces while the
+  ground goes dark.
+- **Overlays cannot be lit.** The HUD, outline and map marker share this program.
+  Forcing them to "full daylight" was enough while light had no direction, but a
+  low sun would still have dimmed them. They now set `u_unlit`, which skips
+  lighting outright and keeps their own vertex shade.
+
+Sunlight warms toward `SUN_WARM` as it nears the horizon and the clear colour
+swings to a warm sky over the same range. **Shadows still do not move** — the
+skylight flood is seeded straight down each column, so an overhang casts the
+same shadow at noon and at dusk. Moving shadows would need a directional flood
+(a 521 ms re-flood per sun step) or shadow maps.
+
+`CF_SUN=<degrees>` pins the sun's arc angle (0 noon, 90 sunset, 180 midnight,
+270 sunrise) for headless verification, the way `CF_AUTOMAP` pins the map view.
 
 ## 5. Verification — `test/light_test.march`
 

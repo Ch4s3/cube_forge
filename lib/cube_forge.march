@@ -512,16 +512,43 @@ mod CubeForge do
     if pos && !neg do 1.0 else if neg && !pos do -1.0 else 0.0 end end
   end
 
-  doc "Sun level 0..1 over a day of [day] seconds (CF_DAY, default 1800 = 30 minutes). Cosine, not sine, so the world starts at noon rather than at midnight; night is the clamped half of the cycle."
-  fn sun_level(t : Float, day : Float) : Float do
-    let phase = Math.cos(t *. 6.283185307 /. day)
+  doc "Sun level 0..1 = the height of the sun's arc, clamped at the horizon. The day starts at noon (cosine, not sine); night is the clamped half of the cycle. A day is CF_DAY seconds, 1800 (30 minutes) by default."
+  fn sun_level_at(a : Float) : Float do
+    let phase = Math.cos(a)
     if phase < 0.0 do 0.0 else phase end
+  end
+
+  doc "Sunlight intensity 0..1. Full while the sun is above roughly 13 degrees, falling to 0 at the horizon. Deliberately NOT the sun's height: a low sun is still bright, it just strikes surfaces at a glancing angle, which the N.L term handles. Mirrors SET_AT in the fragment shader."
+  fn sun_intensity(sun : Float) : Float do
+    if sun >= 0.22 do 1.0 else sun /. 0.22 end
+  end
+
+  doc "How far into dusk the sky is, 0..1: 0 with the sun high, 1 at the horizon."
+  fn dusk_amount(sun : Float) : Float do
+    if sun >= 0.55 do 0.0 else (0.55 -. sun) /. 0.55 end
   end
 
   doc "Moonlight 0..1: full through the night, fading out as the sun climbs. Matches the ramp the fragment shader uses so the sky and the ground agree."
   fn moon_level(sun : Float) : Float do
     if sun >= 0.25 do 0.0 else (0.25 -. sun) /. 0.25 end
   end
+
+  -- The sun rides a great circle: straight up at noon, on the horizon at dawn
+  -- and dusk, below it at night. `sun_level` is exactly this arc's height
+  -- clamped at zero, so the two never disagree about when it is dark.
+  -- The z tilt keeps the arc off a perfectly vertical plane, so north and south
+  -- faces are not lit identically all day.
+  fn sun_arc_angle(t : Float, day : Float) : Float do t *. 6.283185307 /. day end
+
+  doc "The arc angle to use this frame: the clock, or CF_SUN degrees when it is set (>= 0). 0 is noon, 90 sunset, 180 midnight, 270 sunrise."
+  fn arc_angle(t : Float, day : Float, sun_deg : Int) : Float do
+    if sun_deg < 0 do sun_arc_angle(t, day)
+    else int_to_float(sun_deg) *. 0.01745329252 end
+  end
+  doc "Direction to the sun: +x at dusk, -x at dawn, +y at noon."
+  fn sun_dir_x(a : Float) : Float do Math.sin(a) end
+  fn sun_dir_y(a : Float) : Float do Math.cos(a) end
+  fn sun_dir_z() : Float do 0.35 end
 
   -- Gather this frame's input into a value the (Input-cap-free) Player module can consume.
   -- Block selection: keys 1-4; 0 when none is pressed this frame.
@@ -580,13 +607,13 @@ mod CubeForge do
 
   -- Frame loop. `max_frames < 0` means run until the window closes.
   -- Run-time knobs read once, outside the frame loop (an Env read allocates).
-  type Knobs = Knobs(Int, Int, String, Bool, Float, Int, Bool, Int, Int, Int, Float)   -- max_frames, dump_frame, dump_path, autowalk, autospin, autoedit frame (<0 = off), autoswim, autoflow frame (<0 = off), workers, automap frame (<0 = off; forces map view on from this frame, for headless verification), day length in seconds
+  type Knobs = Knobs(Int, Int, String, Bool, Float, Int, Bool, Int, Int, Int, Float, Int)   -- max_frames, dump_frame, dump_path, autowalk, autospin, autoedit frame (<0 = off), autoswim, autoflow frame (<0 = off), workers, automap frame (<0 = off; forces map view on from this frame, for headless verification), day length in seconds, sun angle override in degrees (<0 = follow the clock)
 
   fn frame_loop(f : Frame, k : Knobs, sc, nchunks : Int, proj : NativeFloatArr, map_proj : NativeFloatArr, fps : Fps) : Frame do
     match f do
       Frame(frame, last_t, player, sample, view, vp, map_mode, marker, flash) ->
         match k do
-        Knobs(max_frames, dump_frame, dump_path, autowalk, autospin, autoedit, autoswim, autoflow, workers, automap, day_len) ->
+        Knobs(max_frames, dump_frame, dump_path, autowalk, autospin, autoedit, autoswim, autoflow, workers, automap, day_len, sun_deg) ->
         if Win.should_close() || (max_frames >= 0 && frame >= max_frames) do
           Frame(frame, last_t, player, sample, view, vp, map_mode, marker, flash)
         else
@@ -636,10 +663,24 @@ mod CubeForge do
           -- The map view is a diagnostic overhead view: hold it at full daylight
           -- and out of the flashlight beam, the same way the underwater tint is
           -- suppressed there. Otherwise it would be unreadable at night.
-          let sun = if map_mode1 do 1.0 else sun_level(now, day_len) end
+          let arc = arc_angle(now, day_len, sun_deg)
+          let sun = if map_mode1 do 1.0 else sun_level_at(arc) end
           let moon = if map_mode1 do 0.0 else moon_level(sun) end
           let flash_now = if map_mode1 do false else flash1 end
-          Win.gfx_begin_frame(0.55 *. sun +. 0.030 *. moon, 0.75 *. sun +. 0.045 *. moon, 0.95 *. sun +. 0.110 *. moon)
+          -- The moon rides the opposite side of the same arc, so it climbs as the
+          -- sun sets. In map mode the light is pinned overhead: that view is a
+          -- diagnostic, and a low sun would leave half of it in shadow.
+          let sdx = if map_mode1 do 0.0 else sun_dir_x(arc) end
+          let sdy = if map_mode1 do 1.0 else sun_dir_y(arc) end
+          let sdz = if map_mode1 do 0.0 else sun_dir_z() end
+          -- Sky: day blue swinging toward a warm horizon as the sun sets, scaled
+          -- by the same intensity ramp the ground uses, plus the moon underneath.
+          let inten = sun_intensity(sun)
+          let da = dusk_amount(sun)
+          Win.gfx_begin_frame((0.55 +. 0.40 *. da) *. inten +. 0.030 *. moon,
+                              (0.75 -. 0.38 *. da) *. inten +. 0.045 *. moon,
+                              (0.95 -. 0.70 *. da) *. inten +. 0.110 *. moon)
+          Win.gfx_set_sky(sdx, sdy, sdz, 0.0 -. sdx, 0.0 -. sdy, 0.0 -. sdz)
           Win.gfx_set_light(sun, V.x(eye), V.y(eye), V.z(eye), V.x(look), V.y(look), V.z(look), flash_now)
           Win.gfx_set_view_proj(render_vp)
           draw_chunks(scene_counts(sc1), 0, nchunks)
@@ -663,6 +704,7 @@ mod CubeForge do
               if Win.gfx_dump_bmp(dump_path) == 0 do println("dump failed") else () end
             else () end
             println("player at " ++ V.to_string(Player.position(player1)) ++ " on_ground=" ++ (if Player.on_ground(player1) do "true" else "false" end))
+            println("  sun level " ++ float_to_string(sun) ++ " dir (" ++ float_to_string(sdx) ++ ", " ++ float_to_string(sdy) ++ ", " ++ float_to_string(sdz) ++ ")  moon " ++ float_to_string(moon))
           else () end
           if frame % 60 == 0 && autowalk do
             println("frame " ++ int_to_string(frame) ++ " player at " ++ V.to_string(Player.position(player1)) ++ " on_ground=" ++ (if Player.on_ground(player1) do "true" else "false" end))
@@ -859,7 +901,7 @@ mod CubeForge do
         if Env.get_int("CF_ALLOC_PROBE", 0) == 1 do alloc_probe(world, proj) else () end
         let t4 = Win.time()
         let knobs = Knobs(max_frames, Env.get_int("CF_DUMP_FRAME", 30), Env.get("CF_DUMP", ""), Env.get_int("CF_AUTOWALK", 0) == 1,
-                          int_to_float(Env.get_int("CF_AUTOSPIN", 0)) /. 1000.0 /. Player.mouse_sens(), Env.get_int("CF_AUTOEDIT", -1), autoswim, Env.get_int("CF_AUTOFLOW", -1), workers, Env.get_int("CF_AUTOMAP", -1), int_to_float(Env.get_int("CF_DAY", 1800)))
+                          int_to_float(Env.get_int("CF_AUTOSPIN", 0)) /. 1000.0 /. Player.mouse_sens(), Env.get_int("CF_AUTOEDIT", -1), autoswim, Env.get_int("CF_AUTOFLOW", -1), workers, Env.get_int("CF_AUTOMAP", -1), int_to_float(Env.get_int("CF_DAY", 1800)), Env.get_int("CF_SUN", -1))
         let tw0 = Win.time()
         let pids = Array.from_list(spawn_water(n * n - 1, n, seed, Nil))
         println("spawned " ++ int_to_string(n * n) ++ " water actors in " ++ ms(Win.time() -. tw0) ++ " (loads run asynchronously)")

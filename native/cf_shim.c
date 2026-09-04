@@ -21,6 +21,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <math.h>
 #include <pthread.h>
 
 /* ── NativeArray payload access ──────────────────────────────────────────────
@@ -135,12 +136,14 @@ static const char *VS =
     "out vec2 v_uv; out float v_layer; out float v_shade;\n"
     "out vec3 v_world; out vec3 v_normal;\n"
     "const vec3 NORMALS[6] = vec3[6](vec3(0,1,0), vec3(0,-1,0), vec3(1,0,0), vec3(-1,0,0), vec3(0,0,1), vec3(0,0,-1));\n"
-    "const float FACE_SHADE[6] = float[6](1.0, 0.55, 0.75, 0.75, 0.85, 0.85);\n"
     "void main(){\n"
     "  int f = int(a_face + 0.5);\n"
     "  gl_Position = u_vp * vec4(a_pos,1.0);\n"
     "  v_uv=a_uv; v_layer=a_layer;\n"
-    "  v_shade = a_shade * FACE_SHADE[f];\n"
+    /* v_shade is now skylight x AO only. The per-face directional constant that
+     * used to be folded in here is replaced by a real N.L against a sun that
+     * moves, computed per fragment. */
+    "  v_shade = a_shade;\n"
     "  v_world = a_pos; v_normal = NORMALS[f];\n"
     "}\n";
 static const char *FS =
@@ -153,6 +156,9 @@ static const char *FS =
     "uniform vec3 u_eye;\n"
     "uniform vec3 u_dir;\n"
     "uniform float u_flash;\n"
+    "uniform vec3 u_sundir;\n"
+    "uniform vec3 u_moondir;\n"
+    "uniform int u_unlit;\n"
     "out vec4 o_color;\n"
     /* The beam shape never varies at runtime, only its position, aim and
      * on/off state, so the cone half-angles are constants rather than uniforms. */
@@ -165,17 +171,40 @@ static const char *FS =
     "const vec3  MOON_TINT  = vec3(0.60, 0.72, 1.00);\n"
     "const float MOON_LEVEL = 0.13;\n"
     "const float MOON_UNTIL = 0.25;\n"
+    /* Sunlight reddens as it nears the horizon. SUN_WARM is dawn/dusk, SUN_WHITE
+     * is high noon; u_sun doubles as the sun's height, so it drives the blend. */
+    "const vec3  SUN_WARM  = vec3(1.00, 0.62, 0.35);\n"
+    "const vec3  SUN_WHITE = vec3(1.00, 0.98, 0.94);\n"
+    /* Ambient floor so a face turned away from the sun keeps its shape instead
+     * of going flat black; the up-bias stands in for sky versus ground bounce.
+     * AMB + DIRECT <= 1 keeps a lit top face from clipping at noon. */
+    /* The sun's HEIGHT (u_sun) is not its intensity: it stays bright until it is
+     * nearly down, and it is the angle that makes surfaces dim. Conflating the
+     * two made the whole world fade as cos(theta) and swallowed golden hour. */
+    "const float SET_AT = 0.22;\n"
+    "const float AMB    = 0.30;\n"
+    "const float AMB_UP = 0.08;\n"
+    "const float DIRECT = 0.62;\n"
     "void main(){\n"
     "  vec4 t = (u_use_tex == 1) ? texture(u_tex, vec3(v_uv, v_layer)) : vec4(v_uv, v_layer, 1.0);\n"
     "  float moon = clamp((MOON_UNTIL - u_sun) / MOON_UNTIL, 0.0, 1.0);\n"
-    "  vec3  sky  = vec3(u_sun) + MOON_TINT * (MOON_LEVEL * moon);\n"
+    "  float amb  = AMB + AMB_UP * v_normal.y;\n"
+    "  float ndls = max(dot(v_normal, u_sundir),  0.0);\n"
+    "  float ndlm = max(dot(v_normal, u_moondir), 0.0);\n"
+    "  vec3  sunc = mix(SUN_WARM, SUN_WHITE, smoothstep(0.0, 0.50, u_sun));\n"
+    "  float inten = clamp(u_sun / SET_AT, 0.0, 1.0);\n"
+    "  vec3  sky  = sunc * (inten * (amb + DIRECT * ndls))\n"
+    "             + MOON_TINT * (MOON_LEVEL * moon * (amb + DIRECT * ndlm));\n"
     "  vec3  baked = v_shade * sky;\n"
     "  vec3  L  = u_eye - v_world;\n"
     "  float d2 = dot(L, L);\n"
     "  vec3  Ln = L * inversesqrt(max(d2, 1e-6));\n"
     "  float spot  = smoothstep(COS_OUTER, COS_INNER, dot(-Ln, u_dir));\n"
     "  float flash = u_flash * spot * max(dot(v_normal, Ln), 0.0) / (1.0 + 0.02 * d2);\n"
-    "  o_color = vec4(t.rgb * (baked + vec3(flash)), t.a);\n"
+    "  vec3  world = baked + vec3(flash);\n"
+    /* Overlays (HUD, outline, map marker) share this program but are not part of
+     * the world: they keep their own vertex shade and skip lighting entirely. */
+    "  o_color = vec4(t.rgb * ((u_unlit == 1) ? vec3(v_shade) : world), t.a);\n"
     "}\n";
 
 static GLuint compile(GLenum kind, const char *src) {
@@ -190,6 +219,7 @@ static GLuint compile(GLenum kind, const char *src) {
 static GLuint g_vbo[CF_MAX_MESHES];
 static GLint  g_u_use_tex = -1;
 static GLint  g_u_sun = -1, g_u_eye = -1, g_u_dir = -1, g_u_flash = -1;
+static GLint  g_u_sundir = -1, g_u_moondir = -1, g_u_unlit = -1;
 static GLuint g_tex = 0;
 
 int64_t cf_gfx_init(void) {
@@ -206,6 +236,9 @@ int64_t cf_gfx_init(void) {
     g_u_eye = glGetUniformLocation(g_prog, "u_eye");
     g_u_dir = glGetUniformLocation(g_prog, "u_dir");
     g_u_flash = glGetUniformLocation(g_prog, "u_flash");
+    g_u_sundir = glGetUniformLocation(g_prog, "u_sundir");
+    g_u_moondir = glGetUniformLocation(g_prog, "u_moondir");
+    g_u_unlit = glGetUniformLocation(g_prog, "u_unlit");
     glGenVertexArrays(1, &g_vao);
     glGenBuffers(CF_MAX_MESHES, g_vbo);
     glUseProgram(g_prog);
@@ -300,29 +333,25 @@ void cf_gfx_draw_translucent(int64_t slot, int64_t nverts) {
  * projection and depth state — for a world-space overlay that should obey
  * normal depth testing (e.g. a marker floating above all possible terrain,
  * so it is naturally visible without disabling the depth test). */
+/* The HUD, the block outline and the map marker share the world program but are
+ * not part of the world: they are screen-space or diagnostic overlays. u_unlit
+ * makes the fragment shader skip lighting for them entirely, which is why they
+ * survive a moving sun — forcing full daylight would still have dimmed them
+ * whenever the sun sat near the horizon. */
+static void cf_unlit_begin(void) { glUniform1i(g_u_unlit, 1); }
+static void cf_unlit_end(void)   { glUniform1i(g_u_unlit, 0); }
+
 void cf_gfx_draw_marker(int64_t slot, int64_t nverts) {
     if (slot < 0 || slot >= CF_MAX_MESHES || nverts <= 0) return;
+    cf_unlit_begin();
     glUniform1i(g_u_use_tex, 0);
     cf_gfx_draw(slot, nverts);
     glUniform1i(g_u_use_tex, g_tex ? 1 : 0);
+    cf_unlit_end();
 }
 
 /* Draw a mesh slot as GL_LINES with the current view-projection, untextured,
  * depth test off so a selection outline is never hidden by the face it sits on. */
-/* The HUD and the block outline share the world program but must not be lit:
- * they are screen-space or wireframe overlays. Force full sun and no flashlight
- * around their draws, then restore what the frame asked for. */
-static float g_sun_saved = 1.0f, g_flash_saved = 0.0f;
-static void cf_unlit_begin(void) {
-    glGetUniformfv(g_prog, g_u_sun, &g_sun_saved);
-    glGetUniformfv(g_prog, g_u_flash, &g_flash_saved);
-    glUniform1f(g_u_sun, 1.0f);
-    glUniform1f(g_u_flash, 0.0f);
-}
-static void cf_unlit_end(void) {
-    glUniform1f(g_u_sun, g_sun_saved);
-    glUniform1f(g_u_flash, g_flash_saved);
-}
 
 void cf_gfx_draw_lines(int64_t slot, int64_t nverts) {
     if (slot < 0 || slot >= CF_MAX_MESHES || nverts <= 0) return;
@@ -404,6 +433,17 @@ void cf_gfx_set_light(double sun, double ex, double ey, double ez,
     glUniform3f(g_u_eye, (float)ex, (float)ey, (float)ez);
     glUniform3f(g_u_dir, (float)dx, (float)dy, (float)dz);
     glUniform1f(g_u_flash, flash ? 1.0f : 0.0f);
+}
+
+/* Direction TO the sun and TO the moon, in world space. Normalised here so the
+ * caller can pass a raw arc position. Called once per frame with set_light. */
+void cf_gfx_set_sky(double sx, double sy, double sz, double mx, double my, double mz) {
+    if (!g_prog) return;
+    double sl = sqrt(sx*sx + sy*sy + sz*sz); if (sl < 1e-9) sl = 1.0;
+    double ml = sqrt(mx*mx + my*my + mz*mz); if (ml < 1e-9) ml = 1.0;
+    glUseProgram(g_prog);
+    glUniform3f(g_u_sundir,  (float)(sx/sl), (float)(sy/sl), (float)(sz/sl));
+    glUniform3f(g_u_moondir, (float)(mx/ml), (float)(my/ml), (float)(mz/ml));
 }
 
 /* Debug/verification hook: read back one pixel of the back buffer as 0xRRGGBB.
