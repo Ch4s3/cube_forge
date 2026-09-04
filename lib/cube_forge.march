@@ -448,7 +448,7 @@ mod CubeForge do
       let cx = float_to_int(V.x(Player.position(p))) + 3
       let cz = float_to_int(V.z(Player.position(p))) + k
       let h = Biome.height_of(scene_biome(sc), cx, cz)
-      dig_canal(edit_block(sc, cx, h + 1, cz, Chunk.water()), p, k + 1)
+      dig_canal(edit_block(sc, cx, h + 1, cz, Chunk.id_of_level(7)), p, k + 1)
     end
   end
 
@@ -824,7 +824,7 @@ mod CubeForge do
           -- No breaking or placing while the inventory is open: those clicks are drags.
           let sc0 = if inv_open2 do sc_drag
                     else interact(sc_drag, player1, In.button(In.button_left()) || scripted_hold, In.button_pressed(In.button_right()) || scripted_place || place_water,
-                                  if place_water do Chunk.water() else -1 end, if scripted_place do 1 else if scripted_sel > 0 do scripted_sel else selected_key() end end, dt) end
+                                  if place_water do Chunk.id_of_level(7) else -1 end, if scripted_place do 1 else if scripted_sel > 0 do scripted_sel else selected_key() end end, dt) end
           -- CF_AUTOFLOW: break the source again 600 frames after placing it
           let sc0b = if autoflow >= 0 && frame == autoflow + 600 do break_sources_near(sc0, player1) else sc0 end
           -- CF_AUTOBREAK=<frame>: from that frame, mine straight down one block every 20 frames.

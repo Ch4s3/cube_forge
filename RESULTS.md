@@ -686,9 +686,10 @@ heightmap, which `edit_block` updates in O(1) and `chop` rescans in a box.
   cached at build so it is not 16,384 noise evaluations per tick. A frontier
   sweep would be O(frontier) but the obvious queue is the G69 trap.
 - **Canal, end to end.** `CF_AUTOCANAL=10 CF_BIOME_RATE=20000`: the player's
-  column goes `grassland moist 0.25` -> frame 100 `moist 0.435 wet 1` (the
-  actors have flowed the canal three columns west) -> frame 890 `forest moist
-  1.0`. Map view differs by 724k pixels. `docs/biome-map.png` and
+  column goes `grassland moist 0.25` -> frame 890 `forest moist 0.917`, and the
+  biome map changes along the pond and its reach (83,883 px of an 800x600
+  frame). With the original infinite-source water this test flooded half the
+  map — see "Finite water" below. `docs/biome-map.png`,
   `docs/biome-map-canal.png`.
 - `CF_AUTOFLOW` cannot drive this test: it places through `interact`, which
   needs a raycast hit, and with `CF_NOMOUSE` the crosshair sits on the horizon.
@@ -696,3 +697,24 @@ heightmap, which `edit_block` updates in O(1) and `chop` rescans in a box.
 - Two G68 corollaries found and recorded as **GAPS G69**: arrays wrapped in a
   variant cell copy on every write (10.8 GB for 20 BFS passes), and a discarded
   `set_*` result silently drops the write.
+
+## Finite water — conserved volume above sea level
+
+`docs/superpowers/specs/2026-09-04-finite-water-design.md`. A placed water block
+used to be id 4, an infinite source `process` never re-evaluated, so placing
+water was placing a spring: the biome canal test flooded the eastern half of the
+map. Now ids 5-11 are units that a push rule moves (fall first, then equalise
+across a difference of two); id 4 stays the infinite source — the sea, and
+already the spring; `source_neighbour` keeps pits filling to lake level.
+
+- Nine placed blocks are now a pond beside the player, `docs/finite-water-pond.png`.
+- Conservation is the test: a closed basin holds exactly 7 units across 40
+  ticks; seven units on a plain settle as seven cells of level 1 and the queue
+  empties; two chunks exchanging spills sum to 7 throughout; a stale mirror
+  that would overfill a cell keeps 7 and bounces the rest — kept plus in-flight
+  is exact.
+- The `kind 2` spill was already forwarded end to end by `apply_reply`; the
+  change is two functions, `process` and `accept_spill`, plus a pending-reply
+  slot on `Sim` for the bounce.
+- A single source no longer exceeds the 250-cell tick budget — its rings settle
+  in two ticks — so that test now uses a full 256-cell layer.

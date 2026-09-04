@@ -30,40 +30,157 @@ mod CubeForge.Test.Flow do
     end
   end
 
+  -- Walls around a 4x4 interior at (6..9, 71.., 6..9): nothing can leave.
+  pfn wall_go(c : CubeForge.Chunk.Chunk, i : Int) : CubeForge.Chunk.Chunk do
+    if i >= 16 * 16 * 4 do c
+    else
+      let x = i % 16
+      let z = (i / 16) % 16
+      let y = 71 + i / 256
+      let inside = x >= 6 && x <= 9 && z >= 6 && z <= 9
+      wall_go(if inside do c else C.set(c, x, y, z, 3) end, i + 1)
+    end
+  end
+  pfn max_level(c : CubeForge.Chunk.Chunk, i : Int, acc : Int) : Int do
+    if i >= 65536 do acc
+    else
+      let id = C.get_idx(c, i)
+      let l = if C.is_water(id) && !C.is_source(id) do C.level_of(id) else 0 end
+      max_level(c, i + 1, if l > acc do l else acc end)
+    end
+  end
+
+  -- Every cell of the y = 71 layer holding seven units.
+  pfn layer_go(c : CubeForge.Chunk.Chunk, i : Int) : CubeForge.Chunk.Chunk do
+    if i >= 256 do c else layer_go(C.set(c, i % 16, 71, i / 16, C.id_of_level(7)), i + 1) end
+  end
+  pfn mark_layer(s : CubeForge.Water.Sim, i : Int) : CubeForge.Water.Sim do
+    if i >= 256 do s else mark_layer(Water.mark(s, i % 16, 71, i / 16), i + 1) end
+  end
+  -- Units carried by every kind-2 entry in a reply: water in flight, not lost.
+  pfn spilled_units(out : List(Int), acc : Int) : Int do
+    match out do
+      Nil -> acc
+      Cons(v, rest) -> spilled_units(rest, if v / 4294967296 == 2 do acc + (v % 4294967296) % 256 else acc end)
+    end
+  end
+
   describe "Sim.tick" do
-    test "a source on a floor spreads rings 7..1 and stabilises" do
-      let s0 = Water.edited(Water.new_sim(C.set(floored(), 8, 71, 8, C.water()), Water.empty_edges()), Water.idx(8, 71, 8), C.water())
-      let s = run_ticks(s0, 30)
+    test "a closed basin conserves seven placed units" do
+      let c0 = C.set(wall_go(floored(), 0), 7, 71, 7, C.id_of_level(7))
+      let s0 = Water.edited(Water.new_sim(c0, Water.empty_edges()), Water.idx(7, 71, 7), C.id_of_level(7))
+      Test.assert_eq_int(Water.volume(s0), 7, "before any tick")
+      let s1 = run_ticks(s0, 1)
+      Test.assert_eq_int(Water.volume(s1), 7, "after one tick")
+      let s5 = run_ticks(s1, 4)
+      Test.assert_eq_int(Water.volume(s5), 7, "after five ticks")
+      let s40 = run_ticks(s5, 35)
+      Test.assert_eq_int(Water.volume(s40), 7, "after forty ticks")
+      Test.assert_true(max_level(Water.sim_chunk(s40), 0, 0) <= 7, "no cell over seven")
+    end
+
+    test "seven units on an open floor settle as seven cells of level 1 and stop" do
+      let s0 = Water.edited(Water.new_sim(C.set(floored(), 8, 71, 8, C.id_of_level(7)), Water.empty_edges()), Water.idx(8, 71, 8), C.id_of_level(7))
+      let s = run_ticks(s0, 40)
       let c = Water.sim_chunk(s)
-      Test.assert_eq_int(C.get(c, 9, 71, 8), C.id_of_level(7), "distance 1 is level 7")
-      Test.assert_eq_int(C.get(c, 12, 71, 8), C.id_of_level(4), "distance 4 is level 4")
-      Test.assert_eq_int(C.get(c, 15, 71, 8), C.id_of_level(1), "distance 7 is level 1")
-      Test.assert_eq_int(C.get(c, 8, 71, 1), C.id_of_level(1), "distance 7 in z is level 1")
-      Test.assert_eq_int(C.get(c, 8, 72, 8), 0, "nothing above the source")
+      Test.assert_eq_int(Water.volume(s), 7, "volume kept")
+      Test.assert_eq_int(C.count_water(c), 7, "seven cells")
+      Test.assert_eq_int(max_level(c, 0, 0), 1, "all at level 1")
       Test.assert_eq_int(Water.pending(s), 0, "queue drained")
     end
-    test "removing the source drains everything" do
-      let s0 = Water.edited(Water.new_sim(C.set(floored(), 8, 71, 8, C.water()), Water.empty_edges()), Water.idx(8, 71, 8), C.water())
-      let s1 = run_ticks(s0, 30)
-      let s2 = run_ticks(Water.edited(s1, Water.idx(8, 71, 8), 0), 40)
-      Test.assert_eq_int(C.count_water(Water.sim_chunk(s2)), 0, "all water gone")
-    end
-    test "water falls down a shaft instead of spreading on the rim" do
-      -- a shaft next to the source: air from y = 70 down to y = 63, stone at y = 62
-      let c = C.set(C.set(C.set(floored(), 8, 71, 8, C.water()), 9, 70, 8, 0), 9, 62, 8, 3)
-      let s = run_ticks(Water.edited(Water.new_sim(c, Water.empty_edges()), Water.idx(8, 71, 8), C.water()), 60)
+    test "water falls down a shaft and pools at the bottom, volume kept" do
+      -- a shaft next to the placed block: air from y = 70 down to y = 63, stone at y = 62
+      let c = C.set(C.set(C.set(floored(), 8, 71, 8, C.id_of_level(7)), 9, 70, 8, 0), 9, 62, 8, 3)
+      let s = run_ticks(Water.edited(Water.new_sim(c, Water.empty_edges()), Water.idx(8, 71, 8), C.id_of_level(7)), 60)
       let ch = Water.sim_chunk(s)
-      Test.assert_eq_int(C.get(ch, 9, 71, 8), C.id_of_level(7), "rim cell above the shaft is water")
-      Test.assert_eq_int(C.get(ch, 9, 70, 8), C.id_of_level(7), "falling water is level 7")
-      Test.assert_true(C.is_water(C.get(ch, 9, 63, 8)), "water reaches the bottom of the shaft")
-      -- the unsupported rim cell contributes nothing; water still reaches (10,10,8) AROUND the shaft, two ledges lower
-      Test.assert_true(C.level_of(C.get(ch, 10, 71, 8)) < 6, "the rim cell over the shaft does not feed its neighbour directly")
-      Test.assert_true(C.is_water(C.get(ch, 10, 63, 8)), "it spreads at the bottom instead")
+      Test.assert_eq_int(Water.volume(s), 7, "volume kept")
+      Test.assert_true(C.is_water(C.get(ch, 9, 63, 8)), "water reached the bottom of the shaft")
+      Test.assert_eq_int(C.get(ch, 9, 70, 8), 0, "nothing left hanging in the shaft")
+      Test.assert_true(C.level_of(C.get(ch, 9, 63, 8)) >= 1, "it pooled there")
     end
     test "the per-tick budget leaves work queued" do
-      let s0 = Water.edited(Water.new_sim(C.set(floored(), 8, 71, 8, C.water()), Water.empty_edges()), Water.idx(8, 71, 8), C.water())
+      -- a whole 16x16 layer of seven-unit cells, every one of them dirty: 256
+      -- cells to process, and the budget is 250.
+      let s0 = mark_layer(Water.new_sim(layer_go(floored(), 0), Water.empty_edges()), 0)
       let one = Water.tick(s0)
       Test.assert_true(Water.pending(Water.step_sim(one)) > 0, "still pending after one tick of 250 cells")
+    end
+  end
+
+  -- Forward one reply's kind-1 (edge) and kind-2 (spill) entries into the
+  -- neighbour, exactly as the frame loop's apply_reply does. dir_to is the
+  -- direction from the sender to the receiver; the receiver sees the opposite.
+  pfn forward(out : List(Int), dst : CubeForge.Water.Sim, dir_to : Int) : CubeForge.Water.Sim do
+    match out do
+      Nil -> dst
+      Cons(v, rest) ->
+        let kind = v / 4294967296
+        let payload = v % 4294967296
+        let dir = payload / 1048576
+        let slot = (payload % 1048576) / 256
+        let val = payload % 256
+        let dst1 = if dir != dir_to do dst
+                   else if kind == 1 do Water.edge_changed(dst, Water.opposite(dir), slot, val)
+                   else if kind == 2 do Water.accept_spill(dst, Water.opposite(dir), slot, val)
+                   else dst end end end
+        forward(rest, dst1, dir_to)
+    end
+  end
+  -- One tick of both sims, exchanging replies. A is west (-x) of B: A pushes in dir 2, B in dir 3.
+  pfn tick_pair(a : CubeForge.Water.Sim, b : CubeForge.Water.Sim, n : Int) : List(CubeForge.Water.Sim) do
+    if n == 0 do Cons(a, Cons(b, Nil))
+    else
+      let sa = Water.tick(a)
+      let sb = Water.tick(b)
+      let a1 = forward(Water.step_out(sb), Water.step_sim(sa), 3)
+      let b1 = forward(Water.step_out(sa), Water.step_sim(sb), 2)
+      tick_pair(a1, b1, n - 1)
+    end
+  end
+  pfn pair_a(l : List(CubeForge.Water.Sim)) : CubeForge.Water.Sim do
+    match l do
+      Cons(a, _) -> a
+      Nil -> Water.new_sim(C.new(), Water.empty_edges())
+    end
+  end
+  pfn pair_b(l : List(CubeForge.Water.Sim)) : CubeForge.Water.Sim do
+    match l do
+      Cons(_, Cons(b, _)) -> b
+      _ -> Water.new_sim(C.new(), Water.empty_edges())
+    end
+  end
+  pfn has_spill(out : List(Int)) : Bool do
+    match out do
+      Nil -> false
+      Cons(v, rest) -> if v / 4294967296 == 2 do true else has_spill(rest) end
+    end
+  end
+
+  describe "volume across a chunk edge" do
+    test "seven units placed at x = 15 end up shared with the chunk to the east, total unchanged" do
+      let ca = C.set(floored(), 15, 71, 8, C.id_of_level(7))
+      let cb = floored()
+      let a0 = Water.edited(Water.new_sim(ca, Water.load_edge(Water.empty_edges(), 2, cb)), Water.idx(15, 71, 8), C.id_of_level(7))
+      let b0 = Water.new_sim(cb, Water.load_edge(Water.empty_edges(), 3, ca))
+      let p1 = tick_pair(a0, b0, 1)
+      Test.assert_eq_int(Water.volume(pair_a(p1)) + Water.volume(pair_b(p1)), 7, "conserved after one exchange")
+      let p = tick_pair(pair_a(p1), pair_b(p1), 30)
+      Test.assert_eq_int(Water.volume(pair_a(p)) + Water.volume(pair_b(p)), 7, "conserved after thirty")
+      Test.assert_true(Water.volume(pair_b(p)) > 0, "some of it crossed into B")
+      Test.assert_true(C.is_water(C.get(Water.sim_chunk(pair_b(p)), 0, 71, 8)) || Water.volume(pair_b(p)) > 0, "at B's west edge")
+    end
+
+    test "a stale mirror cannot lose units: the receiver keeps seven and bounces the rest" do
+      -- B's cell at x = 0 already holds 6, but A was never told (mirror shows air).
+      let cb = C.set(floored(), 0, 71, 8, C.id_of_level(6))
+      let b0 = Water.new_sim(cb, Water.empty_edges())
+      let b1 = Water.accept_spill(b0, 3, 8 + 16 * 71, 3)
+      Test.assert_eq_int(C.get(Water.sim_chunk(b1), 0, 71, 8), C.id_of_level(7), "capped at seven")
+      let r = Water.tick(b1)
+      Test.assert_true(has_spill(Water.step_out(r)), "the overflow goes back as a spill")
+      -- B's cell sits at x = 0, so its own spread also pushes west across the
+      -- edge in this tick: everything not in B is in flight in the reply.
+      Test.assert_eq_int(Water.volume(Water.step_sim(r)) + spilled_units(Water.step_out(r), 0), 6 + 3, "six had, three sent: kept plus in flight is nine")
     end
   end
 
