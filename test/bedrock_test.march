@@ -1,0 +1,68 @@
+-- Bedrock: the world floor the player cannot mine through and fall out of.
+mod CubeForge.Test.Bedrock do
+
+  needs IO.Spawn
+  needs IO.Console
+  needs IO.Process
+  needs IO.Clock
+  import Test
+  alias CubeForge.Chunk as C
+  alias CubeForge.Inventory as Inv
+  alias CubeForge.Noise as N
+
+  -- every column of a generated chunk is capped with bedrock at the bottom
+  pfn all_columns_floored(c : CubeForge.Chunk.Chunk, i : Int) : Bool do
+    if i >= 256 do true
+    else
+      let x = i % 16
+      let z = i / 16
+      if C.get(c, x, 0, z) == C.bedrock() && C.get(c, x, C.bedrock_depth() - 1, z) == C.bedrock() do
+        all_columns_floored(c, i + 1)
+      else false end
+    end
+  end
+
+  pfn no_slot_places_it(slot : Int) : Bool do
+    if slot > Inv.slots() do true
+    else if Inv.block_of_slot(slot) == C.bedrock() do false
+    else no_slot_places_it(slot + 1) end end
+  end
+
+  describe "bedrock floor" do
+    test "fills the bottom of every generated column" do
+      Test.assert_true(all_columns_floored(C.generate(0, 0, 5), 0), "generated chunk is floored")
+      Test.assert_true(all_columns_floored(C.generate_scalar(64, 32, 9), 0), "scalar generator too")
+    end
+    test "sits below the terrain, not on top of it" do
+      let c = C.generate(0, 0, 5)
+      Test.assert_eq_int(C.get(c, 8, C.bedrock_depth(), 8), 3, "stone directly above the bedrock")
+      Test.assert_true(N.height(8, 8, 5) > C.bedrock_depth(), "terrain is well above the floor")
+    end
+    test "is solid, so nothing can fall through it" do
+      Test.assert_true(C.is_collidable(C.bedrock()), "bedrock is collidable")
+      Test.assert_true(C.is_solid(C.bedrock()), "bedrock is solid")
+    end
+  end
+
+  describe "the world refuses to break bedrock" do
+    -- the guard the frame loop consults before accumulating break progress
+    test "breakable_at is false on the floor and true on the terrain above it" do
+      let w = CubeForge.World.generate(1, 5, 1)
+      Test.assert_false(CubeForge.World.breakable_at(w, 8, 0, 8), "the floor cannot be broken")
+      Test.assert_false(CubeForge.World.breakable_at(w, 8, C.bedrock_depth() - 1, 8), "nor its top layer")
+      Test.assert_true(CubeForge.World.breakable_at(w, 8, C.bedrock_depth(), 8), "the stone above it can")
+    end
+  end
+
+  describe "bedrock is unbreakable" do
+    test "is the only unbreakable block" do
+      Test.assert_true(C.is_unbreakable(C.bedrock()), "bedrock cannot be broken")
+      Test.assert_false(C.is_unbreakable(3) || C.is_unbreakable(C.granite()) || C.is_unbreakable(C.water()), "everything else can")
+    end
+    test "cannot be collected or placed" do
+      Test.assert_eq_int(Inv.slot_of_block(C.bedrock()), 0, "no hotbar slot, so breaking it would yield nothing")
+      Test.assert_true(no_slot_places_it(1), "no hotbar slot places bedrock")
+    end
+  end
+
+end

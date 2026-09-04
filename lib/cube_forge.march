@@ -447,8 +447,10 @@ mod CubeForge do
         let hit = Ray.cast(world, V.x(e), V.y(e), V.z(e), V.x(d), V.y(d), V.z(d), reach(), Inv.sel(inv0) != 4)
         let outline1 = if Ray.is_hit(hit) do Outline.build(outline, Ray.bx(hit), Ray.by_(hit), Ray.bz(hit)) else F32Buf.clear(outline) end
         if Ray.is_hit(hit) do CubeForge.Ffi.Window.gfx_upload(254, F32Buf.storage(outline1), F32Buf.len(outline1)) else () end
-        -- breaking: hold accumulates on the same target; release or a miss resets
-        let inv1 = if break_held && Ray.is_hit(hit) do Inv.hold(inv0, Ray.bx(hit), Ray.by_(hit), Ray.bz(hit), dt) else Inv.release(inv0) end
+        -- breaking: hold accumulates on the same target; release, a miss, or an
+        -- unbreakable block (bedrock: the world floor) resets, so no progress shows.
+        let can_break = break_held && Ray.is_hit(hit) && World.breakable_at(world, Ray.bx(hit), Ray.by_(hit), Ray.bz(hit))
+        let inv1 = if can_break do Inv.hold(inv0, Ray.bx(hit), Ray.by_(hit), Ray.bz(hit), dt) else Inv.release(inv0) end
         let sc1 = Scene(world, counts, outline1, hit, ui_with_inv(ui0, inv1), pids, flags, meshes)
         if Inv.is_complete(inv1) do
           let id = World.block_at(world, Ray.bx(hit), Ray.by_(hit), Ray.bz(hit))
@@ -968,7 +970,12 @@ mod CubeForge do
         let player = if autoswim && water_col >= 0 do
           println("autoswim: spawning over water column " ++ int_to_string(water_col % 4096) ++ "," ++ int_to_string(water_col / 4096))
           Player.with_pitch(Player.new(int_to_float(water_col % 4096) +. 0.5, 90.0, int_to_float(water_col / 4096) +. 0.5), -1.4)
-        else Player.with_pitch(Player.new(int_to_float(spawn_x) +. 0.5, ground_y, int_to_float(spawn_z) +. 0.5), -0.25) end
+        else
+          -- CF_SPAWN_Y=<y>: start at a chosen height (inspection aid, e.g. to look at the bedrock floor)
+          let forced_y = Env.get_int("CF_SPAWN_Y", -1)
+          let y0 = if forced_y >= 0 do int_to_float(forced_y) else ground_y end
+          Player.with_pitch(Player.new(int_to_float(spawn_x) +. 0.5, y0, int_to_float(spawn_z) +. 0.5), -0.25)
+        end
         if Env.get_int("CF_ALLOC_PROBE", 0) == 1 do alloc_probe(world, proj) else () end
         let t4 = Win.time()
         let knobs = Knobs(max_frames, Env.get_int("CF_DUMP_FRAME", 30), Env.get("CF_DUMP", ""), Env.get_int("CF_AUTOWALK", 0) == 1,

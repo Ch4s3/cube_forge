@@ -14,6 +14,8 @@ Planned, not started. One entry per feature; each gets its own design doc under
 
 - [x] **Layered terrain (ruggedness + ridged mountains), sand/snow/granite, 7-slot hotbar, random seed** — done 2026-09-03 (`docs/superpowers/specs/2026-09-03-terrain-biomes-design.md`).
 
+- [x] **Bedrock floor** — done 2026-09-03: unbreakable, three layers deep, generated in every column.
+
 ## Engine
 
 - [ ] **Main-thread pinning runtime patch** (GAPS.md G15) — chip spawned, in progress in a separate session.

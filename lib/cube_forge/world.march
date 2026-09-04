@@ -67,6 +67,8 @@ mod CubeForge.World do
   fn solid_at(w : World, x : Int, y : Int, z : Int) : Bool do block_at(w, x, y, z) != 0 end
   fn collidable_at(w : World, x : Int, y : Int, z : Int) : Bool do C.is_collidable(block_at(w, x, y, z)) end
   fn water_at(w : World, x : Int, y : Int, z : Int) : Bool do C.is_water(block_at(w, x, y, z)) end
+  doc "False for the bedrock floor, so mining can never break through into the void."
+  fn breakable_at(w : World, x : Int, y : Int, z : Int) : Bool do !C.is_unbreakable(block_at(w, x, y, z)) end
 
   -- Apply a list of packed (idx * 256 + id) cell writes to one chunk: the chunk is
   -- copied once (copy-on-write, it is shared with the old world) and then updated in place.
