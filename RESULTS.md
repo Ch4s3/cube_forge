@@ -644,3 +644,31 @@ subset; a `rm -rf .march/build` shows all 96 on both toolchains. The G60/G62
 cross-check of declared-vs-run counts was itself unreliable, because the grep
 used to count declarations missed indentation variants. Both counts were wrong
 in the same direction, which is why they agreed.
+
+## The inventory's hidden per-frame allocation
+
+The frame loop is meant to hold at one live object per frame, and the inventory
+window quietly doubled it to two. What caused it is worth recording because
+nothing about the code looks like an allocation.
+
+`Inventory.hud_key` hashed 36 slots through `item_at`/`count_at`, and each of
+those destructures the `Inv` variant to reach its array — 73 destructures per
+frame. Benchmarked on its own, that is free: 5 live objects per 100 iterations.
+In the frame loop it cost one object per frame, because there the `Inv` is
+reached through `Scene -> Ui -> Inv` and is shared rather than uniquely owned,
+and destructuring a shared variant copies (GAPS.md **G68**).
+
+Matching once and walking the raw cell array restored 1 per frame:
+
+| | live objects per frame |
+|---|---|
+| before the inventory window | 1 |
+| with `hud_key` calling accessors per slot | **2** |
+| with the destructure hoisted out | 1 |
+| with the window open every frame | 1 |
+
+The measurement that found it was the whole-frame live-object count the game
+prints on every run. A microbenchmark of `hud_key` says it is free, the
+definition looks like a field read, and the call site looks like a hash. This is
+the third time in this project that a per-frame allocation was only visible from
+the outside, and the argument for keeping that counter in the default output.

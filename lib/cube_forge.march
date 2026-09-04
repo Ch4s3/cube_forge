@@ -762,8 +762,11 @@ mod CubeForge do
           let dt = if now -. last_t > 0.1 do 0.1 else now -. last_t end
           -- Cursor in NDC. The shim hands back framebuffer pixels, so the only
           -- conversion here is pixels to NDC, with y flipped (screen y grows down).
-          let ndc_x = 2.0 *. In.mouse_x() /. int_to_float(Win.fb_width()) -. 1.0
-          let ndc_y = 1.0 -. 2.0 *. In.mouse_y() /. int_to_float(Win.fb_height())
+          -- Read only while the window is open: each of these extern calls returns
+          -- a Float, which costs an allocation, and the frame loop is meant to hold
+          -- at one live object per frame.
+          let ndc_x = if inv_open2 do 2.0 *. In.mouse_x() /. int_to_float(Win.fb_width()) -. 1.0 else 0.0 end
+          let ndc_y = if inv_open2 do 1.0 -. 2.0 *. In.mouse_y() /. int_to_float(Win.fb_height()) else 0.0 end
           -- Press lifts a non-empty slot onto the cursor; release drops it on
           -- whatever slot is under the cursor, or returns it home on a miss.
           let hovered = if inv_open2 do Hud.slot_at(ndc_x, ndc_y, true) else -1 end
@@ -979,6 +982,19 @@ mod CubeForge do
   pfn repeat_fyp(i : Int, acc : Float) : Float do
     if i == 0 do acc else repeat_fyp(i - 1, acc +. Q.w(Q.from_yaw_pitch(0.3, 0.2))) end
   end
+  pfn repeat_hud_key(i : Int, inv : CubeForge.Inventory.Inv, acc : Int) : Int do
+    if i == 0 do acc else repeat_hud_key(i - 1, inv, acc + Inv.hud_key(inv)) end
+  end
+  pfn repeat_item_at(i : Int, inv : CubeForge.Inventory.Inv, acc : Int) : Int do
+    if i == 0 do acc else repeat_item_at(i - 1, inv, acc + Inv.item_at(inv, i % 36)) end
+  end
+  pfn repeat_slot_at(i : Int, acc : Int) : Int do
+    if i == 0 do acc else repeat_slot_at(i - 1, acc + Hud.slot_at(0.1, -0.9, true)) end
+  end
+  pfn repeat_key_pressed(i : Int, acc : Int) : Int do
+    if i == 0 do acc else repeat_key_pressed(i - 1, acc + (if In.key_pressed(In.key_i()) do 1 else 0 end)) end
+  end
+
   pfn alloc_probe(world : CubeForge.World.World, proj : NativeFloatArr) : Unit do
     println("allocation bisect (net live objects; >0 means a leak):")
     measure("extern Float returns (time, mouse_dx)", fn _ -> repeat_time(100, 0.0))
@@ -993,6 +1009,10 @@ mod CubeForge do
     measure("mul_into_f32 only", fn _ -> NativeArray.get_f32(repeat_mul_into(proj, NativeArray.make_float(16, 0.0), NativeArray.make_f32(16, 0.0), 100), 0))
     measure("Player.eye only", fn _ -> repeat_eye(Player.new(8.0, 70.0, 8.0), 100, 0.0))
     measure("Quat.from_yaw_pitch only", fn _ -> repeat_fyp(100, 0.0))
+    measure("Inv.hud_key", fn _ -> repeat_hud_key(100, Inv.harvest(Inv.new(), 3), 0))
+    measure("Inv.item_at", fn _ -> repeat_item_at(100, Inv.harvest(Inv.new(), 3), 0))
+    measure("Hud.slot_at", fn _ -> repeat_slot_at(100, 0))
+    measure("In.key_pressed", fn _ -> repeat_key_pressed(100, 0))
     measure("view_proj (in place)", fn _ -> NativeArray.get_f32(repeat_view_inplace(proj, Player.new(8.0, 70.0, 8.0), NativeArray.make_float(16, 0.0), NativeArray.make_f32(16, 0.0), 100), 0))
   end
 

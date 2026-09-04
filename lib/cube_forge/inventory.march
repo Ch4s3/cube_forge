@@ -180,15 +180,24 @@ mod CubeForge.Inventory do
 
   -- ── HUD change detection ────────────────────────────────────────────────────
 
-  pfn key_go(i : Inv, s : Int, acc : Int) : Int do
-    if s >= slots() do acc
-    else key_go(i, s + 1, acc * 31 + item_at(i, s) * 1009 + count_at(i, s))
+  -- Walks the raw cell array rather than calling item_at/count_at, which would
+  -- destructure the Inv variant twice per slot: 73 destructures a frame. That is
+  -- free when the Inv is uniquely owned and an allocation each when it is shared
+  -- inside the Scene, which is exactly where the HUD reads it from — it cost the
+  -- frame loop a second live object per frame (GAPS.md G28/G29).
+  --
+  -- Kept modular so the running hash cannot outgrow a machine integer either.
+  pfn key_go(a : NativeIntArr, s : Int, acc : Int) : Int do
+    if s >= 2 * slots() do acc
+    else key_go(a, s + 1, (acc * 31 + NativeArray.get_int(a, s)) % 1000003)
     end
   end
 
   doc "A small integer that changes whenever the HUD needs a rebuild."
   fn hud_key(i : Inv) : Int do
-    key_go(i, 0, 0) * 1000 + sel(i) * 20 + float_to_int(progress(i) *. 16.0)
+    match i do
+      Inv(a, sel, p, _, _, _) -> key_go(a, 0, 0) * 1000 + sel * 20 + float_to_int(p *. 16.0)
+    end
   end
 
 end

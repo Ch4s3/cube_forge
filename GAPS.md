@@ -974,3 +974,38 @@ are freed immediately.
 - **Would need:** either uniqueness the optimiser can see through a variant field,
   or a mutable-array escape hatch (a linear/borrowed `NativeArray` write) for the
   case where the array demonstrably has one owner.
+
+### G68. Reading a field of a *shared* variant allocates, so a read-only accessor can be a hidden per-frame allocation
+- `Inventory.hud_key` walked 36 slots through two accessors, each of which is a
+  one-line field read:
+
+  ```march
+  fn cells(i : Inv) : NativeIntArr do match i do Inv(a, _, _, _, _, _) -> a end end
+  fn item_at(i : Inv, s : Int) : Int do NativeArray.get_int(cells(i), 2 * s) end
+  ```
+
+  73 destructures a frame. Measured in isolation — an `Inv` built locally and
+  hashed 100 times — that costs **5 live objects per 100 iterations**, i.e.
+  nothing. Called from the frame loop, where the same `Inv` is reached through
+  `Scene -> Ui -> Inv` and is therefore shared, it cost **one extra live object
+  every frame**, doubling the frame loop's allocation from 1 to 2.
+- The difference is ownership, not the code: destructuring a uniquely-owned
+  variant is free and destructuring a shared one is not. Nothing at the call site
+  says which case you are in, and the accessor that costs nothing in a test
+  costs an allocation in the loop that matters.
+- Hoisting the destructure out — matching once and walking the raw array —
+  restored 1 per frame:
+
+  ```march
+  fn hud_key(i : Inv) : Int do
+    match i do Inv(a, sel, p, _, _, _) -> key_go(a, 0, 0) * 1000 + ... end
+  end
+  ```
+- Why this is worth writing down rather than filing as a variant of G28: the
+  allocation is invisible at the definition, invisible at the call site, and
+  invisible to a microbenchmark of the same function. The only thing that found
+  it was a whole-frame live-object count, and the only reason it was noticed at
+  all is that the project prints that count every run.
+- **Would need:** either field reads on shared variants that do not allocate, or
+  a way to see at the call site that an accessor will copy. A lint for "accessor
+  called in a loop over a value the function does not own" would catch the shape.
