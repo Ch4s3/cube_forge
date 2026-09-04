@@ -164,6 +164,12 @@ Decay is the harder half: a tree is a 3D structure spanning several columns, not
 a single column, so removal needs the tree's extent rather than just its base.
 It lands last (§9) and may be reduced to leaves-only if the cost is bad.
 
+*As built:* felling removes exactly the blocks `Trees.block_of_tree` says the
+tree owns, given its trunk height (measured) and species (from the log id) —
+not a leaf search. Growth plants only at a cell's canonical trunk column.
+Bushes (grassland) are not implemented, so grassland's generated trees are
+felled.
+
 ## 7. Eight biomes, three new blocks
 
 `dirt(20)`, `gravel(21)`, `clay(22)`, each a procedural generator in

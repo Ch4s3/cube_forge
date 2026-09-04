@@ -1,0 +1,79 @@
+-- Vegetation: growth is spaced and idempotent; decay finds the trunk.
+mod CubeForge.Test.Veg do
+
+  needs IO.Spawn
+  import Test
+  alias CubeForge.Veg as Veg
+  alias CubeForge.Biome as Biome
+  alias CubeForge.Chunk as C
+
+  pfn flat_cells(c : CubeForge.Chunk.Chunk, i : Int, h : Int) : CubeForge.Chunk.Chunk do
+    if i >= 256 * h do c else flat_cells(C.set(c, i % 16, i / 256, (i / 16) % 16, 3), i + 1, h) end
+  end
+  pfn flat_chunks(i : Int, h : Int, acc : List(CubeForge.Chunk.Chunk)) : List(CubeForge.Chunk.Chunk) do
+    if i < 0 do acc else flat_chunks(i - 1, h, Cons(flat_cells(C.new(), 0, h), acc)) end
+  end
+  pfn flat_world(h : Int) : CubeForge.World.World do
+    CubeForge.World.World(Array.from_list(flat_chunks(63, h, Nil)), CubeForge.Light.new(), CubeForge.Light.new(), 8)
+  end
+  -- top the first chunk with grass so trees have their palette block under them
+  pfn grass_top16(w : CubeForge.World.World, i : Int, h : Int) : CubeForge.World.World do
+    if i >= 256 do w else grass_top16(CubeForge.World.set_block(w, i % 16, h - 1, i / 16, 1), i + 1, h) end
+  end
+  pfn all_canonical(cols : List(Int), seed : Int) : Bool do
+    match cols do
+      Nil -> true
+      Cons(e, rest) ->
+        let ci = Veg.column_of(e)
+        let x = ci % 128
+        let z = ci / 128
+        if CubeForge.Trees.cell_trunk(x / 8, z / 8, seed) == x + 4096 * z do all_canonical(rest, seed) else false end
+    end
+  end
+  pfn first_grow(cols : List(Int)) : Int do
+    match cols do
+      Nil -> 0 - 1
+      Cons(e, rest) -> if Veg.is_decay(e) do first_grow(rest) else Veg.column_of(e) end
+    end
+  end
+
+  describe "Veg.density" do
+    test "only forest, taiga and wetland hold trees; forest matches generation" do
+      Test.assert_true(Veg.wants_trees(Biome.b_forest()) && Veg.wants_trees(Biome.b_taiga()) && Veg.wants_trees(Biome.b_wetland()), "the three")
+      Test.assert_true(!Veg.wants_trees(Biome.b_desert()) && !Veg.wants_trees(Biome.b_tundra()) && !Veg.wants_trees(Biome.b_grassland()), "not the others")
+      Test.assert_true(Math.abs(Veg.density(Biome.b_forest()) -. 0.45) < 0.001, "forest 0.45")
+    end
+  end
+
+  describe "Veg.candidates" do
+    test "growth picks are canonical trunk columns, and a planted tree is not picked again" do
+      let w = grass_top16(flat_world(70), 0, 70)
+      let f = Biome.build(w, 7)
+      let picks = Veg.candidates(f, w, 7, 0, 256, 16)
+      Test.assert_true(all_canonical(picks, 7), "every pick is its cell's trunk column")
+      let g = first_grow(picks)
+      if g < 0 do Test.assert_true(true, "no forest in this corner for seed 7; nothing to plant")
+      else
+        let x = g % 128
+        let z = g / 128
+        let w2 = Veg.plant(w, x, z, 69, 5, false)
+        Test.assert_true(Veg.is_log(CubeForge.World.block_at(w2, x, 70, z)), "a log stands on the ground")
+        let f2 = Biome.rescan_box(f, w2, x, z, 5)
+        Test.assert_true(!Veg.can_grow(f2, w2, 7, x, z), "not a growth candidate any more")
+        Test.assert_eq_int(Veg.trunk_base(w2, x, z, Biome.height_of(f2, x, z)), 69, "trunk_base finds the ground under the tree")
+      end
+    end
+
+    test "felling removes the logs and the leaves" do
+      let w = grass_top16(flat_world(70), 0, 70)
+      let w2 = Veg.plant(w, 8, 8, 69, 5, false)
+      Test.assert_true(C.count_water(CubeForge.World.chunk_at(w2, 0, 0)) == 0, "sanity: no water")
+      let w3 = Veg.fell(w2, 8, 8, 69)
+      Test.assert_eq_int(CubeForge.World.block_at(w3, 8, 70, 8), 0, "trunk gone")
+      Test.assert_eq_int(CubeForge.World.block_at(w3, 8, 74, 8), 0, "top of trunk gone")
+      Test.assert_eq_int(CubeForge.World.block_at(w3, 9, 73, 8), 0, "a leaf beside the crown gone")
+      Test.assert_eq_int(CubeForge.World.block_at(w3, 8, 69, 8), 1, "the grass it stood on stays")
+    end
+  end
+
+end

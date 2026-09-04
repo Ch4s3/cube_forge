@@ -354,4 +354,10 @@ mod CubeForge.Biome do
     migrations_go(f, w, n, (tick * scan) % (n * n), scan, budget, Nil)
   end
 
+
+  doc "The column's water flag."
+  fn is_wet(f : Field, wx : Int, wz : Int) : Bool do
+    match f do Field(_, ws, _, _, _, _, _) -> NativeArray.get_u8(ws, wx + 128 * wz) == 1 end
+  end
+
 end

@@ -747,3 +747,29 @@ columns 15 ms**, pixel-identical output. `docs/biome-retexture.png` is a fresh
 world after 900 frames — snow on the cold lowland, clay ringing the lake,
 gravel above the treeline; `docs/biome-retexture-canal.png` shows clay forming
 around the pond.
+
+## Biomes — phase 4, vegetation grows and decays
+
+Trees stay a pure function of the seed; ongoing change goes through `Veg`. A
+column grows a tree only at its 8-block cell's canonical trunk column and only
+when the cell's density draw is under its biome's density (forest 0.45 as at
+generation, taiga 0.25 pines, wetland 0.15), so growth is spaced and a column
+is a candidate at most once. A tree is felled where its biome holds no trees.
+`CF_VEG_BUDGET` (default 1) trees per tick.
+
+- **Felling cost 0.9-2.6 s per tree at first.** `World.decay_leaves` searches a
+  (2r+1)^3 box for a log around every leaf in a (2r+1)^3 box — up to five
+  million reads per tree. A tree of known trunk and species is ~730 predicate
+  checks against `Trees.block_of_tree`, so `Veg.fell` removes exactly its own
+  blocks: **~40 ms per tree** including relight and remesh.
+- **Stale sections.** The first batched version relit with `relight_at` and
+  remeshed only the tree's box. A relight changes baked light in sections the
+  box never touches, and a section whose light moved but whose mesh was not
+  rebuilt renders stale — whole-frame differences between remesh strategies.
+  `relight_marked` reports which sections it changed; those join the geometry
+  marks, and the result is pixel-identical to a superset 3x3-chunk remesh.
+- **Grassland is "bushes only", so its trees are felled.** Generation plants on
+  every flat grass column at 0.45; the biome table keeps trees only in forest,
+  taiga and wetland. On a fresh world the temperate dry plain loses its trees
+  over the first minutes while forest near the water keeps them —
+  `docs/biome-vegetation.png`. Bushes are not implemented yet.

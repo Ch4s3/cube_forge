@@ -32,6 +32,7 @@ mod CubeForge do
   alias CubeForge.Precip as Precip
   alias CubeForge.Weather as Weather
   alias CubeForge.Biome as Biome
+  alias CubeForge.Veg as Veg
 
   fn ms(seconds : Float) : String do float_to_string(seconds *. 1000.0) ++ "ms" end
 
@@ -441,6 +442,82 @@ mod CubeForge do
   end
 
   -- Scripted: remove every source block within 3 cells of the player's feet (the one CF_AUTOFLOW placed).
+  -- Grow or fell every tree in the batch, then remesh ONCE. Each tree: its
+  -- blocks, a relight at the trunk's middle (reach 15 covers any tree), the
+  -- occupancy texture for its box, and section marks for exactly the sections
+  -- its 9x9 box touches. remesh_region's fixed 3x3 chunks per tree was the
+  -- cost -- two trees at ~60 ms each -- when a tree touches one or two.
+  pfn veg_go(w : CubeForge.World.World, bio : CubeForge.Biome.Field, marks : NativeIntArr, seed : Int, n : Int, entries : List(Int)) : Migrated do
+    match entries do
+      Nil -> Migrated(w, bio, marks)
+      Cons(e, rest) ->
+        let ci = Veg.column_of(e)
+        let x = ci % (n * 16)
+        let z = ci / (n * 16)
+        let h = Biome.height_of(bio, x, z)
+        let base = if Veg.is_decay(e) do Veg.trunk_base(w, x, z, h) else h end
+        let b = Biome.biome_of(bio, x, z)
+        let trunk = if Veg.pine_for(b) do 7 else 5 end
+        let w1 = if Veg.is_decay(e) do Veg.fell(w, x, z, base) else Veg.plant(w, x, z, base, trunk, Veg.pine_for(b)) end
+        -- relight_marked, not relight_at: the relight can change baked light in
+        -- sections the tree's box never touched, and a section whose light moved
+        -- but whose mesh was not rebuilt renders stale. The relight reports
+        -- exactly which sections it changed; those join the geometry marks.
+        let relit = CubeForge.Light.relight_marked(World.light(w1), w1, x, base + 4, z)
+        let w2 = World.set_light(w1, CubeForge.Light.relit_field(relit))
+        sync_occupancy(w2, x, z, base, base + trunk + 2)
+        let marks1 = or_marks(mark_box(marks, x - 4, base, z - 4, x + 4, base + trunk + 2, z + 4, n, 0), CubeForge.Light.relit_marks(relit), 0)
+        veg_go(w2, Biome.rescan_box(bio, w2, x, z, Veg.decay_radius() + 1), marks1, seed, n, rest)
+    end
+  end
+  pfn or_marks(a : NativeIntArr, b : NativeIntArr, i : Int) : NativeIntArr do
+    if i >= 1024 do a
+    else or_marks(if NativeArray.get_int(b, i) != 0 do NativeArray.set_int(a, i, 1) else a end, b, i + 1) end
+  end
+  -- Mark every section a box touches: the box's corners at each section row it spans.
+  pfn mark_box(marks : NativeIntArr, x0 : Int, y0 : Int, z0 : Int, x1 : Int, y1 : Int, z1 : Int, n : Int, i : Int) : NativeIntArr do
+    let rows = y1 / 16 - y0 / 16 + 1
+    if i >= 4 * rows do marks
+    else
+      let y = (y0 / 16 + i / 4) * 16
+      let x = if i % 2 == 0 do x0 else x1 end
+      let z = if (i / 2) % 2 == 0 do z0 else z1 end
+      let xc = if x < 0 do 0 else if x >= n * 16 do n * 16 - 1 else x end end
+      let zc = if z < 0 do 0 else if z >= n * 16 do n * 16 - 1 else z end end
+      mark_box(mark_geometry(marks, xc, if y > y1 do y1 else y end, zc, n), x0, y0, z0, x1, y1, z1, n, i + 1)
+    end
+  end
+
+  pfn vegetate(sc, seed : Int, entries : List(Int)) do
+    match entries do
+      Nil -> sc
+      _ ->
+        match sc do
+          Scene(world, counts, outline, hit, ui, pids, flags, meshes, bio) ->
+            let n = World.side(world)
+            match veg_go(world, bio, CubeForge.Light.marks_new(), seed, n, entries) do
+              Migrated(w1, bio1, marks) ->
+                match remesh_marked(w1, marks, 0, n, counts, meshes, Chunk.new()) do
+                  Remeshed(c1, m1) -> Scene(w1, c1, outline, hit, ui, pids, flags, m1, bio1)
+                end
+            end
+        end
+    end
+  end
+
+  -- The shadow occupancy texture is per-voxel on the GPU; push the tree's box.
+  pfn sync_occupancy(w : CubeForge.World.World, x : Int, z : Int, y0 : Int, y1 : Int) : Unit do sync_go(w, x, z, y0, y1, 0) end
+  pfn sync_go(w : CubeForge.World.World, x : Int, z : Int, y0 : Int, y1 : Int, i : Int) : Unit do
+    if i >= 81 * (y1 - y0 + 1) do ()
+    else
+      let bx = x - 4 + i % 9
+      let bz = z - 4 + (i / 9) % 9
+      let yy = y0 + i / 81   -- not `by`: reserved (GAPS G65)
+      Win.gfx_set_voxel(bx, yy, bz, CubeForge.Light.occludes(World.block_at(w, bx, yy, bz)))
+      sync_go(w, x, z, y0, y1, i + 1)
+    end
+  end
+
   -- Retexture a batch of columns as ONE edit: every pick is a palette block
   -- replacing a palette block, so opacity never changes and no relight is
   -- needed; the touched sections are collected into one marks array and
@@ -787,13 +864,13 @@ mod CubeForge do
 
   -- Frame loop. `max_frames < 0` means run until the window closes.
   -- Run-time knobs read once, outside the frame loop (an Env read allocates).
-  type Knobs = Knobs(Int, Int, String, Bool, Float, Int, Bool, Int, Int, Int, Float, Int, Float, Bool, Int, Int, Int, Int, Int, Bool, Int, Int)   -- max_frames, dump_frame, dump_path, autowalk, autospin, autoedit frame (<0 = off), autoswim, autoflow frame (<0 = off), workers, automap frame (<0 = off; forces map view on from this frame, for headless verification), day length in seconds, sun angle override in degrees (<0 = follow the clock), shadow reach in blocks (0 = off), soft shadow edges, autobreak frame (<0 = off): break the column under the player every 20 frames, for a repeatable edit benchmark, weather pin 0..100 (<0 = follow the actor), precipitation pool capacity, biome ease rate in percent (100 = one CF_DAY per full swing), draw the biome map in map view, autocanal frame (<0 = off): lay a 9-block line of water three columns east of the player, aim-independent, for the biome end-to-end test, biome migration budget: surface columns retextured per tick
+  type Knobs = Knobs(Int, Int, String, Bool, Float, Int, Bool, Int, Int, Int, Float, Int, Float, Bool, Int, Int, Int, Int, Int, Bool, Int, Int, Int)   -- max_frames, dump_frame, dump_path, autowalk, autospin, autoedit frame (<0 = off), autoswim, autoflow frame (<0 = off), workers, automap frame (<0 = off; forces map view on from this frame, for headless verification), day length in seconds, sun angle override in degrees (<0 = follow the clock), shadow reach in blocks (0 = off), soft shadow edges, autobreak frame (<0 = off): break the column under the player every 20 frames, for a repeatable edit benchmark, weather pin 0..100 (<0 = follow the actor), precipitation pool capacity, biome ease rate in percent (100 = one CF_DAY per full swing), draw the biome map in map view, autocanal frame (<0 = off): lay a 9-block line of water three columns east of the player, aim-independent, for the biome end-to-end test, biome migration budget: surface columns retextured per tick, vegetation budget: trees grown or felled per tick
 
   fn frame_loop(f : Frame, k : Knobs, sc, nchunks : Int, proj : NativeFloatArr, map_proj : NativeFloatArr, fps : Fps, wxpid, seed : Int) : Frame do
     match f do
       Frame(frame, last_t, player, sample, view, vp, map_mode, marker, flash, wcache, bcache, inv_open, drag_from) ->
         match k do
-        Knobs(max_frames, dump_frame, dump_path, autowalk, autospin, autoedit, autoswim, autoflow, workers, automap, day_len, sun_deg, shadow_dist, soft_shadows, autoinv, autobreak, weather_pin, precip_cap, biome_rate, biome_map, autocanal, biome_budget) ->
+        Knobs(max_frames, dump_frame, dump_path, autowalk, autospin, autoedit, autoswim, autoflow, workers, automap, day_len, sun_deg, shadow_dist, soft_shadows, autoinv, autobreak, weather_pin, precip_cap, biome_rate, biome_map, autocanal, biome_budget, veg_budget) ->
         if Win.should_close() || (max_frames >= 0 && frame >= max_frames) do
           Frame(frame, last_t, player, sample, view, vp, map_mode, marker, flash, wcache, bcache, inv_open, drag_from)
         else
@@ -882,7 +959,13 @@ mod CubeForge do
             let picks = Biome.migrations(scene_biome(scb), scene_world(scb), frame / tick_period(), 2048, biome_budget)
             let scm = migrate(scb, picks)
             if autoflow >= 0 && frame % 100 == 0 do println("biome migrate: " ++ int_to_string(List.length(picks)) ++ " columns in " ++ ms(Win.time() -. tm0)) else () end
-            scm
+            -- Vegetation: grow where the biome wants a tree and the cell says so,
+            -- fell where it no longer does. Each one is a chop-sized edit.
+            let tv0 = Win.time()
+            let vpicks = Veg.candidates(scene_biome(scm), scene_world(scm), seed, frame / tick_period(), 2048, veg_budget)
+            let scv = vegetate(scm, seed, vpicks)
+            if autoflow >= 0 && frame % 100 == 0 do println("biome veg: " ++ int_to_string(List.length(vpicks)) ++ " trees in " ++ ms(Win.time() -. tv0)) else () end
+            scv
           else sc0d end
           if autoflow >= 0 && frame >= autoflow && (frame - autoflow) % 100 == 0 do
             let cx = World.floor_div16(float_to_int(Math.floor(V.x(Player.position(player1)))))
@@ -1285,7 +1368,7 @@ mod CubeForge do
         if Env.get_int("CF_ALLOC_PROBE", 0) == 1 do alloc_probe(world, proj) else () end
         let t4 = Win.time()
         let knobs = Knobs(max_frames, Env.get_int("CF_DUMP_FRAME", 30), Env.get("CF_DUMP", ""), Env.get_int("CF_AUTOWALK", 0) == 1,
-                          int_to_float(Env.get_int("CF_AUTOSPIN", 0)) /. 1000.0 /. Player.mouse_sens(), Env.get_int("CF_AUTOEDIT", -1), autoswim, Env.get_int("CF_AUTOFLOW", -1), workers, Env.get_int("CF_AUTOMAP", -1), int_to_float(Env.get_int("CF_DAY", 1800)), Env.get_int("CF_SUN", -1), int_to_float(Env.get_int("CF_SHADOW_DIST", 64)), Env.get_int("CF_SHADOW_SOFT", 1) == 1, Env.get_int("CF_AUTOINV", -1), Env.get_int("CF_AUTOBREAK", -1), Env.get_int("CF_WEATHER", -1), Env.get_int("CF_PRECIP", 4000), Env.get_int("CF_BIOME_RATE", 100), Env.get_int("CF_BIOME_MAP", 0) == 1, Env.get_int("CF_AUTOCANAL", -1), Env.get_int("CF_BIOME_BUDGET", 32))
+                          int_to_float(Env.get_int("CF_AUTOSPIN", 0)) /. 1000.0 /. Player.mouse_sens(), Env.get_int("CF_AUTOEDIT", -1), autoswim, Env.get_int("CF_AUTOFLOW", -1), workers, Env.get_int("CF_AUTOMAP", -1), int_to_float(Env.get_int("CF_DAY", 1800)), Env.get_int("CF_SUN", -1), int_to_float(Env.get_int("CF_SHADOW_DIST", 64)), Env.get_int("CF_SHADOW_SOFT", 1) == 1, Env.get_int("CF_AUTOINV", -1), Env.get_int("CF_AUTOBREAK", -1), Env.get_int("CF_WEATHER", -1), Env.get_int("CF_PRECIP", 4000), Env.get_int("CF_BIOME_RATE", 100), Env.get_int("CF_BIOME_MAP", 0) == 1, Env.get_int("CF_AUTOCANAL", -1), Env.get_int("CF_BIOME_BUDGET", 32), Env.get_int("CF_VEG_BUDGET", 1))
         let tw0 = Win.time()
         let pids = Array.from_list(spawn_water(n * n - 1, n, seed, Nil))
         println("spawned " ++ int_to_string(n * n) ++ " water actors in " ++ ms(Win.time() -. tw0) ++ " (loads run asynchronously)")

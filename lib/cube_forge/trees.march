@@ -46,6 +46,15 @@ mod CubeForge.Trees do
     end
   end
 
+  doc "The trunk column a cell would use if it held a tree, packed x + 4096 * z. What tree_at_cell picks before it asks whether the ground allows it; growth after generation plants only here, so trees stay spaced and a column is a candidate at most once."
+  fn cell_trunk(cx : Int, cz : Int, seed : Int) : Int do
+    let ox = float_to_int(cell_hash(cx, cz, seed, 2) *. int_to_float(cell_size()))
+    let oz = float_to_int(cell_hash(cx, cz, seed, 3) *. int_to_float(cell_size()))
+    (cx * cell_size() + ox) + 4096 * (cz * cell_size() + oz)
+  end
+  doc "The cell's density draw in [0, 1): a cell holds a tree when this is below its biome's density."
+  fn cell_density(cx : Int, cz : Int, seed : Int) : Float do cell_hash(cx, cz, seed, 1) end
+
   doc "A column can hold a plant only on flat grass above the water line."
   fn plantable(wx : Int, wz : Int, seed : Int) : Bool do
     let h = N.height(wx, wz, seed)
