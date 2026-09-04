@@ -158,12 +158,19 @@ static const char *VS =
     "layout(location=4) in float a_face;\n"
     "layout(location=5) in float a_fx;\n"
     "uniform mat4 u_vp;\n"
+    "uniform float u_time;\n"
     "out vec2 v_uv; out float v_layer; out float v_shade;\n"
     "out vec3 v_world; out vec3 v_normal; out float v_fx;\n"
     "const vec3 NORMALS[6] = vec3[6](vec3(0,1,0), vec3(0,-1,0), vec3(1,0,0), vec3(-1,0,0), vec3(0,0,1), vec3(0,0,-1));\n"
     "void main(){\n"
     "  int f = int(a_face + 0.5);\n"
-    "  gl_Position = u_vp * vec4(a_pos,1.0);\n"
+    /* Water bobs: a small vertical wave on any water effect (>= 2). Cosmetic
+     * only -- v_world stays at the true position so lighting, shadows and
+     * fog see the block the game logic sees. */
+    "  int fe = int(a_fx + 0.5) >> 8;\n"
+    "  vec3 p = a_pos;\n"
+    "  if (fe >= 2) p.y += 0.03 * sin(u_time * 1.7 + a_pos.x * 1.3 + a_pos.z * 0.9);\n"
+    "  gl_Position = u_vp * vec4(p,1.0);\n"
     "  v_uv=a_uv; v_layer=a_layer;\n"
     /* v_shade is now skylight x AO only. The per-face directional constant that
      * used to be folded in here is replaced by a real N.L against a sun that
@@ -194,6 +201,7 @@ static const char *FS =
     "uniform vec3  u_fog_color;\n"
     "uniform float u_overcast;\n"
     "uniform float u_bolt;\n"
+    "uniform float u_time;\n"
     "out vec4 o_color;\n"
     /* The beam shape never varies at runtime, only its position, aim and
      * on/off state, so the cone half-angles are constants rather than uniforms. */
@@ -329,8 +337,21 @@ static const char *FS =
     "  }\n"
     "  return acc * 0.25;\n"
     "}\n"
+    /* Eight compass directions for the flow effects 2..9, in the order the
+     * mesher packs them: +x, +x+z, +z, -x+z, -x, -x-z, -z, +x-z. */
+    "const vec2 DIRS[8] = vec2[8](vec2(1,0), vec2(0.7071,0.7071), vec2(0,1), vec2(-0.7071,0.7071), vec2(-1,0), vec2(-0.7071,-0.7071), vec2(0,-1), vec2(0.7071,-0.7071));\n"
     "void main(){\n"
-    "  vec4 t = (u_use_tex == 1) ? texture(u_tex, vec3(v_uv, v_layer)) : vec4(v_uv, v_layer, 1.0);\n"
+    "  int  fxw = int(v_fx + 0.5);\n"
+    "  int  fe  = fxw >> 8;\n"
+    "  float spd = float(fxw & 255) / 255.0 * 7.0;\n"
+    /* Flowing water scrolls its ripple along the flow; still water drifts;
+     * fast or falling water blends toward the foam layer. */
+    "  vec2 uv = v_uv;\n"
+    "  if (fe >= 2 && fe <= 9) uv += DIRS[fe - 2] * u_time * (0.05 + spd * 0.04);\n"
+    "  else if (fe == 10)      uv += vec2(0.02, 0.013) * u_time;\n"
+    "  vec4 t = (u_use_tex == 1) ? texture(u_tex, vec3(uv, v_layer)) : vec4(v_uv, v_layer, 1.0);\n"
+    "  float foam = (fe == 11) ? 1.0 : ((fe >= 2 && fe <= 9) ? spd / 7.0 : 0.0);\n"
+    "  if (foam > 0.0 && u_use_tex == 1) t = mix(t, texture(u_tex, vec3(uv * 1.5, 16.0)), foam * 0.7);\n"
     "  if (u_cutout == 1 && t.a < 0.5) discard;\n"
     "  float moon = clamp((MOON_UNTIL - u_sun) / MOON_UNTIL, 0.0, 1.0);\n"
     /* Cloud does not remove light, it diffuses it: ambient rises as the direct
@@ -386,8 +407,9 @@ static const char *FS =
     /* Overlays (HUD, outline, map marker) share this program but are not part of
      * the world: they keep their own vertex shade and skip lighting entirely. */
     "  vec3 lit = t.rgb * ((u_unlit == 1) ? vec3(v_shade) : world);\n"
-    "  int  fx  = int(v_fx + 0.5);\n"
-    "  float a  = float(fx & 255) / 255.0;\n"
+    "  int  fx  = fxw;\n"
+    /* Water effects carry speed in the alpha byte, not alpha. */
+    "  float a  = (fe >= 2) ? 1.0 : float(fx & 255) / 255.0;\n"
     /* Fog is for the world only. Overlays (HUD, crosshair, outline, marker) are
      * drawn in NDC with z = 0, so `length(v_world - u_eye)` is a meaningless
      * large number for them and a storm would grey out the hotbar. u_unlit
@@ -416,6 +438,7 @@ static GLint  g_u_use_tex = -1;
 static GLint  g_u_cutout = -1;
 static GLint  g_u_sun = -1, g_u_eye = -1, g_u_dir = -1, g_u_flash = -1;
 static GLint  g_u_sundir = -1, g_u_moondir = -1, g_u_unlit = -1;
+static GLint  g_u_time = -1;
 static GLint  g_u_fog_density = -1, g_u_fog_color = -1, g_u_overcast = -1, g_u_bolt = -1;
 /* The clear colour, kept so the fog can reuse it: fog colour IS sky colour,
  * so distant geometry dissolves into the horizon instead of popping at the
@@ -461,6 +484,7 @@ int64_t cf_gfx_init(void) {
     g_u_fog_color = glGetUniformLocation(g_prog, "u_fog_color");
     g_u_overcast = glGetUniformLocation(g_prog, "u_overcast");
     g_u_bolt = glGetUniformLocation(g_prog, "u_bolt");
+    g_u_time = glGetUniformLocation(g_prog, "u_time");
     if (getenv("CF_DEBUG")) fprintf(stderr, "cf: uniforms occ=%d shadow=%d sundir=%d unlit=%d\n", g_u_occ, g_u_shadow, g_u_sundir, g_u_unlit);
     glGenVertexArrays(1, &g_vao);
     glGenBuffers(CF_MAX_MESHES, g_vbo);
@@ -996,6 +1020,13 @@ void cf_gfx_set_sky(double sx, double sy, double sz, double mx, double my, doubl
 /* Fog density, cloud cover and the lightning spike. The fog colour is not a
  * parameter: it is whatever cf_gfx_begin_frame last cleared to, so the fog and
  * the sky are the same colour by construction. */
+/* Seconds, for the water animation. CF_TIME pins it on the March side so frame
+ * dumps stay comparable. */
+void cf_gfx_set_time(double t) {
+    glUseProgram(g_prog);
+    glUniform1f(g_u_time, (float)t);
+}
+
 void cf_gfx_set_weather(double fog_density, double overcast, double bolt) {
     glUseProgram(g_prog);
     glUniform1f(g_u_fog_density, (float)fog_density);

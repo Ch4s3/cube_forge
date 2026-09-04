@@ -16,6 +16,7 @@
 mod CubeForge.Water do
 
   needs IO.Spawn
+  needs IO.Process   -- Env reads for CF_SPRING_RATE and CF_EVAP
 
   alias CubeForge.Chunk as C
 

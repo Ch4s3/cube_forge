@@ -864,13 +864,13 @@ mod CubeForge do
 
   -- Frame loop. `max_frames < 0` means run until the window closes.
   -- Run-time knobs read once, outside the frame loop (an Env read allocates).
-  type Knobs = Knobs(Int, Int, String, Bool, Float, Int, Bool, Int, Int, Int, Float, Int, Float, Bool, Int, Int, Int, Int, Int, Bool, Int, Int, Int)   -- max_frames, dump_frame, dump_path, autowalk, autospin, autoedit frame (<0 = off), autoswim, autoflow frame (<0 = off), workers, automap frame (<0 = off; forces map view on from this frame, for headless verification), day length in seconds, sun angle override in degrees (<0 = follow the clock), shadow reach in blocks (0 = off), soft shadow edges, autobreak frame (<0 = off): break the column under the player every 20 frames, for a repeatable edit benchmark, weather pin 0..100 (<0 = follow the actor), precipitation pool capacity, biome ease rate in percent (100 = one CF_DAY per full swing), draw the biome map in map view, autocanal frame (<0 = off): lay a 9-block line of water three columns east of the player, aim-independent, for the biome end-to-end test, biome migration budget: surface columns retextured per tick, vegetation budget: trees grown or felled per tick
+  type Knobs = Knobs(Int, Int, String, Bool, Float, Int, Bool, Int, Int, Int, Float, Int, Float, Bool, Int, Int, Int, Int, Int, Bool, Int, Int, Int, Int)   -- max_frames, dump_frame, dump_path, autowalk, autospin, autoedit frame (<0 = off), autoswim, autoflow frame (<0 = off), workers, automap frame (<0 = off; forces map view on from this frame, for headless verification), day length in seconds, sun angle override in degrees (<0 = follow the clock), shadow reach in blocks (0 = off), soft shadow edges, autobreak frame (<0 = off): break the column under the player every 20 frames, for a repeatable edit benchmark, weather pin 0..100 (<0 = follow the actor), precipitation pool capacity, biome ease rate in percent (100 = one CF_DAY per full swing), draw the biome map in map view, autocanal frame (<0 = off): lay a 9-block line of water three columns east of the player, aim-independent, for the biome end-to-end test, biome migration budget: surface columns retextured per tick, vegetation budget: trees grown or felled per tick, time pin in seconds (<0 = live clock) for the water animation
 
   fn frame_loop(f : Frame, k : Knobs, sc, nchunks : Int, proj : NativeFloatArr, map_proj : NativeFloatArr, fps : Fps, wxpid, seed : Int) : Frame do
     match f do
       Frame(frame, last_t, player, sample, view, vp, map_mode, marker, flash, wcache, bcache, inv_open, drag_from) ->
         match k do
-        Knobs(max_frames, dump_frame, dump_path, autowalk, autospin, autoedit, autoswim, autoflow, workers, automap, day_len, sun_deg, shadow_dist, soft_shadows, autoinv, autobreak, weather_pin, precip_cap, biome_rate, biome_map, autocanal, biome_budget, veg_budget) ->
+        Knobs(max_frames, dump_frame, dump_path, autowalk, autospin, autoedit, autoswim, autoflow, workers, automap, day_len, sun_deg, shadow_dist, soft_shadows, autoinv, autobreak, weather_pin, precip_cap, biome_rate, biome_map, autocanal, biome_budget, veg_budget, time_pin) ->
         if Win.should_close() || (max_frames >= 0 && frame >= max_frames) do
           Frame(frame, last_t, player, sample, view, vp, map_mode, marker, flash, wcache, bcache, inv_open, drag_from)
         else
@@ -1047,6 +1047,7 @@ mod CubeForge do
           -- obscure the terrain it exists to show.
           Win.gfx_set_shadow(if map_mode1 do 0.0 else shadow_dist end, soft_shadows)
           Win.gfx_set_light(sun, V.x(eye), V.y(eye), V.z(eye), V.x(look), V.y(look), V.z(look), flash_now)
+          Win.gfx_set_time(if time_pin >= 0 do int_to_float(time_pin) else now end)
           Win.gfx_set_view_proj(render_vp)
           draw_chunks(scene_counts(sc1), 0, nchunks)
           draw_foliage(scene_counts(sc1), 0, nchunks)
@@ -1378,7 +1379,7 @@ mod CubeForge do
         if Env.get_int("CF_ALLOC_PROBE", 0) == 1 do alloc_probe(world, proj) else () end
         let t4 = Win.time()
         let knobs = Knobs(max_frames, Env.get_int("CF_DUMP_FRAME", 30), Env.get("CF_DUMP", ""), Env.get_int("CF_AUTOWALK", 0) == 1,
-                          int_to_float(Env.get_int("CF_AUTOSPIN", 0)) /. 1000.0 /. Player.mouse_sens(), Env.get_int("CF_AUTOEDIT", -1), autoswim, Env.get_int("CF_AUTOFLOW", -1), workers, Env.get_int("CF_AUTOMAP", -1), int_to_float(Env.get_int("CF_DAY", 1800)), Env.get_int("CF_SUN", -1), int_to_float(Env.get_int("CF_SHADOW_DIST", 64)), Env.get_int("CF_SHADOW_SOFT", 1) == 1, Env.get_int("CF_AUTOINV", -1), Env.get_int("CF_AUTOBREAK", -1), Env.get_int("CF_WEATHER", -1), Env.get_int("CF_PRECIP", 4000), Env.get_int("CF_BIOME_RATE", 100), Env.get_int("CF_BIOME_MAP", 0) == 1, Env.get_int("CF_AUTOCANAL", -1), Env.get_int("CF_BIOME_BUDGET", 32), Env.get_int("CF_VEG_BUDGET", 1))
+                          int_to_float(Env.get_int("CF_AUTOSPIN", 0)) /. 1000.0 /. Player.mouse_sens(), Env.get_int("CF_AUTOEDIT", -1), autoswim, Env.get_int("CF_AUTOFLOW", -1), workers, Env.get_int("CF_AUTOMAP", -1), int_to_float(Env.get_int("CF_DAY", 1800)), Env.get_int("CF_SUN", -1), int_to_float(Env.get_int("CF_SHADOW_DIST", 64)), Env.get_int("CF_SHADOW_SOFT", 1) == 1, Env.get_int("CF_AUTOINV", -1), Env.get_int("CF_AUTOBREAK", -1), Env.get_int("CF_WEATHER", -1), Env.get_int("CF_PRECIP", 4000), Env.get_int("CF_BIOME_RATE", 100), Env.get_int("CF_BIOME_MAP", 0) == 1, Env.get_int("CF_AUTOCANAL", -1), Env.get_int("CF_BIOME_BUDGET", 32), Env.get_int("CF_VEG_BUDGET", 1), Env.get_int("CF_TIME", -1))
         let tw0 = Win.time()
         let pids = Array.from_list(spawn_water(n * n - 1, n, seed, Nil))
         println("spawned " ++ int_to_string(n * n) ++ " water actors in " ++ ms(Win.time() -. tw0) ++ " (loads run asynchronously)")
