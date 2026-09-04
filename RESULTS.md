@@ -338,3 +338,111 @@ reporting the count at three different sweep sizes.
 So the remaining ~10 ms stays until either that refcount bug is fixed or the
 sweep moves into the C shim. The first is the point of this project; the second
 would be routing around the problem silently, which is not.
+
+### Frame cost, uncapped (`CF_VSYNC=0`)
+
+Every earlier figure in this file was taken with vsync on and is therefore
+pinned to the display, not a measure of headroom. `CF_VSYNC=0` uncaps it.
+800x600, `CF_SEED=7`, sun at 45 degrees:
+
+| configuration | fps | ms/frame |
+|---|---|---|
+| shadows off | 1315 | 0.76 |
+| shadow reach 24 | 1321 | 0.76 |
+| shadow reach 64 (default) | 965 | 1.04 |
+| shadow reach 300 | 680 | 1.47 |
+| map view, whole world drawn top-down | 1361 | 0.73 |
+
+The frame budget at 60 Hz is 16.7 ms and the frame costs **1 ms**, so the
+renderer uses about 6% of it. Shadows are the single largest item at 0.28 ms
+for the default reach.
+
+**The map view row is the interesting one for culling questions.** It draws all
+64 chunks at once and runs as fast as the first-person view, which says the
+renderer is not draw-call or geometry bound — 128 draw calls and 244k vertices
+are nowhere near a limit. Occlusion culling would remove work that is not
+costing anything. What time there is goes to fragment work, so if this ever
+does need optimising, drawing chunks front-to-back (so early-Z rejects hidden
+fragments before the shadow trace runs) targets the real cost, and frustum
+culling — which does not exist yet either — is the cheaper first step. Both
+become worthwhile when chunk streaming raises the chunk count; neither is worth
+doing at 8x8.
+
+### Stale lighting after an edit (fixed)
+
+Per-vertex light is baked into the mesh, but the edit path only remeshed the
+edited cell's section (plus neighbours on a boundary), while `relight_at`
+changes light across a far wider box. Everything else kept stale lighting until
+something forced a rebuild.
+
+Measured before the fix, counting sections whose light actually moved against
+the one section being remeshed:
+
+| edit | sections whose light changed | sections remeshed |
+|---|---|---|
+| break a surface block | 0 | 1 |
+| place a block at y=90 | 2 | 1 |
+| place a block high in open air | **5** | 1 |
+| 3-block platform | **5** | 1 |
+
+`relight_marked` now returns a dirty `(chunk, section)` mask alongside the
+repaired field, and the edit remeshes exactly those. A block edit measures
+17-30 ms end to end, still dominated by the relight rather than the extra
+sections (~1.2 ms each). Blindly remeshing the whole relight box would have
+been ~173 ms, which is why the mask is worth having.
+
+The mask is one slot per (chunk, section) rather than a packed per-chunk
+bitmask: a bitmask means reading the accumulator before OR-ing into it, and
+reading an array before writing it turns every write into a full copy (G63).
+The mark pass is write-only; the 16-bit masks are derived in a separate read.
+
+The invariant is pinned by a test: for the edit that reaches furthest (a block
+placed high in open air, darkening the column beneath it), no voxel changes
+light in a section the mask failed to flag.
+
+### Soft shadows and the reach fade
+
+`trace` now returns the distance to the occluder rather than a yes/no, so a
+shadow whose caster sits near the reach limit fades out instead of ending in a
+hard line where the trace gives up.
+
+Soft edges spread four rays over a small cone (`SOFT_SPREAD` 0.035 rad),
+rotated per pixel so the samples read as softness rather than four bands.
+Because the rays diverge, the penumbra widens with distance from the caster on
+its own -- no separate penumbra estimate needed. `CF_SHADOW_SOFT=0` reverts to
+one ray.
+
+Measured at 800x600 with a low sun (`CF_SUN=75`), which is the expensive case
+because rays travel further before escaping:
+
+| | fps | ms/frame |
+|---|---|---|
+| hard, 1 ray | 501 | 2.0 |
+| soft, 4 rays | 206 | 4.9 |
+
+2.4x the frame cost, and only 2.6% of pixels change by more than 4/255 -- the
+gain is real but small, chiefly removing hard-edged shadow bands. It is on by
+default because 4.9 ms still fits a 16.7 ms budget comfortably.
+
+**Caveat worth knowing:** these numbers are at an 800x600 framebuffer. On a
+retina backing store (1600x1200, which this window sometimes gets) the shadow
+cost is per-pixel and would be roughly 4x, putting soft shadows near the 60 Hz
+budget. That case has not been measured. `CF_SHADOW_SOFT=0` halves the cost if
+it bites.
+
+### Ambient occlusion across chunk boundaries (fixed)
+
+AO needs the diagonal neighbour of a face corner, and that voxel can leave the
+chunk on BOTH axes at once, landing in a diagonal chunk the mesher is not given.
+`nb_get_d` read it as air, softening occlusion on the four corner columns of
+every chunk.
+
+The fix was not to pass nine chunks. `World` now retains the occupancy field it
+was already building for the shadow ray-marcher, and the mesher reads occluders
+from it. Occupancy is world-space, so the seam is gone by construction and
+`nb_get_d` is deleted rather than extended. It also unifies the two notions of
+"solid": the mesher's occluder test and the shadow marcher's are now literally
+the same bytes.
+
+Cost: the 4 MB occupancy field is kept rather than built and dropped, and a
+block edit updates one byte of it alongside the GPU texel.

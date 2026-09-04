@@ -143,26 +143,25 @@ mod CubeForge.Mesher do
     else C.get(c, x, y, z) end end end end end
   end
 
-  -- nb_get resolves one out-of-chunk axis. Ambient occlusion also needs the
-  -- diagonal neighbour, where BOTH x and z can leave the chunk — that cell lives
-  -- in a diagonal chunk the mesher is not given, so it reads as air. The effect
-  -- is confined to the diagonal occlusion term on the four corner columns of
-  -- each chunk (1.5% of columns), and never to the face-adjacent terms.
-  pfn nb_get_d(c : CubeForge.Chunk.Chunk, n : CubeForge.Chunk.Chunk, s : CubeForge.Chunk.Chunk,
-               e : CubeForge.Chunk.Chunk, w : CubeForge.Chunk.Chunk, x : Int, y : Int, z : Int) : Int do
-    if y < 0 || y >= 256 do 0
-    else if x < 0 do (if z < 0 || z >= 16 do 0 else C.get(w, x + 16, y, z) end)
-    else if x >= 16 do (if z < 0 || z >= 16 do 0 else C.get(e, x - 16, y, z) end)
-    else if z < 0 do C.get(n, x, y, z + 16)
-    else if z >= 16 do C.get(s, x, y, z - 16)
-    else C.get(c, x, y, z) end end end end end
-  end
-
   -- One corner of a face. [nx,ny,nz] is the voxel just outside the face; [a] and
   -- [b] are the two tangent steps toward this corner, so the corner is touched
   -- by n, n+a, n+b and n+a+b. AO counts the three occluders; light is the mean
   -- over those of the four that are not opaque (n never is).
-  pfn corner_pack(c : CubeForge.Chunk.Chunk, n : CubeForge.Chunk.Chunk, s : CubeForge.Chunk.Chunk, e : CubeForge.Chunk.Chunk, w : CubeForge.Chunk.Chunk, la : NativeU8Arr, oxi : Int, ozi : Int, nx : Int, ny : Int, nz : Int, aux : Int, auz : Int, avy : Int, avz : Int) : Int do
+  --
+  -- Occluders are read from the world occupancy field rather than the five-chunk
+  -- neighbourhood. The diagonal occluder can leave the chunk on BOTH axes at
+  -- once, which lands in a chunk the mesher is not given; reading it as air used
+  -- to soften ambient occlusion on the four corner columns of every chunk.
+  -- Occupancy is world-space, so the seam is simply gone.
+  @[no_alloc]
+  pfn occluded(occ : NativeU8Arr, oxi : Int, ozi : Int, x : Int, y : Int, z : Int) : Bool do
+    let wx = oxi + x
+    let wz = ozi + z
+    if wx < 0 || wx >= 128 || y < 0 || y >= 256 || wz < 0 || wz >= 128 do false
+    else NativeArray.get_u8(occ, CubeForge.Light.occ_index(wx, y, wz)) != 0 end
+  end
+
+  pfn corner_pack(la : NativeU8Arr, occ : NativeU8Arr, oxi : Int, ozi : Int, nx : Int, ny : Int, nz : Int, aux : Int, auz : Int, avy : Int, avz : Int) : Int do
     let s1x = nx + aux
     let s1z = nz + auz
     let s2y = ny + avy
@@ -170,9 +169,9 @@ mod CubeForge.Mesher do
     let ccx = nx + aux
     let ccy = ny + avy
     let ccz = nz + auz + avz
-    let o1 = !see_through(nb_get_d(c, n, s, e, w, s1x, ny, s1z))
-    let o2 = !see_through(nb_get_d(c, n, s, e, w, nx, s2y, s2z))
-    let oc = !see_through(nb_get_d(c, n, s, e, w, ccx, ccy, ccz))
+    let o1 = occluded(occ, oxi, ozi, s1x, ny, s1z)
+    let o2 = occluded(occ, oxi, ozi, nx, s2y, s2z)
+    let oc = occluded(occ, oxi, ozi, ccx, ccy, ccz)
     let ln = CubeForge.Light.get(la, oxi + nx, ny, ozi + nz)
     let l1 = if o1 do 0 else CubeForge.Light.get(la, oxi + s1x, ny, ozi + s1z) end
     let l2 = if o2 do 0 else CubeForge.Light.get(la, oxi + nx, s2y, ozi + s2z) end
@@ -321,7 +320,7 @@ mod CubeForge.Mesher do
   -- there is no face, else the packed key: block id plus the four corner
   -- light/AO values in mask (u, v) order.
   pfn face_key(c : CubeForge.Chunk.Chunk, n : CubeForge.Chunk.Chunk, s : CubeForge.Chunk.Chunk, e : CubeForge.Chunk.Chunk, w : CubeForge.Chunk.Chunk,
-               la : NativeU8Arr, oxi : Int, ozi : Int, x : Int, y : Int, z : Int, d : Int, cat : Int) : Int do
+               la : NativeU8Arr, occ : NativeU8Arr, oxi : Int, ozi : Int, x : Int, y : Int, z : Int, d : Int, cat : Int) : Int do
     let id = C.get(c, x, y, z)
     if id == 0 || C.is_water(id) || category_of(id) != cat do 0
     else
@@ -339,10 +338,10 @@ mod CubeForge.Mesher do
         let vy = t2y(d)
         let vz = t2z(d)
         -- corners c0..c3 at (du, dv) = (-,-) (+,-) (+,+) (-,+) in mask order
-        let k0 = corner_pack(c, n, s, e, w, la, oxi, ozi, nx, ny, nz, 0 - ux, 0 - uz, 0 - vy, 0 - vz)
-        let k1 = corner_pack(c, n, s, e, w, la, oxi, ozi, nx, ny, nz, ux, uz, 0 - vy, 0 - vz)
-        let k2 = corner_pack(c, n, s, e, w, la, oxi, ozi, nx, ny, nz, ux, uz, vy, vz)
-        let k3 = corner_pack(c, n, s, e, w, la, oxi, ozi, nx, ny, nz, 0 - ux, 0 - uz, vy, vz)
+        let k0 = corner_pack(la, occ, oxi, ozi, nx, ny, nz, 0 - ux, 0 - uz, 0 - vy, 0 - vz)
+        let k1 = corner_pack(la, occ, oxi, ozi, nx, ny, nz, ux, uz, 0 - vy, 0 - vz)
+        let k2 = corner_pack(la, occ, oxi, ozi, nx, ny, nz, ux, uz, vy, vz)
+        let k3 = corner_pack(la, occ, oxi, ozi, nx, ny, nz, 0 - ux, 0 - uz, vy, vz)
         key_of(id, k0, k1, k2, k3)
       end
     end
@@ -352,15 +351,15 @@ mod CubeForge.Mesher do
   --   d 0/1: a = local y, u = x, v = z.   d 2/3: a = x, u = z, v = local y.   d 4/5: a = z, u = x, v = local y.
   -- mask[256] counts the non-zero keys so an empty slice can be skipped without a second pass.
   pfn fill_mask(mask : NativeIntArr, i : Int, c : CubeForge.Chunk.Chunk, n : CubeForge.Chunk.Chunk, s : CubeForge.Chunk.Chunk,
-                e : CubeForge.Chunk.Chunk, w : CubeForge.Chunk.Chunk, la : NativeU8Arr, oxi : Int, ozi : Int, sy : Int, d : Int, a : Int, cnt : Int, cat : Int) : NativeIntArr do
+                e : CubeForge.Chunk.Chunk, w : CubeForge.Chunk.Chunk, la : NativeU8Arr, occ : NativeU8Arr, oxi : Int, ozi : Int, sy : Int, d : Int, a : Int, cnt : Int, cat : Int) : NativeIntArr do
     if i >= 256 do NativeArray.set_int(mask, 256, cnt)
     else
       let u = i % 16
       let v = i / 16
-      let key = if d <= 1 do face_key(c, n, s, e, w, la, oxi, ozi, u, sy * 16 + a, v, d, cat)
-                else if d <= 3 do face_key(c, n, s, e, w, la, oxi, ozi, a, sy * 16 + v, u, d, cat)
-                else face_key(c, n, s, e, w, la, oxi, ozi, u, sy * 16 + v, a, d, cat) end end
-      fill_mask(NativeArray.set_int(mask, i, key), i + 1, c, n, s, e, w, la, oxi, ozi, sy, d, a, if key != 0 do cnt + 1 else cnt end, cat)
+      let key = if d <= 1 do face_key(c, n, s, e, w, la, occ, oxi, ozi, u, sy * 16 + a, v, d, cat)
+                else if d <= 3 do face_key(c, n, s, e, w, la, occ, oxi, ozi, a, sy * 16 + v, u, d, cat)
+                else face_key(c, n, s, e, w, la, occ, oxi, ozi, u, sy * 16 + v, a, d, cat) end end
+      fill_mask(NativeArray.set_int(mask, i, key), i + 1, c, n, s, e, w, la, occ, oxi, ozi, sy, d, a, if key != 0 do cnt + 1 else cnt end, cat)
     end
   end
 
@@ -454,29 +453,29 @@ mod CubeForge.Mesher do
   end
 
   pfn slices_go(g : Greedy, c : CubeForge.Chunk.Chunk, n : CubeForge.Chunk.Chunk, s : CubeForge.Chunk.Chunk, e : CubeForge.Chunk.Chunk, w : CubeForge.Chunk.Chunk,
-                la : NativeU8Arr, oxi : Int, ozi : Int, sy : Int, d : Int, a : Int, ox : Float, oz : Float, cat : Int) : Greedy do
+                la : NativeU8Arr, occ : NativeU8Arr, oxi : Int, ozi : Int, sy : Int, d : Int, a : Int, ox : Float, oz : Float, cat : Int) : Greedy do
     if a >= 16 do g
     else
       match g do
         Greedy(b, mask) ->
-          let m1 = fill_mask(mask, 0, c, n, s, e, w, la, oxi, ozi, sy, d, a, 0, cat)
-          if NativeArray.get_int(m1, 256) == 0 do slices_go(Greedy(b, m1), c, n, s, e, w, la, oxi, ozi, sy, d, a + 1, ox, oz, cat)
-          else slices_go(greedy_go(Greedy(b, m1), 0, d, sy, a, ox, oz), c, n, s, e, w, la, oxi, ozi, sy, d, a + 1, ox, oz, cat) end
+          let m1 = fill_mask(mask, 0, c, n, s, e, w, la, occ, oxi, ozi, sy, d, a, 0, cat)
+          if NativeArray.get_int(m1, 256) == 0 do slices_go(Greedy(b, m1), c, n, s, e, w, la, occ, oxi, ozi, sy, d, a + 1, ox, oz, cat)
+          else slices_go(greedy_go(Greedy(b, m1), 0, d, sy, a, ox, oz), c, n, s, e, w, la, occ, oxi, ozi, sy, d, a + 1, ox, oz, cat) end
       end
     end
   end
 
   pfn dirs_go(g : Greedy, c : CubeForge.Chunk.Chunk, n : CubeForge.Chunk.Chunk, s : CubeForge.Chunk.Chunk, e : CubeForge.Chunk.Chunk, w : CubeForge.Chunk.Chunk,
-              la : NativeU8Arr, oxi : Int, ozi : Int, sy : Int, d : Int, ox : Float, oz : Float, cat : Int) : Greedy do
-    if d >= 6 do g else dirs_go(slices_go(g, c, n, s, e, w, la, oxi, ozi, sy, d, 0, ox, oz, cat), c, n, s, e, w, la, oxi, ozi, sy, d + 1, ox, oz, cat) end
+              la : NativeU8Arr, occ : NativeU8Arr, oxi : Int, ozi : Int, sy : Int, d : Int, ox : Float, oz : Float, cat : Int) : Greedy do
+    if d >= 6 do g else dirs_go(slices_go(g, c, n, s, e, w, la, occ, oxi, ozi, sy, d, 0, ox, oz, cat), c, n, s, e, w, la, occ, oxi, ozi, sy, d + 1, ox, oz, cat) end
   end
 
   -- Greedy-meshed faces of one category in section [sy] of chunk [c] (with its 4 neighbours).
   fn mesh_section_cat(c : CubeForge.Chunk.Chunk, n : CubeForge.Chunk.Chunk, s : CubeForge.Chunk.Chunk, e : CubeForge.Chunk.Chunk, w : CubeForge.Chunk.Chunk,
-                      la : NativeU8Arr, sy : Int, ox : Float, oz : Float, cat : Int) : CubeForge.F32Buf.F32Buf do
+                      la : NativeU8Arr, occ : NativeU8Arr, sy : Int, ox : Float, oz : Float, cat : Int) : CubeForge.F32Buf.F32Buf do
     if !section_has(c, sy * 4096, (sy + 1) * 4096, cat) do B.new(1)
     else
-      match dirs_go(Greedy(B.new(1024), NativeArray.make_int(257, 0)), c, n, s, e, w, la, float_to_int(ox), float_to_int(oz), sy, 0, ox, oz, cat) do
+      match dirs_go(Greedy(B.new(1024), NativeArray.make_int(257, 0)), c, n, s, e, w, la, occ, float_to_int(ox), float_to_int(oz), sy, 0, ox, oz, cat) do
         Greedy(b, _) -> b
       end
     end
@@ -484,14 +483,14 @@ mod CubeForge.Mesher do
 
   doc "Greedy-meshed opaque faces of section [sy]."
   fn mesh_section_opaque(c : CubeForge.Chunk.Chunk, n : CubeForge.Chunk.Chunk, s : CubeForge.Chunk.Chunk, e : CubeForge.Chunk.Chunk, w : CubeForge.Chunk.Chunk,
-                         la : NativeU8Arr, sy : Int, ox : Float, oz : Float) : CubeForge.F32Buf.F32Buf do
-    mesh_section_cat(c, n, s, e, w, la, sy, ox, oz, cat_opaque())
+                         la : NativeU8Arr, occ : NativeU8Arr, sy : Int, ox : Float, oz : Float) : CubeForge.F32Buf.F32Buf do
+    mesh_section_cat(c, n, s, e, w, la, occ, sy, ox, oz, cat_opaque())
   end
 
   doc "Greedy-meshed alpha-cutout foliage faces of section [sy]."
   fn mesh_section_foliage(c : CubeForge.Chunk.Chunk, n : CubeForge.Chunk.Chunk, s : CubeForge.Chunk.Chunk, e : CubeForge.Chunk.Chunk, w : CubeForge.Chunk.Chunk,
-                          la : NativeU8Arr, sy : Int, ox : Float, oz : Float) : CubeForge.F32Buf.F32Buf do
-    mesh_section_cat(c, n, s, e, w, la, sy, ox, oz, cat_foliage())
+                          la : NativeU8Arr, occ : NativeU8Arr, sy : Int, ox : Float, oz : Float) : CubeForge.F32Buf.F32Buf do
+    mesh_section_cat(c, n, s, e, w, la, occ, sy, ox, oz, cat_foliage())
   end
 
   pfn water_section_go(b : CubeForge.F32Buf.F32Buf, c : CubeForge.Chunk.Chunk, n : CubeForge.Chunk.Chunk, s : CubeForge.Chunk.Chunk,
