@@ -1,0 +1,52 @@
+-- Biome classification: the two axes, the elevation gate, and beach.
+mod CubeForge.Test.Biome do
+
+  needs IO.Spawn   -- capability ceiling, as in test/water_test.march
+  import Test
+  alias CubeForge.Biome as Biome
+
+  -- Inland (far from water) at sea level, so only the axes decide.
+  pfn inland(t : Float, m : Float) : Int do Biome.classify(t, m, 62, 99) end
+
+  describe "Biome.classify" do
+    test "walks the Whittaker table" do
+      Test.assert_eq_int(inland(0.1, 0.2), Biome.b_tundra(),    "cold dry")
+      Test.assert_eq_int(inland(0.1, 0.8), Biome.b_taiga(),     "cold damp")
+      Test.assert_eq_int(inland(0.5, 0.2), Biome.b_grassland(), "temperate dry")
+      Test.assert_eq_int(inland(0.5, 0.8), Biome.b_forest(),    "temperate damp")
+      Test.assert_eq_int(inland(0.9, 0.2), Biome.b_desert(),    "hot dry")
+      Test.assert_eq_int(inland(0.9, 0.8), Biome.b_wetland(),   "hot damp")
+    end
+
+    test "elevation gate beats the axes" do
+      Test.assert_eq_int(Biome.classify(0.9, 0.8, 95, 99), Biome.b_alpine(), "at the snow line")
+      Test.assert_eq_int(Biome.classify(0.9, 0.8, 94, 99), Biome.b_wetland(), "one below it")
+    end
+
+    test "beach needs water adjacency AND low ground" do
+      Test.assert_eq_int(Biome.classify(0.5, 0.9, 63, 1), Biome.b_beach(), "next to water, at sea level")
+      Test.assert_eq_int(Biome.classify(0.5, 0.9, 70, 1), Biome.b_forest(), "next to water but high: not beach")
+      Test.assert_eq_int(Biome.classify(0.5, 0.9, 63, 2), Biome.b_forest(), "low but two columns from water: not beach")
+    end
+  end
+
+  describe "Biome.moisture_target" do
+    test "falls linearly to zero at the reach" do
+      Test.assert_true(Math.abs(Biome.moisture_target(0) -. 1.0) < 0.0001, "on the water")
+      Test.assert_true(Math.abs(Biome.moisture_target(12) -. 0.5) < 0.0001, "halfway")
+      Test.assert_true(Biome.moisture_target(24) < 0.0001, "at the reach")
+      Test.assert_true(Biome.moisture_target(99) < 0.0001, "beyond it")
+    end
+  end
+
+  describe "Biome.temp_target" do
+    test "is colder higher up, and seeded" do
+      let low = Biome.temp_target(40, 40, 7, 62)
+      let high = Biome.temp_target(40, 40, 7, 100)
+      Test.assert_true(high < low, "lapse rate")
+      Test.assert_true(Math.abs(Biome.temp_target(40, 40, 7, 62) -. Biome.temp_target(40, 40, 8, 62)) > 0.0001, "seed matters")
+      Test.assert_true(low >= 0.0 && low <= 1.0, "clamped")
+    end
+  end
+
+end

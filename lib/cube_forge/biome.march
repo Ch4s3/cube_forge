@@ -1,0 +1,64 @@
+-- Biome — a derived, mutable climate field, one entry per world column.
+--
+-- Temperature and moisture (the Whittaker pair) plus an elevation gate. The
+-- field is recomputed WHOLE every tick: 16,384 columns is small enough that the
+-- light field's incremental machinery would be waste, and it means a player
+-- edit needs no special handling anywhere.
+mod CubeForge.Biome do
+
+  alias CubeForge.Noise as N
+
+  -- height, water flag, eased temperature, eased moisture, biome id, hold counter
+  type Field = Field(NativeU8Arr, NativeU8Arr, NativeFloatArr, NativeFloatArr, NativeU8Arr, NativeU8Arr)
+
+  doc "Biome ids. The order is the Whittaker table read row by row, then the two gated ones."
+  fn b_tundra() : Int do 0 end
+  fn b_taiga() : Int do 1 end
+  fn b_grassland() : Int do 2 end
+  fn b_forest() : Int do 3 end
+  fn b_desert() : Int do 4 end
+  fn b_wetland() : Int do 5 end
+  fn b_beach() : Int do 6 end
+  fn b_alpine() : Int do 7 end
+
+  fn name(id : Int) : String do
+    if id == 0 do "tundra" else if id == 1 do "taiga" else if id == 2 do "grassland"
+    else if id == 3 do "forest" else if id == 4 do "desert" else if id == 5 do "wetland"
+    else if id == 6 do "beach" else "alpine" end end end end end end end
+  end
+
+  doc "Columns from water at which moisture reaches zero."
+  fn reach() : Int do 24 end
+  doc "Temperature lost per block above sea level."
+  fn lapse() : Float do 0.012 end
+  doc "Surface height at and above which a column is alpine, whatever the axes say."
+  fn alpine_line() : Int do 95 end
+  doc "Columns beside water this low are beach."
+  fn beach_max_height() : Int do 64 end
+
+  pfn clamp01(v : Float) : Float do if v < 0.0 do 0.0 else if v > 1.0 do 1.0 else v end end end
+
+  doc "Moisture 0..1 for a column [dist] away from the nearest water: linear, zero at the reach."
+  fn moisture_target(dist : Int) : Float do
+    clamp01(1.0 -. int_to_float(dist) /. int_to_float(reach()))
+  end
+
+  doc "Temperature 0..1: one low-frequency octave (regions, not noise -- see Noise.ruggedness for why one octave), minus the lapse for height above sea level."
+  fn temp_target(wx : Int, wz : Int, seed : Int, h : Int) : Float do
+    let base = N.value2(int_to_float(wx) *. 0.018, int_to_float(wz) *. 0.018, seed + 1700)
+    clamp01(base -. lapse() *. int_to_float(h - N.sea_level()))
+  end
+
+  doc "The Whittaker lookup with two gates in front of it. Thresholds: cold below 0.33, hot from 0.66; damp from 0.5."
+  fn classify(temp : Float, moist : Float, h : Int, dist_water : Int) : Int do
+    if h >= alpine_line() do b_alpine()
+    else if dist_water <= 1 && h <= beach_max_height() do b_beach()
+    else
+      let damp = moist >= 0.5
+      if temp < 0.33 do (if damp do b_taiga() else b_tundra() end)
+      else if temp < 0.66 do (if damp do b_forest() else b_grassland() end)
+      else (if damp do b_wetland() else b_desert() end) end end
+    end end
+  end
+
+end
