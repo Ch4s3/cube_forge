@@ -205,8 +205,9 @@ can listen to — the audio equivalent of the BMP dumps.
   there was otherwise no headless way to reach the underwater state at all, and
   therefore no way to check the bed that plays there.
 
-Note that the whole app requires `MARCH_PIN_MAIN=1` on macOS (G15); without it
-it segfaults before the frame loop, with or without audio.
+(While this branch was open, the app needed `MARCH_PIN_MAIN=1` on macOS or it
+segfaulted before the frame loop, with or without audio — G15. The shim now
+sets that itself from a C constructor, so the runs above need no such prefix.)
 
 ## Levels
 
