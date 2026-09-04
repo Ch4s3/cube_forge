@@ -369,3 +369,20 @@ retina backing store (1600x1200, which this window sometimes gets) the shadow
 cost is per-pixel and would be roughly 4x, putting soft shadows near the 60 Hz
 budget. That case has not been measured. `CF_SHADOW_SOFT=0` halves the cost if
 it bites.
+
+### Ambient occlusion across chunk boundaries (fixed)
+
+AO needs the diagonal neighbour of a face corner, and that voxel can leave the
+chunk on BOTH axes at once, landing in a diagonal chunk the mesher is not given.
+`nb_get_d` read it as air, softening occlusion on the four corner columns of
+every chunk.
+
+The fix was not to pass nine chunks. `World` now retains the occupancy field it
+was already building for the shadow ray-marcher, and the mesher reads occluders
+from it. Occupancy is world-space, so the seam is gone by construction and
+`nb_get_d` is deleted rather than extended. It also unifies the two notions of
+"solid": the mesher's occluder test and the shadow marcher's are now literally
+the same bytes.
+
+Cost: the 4 MB occupancy field is kept rather than built and dropped, and a
+block edit updates one byte of it alongside the GPU texel.

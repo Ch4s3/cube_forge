@@ -411,7 +411,7 @@ mod CubeForge do
     match sc do
       Scene(world, counts, outline, hit, ui, pids, flags, meshes) ->
         let t0 = Win.time()
-        let w0 = World.set_block(world, x, y, z, id)
+        let w0 = World.set_occupied(World.set_block(world, x, y, z, id), x, y, z, CubeForge.Light.occludes(id))
         Win.gfx_set_voxel(x, y, z, CubeForge.Light.occludes(id))
         let n = World.side(w0)
         -- accessors, not a match: a dotted constructor pattern does not parse (GAPS.md G24/G25)
@@ -999,16 +999,15 @@ mod CubeForge do
       let world_dark = World.generate(n, seed, workers)
       let t2 = System.monotonic_time()
       -- stage 1b: skylight (needs the finished terrain, including neighbours)
-      let world = World.relight_all(world_dark)
+      let world_lit = World.relight_all(world_dark)
       let t2b = System.monotonic_time()
       println("  skylight flood: " ++ int_to_string(t2b - t2) ++ " ms")
       -- The shadow ray-marcher's view of the world. Built once and handed over;
       -- March keeps no copy, since a block edit only needs one texel.
-      let occ_ms = if headless do 0 else
-        let to0 = System.monotonic_time()
-        Win.gfx_upload_occupancy(CubeForge.Light.occupancy(world), 128, 256, 128)
-        System.monotonic_time() - to0 end
-      if !headless do println("  occupancy upload: " ++ int_to_string(occ_ms) ++ " ms") else () end
+      let to0 = System.monotonic_time()
+      let world = World.rebuild_occupancy(world_lit)
+      if !headless do Win.gfx_upload_occupancy(World.occupancy(world), 128, 256, 128) else () end
+      println("  occupancy: " ++ int_to_string(System.monotonic_time() - to0) ++ " ms")
       -- stage 2: meshing (needs neighbours; runs only after stage 1 completed)
       let meshes = mesh_all(world, n, workers)
       let t3 = System.monotonic_time()

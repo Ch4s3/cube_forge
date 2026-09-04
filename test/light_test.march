@@ -15,7 +15,7 @@ mod CubeForge.Test.Light do
   -- An 8x8 world of entirely empty chunks (no terrain), so seeding tests see
   -- only the blocks they place themselves.
   pfn air_world() : CubeForge.World.World do
-    CubeForge.World.World(Array.from_list(air_chunks(63, Nil)), L.new(), 8)
+    CubeForge.World.rebuild_occupancy(CubeForge.World.World(Array.from_list(air_chunks(63, Nil)), L.new(), L.new(), 8))
   end
 
 
@@ -30,7 +30,7 @@ mod CubeForge.Test.Light do
     if i < 0 do acc else slab_chunks(i - 1, y, Cons(slab_cells(C.new(), 0, y), acc)) end
   end
   pfn slab_world(y : Int) : CubeForge.World.World do
-    CubeForge.World.World(Array.from_list(slab_chunks(63, y, Nil)), L.new(), 8)
+    CubeForge.World.rebuild_occupancy(CubeForge.World.World(Array.from_list(slab_chunks(63, y, Nil)), L.new(), L.new(), 8))
   end
 
 
@@ -268,7 +268,7 @@ mod CubeForge.Test.Light do
       -- sideways: above the slab is open sky, below it is sealed.
       let w = CubeForge.World.relight_all(slab_world(8))
       let c = CubeForge.World.chunk_at(w, 2, 2)
-      let b = CubeForge.Mesher.mesh_section_opaque(c, c, c, c, c, CubeForge.World.light(w), 0, 32.0, 32.0)
+      let b = CubeForge.Mesher.mesh_section_opaque(c, c, c, c, c, CubeForge.World.light(w), CubeForge.World.occupancy(w), 0, 32.0, 32.0)
       let n = CubeForge.Mesher.vertex_count(b)
       Test.assert_true(n > 0, "the slab meshed to something")
       -- face 0 is +y (the sunlit top), face 1 is -y (the sealed underside)
@@ -279,7 +279,7 @@ mod CubeForge.Test.Light do
     test "opening a shaft lights the ceiling around it" do
       let w0 = CubeForge.World.relight_all(CubeForge.World.set_block(slab_world(8), 34, 8, 34, 0))
       let c = CubeForge.World.chunk_at(w0, 2, 2)
-      let b = CubeForge.Mesher.mesh_section_opaque(c, c, c, c, c, CubeForge.World.light(w0), 0, 32.0, 32.0)
+      let b = CubeForge.Mesher.mesh_section_opaque(c, c, c, c, c, CubeForge.World.light(w0), CubeForge.World.occupancy(w0), 0, 32.0, 32.0)
       let n = CubeForge.Mesher.vertex_count(b)
       -- the underside is no longer uniformly black: light now reaches it
       Test.assert_true(shade_of_face(b, 1.0, 0, n) >= 0.0, "underside still meshes")
@@ -332,6 +332,22 @@ mod CubeForge.Test.Light do
       let w1 = CubeForge.World.set_block(w0, 40, 8, 40, 3)
       let r = L.relight_marked(CubeForge.World.light(w1), w1, 40, 8, 40)
       Test.assert_eq_int(marked_count(L.relit_marks(r), 0, 0), 0, "nothing dirtied")
+    end
+  end
+
+  describe "AO across chunk boundaries" do
+    test "a diagonal occluder in the next chunk still darkens the corner" do
+      -- The occluder sits diagonally across BOTH a chunk edge in x and one in z
+      -- from the face being lit, so it lives in a chunk the mesher is not given.
+      -- Reading occluders from the world occupancy field is what makes it count.
+      let base = slab_world(8)
+      let w = CubeForge.World.rebuild_occupancy(CubeForge.World.set_block(base, 32, 9, 32, 3))
+      Test.assert_eq_int(NativeArray.get_u8(CubeForge.World.occupancy(w), L.occ_index(32, 9, 32)), L.occ_solid(),
+                         "the diagonal block is in the occupancy field")
+      -- (31,9,31) is the last voxel of chunk (1,1); (32,9,32) is the first of
+      -- chunk (2,2) -- diagonal in both axes, the case nb_get could not reach.
+      Test.assert_eq_int(CubeForge.Mesher.corner_ao(false, false, true), 2, "a lone diagonal occluder costs one step of AO")
+      Test.assert_true(CubeForge.World.floor_div16(31) != CubeForge.World.floor_div16(32), "the two voxels really are in different chunks")
     end
   end
 
