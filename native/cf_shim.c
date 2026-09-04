@@ -908,6 +908,73 @@ void cf_spring_set(int64_t x, int64_t y, int64_t z, int64_t on) {
 }
 int64_t cf_spring_count(void) { return g_nsprings; }
 
+/* ── Spray ──────────────────────────────────────────────────────────────────
+ * White, short-lived, up then down. Fed by an emitter queue March fills from
+ * the water actors' drop entries, by every spring's mouth bubbling, and by a
+ * burst when a spring is placed. Same idioms as the precipitation pool. */
+#define CF_SPRAY_SLOT 247
+#define CF_SPRAY_LIFE 0.6f
+static float  *g_spray = NULL;     /* x y z vx vy vz life, 7 floats */
+static float  *g_spray_vtx = NULL;
+static int64_t g_spray_cap = 0, g_spray_live = 0;
+static int32_t g_emit[1024][4]; static int64_t g_nemit = 0;   /* x y z count */
+
+void cf_spray_init(int64_t cap) {
+    if (cap < 0) cap = 0; if (cap > 1 << 16) cap = 1 << 16;
+    free(g_spray); free(g_spray_vtx);
+    g_spray_cap = cap; g_spray_live = 0;
+    g_spray = cap ? (float *)calloc((size_t)cap * 7, sizeof(float)) : NULL;
+    g_spray_vtx = cap ? (float *)calloc((size_t)cap * CF_PRECIP_VTX, sizeof(float)) : NULL;
+}
+void cf_spray_at(int64_t x, int64_t y, int64_t z, int64_t n) {
+    if (g_nemit < 1024) { g_emit[g_nemit][0] = (int32_t)x; g_emit[g_nemit][1] = (int32_t)y; g_emit[g_nemit][2] = (int32_t)z; g_emit[g_nemit][3] = (int32_t)n; g_nemit++; }
+}
+static void spray_spawn(float x, float y, float z, int64_t n, int64_t tick) {
+    for (int64_t k = 0; k < n && g_spray_live < g_spray_cap; k++) {
+        float *p = g_spray + g_spray_live * 7;
+        float a = pcl_rnd(g_spray_live * 31 + k, tick) * 6.283185f;
+        float r = pcl_rnd(g_spray_live * 17 + k, tick + 1) * 1.6f;
+        p[0] = x + 0.5f; p[1] = y + 0.9f; p[2] = z + 0.5f;
+        p[3] = cosf(a) * r; p[4] = 2.5f + pcl_rnd(k, tick + 2) * 2.0f; p[5] = sinf(a) * r;
+        p[6] = CF_SPRAY_LIFE;
+        g_spray_live++;
+    }
+}
+/* Step, spawn queued emitters (and every spring's mouth, two a tick), upload.
+ * Returns the vertex count to draw. */
+int64_t cf_spray_frame(double dt, int64_t tick) {
+    if (!g_spray) return 0;
+    for (int64_t i = 0; i < g_nemit; i++) spray_spawn((float)g_emit[i][0], (float)g_emit[i][1], (float)g_emit[i][2], g_emit[i][3], tick);
+    g_nemit = 0;
+    if (tick % 10 == 0) for (int64_t i = 0; i < g_nsprings; i++) spray_spawn((float)g_springs[i][0], (float)g_springs[i][1], (float)g_springs[i][2], 2, tick + i);
+    for (int64_t i = 0; i < g_spray_live; ) {
+        float *p = g_spray + i * 7;
+        p[6] -= (float)dt;
+        if (p[6] <= 0.0f) { memcpy(p, g_spray + (g_spray_live - 1) * 7, 7 * sizeof(float)); g_spray_live--; continue; }
+        p[4] -= 9.0f * (float)dt;
+        p[0] += p[3] * (float)dt; p[1] += p[4] * (float)dt; p[2] += p[5] * (float)dt;
+        i++;
+    }
+    for (int64_t i = 0; i < g_spray_live; i++) {
+        float *p = g_spray + i * 7;
+        float a = p[6] / CF_SPRAY_LIFE;
+        float fx = (float)(1 * 256 + (int)(a * 0.9f * 255.0f + 0.5f));
+        float h = 0.07f;
+        float *v = g_spray_vtx + i * CF_PRECIP_VTX;
+        pcl_vert(v + 0 * CF_VERT_FLOATS, p[0] - h, p[1] - h, p[2],     0.95f, 0.97f, 1.0f, fx);
+        pcl_vert(v + 1 * CF_VERT_FLOATS, p[0] + h, p[1] - h, p[2],     0.95f, 0.97f, 1.0f, fx);
+        pcl_vert(v + 2 * CF_VERT_FLOATS, p[0] + h, p[1] + h, p[2],     0.95f, 0.97f, 1.0f, fx);
+        pcl_vert(v + 3 * CF_VERT_FLOATS, p[0] - h, p[1] - h, p[2],     0.95f, 0.97f, 1.0f, fx);
+        pcl_vert(v + 4 * CF_VERT_FLOATS, p[0] + h, p[1] + h, p[2],     0.95f, 0.97f, 1.0f, fx);
+        pcl_vert(v + 5 * CF_VERT_FLOATS, p[0] - h, p[1] + h, p[2],     0.95f, 0.97f, 1.0f, fx);
+    }
+    if (g_spray_live > 0) {
+        glBindBuffer(GL_ARRAY_BUFFER, g_vbo[CF_SPRAY_SLOT]);
+        glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(g_spray_live * CF_PRECIP_VTX * (int64_t)sizeof(float)), g_spray_vtx, GL_STREAM_DRAW);
+    }
+    return g_spray_live * 6;
+}
+
 /* Precipitation: blended and depth-write-off like water, but also unlit and
  * untextured, so each particle keeps the colour it carries in its uv/layer
  * slots instead of being dimmed by a sun it is supposed to be obscuring. */

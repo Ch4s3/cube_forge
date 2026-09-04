@@ -857,4 +857,24 @@ Balance, release build, seed 7, frame ~890, one tick every ten frames:
 Defaults landed: **rate 1, evap 16, density 100** -- five springs, ~9-cell
 brooks in the probe, actors well under the 2 ms target. The remesh is the honest
 cost of water that keeps moving: about three sections per brook per tick,
-~1.5 ms each. `CF_SPRING_DENSITY` is the lever for it. `docs/spring-brook.png`.
+~1.5 ms each. `CF_SPRING_DENSITY` is the lever for it. `docs/spring-brook.png` is
+seed 5, whose spring sits four columns from spawn: a pool at the mouth and
+evaporating tips scattered downslope -- at rate 1 a brook reads as a chain of
+puddles rather than a ribbon.
+
+## Spray
+
+Drops and spring mouths. When `give` lands water in a cell with air beneath it,
+the actor appends a `kind 4` entry with the cell; `apply_reply` turns it into
+three spray particles there. Every spring bubbles two particles every ten
+frames from the shim's spring list; placing a spring bursts forty. A second
+pool in the shim (`CF_SPRAY`, default 512), white quads fading with life,
+drawn through the precipitation path in slot 247. Seed 5 at frame 890, spray
+on against off: 500 pixels differ, all around the spring by spawn
+(`docs/spring-spray.png`).
+
+Two March traps on the way: `&&` does not short-circuit (G33), so a
+`dy > 0 && C.get(.., dy - 1, ..)` guard still read y = -1 once water had fallen
+to the bottom of a test world with no floor -- nested `if` now; and the shaft
+test's world had a single stone block as its "floor", off which water fell to
+y = 0 -- a full layer now.

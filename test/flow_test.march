@@ -16,6 +16,9 @@ mod CubeForge.Test.Flow do
     if i >= 256 do c else floor_go(C.set(c, i % 16, 70, i / 16, 3), i + 1) end
   end
   pfn floored() : CubeForge.Chunk.Chunk do floor_go(C.new(), 0) end
+  pfn layer_at(c : CubeForge.Chunk.Chunk, y : Int, i : Int) : CubeForge.Chunk.Chunk do
+    if i >= 256 do c else layer_at(C.set(c, i % 16, y, i / 16, 3), y, i + 1) end
+  end
 
   pfn run_ticks(s : CubeForge.Water.Sim, n : Int) : CubeForge.Water.Sim do
     if n == 0 do s else run_ticks(Water.step_sim(Water.tick(s)), n - 1) end
@@ -91,8 +94,9 @@ mod CubeForge.Test.Flow do
       Test.assert_eq_int(Water.pending(s), 0, "queue drained")
     end
     test "water falls down a shaft and pools at the bottom, volume kept" do
-      -- a shaft next to the placed block: air from y = 70 down to y = 63, stone at y = 62
-      let c = roof_go(C.set(C.set(C.set(floored(), 8, 71, 8, C.id_of_level(7)), 9, 70, 8, 0), 9, 62, 8, 3), 0)
+      -- a shaft next to the placed block: air from y = 70 down to y = 63, a full stone layer at y = 62
+      -- (a single stone block there let the water spread off it and fall to y = 0)
+      let c = roof_go(C.set(C.set(layer_at(floored(), 62, 0), 8, 71, 8, C.id_of_level(7)), 9, 70, 8, 0), 0)
       let s = run_ticks(Water.edited(Water.new_sim(c, Water.empty_edges()), Water.idx(8, 71, 8), C.id_of_level(7)), 60)
       let ch = Water.sim_chunk(s)
       Test.assert_eq_int(Water.volume(s), 7, "volume kept")
@@ -240,6 +244,26 @@ mod CubeForge.Test.Flow do
       Test.assert_true(Water.volume(s) > 0, "the spring is still feeding a brook after sixty ticks")
       Test.assert_true(C.count_water(Water.sim_chunk(s)) > 3, "the water went somewhere: more than the spring and its two neighbours")
       Test.assert_true(Water.volume(s) < 40, "and evaporation holds it to a brook, not a lake")
+    end
+  end
+
+  pfn has_drop(out : List(Int)) : Bool do
+    match out do
+      Nil -> false
+      Cons(v, rest) -> if v / 4294967296 == 4 do true else has_drop(rest) end
+    end
+  end
+  describe "drops" do
+    test "water landing over a pit reports a drop; over a one-block step it does not" do
+      -- pit: the cell at (9,70) is air and so is (9,69); floor at 68
+      let cp = C.set(C.set(C.set(roof_go(floored(), 0), 9, 70, 8, 0), 9, 69, 8, 0), 9, 68, 8, 3)
+      let cp1 = C.set(cp, 8, 71, 8, C.id_of_level(7))
+      let rp = Water.tick(Water.edited(Water.new_sim(cp1, Water.empty_edges()), Water.idx(8, 71, 8), C.id_of_level(7)))
+      Test.assert_true(has_drop(Water.step_out(rp)), "a drop over the pit")
+      -- step: (9,70) air over a full stone layer at 69 -- the landing has ground under it
+      let cs = C.set(C.set(roof_go(layer_at(floored(), 69, 0), 0), 9, 70, 8, 0), 8, 71, 8, C.id_of_level(7))
+      let rs = Water.tick(Water.edited(Water.new_sim(cs, Water.empty_edges()), Water.idx(8, 71, 8), C.id_of_level(7)))
+      Test.assert_true(!has_drop(Water.step_out(rs)), "no drop over a step")
     end
   end
 

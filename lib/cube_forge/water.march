@@ -30,6 +30,8 @@ mod CubeForge.Water do
   fn kind_edge() : Int do 4294967296 end
   fn kind_spill() : Int do 8589934592 end
   fn kind_pending() : Int do 12884901888 end
+  doc "kind 4: water landed in a cell with air beneath it -- a drop's foot, for spray. payload = idx."
+  fn kind_drop() : Int do 17179869184 end
   fn max_cells_per_tick() : Int do 250 end
   doc "Units a source may give per processing, summed over its neighbours. A source is a spring, and a spring is a trickle: uncapped it gives 8-16 a tick and no evaporation rate balances that. CF_SPRING_RATE."
   fn spring_rate() : Int do Env.get_int("CF_SPRING_RATE", 1) end
@@ -204,7 +206,12 @@ mod CubeForge.Water do
           -- receiver only when the giver is itself written -- and a source never
           -- is. A spring's receivers filled to 7 and then nothing moved again.
           match set_cell(st1, dx, dy, dz, C.id_of_level(if rl + u > 7 do 7 else rl + u end)) do
-            Step(s2, o2) -> Step(mark(s2, dx, dy, dz), o2)
+            Step(s2, o2) ->
+              -- Falling onto a cell with nothing under it is a drop: report it
+              -- so the frame loop can put spray there.
+              -- nested, not &&: it does not short-circuit (GAPS.md G33), and dy - 1 can be -1
+              let drop = if dy < sy && dy > 0 do C.get(sim_chunk(s2), dx, dy - 1, dz) == 0 else false end
+              Step(mark(s2, dx, dy, dz), if drop do Cons(kind_drop() + idx(dx, dy, dz), o2) else o2 end)
           end
         end
       else if dy < 0 || dy >= 256 do st1

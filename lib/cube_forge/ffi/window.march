@@ -28,6 +28,9 @@ mod CubeForge.Ffi.Window do
     fn x_gfx_set_time(t: Float): Unit = "cf_gfx_set_time"
     fn x_spring_set(x: Int, y: Int, z: Int, flag: Int): Unit = "cf_spring_set"   -- not `on`: reserved (GAPS G65)
     fn x_spring_count(): Int = "cf_spring_count"
+    fn x_spray_init(cap: Int): Unit = "cf_spray_init"
+    fn x_spray_at(x: Int, y: Int, z: Int, n: Int): Unit = "cf_spray_at"
+    fn x_spray_frame(dt: Float, tick: Int): Int = "cf_spray_frame"
     fn x_gfx_draw_precip(slot: Int, nverts: Int): Unit = "cf_gfx_draw_precip"
     fn x_precip_init(cap: Int): Unit = "cf_precip_init"
     fn x_biome_map_upload(biomes: NativeU8Arr, n: Int): Unit = "cf_biome_map_upload"
@@ -76,6 +79,13 @@ mod CubeForge.Ffi.Window do
   doc "Tell the shim a spring (a source above sea level) appeared or vanished at (x, y, z)."
   fn spring_set(x : Int, y : Int, z : Int, present : Bool) : Unit do x_spring_set(x, y, z, if present do 1 else 0 end) end
   fn spring_count() : Int do x_spring_count() end
+
+  doc "Allocate the spray pool. Once, at startup."
+  fn spray_init(cap : Int) : Unit do x_spray_init(cap) end
+  doc "Queue [n] spray particles at block (x, y, z) for the next frame."
+  fn spray_at(x : Int, y : Int, z : Int, n : Int) : Unit do x_spray_at(x, y, z, n) end
+  doc "Step the spray, spawn what was queued and the springs' mouths, upload; returns the vertex count to draw."
+  fn spray_frame(dt : Float, tick : Int) : Int do x_spray_frame(dt, tick) end
 
   doc "Seconds for the water animation."
   fn gfx_set_time(t : Float) : Unit do x_gfx_set_time(t) end

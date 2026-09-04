@@ -169,9 +169,13 @@ mod CubeForge do
             apply_reply(w, pids, send_edge(w, pids, flags, nb_cx(cx, dir), nb_cz(cz, dir), Water.opposite(dir), slot, val), ci, rest, cells)
           else if kind == 2 do
             apply_reply(w, pids, send_spill(w, pids, flags, nb_cx(cx, dir), nb_cz(cz, dir), Water.opposite(dir), slot, val), ci, rest, cells)
+          else if kind == 4 do
+            -- a drop's foot: spray there
+            Win.spray_at(16 * cx + payload % 16, payload / 256, 16 * cz + (payload / 16) % 16, 3)
+            apply_reply(w, pids, flags, ci, rest, cells)
           else
             apply_reply(w, pids, NativeArray.set_int(flags, ci, 1), ci, rest, cells)
-          end end
+          end end end
         end
     end
   end
@@ -448,6 +452,7 @@ mod CubeForge do
         let was_spring = y > Chunk.sea_level() && Chunk.is_source(World.block_at(world, x, y, z))
         let is_spring = y > Chunk.sea_level() && Chunk.is_source(id)
         if was_spring != is_spring do Win.spring_set(x, y, z, is_spring) else () end
+        if is_spring && !was_spring do Win.spray_at(x, y, z, 40) else () end
         Win.gfx_set_voxel(x, y, z, CubeForge.Light.occludes(id))
         let n = World.side(w0)
         -- accessors, not a match: a dotted constructor pattern does not parse (GAPS.md G24/G25)
@@ -1094,6 +1099,8 @@ mod CubeForge do
           draw_foliage(scene_counts(sc1), 0, nchunks)
           draw_water(scene_counts(sc1), 0, nchunks)
           if live > 0 do Win.gfx_draw_precip(Precip.slot(), Precip.vertex_count(live)) else () end
+          let spray_verts = Win.spray_frame(pdt, frame)
+          if spray_verts > 0 do Win.gfx_draw_precip(247, spray_verts) else () end
           if scene_has_hit(sc1) do CubeForge.Ffi.Window.gfx_draw_lines(254, Outline.vertex_count()) else () end
           -- the underwater screen tint only makes sense from the real first-person eye
           if map_mode1 do ()
@@ -1361,6 +1368,7 @@ mod CubeForge do
     else
       if !headless do (if Win.gfx_init() == 0 do println("gfx init failed") else () end) else () end
       if !headless do Win.precip_init(Env.get_int("CF_PRECIP", 4000)) else () end
+      if !headless do Win.spray_init(Env.get_int("CF_SPRAY", 512)) else () end
       -- stage 1: terrain (independent chunks)
       let t0 = System.monotonic_time()
       let world_scalar = World.generate_scalar(n, seed, workers)
