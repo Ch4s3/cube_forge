@@ -522,7 +522,7 @@ mod CubeForge do
         let w2 = World.set_light(w1, CubeForge.Light.relit_field(relit))
         sync_occupancy(w2, x, z, base, base + trunk + 2)
         let marks1 = or_marks(mark_box(marks, x - 4, base, z - 4, x + 4, base + trunk + 2, z + 4, n, 0), CubeForge.Light.relit_marks(relit), 0)
-        veg_go(w2, Biome.rescan_box(bio, w2, x, z, Veg.decay_radius() + 1), marks1, seed, n, rest)
+        veg_go(w2, Biome.rescan_box(bio, w2, x, z, Veg.decay_radius() + 1, base + trunk + 2), marks1, seed, n, rest)
     end
   end
   pfn or_marks(a : NativeIntArr, b : NativeIntArr, i : Int) : NativeIntArr do
@@ -578,16 +578,20 @@ mod CubeForge do
   -- needed; the touched sections are collected into one marks array and
   -- remeshed once. Doing it through edit_block cost ~7 ms per column, almost
   -- all of it a relight and a per-column section remesh.
-  pfn migrate_go(w : CubeForge.World.World, bio : CubeForge.Biome.Field, marks : NativeIntArr, n : Int, cols : List(Int)) : Migrated do
+  -- The field update is batched (Biome.note_edits) rather than one note_edit per
+  -- column: each column's height and water flag depend only on that column, so
+  -- noting them all against the finished world is the same answer for two array
+  -- copies instead of sixty-four.
+  pfn migrate_go(w : CubeForge.World.World, bio : CubeForge.Biome.Field, marks : NativeIntArr, n : Int, cols : List(Int), edits : List(Int)) : Migrated do
     match cols do
-      Nil -> Migrated(w, bio, marks)
+      Nil -> Migrated(w, Biome.note_edits(bio, w, edits), marks)
       Cons(ci, rest) ->
         let x = ci % (n * 16)
         let z = ci / (n * 16)
         let h = Biome.height_of(bio, x, z)
         let id = Biome.palette(Biome.biome_of(bio, x, z))
-        let w1 = World.set_block(w, x, h, z, id)
-        migrate_go(w1, Biome.note_edit(bio, w1, x, h, z, id), mark_geometry(marks, x, h, z, n), n, rest)
+        migrate_go(World.set_block(w, x, h, z, id), bio, mark_geometry(marks, x, h, z, n), n, rest,
+                   Cons(Biome.pack_edit(x, h, z, id), edits))
     end
   end
   type Migrated = Migrated(CubeForge.World.World, CubeForge.Biome.Field, NativeIntArr)
@@ -611,7 +615,7 @@ mod CubeForge do
         match sc do
           Scene(world, counts, outline, hit, ui, pids, flags, meshes, bio) ->
             let n = World.side(world)
-            match migrate_go(world, bio, CubeForge.Light.marks_new(), n, cols) do
+            match migrate_go(world, bio, CubeForge.Light.marks_new(), n, cols, Nil) do
               Migrated(w1, bio1, marks) ->
                 match remesh_marked(w1, marks, 0, n, counts, meshes, Chunk.new()) do
                   Remeshed(c1, m1) -> Scene(w1, c1, outline, hit, ui, pids, flags, m1, bio1)
@@ -697,7 +701,7 @@ mod CubeForge do
         let world1 = World.decay_leaves(world, x, y, z, decay_radius())
         let world2 = World.relight_at(world1, x, y, z)
         match remesh_region(world2, x, y, z, counts, meshes, Chunk.new(), 0) do
-          Remeshed(c1, m1) -> Scene(world2, c1, outline, hit, ui, pids, flags, m1, Biome.rescan_box(bio, world2, x, z, decay_radius()))
+          Remeshed(c1, m1) -> Scene(world2, c1, outline, hit, ui, pids, flags, m1, Biome.rescan_box(bio, world2, x, z, decay_radius(), 0))
         end
     end
   end
@@ -1220,6 +1224,11 @@ mod CubeForge do
             let pcz = float_to_int(V.z(Player.position(player1)))
             println("  biome at player column (" ++ int_to_string(pcx) ++ "," ++ int_to_string(pcz) ++ "): " ++ Biome.name(Biome.biome_of(scene_biome(sc1), pcx, pcz)) ++ " height " ++ int_to_string(Biome.height_of(scene_biome(sc1), pcx, pcz)) ++ " " ++ Biome.debug_axes(scene_biome(sc1), pcx, pcz))
             println("  weather " ++ float_to_string(wx) ++ " (overcast " ++ float_to_string(ov) ++ ", fog " ++ float_to_string(fog_density(wx)) ++ ", bolt " ++ float_to_string(bolt) ++ ", live " ++ int_to_string(live) ++ (if snowing do " snow" else " rain" end) ++ ")")
+            -- Behaviour oracle for refactors: the discrete field state and every
+            -- voxel, hashed. Resolution-independent, unlike a frame dump, and it
+            -- covers the columns the camera cannot see.
+            println("  state: biome " ++ int_to_string(Biome.state_hash(scene_biome(sc1), World.side(scene_world(sc1)) * 16))
+                    ++ " world " ++ int_to_string(World.state_hash(scene_world(sc1))))
           else () end
           if frame % 60 == 0 && autowalk do
             println("frame " ++ int_to_string(frame) ++ " player at " ++ V.to_string(Player.position(player1)) ++ " on_ground=" ++ (if Player.on_ground(player1) do "true" else "false" end))

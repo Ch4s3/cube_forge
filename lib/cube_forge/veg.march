@@ -28,26 +28,42 @@ mod CubeForge.Veg do
 
   -- Column (x, z) is its cell's canonical trunk column and the cell's density draw
   -- is under the biome's density.
+  -- Nested, not `&&`: `&&` evaluates both sides (GAPS G33), and the scan runs
+  -- this over 2048 columns a tick, where the trunk test rejects all but one in
+  -- a few hundred. The density noise is only worth computing for a trunk column.
   pfn cell_says_tree(x : Int, z : Int, seed : Int, b : Int) : Bool do
     let cx = x / Trees.cell_size()
     let cz = z / Trees.cell_size()
-    Trees.cell_trunk(cx, cz, seed) == x + 4096 * z && Trees.cell_density(cx, cz, seed) < density(b)
+    if Trees.cell_trunk(cx, cz, seed) == x + 4096 * z do Trees.cell_density(cx, cz, seed) < density(b)
+    else false end
   end
 
   doc "Can a tree grow at column (x, z) now: its biome wants one, the cell says so, the surface is the biome's own ground with air above, it is dry and above the sea, and nothing stands there yet."
+  -- Nested rather than a chain of `&&`: `&&` does not short-circuit (GAPS G33),
+  -- so the flat version ran the noise call and both block_at lookups for every
+  -- one of the 2048 columns a tick scans, nearly all of which the first test
+  -- already rejected. Cheapest and most selective tests first.
   fn can_grow(f : CubeForge.Biome.Field, w : CubeForge.World.World, seed : Int, x : Int, z : Int) : Bool do
     let b = Biome.biome_of(f, x, z)
-    let h = Biome.height_of(f, x, z)
-    wants_trees(b) && h > C.sea_level() && cell_says_tree(x, z, seed, b)
-      && W.block_at(w, x, h, z) == Biome.palette(b) && W.block_at(w, x, h + 1, z) == 0
-      && !Biome.is_wet(f, x, z)
+    if !wants_trees(b) do false
+    else
+      let h = Biome.height_of(f, x, z)
+      if h <= C.sea_level() do false
+      else if !cell_says_tree(x, z, seed, b) do false
+      else if W.block_at(w, x, h, z) != Biome.palette(b) do false
+      else if W.block_at(w, x, h + 1, z) != 0 do false
+      else !Biome.is_wet(f, x, z) end end end end
+    end
   end
 
   doc "Should the tree rooted at column (x, z) decay: a log stands on the surface's ground and the biome does not want trees. The heightmap sees a tree's top as the surface, so the ground is found by walking down through the tree."
+  -- Nested for the same reason as can_grow (G33): trunk_base walks up to
+  -- thirteen block_at down the column, and the biome test rejects it outright
+  -- everywhere a tree could never have stood.
   fn can_decay(f : CubeForge.Biome.Field, w : CubeForge.World.World, x : Int, z : Int) : Bool do
     let b = Biome.biome_of(f, x, z)
-    let h = Biome.height_of(f, x, z)
-    !wants_trees(b) && trunk_base(w, x, z, h) >= 0
+    if wants_trees(b) do false
+    else trunk_base(w, x, z, Biome.height_of(f, x, z)) >= 0 end
   end
 
   doc "The y of the ground under the tree whose trunk is in column (x, z), searching down from [top]; -1 if no log sits on solid ground within a trunk's height."

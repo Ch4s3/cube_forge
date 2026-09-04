@@ -182,4 +182,17 @@ mod CubeForge.World do
     World(Array.from_list(chunks), CubeForge.Light.new(), CubeForge.Light.new(), n)
   end
 
+  -- A rolling hash over every voxel of every chunk. Four million reads, so this
+  -- is a diagnostic run once on demand at the dump frame, never on the frame path.
+  pfn hash_voxels(c : CubeForge.Chunk.Chunk, i : Int, h : Int) : Int do
+    if i >= 65536 do h
+    else hash_voxels(c, i + 1, (h * 131 + C.get_idx(c, i)) % 1073741789) end
+  end
+  pfn hash_chunks(w : World, ci : Int, n : Int, h : Int) : Int do
+    if ci >= n * n do h
+    else hash_chunks(w, ci + 1, n, hash_voxels(chunk_at(w, ci % n, ci / n), 0, h)) end
+  end
+  doc "A hash of every block in the world: an oracle for 'the world evolved the same way' across a refactor."
+  fn state_hash(w : World) : Int do hash_chunks(w, 0, side(w), 7) end
+
 end
