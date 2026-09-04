@@ -30,13 +30,19 @@ mod CubeForge do
   alias CubeForge.Inventory as Inv
   alias CubeForge.Vertex as Vx
   alias CubeForge.Precip as Precip
+  alias CubeForge.Weather as Weather
 
   fn ms(seconds : Float) : String do float_to_string(seconds *. 1000.0) ++ "ms" end
 
   -- Everything the frame loop threads through. A variant so the per-frame
   -- rebuild can reuse the cell (see GAPS.md G12).
-  -- frame, last_time, player, alloc_sample, view scratch, vp upload buffer, map-view toggle, marker buffer, flashlight
-  type Frame = Frame(Int, Float, CubeForge.Player.Player, Int, NativeFloatArr, NativeF32Arr, Bool, CubeForge.F32Buf.F32Buf, Bool)
+  -- frame, last_time, player, alloc_sample, view scratch, vp upload buffer, map-view toggle, marker buffer, flashlight, cached weather intensity, cached lightning bolt
+  -- The weather actor's answer for one tick: intensity and lightning bolt.
+  type Wx = Wx(Float, Float)
+  pfn pair_a(w : Wx) : Float do match w do Wx(a, _) -> a end end
+  pfn pair_b(w : Wx) : Float do match w do Wx(_, b) -> b end end
+
+  type Frame = Frame(Int, Float, CubeForge.Player.Player, Int, NativeFloatArr, NativeF32Arr, Bool, CubeForge.F32Buf.F32Buf, Bool, Float, Float)
   -- Mutable-per-edit world state: world, per-slot vertex counts (opaque 0..63, water 64..127), outline buffer, current hit,
   -- selected block id, water actor pids (Array, one per chunk), per-chunk "has dirty cells" flags
   -- `p` is the water-actor Pid type: Pid(state) cannot be written in an annotation (GAPS.md G45), so it is a parameter.
@@ -640,13 +646,13 @@ mod CubeForge do
   -- Run-time knobs read once, outside the frame loop (an Env read allocates).
   type Knobs = Knobs(Int, Int, String, Bool, Float, Int, Bool, Int, Int, Int, Float, Int, Float, Int, Int)   -- max_frames, dump_frame, dump_path, autowalk, autospin, autoedit frame (<0 = off), autoswim, autoflow frame (<0 = off), workers, automap frame (<0 = off; forces map view on from this frame, for headless verification), day length in seconds, sun angle override in degrees (<0 = follow the clock), shadow reach in blocks (0 = off), weather pin 0..100 (<0 = follow the actor), precipitation pool capacity
 
-  fn frame_loop(f : Frame, k : Knobs, sc, nchunks : Int, proj : NativeFloatArr, map_proj : NativeFloatArr, fps : Fps) : Frame do
+  fn frame_loop(f : Frame, k : Knobs, sc, nchunks : Int, proj : NativeFloatArr, map_proj : NativeFloatArr, fps : Fps, wxpid) : Frame do
     match f do
-      Frame(frame, last_t, player, sample, view, vp, map_mode, marker, flash) ->
+      Frame(frame, last_t, player, sample, view, vp, map_mode, marker, flash, wcache, bcache) ->
         match k do
         Knobs(max_frames, dump_frame, dump_path, autowalk, autospin, autoedit, autoswim, autoflow, workers, automap, day_len, sun_deg, shadow_dist, weather_pin, precip_cap) ->
         if Win.should_close() || (max_frames >= 0 && frame >= max_frames) do
-          Frame(frame, last_t, player, sample, view, vp, map_mode, marker, flash)
+          Frame(frame, last_t, player, sample, view, vp, map_mode, marker, flash, wcache, bcache)
         else
           In.poll()
           if In.key(In.key_escape()) do Win.request_close() else () end
@@ -709,8 +715,19 @@ mod CubeForge do
           let inten = sun_intensity(sun)
           let da = dusk_amount(sun)
           -- Weather. The map view is a diagnostic, so it stays clear and unfogged.
-          let wx = if map_mode1 do 0.0 else weather_now(weather_pin, 0.0) end
+          -- One call per tick_period(), not per frame, and the cached value is
+          -- eased in between, so the actor costs one message per ten frames.
+          let asked = if frame % tick_period() == 0 do
+            match Weather.call_tick(wxpid) do
+              Ok(Cons(iv, Cons(bv, _))) -> Wx(int_to_float(iv) /. 1000.0, int_to_float(bv) /. 1000.0)
+              _ -> Wx(wcache, bcache)
+            end
+          else Wx(wcache, bcache) end
+          let wnow = pair_a(asked)
+          let bnow = pair_b(asked)
+          let wx = if map_mode1 do 0.0 else weather_now(weather_pin, wnow) end
           let ov = overcast_of(wx)
+          let bolt = if map_mode1 do 0.0 else (if weather_pin < 0 do bnow else 0.0 end) end
           let sr = (0.55 +. 0.40 *. da) *. inten +. 0.030 *. moon
           let sg = (0.75 -. 0.38 *. da) *. inten +. 0.045 *. moon
           let sb = (0.95 -. 0.70 *. da) *. inten +. 0.110 *. moon
@@ -718,7 +735,7 @@ mod CubeForge do
           Win.gfx_begin_frame(overcast_sky(sr, lum, ov), overcast_sky(sg, lum, ov), overcast_sky(sb, lum, ov))
           Win.gfx_set_sky(sdx, sdy, sdz, 0.0 -. sdx, 0.0 -. sdy, 0.0 -. sdz)
           -- Must follow begin_frame: the fog colour is the clear colour it stashed.
-          Win.gfx_set_weather(fog_density(wx), ov, 0.0)
+          Win.gfx_set_weather(fog_density(wx), ov, bolt)
           -- Precipitation. Under CF_FRAMES the integration uses a fixed step so
           -- headless dumps replay identically; the pool is the first stateful
           -- renderer-side simulation and that is what keeps it reproducible.
@@ -771,7 +788,7 @@ mod CubeForge do
           if frame == 200 do
             println("live-object delta over frames 100..200: " ++ int_to_string(Win.live_allocs() - sample1) ++ " (" ++ int_to_string((Win.live_allocs() - sample1) / 100) ++ " per frame)")
           else () end
-          frame_loop(Frame(frame + 1, now, player1, sample1, view1, vp1, map_mode1, marker1, flash1), k, sc2, nchunks, proj, map_proj, fps1)
+          frame_loop(Frame(frame + 1, now, player1, sample1, view1, vp1, map_mode1, marker1, flash1, wnow, bnow), k, sc2, nchunks, proj, map_proj, fps1, wxpid)
         end
         end
     end
@@ -1027,8 +1044,10 @@ mod CubeForge do
         println("spawned " ++ int_to_string(n * n) ++ " water actors in " ++ ms(Win.time() -. tw0) ++ " (loads run asynchronously)")
         let scene = Scene(world, counts, F32Buf.new(256), Ray.miss(), Ui(Inv.new(), F32Buf.new(2048), F32Buf.new(256), -1), pids, NativeArray.make_int(n * n, 0), Array.from_list(meshes))
         let fps0 = Fps(t4, 0, 0, F32Buf.new(4096))
-        match frame_loop(Frame(0, t4, player, 0, NativeArray.make_float(16, 0.0), NativeArray.make_f32(16, 0.0), false, F32Buf.new(64), Env.get_int("CF_FLASH", 0) == 1), knobs, scene, n * n, proj, map_proj, fps0) do
-          Frame(frames, _, p, _, _, _, _, _, _) ->
+        let wxpid = Weather.spawn_weather()
+        Weather.send_seed(wxpid, seed)
+        match frame_loop(Frame(0, t4, player, 0, NativeArray.make_float(16, 0.0), NativeArray.make_f32(16, 0.0), false, F32Buf.new(64), Env.get_int("CF_FLASH", 0) == 1, 0.0, 0.0), knobs, scene, n * n, proj, map_proj, fps0, wxpid) do
+          Frame(frames, _, p, _, _, _, _, _, _, _, _) ->
             let t5 = Win.time()
             println("ran " ++ int_to_string(frames) ++ " frames in " ++ ms(t5 -. t4) ++ " (" ++ float_to_string(int_to_float(frames) /. (t5 -. t4)) ++ " fps, vsync on); player ended at " ++ V.to_string(Player.position(p)))
         end

@@ -232,3 +232,38 @@ there is little brightness left to remove.
 Both produced plausible-looking output — the first darkened almost everything,
 the second nothing — which is why the sun-angle sweep above is the check that
 matters rather than a single screenshot.
+
+## Weather
+
+Overcast, fog, precipitation and a weather actor
+(`docs/superpowers/specs/2026-09-03-weather-design.md`). Release build,
+`MARCH_NUM_SCHEDULERS=1`, seed 7, `CF_SUN=45`, best of four 150-frame runs — the
+machine was under variable load, so single runs swing by 3x and only the best
+run approximates an uncontended one.
+
+| particles | fps |
+|-----------|-----|
+| 0         | 270 |
+| 4000 (default) | 265 |
+| 16000     | 181 |
+
+The pool and its geometry live in the C shim rather than in March. In March the
+step alone ran 4000 particles at **5.9 fps** and the geometry build was SIGKILLed
+for memory: `NativeArray` writes copy the whole array when it is not uniquely
+owned, so both loops are O(n^2). See GAPS.md G67.
+
+Vertex layout went 8 -> 9 floats (packed effect + alpha), +12.5% vertex memory,
+about 1 MB at a full 217k-vertex world.
+
+Verification:
+
+- `CF_WEATHER=0` renders **pixel-identical** to the pre-weather baseline. The
+  0.002 haze floor is below 8-bit precision at this view distance.
+- Storm underground: **0** rain pixels. Storm above ground: 39,466
+  (`scratch/rainpixels.py`).
+- Two identical runs are pixel-identical from ~frame 150 onward. Earlier frames
+  are not reproducible, because the async water actors are still mutating the
+  light field that the precipitation kill reads — pre-existing behaviour, not
+  something the pool introduces.
+- A bare `cmp` on two dumps never matches: the FPS counter differs between any
+  two runs. `scratch/cmpframe.py` masks it.

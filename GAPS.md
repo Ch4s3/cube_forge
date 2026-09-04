@@ -907,3 +907,25 @@ are freed immediately.
   reported **0 errors** on `lib/`; only `forge build` caught it, at the clang stage.
 - Cheap to trip over: the whole point of `check` is the fast inner loop, and a
   cross-module signature change is exactly what it should catch.
+
+### G67. Per-element `NativeArray` writes are O(n) on a shared array, so a per-frame simulation is O(n^2)
+- The precipitation pool is 4 floats per particle and its geometry is 54. Written
+  in March with `NativeArray.set_float` / `set_f32`, the cost is quadratic in the
+  particle count, because each write copies the whole array rather than mutating
+  it — the buffers live in the frame variant, so they are never uniquely owned.
+- Measured, release build, 4000 particles: the **step alone** (three writes per
+  particle over a 16,000-float array, no geometry built at all) ran at **5.9 fps**
+  against 270 fps with the pool disabled. The 216,000-float geometry build was
+  worse — the process was **SIGKILLed for memory (exit 137)**. 1000 particles was
+  free, 2000 cost half the frame rate, 3000 cost 90% of it: the shape of an
+  O(n^2) curve, not a fill-rate one.
+- Moving both loops into `cf_precip_frame` in the C shim made 4000 particles cost
+  **2%** (265 fps against 270) and 16,000 still run at 181 fps.
+- `F32Buf.push` has the same problem for the same reason, and `F32Buf.grow`
+  compounds it: `copy_into` is an element-by-element recursion, so growing a
+  large buffer also recurses once per element.
+- This is the first thing in the project that a March-side per-frame loop simply
+  could not do. Meshing gets away with it because it runs once at startup.
+- **Would need:** either uniqueness the optimiser can see through a variant field,
+  or a mutable-array escape hatch (a linear/borrowed `NativeArray` write) for the
+  case where the array demonstrably has one owner.

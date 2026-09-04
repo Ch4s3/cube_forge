@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Count rain-coloured pixels in a cube_forge BMP dump.
 
-Rain is tinted (0.72, 0.80, 0.92) and drawn unlit, so it lands in a pale-blue
-band no terrain, water or HUD element occupies. Used for the skylight gate:
-a dump taken underground must report 0.
+ONLY VALID ON STORM FRAMES (CF_WEATHER high). Rain is tinted (0.72, 0.80, 0.92)
+and drawn unlit, which is distinguishable against the grey of an overcast sky
+but NOT against a clear blue one -- a clear-weather frame scores ~479,000 here,
+which is the sky, not rain. Use it for the skylight gate, where the comparison
+is storm-above-ground (~39,000) against storm-underground (0).
 """
 import sys
 W, H = 800, 600

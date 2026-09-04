@@ -1,0 +1,125 @@
+-- Weather — the phase machine and the actor that runs it.
+--
+-- Pure state: no buffers, no GL, no light field. The frame loop asks this actor
+-- once per tick_period() and eases toward the answer in between, so a weather
+-- change costs one message per ten frames and still looks smooth.
+mod CubeForge.Weather do
+
+  alias CubeForge.Noise as N
+
+  -- phase, ticks left in this phase, current intensity, bolt level
+  type Phase = Phase(Int, Int, Float, Float)
+
+  doc "Phases: 0 clear, 1 cloudy, 2 rain, 3 storm."
+  fn p_clear() : Int do 0 end
+  fn p_cloudy() : Int do 1 end
+  fn p_rain() : Int do 2 end
+  fn p_storm() : Int do 3 end
+
+  doc "How far intensity may move in one tick. The continuity property in the tests is stated against exactly this."
+  fn ease_rate() : Float do 0.004 end
+
+  doc "Target intensity for each phase."
+  fn target_of(phase : Int) : Float do
+    if phase == p_clear() do 0.0
+    else if phase == p_cloudy() do 0.35
+    else if phase == p_rain() do 0.7
+    else 1.0 end end end
+  end
+
+  doc "Clear skies with a long spell ahead."
+  fn start() : Phase do Phase(p_clear(), 600, 0.0, 0.0) end
+
+  fn phase_of(s : Phase) : Int do match s do Phase(p, _, _, _) -> p end end
+  fn intensity_of(s : Phase) : Float do match s do Phase(_, _, v, _) -> v end end
+  fn bolt_of(s : Phase) : Float do match s do Phase(_, _, _, b) -> b end end
+
+  -- Weather does not jump from clear to storm: it walks the scale one step at a
+  -- time, so the sky always greys before it pours. The tests lean on this --
+  -- reaching phase 0 and phase 3 is what proves 1 and 2 were visited too.
+  pfn next_phase(cur : Int, r : Float) : Int do
+    if cur == p_clear() do if r < 0.7 do p_cloudy() else p_clear() end
+    else if cur == p_cloudy() do if r < 0.55 do p_rain() else p_clear() end
+    else if cur == p_rain() do if r < 0.45 do p_storm() else p_cloudy() end
+    else p_rain() end end end
+  end
+
+  -- Storms are short, clear spells long. Ticks, at ten frames each, so at 60 fps
+  -- a tick is a sixth of a second and a 900-tick clear spell is about 2.5
+  -- minutes. A CF_DAY of 1800s is roughly 10,800 ticks, so these dwells put a
+  -- couple of weather changes in a day rather than one every few days.
+  pfn dwell_for(phase : Int, r : Float) : Int do
+    let base = if phase == p_storm() do 200
+               else if phase == p_rain() do 400
+               else if phase == p_cloudy() do 600
+               else 900 end end end
+    base + float_to_int(r *. int_to_float(base))
+  end
+
+  pfn clamp01(v : Float) : Float do if v < 0.0 do 0.0 else if v > 1.0 do 1.0 else v end end end
+
+  doc "One tick of the phase machine."
+  fn advance(s : Phase, tick : Int, seed : Int) : Phase do
+    match s do
+      Phase(phase, left, v, bolt) ->
+        let r = N.hash2(tick, seed, 4242)
+        let phase1 = if left <= 0 do next_phase(phase, r) else phase end
+        let left1 = if left <= 0 do dwell_for(phase1, N.hash2(tick + 1, seed, 4242)) else left - 1 end
+        -- Ease toward the target by at most ease_rate(), which is what makes the
+        -- continuity property in the tests hold.
+        let t = target_of(phase1)
+        let d = t -. v
+        let stepd = if d > ease_rate() do ease_rate()
+                    else if d < 0.0 -. ease_rate() do 0.0 -. ease_rate()
+                    else d end end
+        let v1 = clamp01(v +. stepd)
+        -- Lightning: only in storms, and only once the storm has actually built.
+        -- The decay is what gives a strike its double-flicker tail.
+        let strike = if phase1 == p_storm() do
+                       if v1 > 0.8 do N.hash2(tick, seed, 99) < 0.02 else false end
+                     else false end
+        let b1 = if strike do 0.6 else bolt *. 0.55 end
+        Phase(phase1, left1, v1, if b1 < 0.001 do 0.0 else b1 end)
+    end
+  end
+
+  -- ── The actor ────────────────────────────────────────────────────────────────
+  type WxTickReq = WxTickReq
+
+  -- Handler bodies live here (the actor lint asks handlers to delegate).
+  -- The reply is [intensity * 1000, bolt * 1000, phase]: an Int list, matching
+  -- the shape water.march already uses for its change lists.
+  pfn handle_tick(reply_to, s : Phase, tick : Int, seed : Int) : Phase do
+    let s1 = advance(s, tick, seed)
+    Actor.reply(reply_to, Cons(float_to_int(intensity_of(s1) *. 1000.0),
+                          Cons(float_to_int(bolt_of(s1) *. 1000.0),
+                          Cons(phase_of(s1), Nil))))
+    s1
+  end
+
+  actor WeatherActor do
+    state { phase : Phase, tick : Int, seed : Int }
+    init { phase: start(), tick: 0, seed: 1 }
+
+    -- call handler first (tag 0): advance one tick, reply with the packed triple
+    on WxTick(reply_to) do
+      { state with phase: handle_tick(reply_to, state.phase, state.tick, state.seed), tick: state.tick + 1 }
+    end
+
+    on WxSeed(seed : Int) do
+      { state with seed: seed }
+    end
+  end
+
+  -- Message constructors are only in scope inside this module, and only after
+  -- the actor declaration in file order (GAPS.md G46), so the frame loop drives
+  -- the actor through these wrappers.
+  fn spawn_weather() do spawn(WeatherActor) end
+  fn send_seed(pid, seed : Int) : Unit do
+    let _ = send(pid, WxSeed(seed))
+    ()
+  end
+  doc "Advance the actor one tick; returns [intensity*1000, bolt*1000, phase]."
+  fn call_tick(pid) : Result(List(Int), String) do Actor.call(pid, WxTickReq, 2000) end
+
+end

@@ -1,0 +1,89 @@
+-- The weather phase machine: continuity, reachability, dwell bounds.
+mod CubeForge.Test.Weather do
+
+  needs IO.Spawn   -- capability ceiling, as in test/water_test.march
+  import Test
+  alias CubeForge.Weather as Weather
+
+  -- Largest single-tick jump in intensity across a simulated run.
+  pfn max_jump(s : CubeForge.Weather.Phase, i : Int, n : Int, seed : Int, worst : Float) : Float do
+    if i >= n do worst
+    else
+      let s1 = Weather.advance(s, i, seed)
+      let d = Math.abs(Weather.intensity_of(s1) -. Weather.intensity_of(s))
+      max_jump(s1, i + 1, n, seed, if d > worst do d else worst end)
+    end
+  end
+
+  -- Lowest and highest phase reached. next_phase only ever moves one step, so
+  -- min 0 and max 3 together mean every phase in between was visited too.
+  pfn lowest_phase(s : CubeForge.Weather.Phase, i : Int, n : Int, seed : Int, lo : Int) : Int do
+    if i >= n do lo
+    else
+      let s1 = Weather.advance(s, i, seed)
+      let p = Weather.phase_of(s1)
+      lowest_phase(s1, i + 1, n, seed, if p < lo do p else lo end)
+    end
+  end
+  pfn highest_phase(s : CubeForge.Weather.Phase, i : Int, n : Int, seed : Int, hi : Int) : Int do
+    if i >= n do hi
+    else
+      let s1 = Weather.advance(s, i, seed)
+      let p = Weather.phase_of(s1)
+      highest_phase(s1, i + 1, n, seed, if p > hi do p else hi end)
+    end
+  end
+
+  -- Intensity must never leave 0..1, whatever the phase machine does.
+  pfn out_of_range(s : CubeForge.Weather.Phase, i : Int, n : Int, seed : Int) : Int do
+    if i >= n do -1
+    else
+      let s1 = Weather.advance(s, i, seed)
+      let v = Weather.intensity_of(s1)
+      if v < 0.0 || v > 1.0 do i else out_of_range(s1, i + 1, n, seed) end
+    end
+  end
+
+  -- Largest bolt value seen, to show lightning fires in storms and only there.
+  pfn max_bolt(s : CubeForge.Weather.Phase, i : Int, n : Int, seed : Int, worst : Float) : Float do
+    if i >= n do worst
+    else
+      let s1 = Weather.advance(s, i, seed)
+      let b = Weather.bolt_of(s1)
+      max_bolt(s1, i + 1, n, seed, if b > worst do b else worst end)
+    end
+  end
+
+  describe "Weather.advance" do
+    test "intensity is continuous -- no snapping between phases" do
+      Test.assert_true(max_jump(Weather.start(), 0, 20000, 42, 0.0) <= Weather.ease_rate() +. 0.0001,
+                       "no jump larger than one ease step")
+    end
+
+    test "reaches every phase over a long run" do
+      Test.assert_eq_int(lowest_phase(Weather.start(), 0, 20000, 42, 9), 0, "reaches clear")
+      Test.assert_eq_int(highest_phase(Weather.start(), 0, 20000, 42, -1), 3, "reaches storm")
+    end
+
+    test "intensity stays within 0..1" do
+      Test.assert_eq_int(out_of_range(Weather.start(), 0, 20000, 42), -1, "never out of range")
+    end
+
+    test "is deterministic for a seed" do
+      let a = max_jump(Weather.start(), 0, 500, 7, 0.0)
+      let b = max_jump(Weather.start(), 0, 500, 7, 0.0)
+      Test.assert_true(Math.abs(a -. b) < 0.000001, "same seed, same run")
+    end
+  end
+
+  describe "Weather.bolt_of" do
+    test "clear weather never produces lightning" do
+      Test.assert_true(Weather.bolt_of(Weather.start()) < 0.0001, "no bolt at rest")
+    end
+
+    test "storms do produce lightning" do
+      Test.assert_true(max_bolt(Weather.start(), 0, 20000, 42, 0.0) > 0.5, "a strike fires somewhere in 20000 ticks")
+    end
+  end
+
+end
