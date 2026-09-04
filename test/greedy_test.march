@@ -67,4 +67,17 @@ mod CubeForge.Test.Greedy do
     end
   end
 
+  describe "Mesher.flow_of" do
+    test "falls, flows toward the lowest neighbour, or stands still" do
+      let w7 = C.id_of_level(7)
+      let w4 = C.id_of_level(4)
+      Test.assert_eq_int(Mesher.flow_effect(Mesher.flow_of(w7, w7, w7, w7, w7, 3)), CubeForge.Vertex.fx_still(), "all level: still")
+      Test.assert_eq_int(Mesher.flow_effect(Mesher.flow_of(w7, w4, w7, w7, w7, 3)), CubeForge.Vertex.fx_dir(0), "+x lowest")
+      Test.assert_eq_int(Mesher.flow_speed(Mesher.flow_of(w7, w4, w7, w7, w7, 3)), 3, "drop of three")
+      Test.assert_eq_int(Mesher.flow_effect(Mesher.flow_of(w7, w7, w7, w7, 0, 3)), CubeForge.Vertex.fx_dir(6), "-z is air: that way")
+      Test.assert_eq_int(Mesher.flow_effect(Mesher.flow_of(w7, w7, w7, w7, w7, 0)), CubeForge.Vertex.fx_fall(), "air below: falling")
+      Test.assert_eq_int(Mesher.flow_effect(Mesher.flow_of(w7, C.water(), w7, w7, w7, 3)), CubeForge.Vertex.fx_still(), "a source beside is not lower")
+    end
+  end
+
 end

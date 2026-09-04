@@ -4,6 +4,7 @@
 mod CubeForge.Hud do
 
   alias CubeForge.F32Buf as B
+  alias CubeForge.Menu as Menu
   alias CubeForge.Vertex as Vx
 
   -- 15-bit glyph masks, row-major top to bottom, 3 columns per row (bit 14 = top-left).
@@ -21,6 +22,47 @@ mod CubeForge.Hud do
       9 -> 31695   -- 111 101 111 001 111
       _ -> 0
     end
+  end
+
+  -- Letters, same 3x5 grid as the digits, keyed by ASCII code. Uppercase only:
+  -- the UI has no lowercase text and 26 masks is already the whole alphabet.
+  -- A space (32) is blank, and so is anything unrecognised, so a caller never
+  -- has to sanitise its own label.
+  pfn letter(c : Int) : Int do
+    match c do
+      65 -> 11245   -- A  010 101 111 101 101
+      66 -> 27566   -- B  110 101 110 101 110
+      67 -> 14627   -- C  011 100 100 100 011
+      68 -> 27502   -- D  110 101 101 101 110
+      69 -> 31143   -- E  111 100 110 100 111
+      70 -> 31140   -- F  111 100 110 100 100
+      71 -> 14699   -- G  011 100 101 101 011
+      72 -> 23533   -- H  101 101 111 101 101
+      73 -> 29847   -- I  111 010 010 010 111
+      74 -> 4714    -- J  001 001 001 101 010
+      75 -> 23469   -- K  101 101 110 101 101
+      76 -> 18727   -- L  100 100 100 100 111
+      77 -> 24557   -- M  101 111 111 101 101
+      78 -> 27501   -- N  110 101 101 101 101
+      79 -> 11114   -- O  010 101 101 101 010
+      80 -> 27556   -- P  110 101 110 100 100
+      81 -> 11131   -- Q  010 101 101 111 011
+      82 -> 27565   -- R  110 101 110 101 101
+      83 -> 14478   -- S  011 100 010 001 110
+      84 -> 29842   -- T  111 010 010 010 010
+      85 -> 23407   -- U  101 101 101 101 111
+      86 -> 23402   -- V  101 101 101 101 010
+      87 -> 23549   -- W  101 101 111 111 101
+      88 -> 23213   -- X  101 101 010 101 101
+      89 -> 23186   -- Y  101 101 010 010 010
+      90 -> 29351   -- Z  111 001 010 100 111
+      _ -> 0
+    end
+  end
+
+  doc "Glyph mask for one ASCII code: digits, uppercase letters, blank otherwise."
+  fn glyph_for(c : Int) : Int do
+    if c >= 48 && c <= 57 do glyph(c - 48) else letter(c) end
   end
 
   pfn vert(b : CubeForge.F32Buf.F32Buf, x : Float, y : Float, shade : Float) : CubeForge.F32Buf.F32Buf do
@@ -57,6 +99,26 @@ mod CubeForge.Hud do
       Nil -> b
       Cons(d, rest) -> emit_digits(glyph_pixels(b, glyph(d), 0, x, y, px, py), rest, x +. 4.0 *. px, y, px, py)
     end
+  end
+
+  pfn emit_codes(b : CubeForge.F32Buf.F32Buf, cs : List(Int), x : Float, y : Float, px : Float, py : Float) : CubeForge.F32Buf.F32Buf do
+    match cs do
+      Nil -> b
+      Cons(c, rest) -> emit_codes(glyph_pixels(b, glyph_for(c), 0, x, y, px, py), rest, x +. 4.0 *. px, y, px, py)
+    end
+  end
+
+  doc """
+  Draw [t] with its top-left at (x, y); [px]/[py] are one glyph pixel in NDC.
+  Glyphs are 3 wide with a one-pixel gap, so the advance is 4 * px.
+  """
+  fn emit_text(b : CubeForge.F32Buf.F32Buf, t : String, x : Float, y : Float, px : Float, py : Float) : CubeForge.F32Buf.F32Buf do
+    emit_codes(b, String.to_codepoints(t), x, y, px, py)
+  end
+
+  doc "Width in NDC of [t] drawn at glyph-pixel size [px] (the trailing gap is included)."
+  fn text_width(t : String, px : Float) : Float do
+    int_to_float(String.codepoint_count(t)) *. 4.0 *. px
   end
 
   -- ── Hotbar ────────────────────────────────────────────────────────────────
@@ -205,7 +267,7 @@ mod CubeForge.Hud do
                  let x0 = slot_ox(s)
                  let y0 = slot_oy(s, n > slots())
                  trect(b, x0 +. pad, y0 +. pad, x0 +. slot_w() -. pad, y0 +. slot_h() -. pad,
-                       CubeForge.Texture.layer_for(id))
+                       CubeForge.Texture.icon_layer(id))
                end
       icons_go(b1, inv, drag_from, s + 1, n, pad)
     end
@@ -223,9 +285,51 @@ mod CubeForge.Hud do
       let id = CubeForge.Inventory.item_at(inv, drag_from)
       if id == 0 do b0
       else trect(b0, nx -. drag_half(), ny -. drag_half(), nx +. drag_half(), ny +. drag_half(),
-                 CubeForge.Texture.layer_for(id))
+                 CubeForge.Texture.icon_layer(id))
       end
     else b0 end
+  end
+
+  -- ── Escape menu ───────────────────────────────────────────────────────────
+  -- Every coordinate comes from `CubeForge.Menu`, which is also what
+  -- `Menu.item_at` hit-tests against, so the drawn boxes and the clickable
+  -- boxes are the same boxes by construction.
+
+  pfn menu_items_go(b : CubeForge.F32Buf.F32Buf, m : CubeForge.Menu.Menu, i : Int) : CubeForge.F32Buf.F32Buf do
+    if i >= Menu.items() do b
+    else
+      let x0 = Menu.item_x0()
+      let y0 = Menu.item_y0(i)
+      let hot = Menu.focused(m) == i
+      let b1 = arect(b, x0, y0, x0 +. Menu.item_w(), y0 +. Menu.item_h(),
+                     if hot do 0.30 else 0.15 end, if hot do 0.35 else 0.17 end,
+                     if hot do 0.42 else 0.21 end, 0.98)
+      let lbl = Menu.label(i)
+      let tw = text_width(lbl, menu_px())
+      let b2 = emit_text(b1, lbl, x0 +. (Menu.item_w() -. tw) /. 2.0,
+                         y0 +. Menu.item_h() /. 2.0 +. 0.035, menu_px(), menu_py())
+      menu_items_go(b2, m, i + 1)
+    end
+  end
+
+  fn menu_px() : Float do 0.010 end
+  fn menu_py() : Float do 0.014 end
+
+  doc """
+  Rebuild [b] (cleared in place) with the escape menu: a dimming layer over the
+  world, the panel, one box per item (brighter under the cursor) and the seed
+  field.
+  """
+  fn build_menu(b : CubeForge.F32Buf.F32Buf, m : CubeForge.Menu.Menu) : CubeForge.F32Buf.F32Buf do
+    let b0 = arect(B.clear(b), -1.0, -1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.55)
+    let b1 = arect(b0, Menu.panel_x0(), Menu.panel_y0(), Menu.panel_x1(), Menu.panel_y1(),
+                   0.10, 0.11, 0.14, 0.95)
+    let b2 = menu_items_go(b1, m, 0)
+    let sx = Menu.seed_x0()
+    let sy = Menu.seed_y0()
+    let b3 = arect(b2, sx, sy, sx +. Menu.item_w(), sy +. Menu.item_h(), 0.05, 0.06, 0.08, 0.98)
+    let b4 = emit_text(b3, "SEED", sx +. 0.014, sy +. Menu.item_h() -. 0.010, 0.006, 0.009)
+    emit_digits(b4, digits_of(Menu.seed(m), Nil), sx +. 0.014, sy +. 0.062, 0.008, 0.011)
   end
 
   -- 

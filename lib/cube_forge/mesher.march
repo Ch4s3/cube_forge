@@ -63,7 +63,23 @@ mod CubeForge.Mesher do
   pfn t2z(d : Int) : Int do if d <= 1 do 1 else 0 end end
 
   pfn vert(b : CubeForge.F32Buf.F32Buf, x : Float, y : Float, z : Float, u : Float, v : Float, layer : Float, shade : Float, face : Float) : CubeForge.F32Buf.F32Buf do
-    b |> B.push3(x, y, z) |> B.push(u) |> B.push(v) |> B.push(layer) |> B.push(shade) |> B.push(face) |> B.push(Vx.plain())
+    vert_fx(b, x, y, z, u, v, layer, shade, face, Vx.plain())
+  end
+  pfn vert_fx(b : CubeForge.F32Buf.F32Buf, x : Float, y : Float, z : Float, u : Float, v : Float, layer : Float, shade : Float, face : Float, fx : Float) : CubeForge.F32Buf.F32Buf do
+    b |> B.push3(x, y, z) |> B.push(u) |> B.push(v) |> B.push(layer) |> B.push(shade) |> B.push(face) |> B.push(fx)
+  end
+
+  -- A quad carrying a flow word: water only.
+  pfn quad_fx(b : CubeForge.F32Buf.F32Buf,
+           x0 : Float, y0 : Float, z0 : Float, x1 : Float, y1 : Float, z1 : Float,
+           x2 : Float, y2 : Float, z2 : Float, x3 : Float, y3 : Float, z3 : Float,
+           layer : Float, shade : Float, face : Float, fx : Float) : CubeForge.F32Buf.F32Buf do
+    b |> vert_fx(x0, y0, z0, 0.0, 0.0, layer, shade, face, fx)
+      |> vert_fx(x1, y1, z1, 1.0, 0.0, layer, shade, face, fx)
+      |> vert_fx(x2, y2, z2, 1.0, 1.0, layer, shade, face, fx)
+      |> vert_fx(x0, y0, z0, 0.0, 0.0, layer, shade, face, fx)
+      |> vert_fx(x2, y2, z2, 1.0, 1.0, layer, shade, face, fx)
+      |> vert_fx(x3, y3, z3, 0.0, 1.0, layer, shade, face, fx)
   end
 
   -- Two triangles from four corners given counter-clockwise as seen from outside.
@@ -232,19 +248,21 @@ mod CubeForge.Mesher do
     let fz = oz +. int_to_float(z)
     let fx1 = fx +. 1.0
     let h = fy +. water_height(id)
+    let flow = flow_of(id, nb_get(c, n, s, e, w, x + 1, y, z), nb_get(c, n, s, e, w, x - 1, y, z), nb_get(c, n, s, e, w, x, y, z + 1), nb_get(c, n, s, e, w, x, y, z - 1), nb_get(c, n, s, e, w, x, y - 1, z))
+    let fw = Vx.pack_flow(flow_effect(flow), flow_speed(flow))
     let fz1 = fz +. 1.0
     let b1 = if !C.is_water(nb_get(c, n, s, e, w, x, y + 1, z)) do
-      quad(b, fx, h, fz, fx, h, fz1, fx1, h, fz1, fx1, h, fz, l, 1.0, face_top()) else b end
+      quad_fx(b, fx, h, fz, fx, h, fz1, fx1, h, fz1, fx1, h, fz, l, 1.0, face_top(), fw) else b end
     let b2 = if nb_get(c, n, s, e, w, x, y - 1, z) == 0 do
-      quad(b1, fx, fy, fz, fx1, fy, fz, fx1, fy, fz1, fx, fy, fz1, l, 1.0, face_bottom()) else b1 end
+      quad_fx(b1, fx, fy, fz, fx1, fy, fz, fx1, fy, fz1, fx, fy, fz1, l, 1.0, face_bottom(), fw) else b1 end
     let b3 = side_base(fy, id, nb_get(c, n, s, e, w, x + 1, y, z))
-    let b3b = if b3 < h do quad(b2, fx1, b3, fz, fx1, h, fz, fx1, h, fz1, fx1, b3, fz1, l, 1.0, face_xpos()) else b2 end
+    let b3b = if b3 < h do quad_fx(b2, fx1, b3, fz, fx1, h, fz, fx1, h, fz1, fx1, b3, fz1, l, 1.0, face_xpos(), fw) else b2 end
     let b4 = side_base(fy, id, nb_get(c, n, s, e, w, x - 1, y, z))
-    let b4b = if b4 < h do quad(b3b, fx, b4, fz1, fx, h, fz1, fx, h, fz, fx, b4, fz, l, 1.0, face_xneg()) else b3b end
+    let b4b = if b4 < h do quad_fx(b3b, fx, b4, fz1, fx, h, fz1, fx, h, fz, fx, b4, fz, l, 1.0, face_xneg(), fw) else b3b end
     let b5 = side_base(fy, id, nb_get(c, n, s, e, w, x, y, z + 1))
-    let b5b = if b5 < h do quad(b4b, fx1, b5, fz1, fx1, h, fz1, fx, h, fz1, fx, b5, fz1, l, 1.0, face_zpos()) else b4b end
+    let b5b = if b5 < h do quad_fx(b4b, fx1, b5, fz1, fx1, h, fz1, fx, h, fz1, fx, b5, fz1, l, 1.0, face_zpos(), fw) else b4b end
     let b6 = side_base(fy, id, nb_get(c, n, s, e, w, x, y, z - 1))
-    if b6 < h do quad(b5b, fx, b6, fz, fx, h, fz, fx1, h, fz, fx1, b6, fz, l, 1.0, face_zneg()) else b5b end
+    if b6 < h do quad_fx(b5b, fx, b6, fz, fx, h, fz, fx1, h, fz, fx1, b6, fz, l, 1.0, face_zneg(), fw) else b5b end
   end
 
   -- Bottom of the side strip to emit against neighbour [nid]: the block base for air, the neighbour's
@@ -254,6 +272,30 @@ mod CubeForge.Mesher do
     else if C.is_water(nid) && C.level_of(nid) < C.level_of(id) do fy +. water_height(nid)
     else fy +. water_height(id) end end
   end
+
+  doc "Where a water cell flows and how fast, packed effect * 16 + speed. [px, mx, pz, mz] are the block ids of the four horizontal neighbours, [below] the block under it. Falling beats everything; otherwise toward the lowest neighbour by at least one level, speed the drop; else still."
+  fn flow_of(id : Int, px : Int, mx : Int, pz : Int, mz : Int, below : Int) : Int do
+    let l = C.level_of(id)
+    if below == 0 || (C.is_water(below) && !C.is_source(below) && C.level_of(below) < 7) do Vx.fx_fall() * 16 + 7
+    else
+      let dpx = drop_to(l, px)
+      let dmx = drop_to(l, mx)
+      let dpz = drop_to(l, pz)
+      let dmz = drop_to(l, mz)
+      let best = Math.max_int(Math.max_int(dpx, dmx), Math.max_int(dpz, dmz))
+      if best <= 0 do Vx.fx_still() * 16
+      else if dpx == best do Vx.fx_dir(0) * 16 + best
+      else if dmx == best do Vx.fx_dir(4) * 16 + best
+      else if dpz == best do Vx.fx_dir(2) * 16 + best
+      else Vx.fx_dir(6) * 16 + best end end end end
+    end
+  end
+  -- Level drop from [l] to a neighbour block: air is level 0; solids and sources take nothing.
+  pfn drop_to(l : Int, nb : Int) : Int do
+    if nb == 0 do l else if C.is_water(nb) && !C.is_source(nb) do l - C.level_of(nb) else 0 end end
+  end
+  fn flow_effect(packed : Int) : Int do packed / 16 end
+  fn flow_speed(packed : Int) : Int do packed % 16 end
 
   doc "Surface height of a water cell within its block: level * 0.875 / 8."
   fn water_height(id : Int) : Float do int_to_float(C.level_of(id)) *. water_top() /. 8.0 end

@@ -1270,9 +1270,87 @@ preemption quantum from 1 ms to 50 ms changed nothing (390 → 360 ms at 4
 threads), so the `sigprocmask`/`_sigtramp` traffic in the profile is
 `swapcontext`'s signal-mask save/restore, not the preemption daemon.
 
+---
+
+## M7 notes — the escape menu
+
+### G74. A `test_setup` block silently deletes every test in the file
+`forge test` accepts
+
+```march
+mod CubeForge.Test.Font do
+  test_setup do () end
+  describe "glyph table" do
+    test "every digit and letter has a mask" do … end
+  end
+end
+```
+
+without an error, a warning, or any other output — and then runs **none of the
+tests in that module**. Removing the one line takes the suite from 153 tests to
+160; putting it back takes it from 160 to 153. Nothing in the run says the file
+was skipped.
+
+This is the second time this project has reported the wrong test count. The
+first was stale build artifacts; this one is worse, because the file compiles,
+`forge check` passes, `forge lint --strict` passes, and the only symptom is a
+number that a human has to have memorised.
+- **Would need:** either honour `test_setup` (whatever its intended semantics)
+  or reject it. A file that defines tests and runs none of them should be an
+  error. Failing that, `forge test` should print the modules it collected, so a
+  vanished file is visible.
+
+### G75. Bare builtins are invisible to `forge search` — WRONG AS FIRST WRITTEN
+**This entry originally claimed March has no way to stop an actor. That is
+false.** `kill(pid)` and `is_alive(pid)` exist and work:
+
+```march
+let p = spawn(Counter)
+kill(p)
+is_alive(p)          -- false
+send(p, Bump(1))     -- None: the message is silently dropped
+```
+
+verified by `probes/actor_kill/actor_kill.march` on this toolchain.
+
+The real finding is the one that misled me. `kill` and `is_alive` are *bare
+builtins* — rows in `lib/tir/llvm_builtins.ml` (`march_kill`, `march_is_alive`),
+like `spawn`, `send` and `task_spawn` — and `forge search` indexes
+module-qualified names, so neither `forge search "kill"` nor
+`forge search -d "stop actor"` returns them. `forge search "kill"` returns
+`Process.kill` (SIGTERM to an OS process), which is a different thing wearing
+the same name, and `forge search "is_alive"` returns nothing at all.
+
+`forge search` is this project's documented first move for finding March code.
+When the answer is a builtin it silently returns either nothing or a same-named
+decoy, and there is no signal that the search space excluded builtins entirely.
+- **Would need:** `forge search` to index the builtin table alongside the stdlib,
+  so `kill` and `is_alive` are findable by the tool that is supposed to find
+  them. Failing that, a line in the empty-result message saying builtins are not
+  indexed.
+- **My error, not the tool's, was concluding from two empty searches that the
+  capability did not exist.** Two negative results from one index are one
+  negative result.
+
+#### What this does and does not change about the escape menu
+Nothing in the code. A new game still reseeds the existing actor pool with
+`Water.send_load` rather than killing and respawning it, because that is 65
+messages instead of 65 kills plus 65 spawns plus 65 loads, and the reload path
+already existed. What changes is the justification: the pool is reused because
+it is cheaper, not because the language left no alternative.
+
+### Not a March gap: the VBO slot collision
+The menu first drew nothing because it uploaded to slot 250, which
+`Marker.slot()` already owns, and drew it through the textured path. Both were
+my own bugs. `lib/cube_forge.march` now carries the full slot map as a comment
+next to `menu_slot()`, since the shim's slots are one flat array and a
+double-booked slot fails silently.
+
+---
+
 ## Procedural audio notes
 
-### G71. `init` is a reserved word, and the parse error points at the whole function
+### G76. `init` is a reserved word, and the parse error points at the whole function
 
 `fn init(mode : Int) : Int do x_aud_init(mode) end` in an ordinary module body
 is a bare "parse error" repeated once per downstream reference — 72 of them for
@@ -1283,7 +1361,7 @@ error names neither the word nor the reason.
 
 `probes/` reproduction: any module with `fn init(x : Int) : Int do x end`.
 
-### G72. A single-letter module alias silently resolves to the wrong module
+### G77. A single-letter module alias silently resolves to the wrong module
 
 `alias CubeForge.Biome as B` in one module and `alias CubeForge.Audio as A` in
 its test compiled and typechecked cleanly, then failed at link time with

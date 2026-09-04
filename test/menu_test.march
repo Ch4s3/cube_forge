@@ -1,0 +1,97 @@
+-- Escape-menu state and geometry. The geometry tests hand `item_at` each item's
+-- own drawn centre: a layout change that moved the drawn boxes but not the hit
+-- boxes would otherwise leave every test green and the menu unusable.
+mod CubeForge.Test.Menu do
+
+  import Test
+  alias CubeForge.Menu as Menu
+
+  pfn centres_ok(i : Int) : Bool do
+    if i >= Menu.items() do true
+    else if Menu.item_at(Menu.item_x0() +. Menu.item_w() /. 2.0,
+                         Menu.item_y0(i) +. Menu.item_h() /. 2.0) == i do centres_ok(i + 1)
+    else false end end
+  end
+
+  -- Append every digit of [n] in turn, as typing it would.
+  pfn type_int(m : CubeForge.Menu.Menu, n : Int) : CubeForge.Menu.Menu do
+    if n < 10 do Menu.append_digit(m, n)
+    else Menu.append_digit(type_int(m, n / 10), n % 10) end
+  end
+
+  pfn zeroed() : CubeForge.Menu.Menu do Menu.set_seed(Menu.new(0), 0) end
+
+  describe "Menu geometry" do
+    test "every item's own centre resolves back to that item" do
+      Test.assert_true(centres_ok(0), "all items round-trip")
+    end
+    test "the gap between items is not clickable" do
+      let between = Menu.item_y0(0) -. 0.03
+      Test.assert_eq_int(Menu.item_at(Menu.item_x0() +. 0.1, between), -1, "between two items")
+    end
+    test "outside the panel is not clickable" do
+      Test.assert_eq_int(Menu.item_at(-0.99, 0.99), -1, "top-left corner")
+      Test.assert_eq_int(Menu.item_at(0.0, -0.99), -1, "below the panel")
+    end
+    test "items do not overlap the seed field" do
+      Test.assert_true(Menu.seed_y0() +. Menu.item_h() < Menu.item_y0(Menu.items() - 1), "seed sits below the last item")
+    end
+    test "the panel contains every item" do
+      Test.assert_true(Menu.item_x0() > Menu.panel_x0(), "left edge inside")
+      Test.assert_true(Menu.item_x0() +. Menu.item_w() < Menu.panel_x1(), "right edge inside")
+      Test.assert_true(Menu.item_y0(0) +. Menu.item_h() < Menu.panel_y1(), "first item inside")
+      Test.assert_true(Menu.seed_y0() > Menu.panel_y0(), "seed field inside")
+    end
+  end
+
+  describe "seed editing" do
+    test "digits append left to right" do
+      Test.assert_eq_int(Menu.seed(type_int(zeroed(), 4071)), 4071, "typed 4071")
+    end
+    test "backspace removes the last digit" do
+      Test.assert_eq_int(Menu.seed(Menu.backspace(Menu.set_seed(zeroed(), 4071))), 407, "4071 -> 407")
+    end
+    test "backspacing the last digit leaves zero, not an empty field" do
+      Test.assert_eq_int(Menu.seed(Menu.backspace(Menu.set_seed(zeroed(), 7))), 0, "7 -> 0")
+      Test.assert_eq_int(Menu.seed(Menu.backspace(zeroed())), 0, "0 -> 0")
+    end
+    test "a digit that would exceed the generator's range is ignored" do
+      let at_max = Menu.set_seed(zeroed(), Menu.max_seed())
+      Test.assert_eq_int(Menu.seed(Menu.append_digit(at_max, 9)), Menu.max_seed(), "seed unchanged")
+      let near = Menu.set_seed(zeroed(), 107374182)
+      Test.assert_eq_int(Menu.seed(Menu.append_digit(near, 3)), 1073741823, "the digit that still fits is taken")
+      Test.assert_eq_int(Menu.seed(Menu.append_digit(near, 4)), 107374182, "the digit that does not is dropped")
+    end
+    test "non-digits are ignored" do
+      Test.assert_eq_int(Menu.seed(Menu.append_digit(Menu.set_seed(zeroed(), 12), 10)), 12, "10 is not a digit")
+      Test.assert_eq_int(Menu.seed(Menu.append_digit(Menu.set_seed(zeroed(), 12), -1)), 12, "-1 is not a digit")
+    end
+    test "reroll produces a different seed, inside the generator's range" do
+      let m = Menu.set_seed(zeroed(), 12345)
+      let r = Menu.reroll(m, 987654321)
+      Test.assert_true(Menu.seed(r) != 12345, "changed")
+      Test.assert_true(Menu.seed(r) >= 0 && Menu.seed(r) <= Menu.max_seed(), "in range")
+    end
+    test "reroll is a function of its entropy, so a run is reproducible" do
+      Test.assert_eq_int(Menu.seed(Menu.reroll(zeroed(), 42)), Menu.seed(Menu.reroll(zeroed(), 42)), "same entropy, same seed")
+      Test.assert_true(Menu.seed(Menu.reroll(zeroed(), 42)) != Menu.seed(Menu.reroll(zeroed(), 43)), "different entropy")
+    end
+  end
+
+  describe "open state" do
+    test "a new menu is closed" do
+      Test.assert_true(!Menu.is_open(Menu.new(7)), "closed")
+      Test.assert_eq_int(Menu.seed(Menu.new(7)), 7, "keeps the seed it was given")
+    end
+    test "opening and closing preserves the seed and the focus" do
+      let m = Menu.set_focus(Menu.set_seed(Menu.new(7), 99), 1)
+      let cycled = Menu.set_open(Menu.set_open(m, true), false)
+      Test.assert_eq_int(Menu.seed(cycled), 99, "seed survives")
+      Test.assert_eq_int(Menu.focused(cycled), 1, "focus survives")
+    end
+    test "labels are distinct" do
+      Test.assert_true(Menu.label(Menu.item_new_game()) != Menu.label(Menu.item_quit()), "two labels")
+    end
+  end
+
+end

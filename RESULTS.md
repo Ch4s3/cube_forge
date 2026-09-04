@@ -863,3 +863,155 @@ Whole-world meshing, same machine, both changes where noted:
 Raising the cap alone does nothing for the mesher, because its ceiling is G73,
 not the thread count. The remaining gap to the ~44 ms a perfect 14x would give
 is the refcount traffic on the shared chunks.
+
+## M7 — escape menu (2026-09-04)
+
+`Esc` opens a menu over the dimmed world with NEW GAME, an editable SEED field
+and QUIT. The window, GL context, texture, camera projections and the actor pool
+outlive a session; a new game rebuilds the world, the meshes and the player.
+
+### Verification
+
+**The restarted world is the world that seed makes.** `CF_AUTOMENU=<frame>`
+opens the menu, types `424242` into the seed field and starts a new game five
+frames later:
+
+```
+seed 7 (CF_SEED)
+  mesh all (greedy sections): 450 ms wall, 231534 vertices (27192 water)
+new game, seed 424242
+ran 26 frames …
+seed 424242 (set CF_SEED to reproduce)
+  mesh all (greedy sections): 488 ms wall, 252108 vertices (31044 water)
+```
+
+and a *fresh process* at `CF_SEED=424242` produces **252108 vertices (31044
+water)** — identical. That is the property that breaks if the session rebuild
+misses a piece of state.
+
+**The text says what it claims to say.** Rather than looking at the screenshot,
+the dumped frame is sampled at the centre of every 3x5 glyph cell the renderer
+should have filled, and the resulting bitmasks are decoded back through the font
+table:
+
+```
+item 0: rendered = 'NEW GAME'   expected 'NEW GAME'   OK
+item 1: rendered = 'QUIT'       expected 'QUIT'       OK
+seed label: rendered = 'SEED'
+seed field reads: 424242
+```
+
+The panel is opaque (80 sampled interior pixels take three adjacent shades of
+one colour) and the rest of the screen dims (242,191,140 → 109,86,63 above the
+panel).
+
+### Two bugs this shook out, both silent
+
+- **A double-booked VBO slot.** The menu uploaded to 250, which the map-view
+  player marker already owns, and drew it through the textured path instead of
+  the colour path. Nothing errored: `glGetError` stayed 0 and the debug trace
+  showed the upload and the draw of all 1272 vertices. The slot map is now a
+  comment in the source, because the shim's slots are one flat array.
+- **A dump overwritten by the next session.** `CF_DUMP_FRAME` fires once per
+  *session*, so a scripted restart dumped twice to the same path and every pixel
+  measurement was really being taken on session two, with the menu closed. The
+  verification run now ends before the restart fires. Two rounds of pixel
+  analysis were wasted on the wrong image.
+
+### A regression this exposed, which is not the menu's
+
+The frame loop is allocating **173 live objects per frame**, not the 1 recorded
+above. Measured at `git stash` on the commit before this work and after it:
+identical, 17349 objects over frames 100-200 in both, and unchanged by
+`CF_SUN`, `CF_WEATHER` or whether the menu is open. So it predates the menu and
+arrived with one of biomes, weather or vegetation. The "1 per frame" figures
+earlier in this file are stale for the current build; the number is not
+re-measured per feature, which is how it went unnoticed. Not chased here.
+
+**Correction (2026-09-04).** The commit message for this feature says the actors
+are reseeded "because March has no Actor.stop". That is wrong: `kill(pid)` and
+`is_alive(pid)` are builtins and work. The pool is reused because it is cheaper,
+not because it had to be. See GAPS.md G75.
+
+## Springs — generated, balanced against evaporation
+
+`docs/superpowers/specs/2026-09-04-springs-and-flow-design.md`. A spring is a
+source above sea level, generated one per 8-block cell that draws under
+`CF_SPRING_DENSITY` per mille and whose column has slope >= 2 at height >= 72.
+It gives at most `CF_SPRING_RATE` units a tick; thin sky-exposed water
+evaporates one draw in `CF_EVAP` per tick.
+
+**The bug that hid the whole feature:** a spring's receivers were never
+processed. `set_cell` marks a written cell's neighbours, which covers the
+receiver only when the giver is itself written -- and a source never is. Every
+spring filled its two air neighbours to 7 and stopped. `give` now marks the
+receiver explicitly. Found with a probe test on the chunk holding the spring at
+(116,90,74), which is kept as the regression: the brook must still be fed after
+sixty ticks, reach beyond the spring's neighbours, and stay under forty units.
+
+Balance, release build, seed 7, frame ~890, one tick every ten frames:
+
+| rate | evap | density (per mille) | springs | active cells | water actors | apply + remesh |
+|------|------|---------------------|---------|--------------|--------------|----------------|
+| 1 | 16 | 150 | 8 | 112 | 2.0 ms | 27.6 ms (23 sections) |
+| 1 | 32 | 150 | 9 | 218 | 3.5 ms | 44.9 ms (30) |
+| 2 | 16 | 150 | 9 | 205 | 4.1 ms | 36.3 ms (26) |
+| 1 | 8  | 150 | 7 | 56  | 1.3 ms | 23.1 ms (22) |
+| 1 | 16 | **100** | **5** | **87** | **1.4 ms** | **23.7 ms (16)** |
+| 1 | 16 | 60  | 2 | 42  | 0.7 ms | 10.8 ms (7) |
+
+Defaults landed: **rate 1, evap 16, density 100** -- five springs, ~9-cell
+brooks in the probe, actors well under the 2 ms target. The remesh is the honest
+cost of water that keeps moving: about three sections per brook per tick,
+~1.5 ms each. `CF_SPRING_DENSITY` is the lever for it. `docs/spring-brook.png` is
+seed 5, whose spring sits four columns from spawn: a pool at the mouth and
+evaporating tips scattered downslope -- at rate 1 a brook reads as a chain of
+puddles rather than a ribbon.
+
+## Spray
+
+Drops and spring mouths. When `give` lands water in a cell with air beneath it,
+the actor appends a `kind 4` entry with the cell; `apply_reply` turns it into
+three spray particles there. Every spring bubbles two particles every ten
+frames from the shim's spring list; placing a spring bursts forty. A second
+pool in the shim (`CF_SPRAY`, default 512), white quads fading with life,
+drawn through the precipitation path in slot 247. Seed 5 at frame 890, spray
+on against off: 500 pixels differ, all around the spring by spawn
+(`docs/spring-spray.png`).
+
+Two March traps on the way: `&&` does not short-circuit (G33), so a
+`dy > 0 && C.get(.., dy - 1, ..)` guard still read y = -1 once water had fallen
+to the bottom of a test world with no floor -- nested `if` now; and the shaft
+test's world had a single stone block as its "floor", off which water fell to
+y = 0 -- a full layer now.
+
+## Water-only section rebuilds
+
+Every water reply used to rebuild all three passes (opaque, water, foliage) of
+each touched section, so a brook that never settles re-meshed its terrain
+forever. `CM.rebuild_section_water` rebuilds only the water pass, and the
+reply path (`remesh_sections_water` and friends, with the same ±1-section and
+neighbour-chunk widening) uses it. Edits, felling, migration and growth still
+take the full rebuild, since they change opaque blocks and baked light.
+
+Measured with `CF_WORKERS=1`, seed 5, five springs at rate 1: the remesh
+share of a water tick fell from 27-36 ms to 3.5-5 ms; the canal tick
+(`CF_AUTOCANAL`) from 25 ms to 2.4 ms.
+
+Staleness check: `CF_REMESH_ALL_AT=<frame>` rebuilds every section of every
+chunk (the ground truth) and, for one instrumented run, reported any section
+whose rebuilt buffer differed from the stored one. Frame 890 on the brook
+world (seed 5) and on a canal world with no springs (finite water that spreads
+and dries): **0 pixels differ and 0 sections change** between the water-only
+build and the full rebuild.
+
+The check took a detour worth recording. Unpinned, a full rebuild and the
+plain run differed by ~5,000 pixels of 1-7 level speckle on lit slopes, and
+two plain runs by 400-1,500 -- which looked like stale baked light. The
+buffers were bit-identical; the sun was not. The sun angle comes from wall
+time, and a rebuild stalls a frame for a few hundred ms, so every "stale
+geometry" delta was the sun moving. **Frame comparisons need `CF_SUN` as
+well as `CF_TIME`**; with both pinned the brook world is deterministic run to
+run, so the earlier note that springs make runs nondeterministic was the
+same mistake. Separately, a launch occasionally exits 0 without writing the
+dump; the harness now retries.

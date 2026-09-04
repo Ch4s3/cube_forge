@@ -84,4 +84,30 @@ mod CubeForge.Test.Terrain do
     end
   end
 
+
+  describe "Trees.spring_at_cell" do
+    test "a spring column has slope and height, and a generated chunk holds it" do
+      let n = count_springs(0, 0, 7, 0, 0)
+      Test.assert_true(n >= 0, "ran")
+      Test.assert_true(all_springs_ok(0, 7), "every spring cell is a mountainside")
+    end
+  end
+  pfn count_springs(cx : Int, cz : Int, seed : Int, i : Int, acc : Int) : Int do
+    if i >= 256 do acc else count_springs(cx, cz, seed, i + 1, if CubeForge.Trees.spring_at_cell(i % 16, i / 16, seed) >= 0 do acc + 1 else acc end) end
+  end
+  pfn all_springs_ok(i : Int, seed : Int) : Bool do
+    if i >= 256 do true
+    else
+      let col = CubeForge.Trees.spring_at_cell(i % 16, i / 16, seed)
+      if col < 0 do all_springs_ok(i + 1, seed)
+      else
+        let wx = col % 4096
+        let wz = col / 4096
+        let h = CubeForge.Noise.height(wx, wz, seed)
+        let ch = CubeForge.Chunk.generate(wx - wx % 16, wz - wz % 16, seed)
+        if CubeForge.Noise.slope(wx, wz, seed) >= 2 && h >= 72 && CubeForge.Chunk.is_source(CubeForge.Chunk.get(ch, wx % 16, h, wz % 16)) do all_springs_ok(i + 1, seed) else false end
+      end
+    end
+  end
+
 end
