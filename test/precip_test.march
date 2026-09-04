@@ -9,16 +9,12 @@ mod CubeForge.Test.Precip do
   alias CubeForge.Precip as P
 
   describe "Precip.snow_mix" do
-    test "rains below the snow line and snows above it" do
-      Test.assert_true(P.snow_mix(60.0) < 0.001, "sea level rains")
-      Test.assert_true(P.snow_mix(120.0) > 0.999, "peaks snow")
-      let mid = P.snow_mix(int_to_float(CubeForge.Noise.snow_line()) -. 4.0)
-      Test.assert_true(mid > 0.0 && mid < 1.0, "the blend band beneath the snow line")
-    end
-
-    test "the blend band is monotonic" do
-      let line = int_to_float(CubeForge.Noise.snow_line())
-      Test.assert_true(P.snow_mix(line -. 6.0) < P.snow_mix(line -. 2.0), "more snow higher up")
+    test "snows where it is cold, rains where it is not, blends between" do
+      Test.assert_true(P.snow_mix(0.1) > 0.999, "tundra-cold snows")
+      Test.assert_true(P.snow_mix(0.6) < 0.001, "temperate rains")
+      let mid = P.snow_mix(P.cold() +. 0.04)
+      Test.assert_true(mid > 0.0 && mid < 1.0, "the blend band above the threshold")
+      Test.assert_true(P.snow_mix(P.cold() +. 0.02) > P.snow_mix(P.cold() +. 0.06), "monotonic")
     end
   end
 

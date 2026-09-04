@@ -718,3 +718,13 @@ already the spring; `source_neighbour` keeps pits filling to lake level.
   slot on `Sim` for the bounce.
 - A single source no longer exceeds the 250-cell tick budget — its rings settle
   in two ticks — so that test now uses a full 256-cell layer.
+
+## Biomes — phase 2, weather by biome
+
+The weather actor is unchanged: one global storm. The biome under the camera
+decides how much of it falls and whether it is snow. `Precip.snow_mix` keys on
+the column's eased temperature (cold below 0.33, blended over 0.08) rather than
+`Noise.snow_line`, and `Biome.precip_scale` multiplies the particle count:
+desert 0.15, tundra 0.5, beach 0.8, grassland and alpine 0.9, forest and taiga
+1.0, wetland 1.3, capped at `CF_PRECIP`. Under `CF_WEATHER=100` the player's
+grassland column runs 3,600 particles; after the canal turns it to forest, 4,000.

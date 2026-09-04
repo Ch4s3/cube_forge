@@ -299,4 +299,21 @@ mod CubeForge.Biome do
     end
   end
 
+
+  doc "Eased temperature 0..1 of one column."
+  fn temp_of(f : Field, wx : Int, wz : Int) : Float do
+    match f do Field(_, _, ta, _, _, _, _) -> NativeArray.get_float(ta, wx + 128 * wz) end
+  end
+
+  doc "How much of a storm actually falls here, as a multiplier on the particle count. Deserts stay dry under the same storm that soaks a wetland; the sea and the mountains sit in between."
+  fn precip_scale(id : Int) : Float do
+    if id == b_desert() do 0.15
+    else if id == b_tundra() do 0.5
+    else if id == b_beach() do 0.8
+    else if id == b_grassland() do 0.9
+    else if id == b_alpine() do 0.9
+    else if id == b_wetland() do 1.3
+    else 1.0 end end end end end end
+  end
+
 end

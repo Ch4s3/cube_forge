@@ -21,7 +21,6 @@
 -- owns the per-particle loop.
 mod CubeForge.Precip do
 
-  alias CubeForge.Noise as N
 
   doc "Mesh slot for the precipitation buffer (249; 250-254 are taken)."
   fn slot() : Int do 249 end
@@ -39,12 +38,14 @@ mod CubeForge.Precip do
   fn rain_speed() : Float do 28.0 end
   fn snow_speed() : Float do 2.5 end
 
-  doc "How much of the precipitation is snow at eye height [ey]: rain below the snow line, snow above it, blended over the eight blocks beneath it. Reuses the constant that already decides where the terrain wears snow, so the weather cannot contradict the ground it lands on."
-  fn snow_mix(ey : Float) : Float do
-    let line = int_to_float(N.snow_line())
-    if ey >= line do 1.0
-    else if ey <= line -. 8.0 do 0.0
-    else (ey -. (line -. 8.0)) /. 8.0 end end
+  doc "Cold end of the temperature axis, matching Biome.classify: below this a column is tundra or taiga."
+  fn cold() : Float do 0.33 end
+
+  doc "How much of the precipitation is snow for a column at eased temperature [t]: all of it below the cold threshold, none of it 0.08 above, blended between. Keyed on the biome field's temperature rather than on altitude, so it snows where it is cold -- which is still the peaks, and now also the tundra."
+  fn snow_mix(t : Float) : Float do
+    if t <= cold() do 1.0
+    else if t >= cold() +. 0.08 do 0.0
+    else (cold() +. 0.08 -. t) /. 0.08 end end
   end
 
   doc "Vertices to draw for [live] particles: six per particle."

@@ -144,4 +144,12 @@ mod CubeForge.Test.Biome do
     end
   end
 
+  describe "Biome.precip_scale" do
+    test "deserts are drier than grassland, wetlands wetter" do
+      Test.assert_true(Biome.precip_scale(Biome.b_desert()) < Biome.precip_scale(Biome.b_grassland()), "desert < grassland")
+      Test.assert_true(Biome.precip_scale(Biome.b_grassland()) < Biome.precip_scale(Biome.b_wetland()), "grassland < wetland")
+      Test.assert_true(Biome.precip_scale(Biome.b_forest()) > 0.99 && Biome.precip_scale(Biome.b_forest()) < 1.01, "forest is the reference")
+    end
+  end
+
 end

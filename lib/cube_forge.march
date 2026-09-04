@@ -901,8 +901,14 @@ mod CubeForge do
           -- headless dumps replay identically; the pool is the first stateful
           -- renderer-side simulation and that is what keeps it reproducible.
           let pdt = if max_frames > 0 do 1.0 /. 60.0 else dt end
-          let live = float_to_int(int_to_float(precip_cap) *. wx)
-          let snowing = Precip.snow_mix(V.y(Player.eye(player1))) > 0.5
+          -- Weather is one global storm; the biome under the camera decides how much
+          -- of it falls here and whether it is snow.
+          let bcx = float_to_int(V.x(Player.position(player1)))
+          let bcz = float_to_int(V.z(Player.position(player1)))
+          let pscale = Biome.precip_scale(Biome.biome_of(scene_biome(sc1), bcx, bcz))
+          let live0 = float_to_int(int_to_float(precip_cap) *. wx *. pscale)
+          let live = if live0 > precip_cap do precip_cap else live0 end
+          let snowing = Precip.snow_mix(Biome.temp_of(scene_biome(sc1), bcx, bcz)) > 0.5
           -- Camera right, flattened to the horizontal plane and normalised.
           let rlen = Math.sqrt(V.z(look) *. V.z(look) +. V.x(look) *. V.x(look))
           let rl = if rlen < 0.0001 do 1.0 else rlen end
