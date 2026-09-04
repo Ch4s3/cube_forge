@@ -32,6 +32,15 @@ mod CubeForge.Test.Light do
     CubeForge.World.World(Array.from_list(slab_chunks(63, y, Nil)), L.new(), 8)
   end
 
+
+  -- First index where the two light fields differ, or -1 when they agree.
+  pfn first_diff_go(a : NativeU8Arr, b : NativeU8Arr, i : Int) : Int do
+    if i >= 4194304 do -1
+    else if NativeArray.get_u8(a, i) != NativeArray.get_u8(b, i) do i
+    else first_diff_go(a, b, i + 1) end end
+  end
+  pfn first_difference(a : NativeU8Arr, b : NativeU8Arr) : Int do first_diff_go(a, b, 0) end
+
   describe "Light.index" do
     test "corners map to the ends of the flat range" do
       Test.assert_eq_int(L.index(0, 0, 0), 0, "origin")
@@ -122,6 +131,47 @@ mod CubeForge.Test.Light do
       let w = CubeForge.World.relight_all(CubeForge.World.generate(8, 1, 1))
       Test.assert_eq_int(CubeForge.World.light_at(w, 40, 255, 40), 15, "open sky")
       Test.assert_eq_int(CubeForge.World.light_at(w, 40, 0, 40), 0, "bedrock depth is dark")
+    end
+  end
+
+  describe "Light.relight_at" do
+    test "breaking a surface block matches a full re-flood" do
+      let w0 = CubeForge.World.relight_all(CubeForge.World.generate(8, 1, 1))
+      let w1 = CubeForge.World.set_block(w0, 40, 70, 40, 0)
+      let inc = L.relight_at(CubeForge.World.light(w1), w1, 40, 70, 40)
+      Test.assert_eq_int(first_difference(inc, L.flood(w1)), -1, "incremental equals full re-flood")
+    end
+
+    test "placing a block matches a full re-flood" do
+      let w0 = CubeForge.World.relight_all(CubeForge.World.generate(8, 1, 1))
+      let w1 = CubeForge.World.set_block(w0, 40, 90, 40, 3)
+      let inc = L.relight_at(CubeForge.World.light(w1), w1, 40, 90, 40)
+      Test.assert_eq_int(first_difference(inc, L.flood(w1)), -1, "incremental equals full re-flood")
+    end
+
+    test "plugging a sky shaft darkens the gallery beneath it" do
+      -- The cap has to be the shaft itself: a lone block higher up is simply
+      -- flowed around, which the equals-full-flood assertion below confirms.
+      let w0 = CubeForge.World.relight_all(CubeForge.World.set_block(slab_world(100), 40, 100, 40, 0))
+      Test.assert_eq_int(CubeForge.World.light_at(w0, 41, 99, 40), 14, "gallery lit before the cap")
+      let w1 = CubeForge.World.set_block(w0, 40, 100, 40, 3)
+      let inc = L.relight_at(CubeForge.World.light(w1), w1, 40, 100, 40)
+      Test.assert_eq_int(first_difference(inc, L.flood(w1)), -1, "incremental equals full re-flood")
+      Test.assert_eq_int(L.get(inc, 41, 99, 40), 0, "the gallery went dark")
+    end
+
+    test "an edit at a chunk boundary matches a full re-flood" do
+      let w0 = CubeForge.World.relight_all(CubeForge.World.generate(8, 1, 1))
+      let w1 = CubeForge.World.set_block(w0, 16, 80, 16, 3)
+      let inc = L.relight_at(CubeForge.World.light(w1), w1, 16, 80, 16)
+      Test.assert_eq_int(first_difference(inc, L.flood(w1)), -1, "incremental equals full re-flood")
+    end
+
+    test "an edit at the world edge matches a full re-flood" do
+      let w0 = CubeForge.World.relight_all(CubeForge.World.generate(8, 1, 1))
+      let w1 = CubeForge.World.set_block(w0, 0, 80, 127, 3)
+      let inc = L.relight_at(CubeForge.World.light(w1), w1, 0, 80, 127)
+      Test.assert_eq_int(first_difference(inc, L.flood(w1)), -1, "incremental equals full re-flood")
     end
   end
 

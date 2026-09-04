@@ -820,3 +820,16 @@ are freed immediately.
 - **Would need:** the G21 fix (borrowed-param inference, so a read that is dead
   before the write does not keep the array live). With it, the queue-based BFS
   in the design doc would be directly expressible and strictly faster.
+
+### G60. `World.block_at` in a per-voxel loop is the hidden cost of any voxel sweep
+- The bounded relight spent **179 ms of its 217 ms in column seeding alone** —
+  961 columns of 256 voxels, each voxel calling `World.block_at`, which
+  re-derives the chunk coordinates and walks the `Array.PVec` trie every time.
+  727 ns per voxel step.
+- A column never leaves its chunk. Hoisting `chunk_at` out of the loop and
+  reading through `Chunk.get_or_air` took seeding to **12 ms (15x)**, the whole
+  relight to 50 ms, and the full-world flood from 1724 ms to **521 ms**.
+- Not a language gap so much as a shape worth writing down: `World.block_at` is
+  the right API for a raycast or a physics probe and the wrong one for anything
+  that walks voxels in bulk. Every future bulk pass (meshing, save/load, chunk
+  streaming) should fetch the chunk once and index it directly.

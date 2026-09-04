@@ -29,6 +29,11 @@ mod CubeForge.World do
   doc "Recompute the whole skylight field from scratch."
   fn relight_all(w : World) : World do set_light(w, CubeForge.Light.flood(w)) end
 
+  doc "Repair the skylight field after an edit at a world coordinate."
+  fn relight_at(w : World, x : Int, y : Int, z : Int) : World do
+    set_light(w, CubeForge.Light.relight_at(light(w), w, x, y, z))
+  end
+
   fn in_bounds(w : World, cx : Int, cz : Int) : Bool do
     let n = side(w)
     cx >= 0 && cx < n && cz >= 0 && cz < n

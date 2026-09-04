@@ -386,7 +386,7 @@ mod CubeForge do
     match sc do
       Scene(world, counts, outline, hit, ui, pids, flags, meshes) ->
         let t0 = Win.time()
-        let world1 = World.set_block(world, x, y, z, id)
+        let world1 = World.relight_at(World.set_block(world, x, y, z, id), x, y, z)
         match remesh_cell(world1, x, y, z, counts, meshes, Chunk.new()) do
           Remeshed(c1, m1) ->
             let t1 = Win.time()

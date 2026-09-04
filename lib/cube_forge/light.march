@@ -45,12 +45,17 @@ mod CubeForge.Light do
   fn is_opaque(id : Int) : Bool do opacity(id) >= max_level() end
 
   -- ── Seeding: sunlight down each column ────────────────────────────────────
+  --
+  -- The chunk is hoisted out of the per-voxel loop: World.block_at re-derives
+  -- the chunk coordinates and walks the PVec trie for every voxel, and a column
+  -- never leaves its chunk. That lookup was the dominant cost of both the full
+  -- flood and the bounded relight.
 
   @[no_alloc]
   -- Light level a column reaches at [y], given it arrived carrying [lv].
   -- 0 once the column is blocked or fully absorbed.
-  pfn column_step(w : CubeForge.World.World, x : Int, y : Int, z : Int, lv : Int) : Int do
-    let id = CubeForge.World.block_at(w, x, y, z)
+  pfn column_step(c : CubeForge.Chunk.Chunk, lx : Int, y : Int, lz : Int, lv : Int) : Int do
+    let id = C.get_or_air(c, lx, y, lz)
     if is_opaque(id) do 0
     else
       let l = lv - opacity(id)
@@ -58,28 +63,45 @@ mod CubeForge.Light do
     end
   end
 
-  pfn seed_column_go(la : NativeU8Arr, w : CubeForge.World.World, x : Int, z : Int, y : Int, lv : Int) : NativeU8Arr do
-    if y < 0 do la
+  -- Seed the column at world (x, z) — chunk-local (lx, lz) of [c] — from [y]
+  -- down to [ylo], entering at level [lv].
+  pfn seed_col_go(la : NativeU8Arr, c : CubeForge.Chunk.Chunk, lx : Int, lz : Int,
+                  x : Int, z : Int, y : Int, ylo : Int, lv : Int) : NativeU8Arr do
+    if y < ylo do la
     else
-      let l = column_step(w, x, y, z, lv)
+      let l = column_step(c, lx, y, lz, lv)
       if l <= 0 do la
-      else seed_column_go(NativeArray.set_u8(la, index(x, y, z), l), w, x, z, y - 1, l) end
+      else seed_col_go(NativeArray.set_u8(la, index(x, y, z), l), c, lx, lz, x, z, y - 1, ylo, l) end
     end
   end
 
-  doc "Seed the sunlight column at (x, z) into [la], writing from [y] down."
-  fn seed_column(la : NativeU8Arr, w : CubeForge.World.World, x : Int, z : Int, y : Int, lv : Int) : NativeU8Arr do
-    seed_column_go(la, w, x, z, y, lv)
+  doc "Seed the sunlight column at world (x, z) from [y] down to [ylo], entering at [lv]."
+  fn seed_column(la : NativeU8Arr, w : CubeForge.World.World, x : Int, z : Int, y : Int, ylo : Int, lv : Int) : NativeU8Arr do
+    let cx = CubeForge.World.floor_div16(x)
+    let cz = CubeForge.World.floor_div16(z)
+    if !CubeForge.World.in_bounds(w, cx, cz) do la
+    else seed_col_go(la, CubeForge.World.chunk_at(w, cx, cz), CubeForge.World.mod16(x), CubeForge.World.mod16(z), x, z, y, ylo, lv) end
   end
 
-  pfn seed_all_go(la : NativeU8Arr, w : CubeForge.World.World, i : Int) : NativeU8Arr do
-    if i >= 16384 do la
-    else seed_all_go(seed_column_go(la, w, i % 128, i / 128, 255, max_level()), w, i + 1) end
+  -- Every column of one chunk, with the chunk fetched once.
+  pfn seed_chunk_go(la : NativeU8Arr, c : CubeForge.Chunk.Chunk, cx : Int, cz : Int, i : Int) : NativeU8Arr do
+    if i >= 256 do la
+    else
+      let lx = i % 16
+      let lz = i / 16
+      seed_chunk_go(seed_col_go(la, c, lx, lz, 16 * cx + lx, 16 * cz + lz, 255, 0, max_level()), c, cx, cz, i + 1)
+    end
+  end
+
+  pfn seed_all_go(la : NativeU8Arr, w : CubeForge.World.World, ci : Int, n : Int) : NativeU8Arr do
+    if ci >= n * n do la
+    else seed_all_go(seed_chunk_go(la, CubeForge.World.chunk_at(w, ci % n, ci / n), ci % n, ci / n, 0), w, ci + 1, n)
+    end
   end
 
   doc "Seed every column of the world."
   fn seed_all(la : NativeU8Arr, w : CubeForge.World.World) : NativeU8Arr do
-    seed_all_go(la, w, 0)
+    seed_all_go(la, w, 0, CubeForge.World.side(w))
   end
 
   -- ── Spread: level-synchronous downward sweep ─────────────────────────────
@@ -97,6 +119,11 @@ mod CubeForge.Light do
   doc "Copy the whole field from [src] into [dst] (one memcpy in the shim)."
   fn copy_field(src : NativeU8Arr, dst : NativeU8Arr) : NativeU8Arr do
     CubeForge.Ffi.Window.u8_blit(dst, 0, src, 0, 4194304)
+  end
+
+  doc "A fresh buffer holding the first [n] bytes of [src]. A y-range is contiguous in the flat index, so a prefix is a whole sub-world of y layers."
+  fn copy_prefix(src : NativeU8Arr, n : {Int | _ >= 1}) : NativeU8Arr do
+    CubeForge.Ffi.Window.u8_blit(NativeArray.make_u8(n, 0), 0, src, 0, n)
   end
 
   @[no_alloc]
@@ -154,6 +181,108 @@ mod CubeForge.Light do
   doc "Compute the world's skylight from scratch: seed every column, then spread."
   fn flood(w : CubeForge.World.World) : NativeU8Arr do
     spread(seed_all(new(), w), w)
+  end
+
+  -- ── Incremental relight ───────────────────────────────────────────────────
+  --
+  -- The design doc called for an add/remove BFS pair. G59 rules that out: a
+  -- queue needs read-then-write on the same array. What survives the constraint
+  -- is a bounded sweep. Light travels at most 15 blocks, so an edit can only
+  -- change light within 15 of it — plus the whole column beneath, since capping
+  -- a sky shaft darkens everything below. Clear that box, re-seed its columns,
+  -- and sweep it. Voxels just outside are unchanged and correct, so they feed
+  -- the interior as boundary sources; the sweep therefore scans one voxel wider
+  -- than the box it clears.
+
+  fn relight_radius() : Int do 15 end
+
+  @[no_alloc]
+  pfn clampi(v : Int, lo : Int, hi : Int) : Int do
+    if v < lo do lo else if v > hi do hi else v end end
+  end
+
+  -- Zero every voxel of the box. Write-only on [la]. Nested rather than
+  -- decomposed from a flat counter, which costs three divisions per voxel.
+  pfn zero_row(la : NativeU8Arr, x : Int, x1 : Int, y : Int, z : Int) : NativeU8Arr do
+    if x > x1 do la else zero_row(NativeArray.set_u8(la, index(x, y, z), 0), x + 1, x1, y, z) end
+  end
+  pfn zero_plane(la : NativeU8Arr, x0 : Int, x1 : Int, y : Int, z : Int, z1 : Int) : NativeU8Arr do
+    if z > z1 do la else zero_plane(zero_row(la, x0, x1, y, z), x0, x1, y, z + 1, z1) end
+  end
+  pfn zero_box_go(la : NativeU8Arr, x0 : Int, x1 : Int, y : Int, y1 : Int, z0 : Int, z1 : Int) : NativeU8Arr do
+    if y > y1 do la else zero_box_go(zero_plane(la, x0, x1, y, z0, z1), x0, x1, y + 1, y1, z0, z1) end
+  end
+
+  -- Re-seed the sky column of every (x, z) in the box, over the box's y range
+  -- only: the light just above the box was not cleared and is still correct, so
+  -- it is exactly the level the column enters at. Write-only on [la].
+  pfn seed_box_go(la : NativeU8Arr, w : CubeForge.World.World, above : NativeU8Arr,
+                  x0 : Int, bw : Int, z0 : Int, y1 : Int, y0 : Int, i : Int, n : Int) : NativeU8Arr do
+    if i >= n do la
+    else
+      let x = x0 + i % bw
+      let z = z0 + i / bw
+      let lv = if y1 >= 255 do max_level() else get(above, x, y1 + 1, z) end
+      seed_box_go(seed_column(la, w, x, z, y1, y0, lv), w, above, x0, bw, z0, y1, y0, i + 1, n)
+    end
+  end
+
+  -- One sweep level restricted to the scan box. Reads [src], writes [dst].
+  pfn level_row(src : NativeU8Arr, dst : NativeU8Arr, w : CubeForge.World.World, lv : Int, x : Int, x1 : Int, y : Int, z : Int) : NativeU8Arr do
+    if x > x1 do dst
+    else if NativeArray.get_u8(src, index(x, y, z)) != lv do level_row(src, dst, w, lv, x + 1, x1, y, z)
+    else level_row(src, give6(src, dst, w, x, y, z, lv), w, lv, x + 1, x1, y, z) end end
+  end
+  pfn level_plane(src : NativeU8Arr, dst : NativeU8Arr, w : CubeForge.World.World, lv : Int, x0 : Int, x1 : Int, y : Int, z : Int, z1 : Int) : NativeU8Arr do
+    if z > z1 do dst
+    else level_plane(src, level_row(src, dst, w, lv, x0, x1, y, z), w, lv, x0, x1, y, z + 1, z1) end
+  end
+  pfn box_level_go(src : NativeU8Arr, dst : NativeU8Arr, w : CubeForge.World.World, lv : Int,
+                   x0 : Int, x1 : Int, y : Int, y1 : Int, z0 : Int, z1 : Int) : NativeU8Arr do
+    if y > y1 do dst
+    else box_level_go(src, level_plane(src, dst, w, lv, x0, x1, y, z0, z1), w, lv, x0, x1, y + 1, y1, z0, z1) end
+  end
+
+  -- [plen] is the prefix length the sweep works within: only y layers up to the
+  -- box top are touched, and those are a contiguous prefix of the flat index,
+  -- so each level allocates and copies that prefix rather than the whole 4 MB.
+  pfn box_sweep_go(src : NativeU8Arr, w : CubeForge.World.World, lv : Int,
+                   x0 : Int, x1 : Int, y0 : Int, y1 : Int, z0 : Int, z1 : Int, plen : {Int | _ >= 1}) : NativeU8Arr do
+    if lv <= 1 do src
+    else box_sweep_go(box_level_go(src, copy_prefix(src, plen), w, lv, x0, x1, y0, y1, z0, z1), w, lv - 1, x0, x1, y0, y1, z0, z1, plen)
+    end
+  end
+
+  doc "Repair the skylight field after the block at (ex, ey, ez) changed. [w] is the world after the edit."
+  fn relight_at(la : NativeU8Arr, w : CubeForge.World.World, ex : Int, ey : Int, ez : Int) : NativeU8Arr do
+    let r = relight_radius()
+    let cx0 = clampi(ex - r, 0, 127)
+    let cx1 = clampi(ex + r, 0, 127)
+    let cz0 = clampi(ez - r, 0, 127)
+    let cz1 = clampi(ez + r, 0, 127)
+    let cy1 = clampi(ey + r, 0, 255)
+    -- The box only has to reach y = 0 when the edit can cap a live sky column.
+    -- If full sky light does not already reach the voxel just above the edit,
+    -- the column below is interrupted higher up and cannot change; lateral
+    -- spread is then the only effect, and that is bounded by the radius.
+    let cy0 = if get(la, ex, ey + 1, ez) >= max_level() do 0 else clampi(ey - r, 0, 255) end
+    let above = copy_field(la, new())
+    let la1 = zero_box_go(la, cx0, cx1, cy0, cy1, cz0, cz1)
+    let la2 = seed_box_go(la1, w, above, cx0, cx1 - cx0 + 1, cz0, cy1, cy0, 0, (cx1 - cx0 + 1) * (cz1 - cz0 + 1))
+    -- scan box: one wider, so the unchanged voxels around the edit feed inward
+    let sx0 = clampi(ex - r - 1, 0, 127)
+    let sx1 = clampi(ex + r + 1, 0, 127)
+    let sz0 = clampi(ez - r - 1, 0, 127)
+    let sz1 = clampi(ez + r + 1, 0, 127)
+    let sy1 = clampi(ey + r + 1, 0, 255)
+    let sy0 = if cy0 <= 0 do 0 else clampi(cy0 - 1, 0, 255) end
+    -- One y layer past the box top, so give1's reads of the layer above are in
+    -- range; that layer is read-only and feeds the box as a boundary source.
+    let plen = (sy1 + 2) * 16384
+    let swept = box_sweep_go(la2, w, max_level(), sx0, sx1, sy0, sy1, sz0, sz1, plen)
+    -- Overlay the swept prefix onto the untouched upper field. la2 was read by
+    -- the sweep, so it cannot itself be the destination (GAPS.md G21).
+    CubeForge.Ffi.Window.u8_blit(copy_field(la2, new()), 0, swept, 0, plen)
   end
 
 end
