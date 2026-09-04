@@ -14,7 +14,7 @@ Planned, not started. One entry per feature; each gets its own design doc under
 
 - [ ] **Main-thread pinning runtime patch** (GAPS.md G15) — chip spawned, in progress in a separate session.
 - [x] **Greedy meshing + sections + `blit` stdlib candidate** — done 2026-09-03 (`docs/superpowers/specs/2026-09-03-greedy-sections-blit-design.md`): 6x fewer vertices, section remesh 3–5x faster; blit exists as `cf_f32_blit` + `F32Buf.append`.
-- [ ] **Lighting** — flood-fill sky/block light, per-vertex light in the 7-float layout; exercises `NativeU8Arr` at scale.
+- [ ] **Lighting** — designed 2026-09-03 (`docs/superpowers/specs/2026-09-03-lighting-design.md`): flood-fill skylight with incremental add/remove relight, smooth per-vertex light + AO, day/night, camera flashlight; vertex layout grows to 8 floats. Exercises `NativeU8Arr` at scale.
 - [ ] **Texture atlas via stb_image** — real block textures; needs `Bytes` across FFI fixed first (GAPS.md G8).
 - [ ] **Chunk streaming with actors** — infinite world, chunk lifecycle as actor state, supervision under load.
 - [ ] **Save/load through the CAS** — persistence keyed by BLAKE3 chunk hashes.
