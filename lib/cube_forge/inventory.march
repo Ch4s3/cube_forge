@@ -88,9 +88,12 @@ mod CubeForge.Inventory do
   doc "Item a broken block yields, or 0 when it is not collectable."
   fn yield_of(id : Int) : Int do
     if id == 0 || id == C.bedrock() do 0
-    else if C.is_water(id) do C.water()   -- any flow level collects as a source
+    -- A source block is a spring and collects as one; any other water is a
+    -- finite seven units. Before this, scooping a puddle yielded a spring.
+    else if C.is_source(id) do C.water()
+    else if C.is_water(id) do C.id_of_level(7)
     else if C.is_foliage(id) do 0         -- leaves crumble
-    else id end end end
+    else id end end end end
   end
 
   -- First slot in [lo, hi) already holding [item], or -1.

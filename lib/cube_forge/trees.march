@@ -9,6 +9,8 @@
 -- byte-identical trees for the blocks they share (see trees_test).
 mod CubeForge.Trees do
 
+  needs IO.Process   -- CF_SPRING_DENSITY
+
   alias CubeForge.Chunk as C
   alias CubeForge.Noise as N
 
@@ -54,6 +56,20 @@ mod CubeForge.Trees do
   end
   doc "The cell's density draw in [0, 1): a cell holds a tree when this is below its biome's density."
   fn cell_density(cx : Int, cz : Int, seed : Int) : Float do cell_hash(cx, cz, seed, 1) end
+
+  doc "Springs per mille of 8-block cells, before the ground test. CF_SPRING_DENSITY."
+  fn spring_density() : Int do Env.get_int("CF_SPRING_DENSITY", 100) end
+
+  doc "Trunk-style column of the spring in cell (cx, cz), packed x + 4096 * z, or -1. A spring needs a slope of at least two and ground at 72 or higher: a mountainside, not a plain. The biome field does not exist at generation, so height and slope stand in, as they do for pines."
+  fn spring_at_cell(cx : Int, cz : Int, seed : Int) : Int do
+    if cell_hash(cx, cz, seed, 6) *. 1000.0 >= int_to_float(spring_density()) do 0 - 1
+    else
+      let col = cell_trunk(cx, cz, seed)
+      let wx = col % 4096
+      let wz = col / 4096
+      if N.slope(wx, wz, seed) >= 2 && N.height(wx, wz, seed) >= 72 do col else 0 - 1 end
+    end
+  end
 
   doc "A column can hold a plant only on flat grass above the water line."
   fn plantable(wx : Int, wz : Int, seed : Int) : Bool do

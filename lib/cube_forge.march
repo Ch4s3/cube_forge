@@ -176,9 +176,13 @@ mod CubeForge do
             apply_reply(w, pids, send_edge(w, pids, flags, nb_cx(cx, dir), nb_cz(cz, dir), Water.opposite(dir), slot, val), ci, rest, cells)
           else if kind == 2 do
             apply_reply(w, pids, send_spill(w, pids, flags, nb_cx(cx, dir), nb_cz(cz, dir), Water.opposite(dir), slot, val), ci, rest, cells)
+          else if kind == 4 do
+            -- a drop's foot: spray there
+            Win.spray_at(16 * cx + payload % 16, payload / 256, 16 * cz + (payload / 16) % 16, 3)
+            apply_reply(w, pids, flags, ci, rest, cells)
           else
             apply_reply(w, pids, NativeArray.set_int(flags, ci, 1), ci, rest, cells)
-          end end
+          end end end
         end
     end
   end
@@ -255,11 +259,11 @@ mod CubeForge do
                       let cx = ci % n
                       let cz = ci / n
                       let smask = widen_mask(section_mask(out, 0), 0, 0)
-                      let m1 = remesh_sections(w1, cx, cz, smask, 0, Array.get(meshes, ci), empty, 0)
+                      let m1 = remesh_sections_water(w1, cx, cz, smask, 0, Array.get(meshes, ci), empty)
                       let c1 = upload_chunk(m1, ci, counts)
                       let meshes1 = Array.set(meshes, ci, m1)
                       -- a changed border cell changes that neighbour's culling too: remesh those neighbours' same sections
-                      match remesh_neighbors(w1, cx, cz, c1, meshes1, empty, edge_mask(out, 0), smask) do
+                      match remesh_neighbors_water(w1, cx, cz, c1, meshes1, empty, edge_mask(out, 0), smask) do
                         Remeshed(c2, meshes2) -> apply_all(w1, pids, flags1, c2, meshes2, rest, rrest, empty, remeshed + count_bits(smask, 0, 0))
                       end
                     else apply_all(w1, pids, flags1, counts, meshes, rest, rrest, empty, remeshed) end
@@ -270,20 +274,40 @@ mod CubeForge do
   end
 
   -- Remesh the sections in [smask] of the neighbour chunks named by [mask] (bits: 1 = -z, 2 = +z, 4 = +x, 8 = -x).
-  pfn remesh_neighbors(w : CubeForge.World.World, cx : Int, cz : Int, counts : NativeIntArr, meshes, empty : CubeForge.Chunk.Chunk, mask : Int, smask : Int) : Remeshed do
-    let r1 = if int_and(mask, 4) != 0 do remesh_chunk_sections(w, cx + 1, cz, smask, counts, meshes, empty) else Remeshed(counts, meshes) end
+  -- Water-only twins of the three below, for the water actors' replies: a reply
+  -- carries nothing but water cells, so only the water pass of each touched
+  -- section is rebuilt. The +-1 widening stays -- a water cell's top and bottom
+  -- faces cull against the section above and below -- but that is the cheap pass.
+  pfn remesh_sections_water(world : CubeForge.World.World, cx : Int, cz : Int, mask : Int, sy : Int, m : CubeForge.ChunkMesh.ChunkMesh, empty : CubeForge.Chunk.Chunk) : CubeForge.ChunkMesh.ChunkMesh do
+    if sy >= 16 do m
+    else
+      let m1 = if int_and(mask, pow2(sy)) != 0 do CM.rebuild_section_water(m, world, cx, cz, sy, empty) else m end
+      remesh_sections_water(world, cx, cz, mask, sy + 1, m1, empty)
+    end
+  end
+  pfn remesh_chunk_sections_water(w : CubeForge.World.World, cx : Int, cz : Int, smask : Int, counts : NativeIntArr, meshes, empty : CubeForge.Chunk.Chunk) : Remeshed do
+    if !World.in_bounds(w, cx, cz) do Remeshed(counts, meshes)
+    else
+      let ci = cx + World.side(w) * cz
+      let m1 = remesh_sections_water(w, cx, cz, smask, 0, Array.get(meshes, ci), empty)
+      Remeshed(upload_chunk(m1, ci, counts), Array.set(meshes, ci, m1))
+    end
+  end
+  pfn remesh_neighbors_water(w : CubeForge.World.World, cx : Int, cz : Int, counts : NativeIntArr, meshes, empty : CubeForge.Chunk.Chunk, mask : Int, smask : Int) : Remeshed do
+    let r1 = if int_and(mask, 4) != 0 do remesh_chunk_sections_water(w, cx + 1, cz, smask, counts, meshes, empty) else Remeshed(counts, meshes) end
     match r1 do
       Remeshed(c1, m1) ->
-        let r2 = if int_and(mask, 8) != 0 do remesh_chunk_sections(w, cx - 1, cz, smask, c1, m1, empty) else Remeshed(c1, m1) end
+        let r2 = if int_and(mask, 8) != 0 do remesh_chunk_sections_water(w, cx - 1, cz, smask, c1, m1, empty) else Remeshed(c1, m1) end
         match r2 do
           Remeshed(c2, m2) ->
-            let r3 = if int_and(mask, 2) != 0 do remesh_chunk_sections(w, cx, cz + 1, smask, c2, m2, empty) else Remeshed(c2, m2) end
+            let r3 = if int_and(mask, 2) != 0 do remesh_chunk_sections_water(w, cx, cz + 1, smask, c2, m2, empty) else Remeshed(c2, m2) end
             match r3 do
-              Remeshed(c3, m3) -> if int_and(mask, 1) != 0 do remesh_chunk_sections(w, cx, cz - 1, smask, c3, m3, empty) else Remeshed(c3, m3) end
+              Remeshed(c3, m3) -> if int_and(mask, 1) != 0 do remesh_chunk_sections_water(w, cx, cz - 1, smask, c3, m3, empty) else Remeshed(c3, m3) end
             end
         end
     end
   end
+
 
   -- Remesh every section any chunk marked dirty. Per-vertex light is baked into
   -- the mesh, so a section whose light moved shows stale lighting until it is
@@ -331,6 +355,26 @@ mod CubeForge do
   end
 
   -- One water tick: call every flagged chunk actor in parallel, apply the replies, remesh what changed.
+  -- Cells still queued across every chunk after a tick: the kind-3 markers' payloads summed.
+  pfn active_cells(replies, acc : Int) : Int do
+    match replies do
+      Nil -> acc
+      Cons(r, rest) -> active_cells(rest, acc + reply_pending(r))
+    end
+  end
+  pfn reply_pending(r) : Int do
+    match r do
+      Ok(out) -> pending_of(out, 0)
+      _ -> 0
+    end
+  end
+  pfn pending_of(out : List(Int), acc : Int) : Int do
+    match out do
+      Nil -> acc
+      Cons(v, rest) -> pending_of(rest, if v / 4294967296 == 3 do acc + v % 4294967296 else acc end)
+    end
+  end
+
   pfn water_tick(sc, workers : Int, verbose : Bool) do
     match sc do
       Scene(w, counts, outline, hit, sel, pids, flags, meshes, bio) ->
@@ -348,7 +392,7 @@ mod CubeForge do
               Applied(w1, counts1, flags2, meshes1, remeshed) ->
                 let t2 = Win.time()
                 if verbose do
-                  println("water tick: " ++ int_to_string(List.length(cis)) ++ " chunks, calls " ++ ms(t1 -. t0) ++ ", apply+remesh " ++ ms(t2 -. t1) ++ " (" ++ int_to_string(remeshed) ++ " sections remeshed), reply sizes " ++ reply_sizes(replies))
+                  println("water tick: " ++ int_to_string(List.length(cis)) ++ " chunks, calls " ++ ms(t1 -. t0) ++ ", apply+remesh " ++ ms(t2 -. t1) ++ " (" ++ int_to_string(remeshed) ++ " sections remeshed), active cells " ++ int_to_string(active_cells(replies, 0)) ++ ", reply sizes " ++ reply_sizes(replies))
                 else () end
                 Scene(w1, counts1, outline, hit, sel, pids, flags2, meshes1, bio)
             end
@@ -432,6 +476,10 @@ mod CubeForge do
         let t0 = Win.time()
         let w0 = World.set_occupied(World.set_block(world, x, y, z, id), x, y, z, CubeForge.Light.occludes(id))
         let bio1 = Biome.note_edit(bio, w0, x, y, z, id)
+        let was_spring = y > Chunk.sea_level() && Chunk.is_source(World.block_at(world, x, y, z))
+        let is_spring = y > Chunk.sea_level() && Chunk.is_source(id)
+        if was_spring != is_spring do Win.spring_set(x, y, z, is_spring) else () end
+        if is_spring && !was_spring do Win.spray_at(x, y, z, 40) else () end
         Win.gfx_set_voxel(x, y, z, CubeForge.Light.occludes(id))
         let n = World.side(w0)
         -- accessors, not a match: a dotted constructor pattern does not parse (GAPS.md G24/G25)
@@ -544,6 +592,18 @@ mod CubeForge do
   end
   type Migrated = Migrated(CubeForge.World.World, CubeForge.Biome.Field, NativeIntArr)
 
+  -- Ground truth: every section of every chunk from the current world and light.
+  pfn remesh_everything(sc) do
+    match sc do
+      Scene(world, counts, outline, hit, ui, pids, flags, meshes, bio) ->
+        let n = World.side(world)
+        match remesh_marked(world, all_marks(0, NativeArray.make_int(1024, 0)), 0, n, counts, meshes, Chunk.new()) do
+          Remeshed(c1, m1) -> Scene(world, c1, outline, hit, ui, pids, flags, m1, bio)
+        end
+    end
+  end
+  pfn all_marks(i : Int, m : NativeIntArr) : NativeIntArr do if i >= 1024 do m else all_marks(i + 1, NativeArray.set_int(m, i, 1)) end end
+
   pfn migrate(sc, cols : List(Int)) do
     match cols do
       Nil -> sc
@@ -562,6 +622,24 @@ mod CubeForge do
   end
 
   -- Water on the surface at (px+3, pz+dz) for dz in [k, 4]: nine columns east of the player.
+  -- Every source above sea level: told to the shim, and its chunk flagged so the
+  -- water actor ticks from the first frame (a chunk with a spring is always live).
+  pfn spring_flags(w : CubeForge.World.World, f : CubeForge.Biome.Field, i : Int, n : Int, flags : NativeIntArr) : NativeIntArr do
+    if i >= n * n * 256 do
+      println("springs: " ++ int_to_string(Win.spring_count()))
+      flags
+    else
+      let x = i % (n * 16)
+      let z = i / (n * 16)
+      let h = Biome.height_of(f, x, z)
+      if h > Chunk.sea_level() && Chunk.is_source(World.block_at(w, x, h, z)) do
+        Win.spring_set(x, h, z, true)
+        println("  spring at " ++ int_to_string(x) ++ "," ++ int_to_string(h) ++ "," ++ int_to_string(z))
+        spring_flags(w, f, i + 1, n, NativeArray.set_int(flags, World.floor_div16(x) + n * World.floor_div16(z), 1))
+      else spring_flags(w, f, i + 1, n, flags) end
+    end
+  end
+
   pfn dig_canal(sc, p : CubeForge.Player.Player, k : Int) do
     if k > 4 do sc
     else
@@ -888,13 +966,13 @@ mod CubeForge do
 
   -- Frame loop. `max_frames < 0` means run until the window closes.
   -- Run-time knobs read once, outside the frame loop (an Env read allocates).
-  type Knobs = Knobs(Int, Int, String, Bool, Float, Int, Bool, Int, Int, Int, Float, Int, Float, Bool, Int, Int, Int, Int, Int, Bool, Int, Int, Int, Int)   -- max_frames, dump_frame, dump_path, autowalk, autospin, autoedit frame (<0 = off), autoswim, autoflow frame (<0 = off), workers, automap frame (<0 = off; forces map view on from this frame, for headless verification), day length in seconds, sun angle override in degrees (<0 = follow the clock), shadow reach in blocks (0 = off), soft shadow edges, autobreak frame (<0 = off): break the column under the player every 20 frames, for a repeatable edit benchmark, weather pin 0..100 (<0 = follow the actor), precipitation pool capacity, biome ease rate in percent (100 = one CF_DAY per full swing), draw the biome map in map view, autocanal frame (<0 = off): lay a 9-block line of water three columns east of the player, aim-independent, for the biome end-to-end test, biome migration budget: surface columns retextured per tick, vegetation budget: trees grown or felled per tick, automenu frame (<0 = off): open the escape menu at that frame and start a new game five frames later, for the restart test
+  type Knobs = Knobs(Int, Int, String, Bool, Float, Int, Bool, Int, Int, Int, Float, Int, Float, Bool, Int, Int, Int, Int, Int, Bool, Int, Int, Int, Int, Int, Int)   -- max_frames, dump_frame, dump_path, autowalk, autospin, autoedit frame (<0 = off), autoswim, autoflow frame (<0 = off), workers, automap frame (<0 = off; forces map view on from this frame, for headless verification), day length in seconds, sun angle override in degrees (<0 = follow the clock), shadow reach in blocks (0 = off), soft shadow edges, autobreak frame (<0 = off): break the column under the player every 20 frames, for a repeatable edit benchmark, weather pin 0..100 (<0 = follow the actor), precipitation pool capacity, biome ease rate in percent (100 = one CF_DAY per full swing), draw the biome map in map view, autocanal frame (<0 = off): lay a 9-block line of water three columns east of the player, aim-independent, for the biome end-to-end test, biome migration budget: surface columns retextured per tick, vegetation budget: trees grown or felled per tick, time pin in seconds (<0 = live clock) for the water animation, remesh-all frame (<0 = off): rebuild every section of every chunk at that frame, a ground truth for stale-mesh hunts, automenu frame (<0 = off): open the escape menu at that frame and start a new game five frames later, for the restart test
 
   fn frame_loop(f : Frame, k : Knobs, sc, nchunks : Int, proj : NativeFloatArr, map_proj : NativeFloatArr, fps : Fps, wxpid, seed : Int) : Frame do
     match f do
       Frame(frame, last_t, player, sample, view, vp, map_mode, marker, flash, wcache, bcache, inv_open, drag_from, menu, menubuf, next_seed) ->
         match k do
-        Knobs(max_frames, dump_frame, dump_path, autowalk, autospin, autoedit, autoswim, autoflow, workers, automap, day_len, sun_deg, shadow_dist, soft_shadows, autoinv, autobreak, weather_pin, precip_cap, biome_rate, biome_map, autocanal, biome_budget, veg_budget, automenu) ->
+        Knobs(max_frames, dump_frame, dump_path, autowalk, autospin, autoedit, autoswim, autoflow, workers, automap, day_len, sun_deg, shadow_dist, soft_shadows, autoinv, autobreak, weather_pin, precip_cap, biome_rate, biome_map, autocanal, biome_budget, veg_budget, time_pin, remesh_all_at, automenu) ->
         if Win.should_close() || (max_frames >= 0 && frame >= max_frames) || next_seed >= 0 do
           Frame(frame, last_t, player, sample, view, vp, map_mode, marker, flash, wcache, bcache, inv_open, drag_from, menu, menubuf, next_seed)
         else
@@ -1100,11 +1178,14 @@ mod CubeForge do
           -- obscure the terrain it exists to show.
           Win.gfx_set_shadow(if map_mode1 do 0.0 else shadow_dist end, soft_shadows)
           Win.gfx_set_light(sun, V.x(eye), V.y(eye), V.z(eye), V.x(look), V.y(look), V.z(look), flash_now)
+          Win.gfx_set_time(if time_pin >= 0 do int_to_float(time_pin) else now end)
           Win.gfx_set_view_proj(render_vp)
           draw_chunks(scene_counts(sc1), 0, nchunks)
           draw_foliage(scene_counts(sc1), 0, nchunks)
           draw_water(scene_counts(sc1), 0, nchunks)
           if live > 0 do Win.gfx_draw_precip(Precip.slot(), Precip.vertex_count(live)) else () end
+          let spray_verts = Win.spray_frame(pdt, frame)
+          if spray_verts > 0 do Win.gfx_draw_precip(247, spray_verts) else () end
           if scene_has_hit(sc1) do CubeForge.Ffi.Window.gfx_draw_lines(254, Outline.vertex_count()) else () end
           -- the underwater screen tint only makes sense from the real first-person eye
           if map_mode1 do ()
@@ -1126,6 +1207,7 @@ mod CubeForge do
           Win.gfx_draw_hud(251, icon_verts(scene_ui(sc2)), true)
           -- Untextured, like the hotbar: build_menu emits colour-in-uv vertices.
           if Menu.is_open(menu2) do Win.gfx_draw_hud(menu_slot(), F32Buf.len(menubuf1) / Vx.floats(), false) else () end
+          let sc1 = if remesh_all_at >= 0 && frame == remesh_all_at do remesh_everything(sc1) else sc1 end
           if frame == dump_frame do
             if dump_path != "" do
               if Win.gfx_dump_bmp(dump_path) == 0 do println("dump failed") else () end
@@ -1381,6 +1463,7 @@ mod CubeForge do
       if !headless do Win.precip_init(Env.get_int("CF_PRECIP", 4000)) else () end
       -- Session-invariant GL state: uploaded once and reused by every session.
       if !headless do
+        Win.spray_init(Env.get_int("CF_SPRAY", 512))
         Win.gfx_upload_texture(Texture.checkerboard(), Texture.size(), Texture.size(), Texture.layers())
         let uq = underwater_quad()
         Win.gfx_upload(253, F32Buf.storage(uq), F32Buf.len(uq))
@@ -1391,7 +1474,7 @@ mod CubeForge do
       let map_proj = M.orthographic(0.0 -. map_half_extent(), map_half_extent(), 0.0 -. map_half_extent(), map_half_extent(), 0.1, 400.0)
       let autoswim = Env.get_int("CF_AUTOSWIM", 0) == 1
       let knobs = Knobs(max_frames, Env.get_int("CF_DUMP_FRAME", 30), Env.get("CF_DUMP", ""), Env.get_int("CF_AUTOWALK", 0) == 1,
-                        int_to_float(Env.get_int("CF_AUTOSPIN", 0)) /. 1000.0 /. Player.mouse_sens(), Env.get_int("CF_AUTOEDIT", -1), autoswim, Env.get_int("CF_AUTOFLOW", -1), workers, Env.get_int("CF_AUTOMAP", -1), int_to_float(Env.get_int("CF_DAY", 1800)), Env.get_int("CF_SUN", -1), int_to_float(Env.get_int("CF_SHADOW_DIST", 64)), Env.get_int("CF_SHADOW_SOFT", 1) == 1, Env.get_int("CF_AUTOINV", -1), Env.get_int("CF_AUTOBREAK", -1), Env.get_int("CF_WEATHER", -1), Env.get_int("CF_PRECIP", 4000), Env.get_int("CF_BIOME_RATE", 100), Env.get_int("CF_BIOME_MAP", 0) == 1, Env.get_int("CF_AUTOCANAL", -1), Env.get_int("CF_BIOME_BUDGET", 32), Env.get_int("CF_VEG_BUDGET", 1), Env.get_int("CF_AUTOMENU", -1))
+                        int_to_float(Env.get_int("CF_AUTOSPIN", 0)) /. 1000.0 /. Player.mouse_sens(), Env.get_int("CF_AUTOEDIT", -1), autoswim, Env.get_int("CF_AUTOFLOW", -1), workers, Env.get_int("CF_AUTOMAP", -1), int_to_float(Env.get_int("CF_DAY", 1800)), Env.get_int("CF_SUN", -1), int_to_float(Env.get_int("CF_SHADOW_DIST", 64)), Env.get_int("CF_SHADOW_SOFT", 1) == 1, Env.get_int("CF_AUTOINV", -1), Env.get_int("CF_AUTOBREAK", -1), Env.get_int("CF_WEATHER", -1), Env.get_int("CF_PRECIP", 4000), Env.get_int("CF_BIOME_RATE", 100), Env.get_int("CF_BIOME_MAP", 0) == 1, Env.get_int("CF_AUTOCANAL", -1), Env.get_int("CF_BIOME_BUDGET", 32), Env.get_int("CF_VEG_BUDGET", 1), Env.get_int("CF_TIME", -1), Env.get_int("CF_REMESH_ALL_AT", -1), Env.get_int("CF_AUTOMENU", -1))
       let pids = Array.from_list(spawn_water(n * n - 1, n, Nil))
       let wxpid = Weather.spawn_weather()
       session_loop(seed, n, workers, headless, seed_env >= 0, knobs, proj, map_proj, pids, wxpid, autoswim)
@@ -1482,7 +1565,8 @@ mod CubeForge do
       let tw0 = Win.time()
       reload_water(pids, n * n - 1, n, seed)
       println("reloaded " ++ int_to_string(n * n) ++ " water actors in " ++ ms(Win.time() -. tw0) ++ " (loads run asynchronously)")
-      let scene = Scene(world, counts, F32Buf.new(256), Ray.miss(), Ui(Inv.new(), F32Buf.new(2048), F32Buf.new(256), -1), pids, NativeArray.make_int(n * n, 0), Array.from_list(meshes), Biome.build(world, seed))
+      let biome0 = Biome.build(world, seed)
+      let scene = Scene(world, counts, F32Buf.new(256), Ray.miss(), Ui(Inv.new(), F32Buf.new(2048), F32Buf.new(256), -1), pids, spring_flags(world, biome0, 0, n, NativeArray.make_int(n * n, 0)), Array.from_list(meshes), biome0)
       let fps0 = Fps(t4, 0, 0, F32Buf.new(4096))
       Weather.send_seed(wxpid, seed)
       match frame_loop(Frame(0, t4, player, 0, NativeArray.make_float(16, 0.0), NativeArray.make_f32(16, 0.0), false, F32Buf.new(64), Env.get_int("CF_FLASH", 0) == 1, 0.0, 0.0, false, -1, Menu.new(seed), F32Buf.new(2048), -1), k, scene, n * n, proj, map_proj, fps0, wxpid, seed) do

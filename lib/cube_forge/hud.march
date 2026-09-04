@@ -267,7 +267,7 @@ mod CubeForge.Hud do
                  let x0 = slot_ox(s)
                  let y0 = slot_oy(s, n > slots())
                  trect(b, x0 +. pad, y0 +. pad, x0 +. slot_w() -. pad, y0 +. slot_h() -. pad,
-                       CubeForge.Texture.layer_for(id))
+                       CubeForge.Texture.icon_layer(id))
                end
       icons_go(b1, inv, drag_from, s + 1, n, pad)
     end
@@ -285,7 +285,7 @@ mod CubeForge.Hud do
       let id = CubeForge.Inventory.item_at(inv, drag_from)
       if id == 0 do b0
       else trect(b0, nx -. drag_half(), ny -. drag_half(), nx +. drag_half(), ny +. drag_half(),
-                 CubeForge.Texture.layer_for(id))
+                 CubeForge.Texture.icon_layer(id))
       end
     else b0 end
   end

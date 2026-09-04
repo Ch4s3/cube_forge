@@ -34,4 +34,14 @@ mod CubeForge.Test.Vertex do
     end
   end
 
+  describe "Vertex.pack_flow" do
+    test "carries a direction and a speed 0..7" do
+      let p = Vx.pack_flow(Vx.fx_dir(3), 5)
+      Test.assert_eq_int(Vx.effect_of(p), 5, "direction 3 is effect 5")
+      Test.assert_eq_int(Vx.speed_of(p), 5, "speed round-trips")
+      Test.assert_eq_int(Vx.speed_of(Vx.pack_flow(Vx.fx_fall(), 7)), 7, "falling at full speed")
+      Test.assert_eq_int(Vx.speed_of(Vx.pack_flow(Vx.fx_still(), 0)), 0, "still")
+    end
+  end
+
 end

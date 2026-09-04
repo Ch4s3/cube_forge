@@ -16,6 +16,16 @@ mod CubeForge.Vertex do
 
   doc "Effect: precipitation — alpha-blended and NOT fogged, since it is the thing making the fog."
   fn fx_precip() : Int do 1 end
+  doc "Effects 2..9: water flowing in one of eight compass directions, +x, +x+z, +z, -x+z, -x, -x-z, -z, +x-z. The alpha byte carries speed 0..7 instead of alpha; water's alpha is in its texture."
+  fn fx_dir(k : Int) : Int do 2 + k end
+  doc "Effect 10: still water — drifts gently in the shader."
+  fn fx_still() : Int do 10 end
+  doc "Effect 11: falling water — full foam."
+  fn fx_fall() : Int do 11 end
+  doc "Pack a water effect with a speed 0..7 in the alpha byte."
+  fn pack_flow(effect : Int, speed : Int) : Float do pack(effect, int_to_float(speed) /. 7.0) end
+  doc "The speed 0..7 back out of a packed flow word."
+  fn speed_of(p : Float) : Int do float_to_int(alpha_of(p) *. 7.0 +. 0.5) end
 
   doc "Pack an effect id and an alpha 0..1 into the fx float."
   fn pack(effect : Int, alpha : Float) : Float do

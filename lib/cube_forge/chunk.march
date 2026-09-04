@@ -253,7 +253,24 @@ mod CubeForge.Chunk do
     let bc0 = floor_div(wx0 - 1, bs)
     let bcz0 = floor_div(wz0 - 1, bs)
     let bspan = floor_div(wx0 + 16, bs) - bc0 + 1
-    plant_bushes_go(plant_trees_go(c, wx0, wz0, seed, 0, tc0, tcz0, tspan), wx0, wz0, seed, 0, bc0, bcz0, bspan)
+    plant_springs_go(plant_bushes_go(plant_trees_go(c, wx0, wz0, seed, 0, tc0, tcz0, tspan), wx0, wz0, seed, 0, bc0, bcz0, bspan), wx0, wz0, seed, 0, floor_div(wx0, ts), floor_div(wz0, ts), floor_div(wx0 + 15, ts) - floor_div(wx0, ts) + 1)
+  end
+
+  -- A spring is one source block at the surface of its cell's column. Only cells
+  -- whose column lies in this chunk: a spring never straddles an edge.
+  pfn plant_springs_go(c : Chunk, wx0 : Int, wz0 : Int, seed : Int, i : Int, cx0 : Int, cz0 : Int, span : Int) : Chunk do
+    if i >= span * span do c
+    else
+      let col = CubeForge.Trees.spring_at_cell(cx0 + i % span, cz0 + i / span, seed)
+      if col < 0 do plant_springs_go(c, wx0, wz0, seed, i + 1, cx0, cz0, span)
+      else
+        let lx = col % 4096 - wx0
+        let lz = col / 4096 - wz0
+        let h = CubeForge.Noise.height(col % 4096, col / 4096, seed)
+        let c1 = if lx < 0 || lx >= 16 || lz < 0 || lz >= 16 || h < 1 || h >= 255 do c else set(c, lx, h, lz, water()) end
+        plant_springs_go(c1, wx0, wz0, seed, i + 1, cx0, cz0, span)
+      end
+    end
   end
 
   -- Scalar reference generator (same terrain), for timing the 4-wide path against.
