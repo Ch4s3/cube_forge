@@ -232,3 +232,32 @@ there is little brightness left to remove.
 Both produced plausible-looking output — the first darkened almost everything,
 the second nothing — which is why the sun-angle sweep above is the check that
 matters rather than a single screenshot.
+
+### Frame cost, uncapped (`CF_VSYNC=0`)
+
+Every earlier figure in this file was taken with vsync on and is therefore
+pinned to the display, not a measure of headroom. `CF_VSYNC=0` uncaps it.
+800x600, `CF_SEED=7`, sun at 45 degrees:
+
+| configuration | fps | ms/frame |
+|---|---|---|
+| shadows off | 1315 | 0.76 |
+| shadow reach 24 | 1321 | 0.76 |
+| shadow reach 64 (default) | 965 | 1.04 |
+| shadow reach 300 | 680 | 1.47 |
+| map view, whole world drawn top-down | 1361 | 0.73 |
+
+The frame budget at 60 Hz is 16.7 ms and the frame costs **1 ms**, so the
+renderer uses about 6% of it. Shadows are the single largest item at 0.28 ms
+for the default reach.
+
+**The map view row is the interesting one for culling questions.** It draws all
+64 chunks at once and runs as fast as the first-person view, which says the
+renderer is not draw-call or geometry bound — 128 draw calls and 244k vertices
+are nowhere near a limit. Occlusion culling would remove work that is not
+costing anything. What time there is goes to fragment work, so if this ever
+does need optimising, drawing chunks front-to-back (so early-Z rejects hidden
+fragments before the shadow trace runs) targets the real cost, and frustum
+culling — which does not exist yet either — is the cheaper first step. Both
+become worthwhile when chunk streaming raises the chunk count; neither is worth
+doing at 8x8.

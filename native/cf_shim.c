@@ -95,7 +95,9 @@ int64_t cf_win_open(int64_t w, int64_t h, march_value title) {
     if (!g_win) { fprintf(stderr, "cf: glfwCreateWindow failed\n"); glfwTerminate(); return 0; }
     glfwMakeContextCurrent(g_win);
     if (!gladLoadGL(glfwGetProcAddress)) { fprintf(stderr, "cf: gladLoadGL failed\n"); return 0; }
-    glfwSwapInterval(1);
+    /* CF_VSYNC=0 uncaps the frame rate, so frame cost can actually be measured;
+     * with vsync on every timing is pinned to the display refresh. */
+    glfwSwapInterval(getenv("CF_VSYNC") && atoi(getenv("CF_VSYNC")) == 0 ? 0 : 1);
     glfwGetFramebufferSize(g_win, &g_fb_w, &g_fb_h);
     glViewport(0, 0, g_fb_w, g_fb_h);
     glfwSetFramebufferSizeCallback(g_win, on_fb_size);
