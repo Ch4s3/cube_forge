@@ -35,6 +35,7 @@ mod CubeForge.Ffi.Window do
     fn x_gfx_draw_hud(slot: Int, nverts: Int, textured: Int): Unit = "cf_gfx_draw_hud"
     fn x_gfx_draw_translucent(slot: Int, nverts: Int): Unit = "cf_gfx_draw_translucent"
     fn x_gfx_draw_marker(slot: Int, nverts: Int): Unit = "cf_gfx_draw_marker"
+    fn x_gfx_draw_cutout(slot: Int, nverts: Int): Unit = "cf_gfx_draw_cutout"
     fn x_f32_blit(consume dst: NativeF32Arr, di: Int, src: NativeF32Arr, si: Int, n: Int): NativeF32Arr = "cf_f32_blit"
     fn x_u8_blit(consume dst: NativeU8Arr, di: Int, src: NativeU8Arr, si: Int, n: Int): NativeU8Arr = "cf_u8_blit"
     fn x_gfx_draw_lines(slot: Int, nverts: Int): Unit = "cf_gfx_draw_lines"
@@ -94,6 +95,8 @@ mod CubeForge.Ffi.Window do
 
   doc "memcpy [n] bytes from src[si..] into dst[di..]; dst must be uniquely owned."
   fn u8_blit(dst : NativeU8Arr, di : Int, src : NativeU8Arr, si : Int, n : Int) : NativeU8Arr do x_u8_blit(dst, di, src, si, n) end
+  doc "Draw a slot as alpha-cutout foliage: depth on, no blending, texels below the alpha threshold discarded."
+  fn gfx_draw_cutout(slot : Int, nverts : Int) : Unit do x_gfx_draw_cutout(slot, nverts) end
   doc "Draw a slot with vertex colour, using the current view-projection and depth state."
   fn gfx_draw_marker(slot : Int, nverts : Int) : Unit do x_gfx_draw_marker(slot, nverts) end
   doc "Draw a slot blended, depth-tested but not depth-written, unculled. For water, after all opaque draws."

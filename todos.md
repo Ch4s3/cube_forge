@@ -14,6 +14,8 @@ Planned, not started. One entry per feature; each gets its own design doc under
 
 - [x] **Layered terrain (ruggedness + ridged mountains), sand/snow/granite, 7-slot hotbar, random seed** — done 2026-09-03 (`docs/superpowers/specs/2026-09-03-terrain-biomes-design.md`).
 
+- [x] **Vegetation (trees and bushes)** — done 2026-09-03 (`docs/superpowers/specs/2026-09-03-vegetation-design.md`): oak and pine as cubes with alpha-cutout leaves, deterministic cell-based placement that agrees across chunk borders, a third (foliage) mesh category with a `discard` shader path, leaf decay when a trunk is chopped, 9-slot hotbar. Costs 5.5x more startup meshing (see RESULTS.md).
+
 - [x] **Bedrock floor** — done 2026-09-03: unbreakable, three layers deep, generated in every column.
 
 ## Engine

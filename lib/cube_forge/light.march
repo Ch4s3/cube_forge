@@ -38,7 +38,10 @@ mod CubeForge.Light do
   fn opacity(id : Int) : Int do
     if id == 0 do 0
     else if C.is_water(id) do 2
-    else max_level() end end
+    -- Leaves attenuate rather than block: a canopy casts dappled shade and thin
+    -- foliage still lets light reach the ground beneath it.
+    else if C.is_foliage(id) do 6
+    else max_level() end end end
   end
 
   @[no_alloc]
