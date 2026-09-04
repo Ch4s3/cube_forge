@@ -58,7 +58,7 @@ mod CubeForge.Test.Veg do
         let z = g / 128
         let w2 = Veg.plant(w, x, z, 69, 5, false)
         Test.assert_true(Veg.is_log(CubeForge.World.block_at(w2, x, 70, z)), "a log stands on the ground")
-        let f2 = Biome.rescan_box(f, w2, x, z, 5)
+        let f2 = Biome.rescan_box(f, w2, x, z, 5, 69 + 5 + 2)
         Test.assert_true(!Veg.can_grow(f2, w2, 7, x, z), "not a growth candidate any more")
         Test.assert_eq_int(Veg.trunk_base(w2, x, z, Biome.height_of(f2, x, z)), 69, "trunk_base finds the ground under the tree")
       end

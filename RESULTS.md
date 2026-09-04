@@ -1015,3 +1015,152 @@ well as `CF_TIME`**; with both pinned the brook world is deterministic run to
 run, so the earlier note that springs make runs nondeterministic was the
 same mistake. Separately, a launch occasionally exits 0 without writing the
 dump; the harness now retries.
+
+## The world tick: 55 ms frames to 11 (2026-09-04)
+
+The game ran at ~82 fps with a visible stall, having been vsync-capped at 120.
+Bisecting the frame rate over the branch found no single culprit and no
+regression in the renderer -- the cost had accumulated across the biome work,
+in four steps, and none of it was the features being expensive:
+
+| commit | fps | live objects/frame |
+|--------|-----|--------------------|
+| `6eb9dca` pre-biome main | 471 | 1 |
+| `8ee3a4d` biome field ticked | 200 | 1 |
+| `e07cfc8` surface migration | 154 | 72 |
+| `8629e17` vegetation | 90 | 173 |
+| `0131ae8` springs (start of this work) | 82 | 230 |
+
+The tick, every ten frames, cost **~80 ms**. Not amortised: one frame in ten
+carried all of it.
+
+### What it was
+
+Six things, in the order they were found. Each was measured before and after,
+and each was verified not to change what the world does (see the oracles
+below). The tick's phase timings, `CF_AUTOFLOW` and the frame gauge:
+
+| | before | after |
+|---|---|---|
+| `Light.sky_floor`, called per tree by `Biome.rescan_box` | 21.5 ms | gone |
+| vegetation scan (`&&` does not short-circuit, G33) | 7.9 ms | 0.5 ms |
+| biome water rescan, per-column `block_at` | 19 ms | 0.43 ms |
+| retexture field update, 64 whole-array copies | 11 ms | 8.8 ms |
+| `Biome.tick` ease + reclassify, all 16,384 columns | 4.8 ms | 1.9 ms |
+| section rebuilds, all three passes whatever changed | 9-18 ms | queued |
+
+- **`sky_floor` was the whole of `rescan_box`.** It walks every chunk down from
+  y=255 -- 2.1 M voxel reads -- to return the constant 127, and `rescan_box`
+  called it every time. A box over ONE column cost 21.8 ms; over 169, 24.8. It
+  takes the edit's top as a parameter now. The same 21.5 ms came off every tree
+  chop, which had been a documented mystery.
+- **G33 again.** `Veg.can_decay` is `!wants_trees(b) && trunk_base(...)`, and
+  `&&` evaluates both sides, so `trunk_base` walked thirteen deep for all 2048
+  columns a tick scans -- every one of them in grassland, where the first test
+  had already said no.
+- **`W.block_at` re-does the chunk-trie lookup per read.** The biome water pass
+  did 32k of them a tick in world coordinates; walked chunk by chunk instead
+  (one lookup per 256 columns) it is 45x faster. `Veg.trunk_base` had the same
+  shape, 26 lookups a column.
+- **The dirty set.** Ease and classify ran over all 16,384 columns to discover
+  that almost none had moved. A column is settled when both axes sit exactly on
+  target -- `ease` assigns the target itself once within a step, so the test is
+  exact -- and the hold counter is clear, which by that counter's own rule means
+  the stored biome IS the classification. Only three things can wake one: the
+  three writers of the heightmap, and a change in the distance to water, which
+  is why the Field now keeps the previous tick's distances.
+- **Passes.** A retexture swaps a palette block for another of the same
+  opacity, so it can move no water cell and no leaf; a tree moves no water. Both
+  rebuilt all three passes of every touched section, and `upload_chunk` pushed
+  all three of all sixteen sections whatever had been rebuilt.
+- **The deferred remesh queue.** The world still changes at once; the mesh is
+  *owed*, a pass bitmask per section in the Scene, paid off four sections a
+  frame. The player's own edits stay immediate -- mining has to be.
+
+### Scheduling, which is the other half
+
+Removing the waste took the tick from 80 ms to ~25, still one frame in ten.
+The phases are sequential, independent steps; running them in the same frame
+only ever meant one frame carrying all of them. They now sit on separate frames
+of the period -- water 0, field 2, retexture halves 4 and 8, vegetation 6 --
+and **the drain runs on the odd frames, between them**. That last detail was
+worth more than anything else in the final round (15.8 ms -> 11.3): a phase
+frame had been paying for its own work *and* for rebuilding what it had just
+staged.
+
+Two measurements that saved effort by being taken:
+
+- **Quartering the retexture is worse than halving it**, 131 fps against 137:
+  four batches rebuild overlapping sections four times.
+- **The relight sweep's prefix copies are not the prize.** `box_sweep_go2`
+  already blits only the swept y-slice per level, so rebasing the sweep to the
+  box's y band -- planned, and real surgery -- would have bought a fraction of
+  what moving the drain did. What did help there was letting `relight_marked`
+  blit its swept slice back into the field it started from (~0.5 MB, no
+  allocation) instead of allocating a fresh 4 MB field and copying into it. The
+  comment saying it could not be the destination was true when written; G67
+  (NativeArray reads borrow) has since made it uniquely owned by that point.
+
+### Where the frame goes now
+
+Per ten frames, at 800x600, `CF_VSYNC=0`, seed 7:
+
+| slot | ms | |
+|------|-----|---|
+| 0 | 7.9 | water tick |
+| 2 | 2.4-3.2 | climate field |
+| 4, 8 | ~5 | retexture, half the budget each |
+| 6 | ~7 | vegetation, every other period |
+| 1, 3, 5, 7, 9 | 0.34 + drain | quiet, and the mesh debt |
+
+**77 -> 162 fps, worst frame 55 ms -> 11-13**, measured back to back against
+`0131ae8` on the same machine. Absolute numbers on this box swing ~1.5x
+depending on what else is compiling; every figure here is an A/B pair taken in
+one sitting for that reason.
+
+### The oracles, and why the first two were not enough
+
+`Biome.state_hash` over heights, water flags and biome ids; `World.state_hash`
+over every voxel; `mesh_hash` over every vertex of every section. All printed at
+`CF_DUMP_FRAME`.
+
+Frame dumps could not do this job: the window lands on a 1x or 2x display run to
+run, so two dumps of the same world differ in *size*.
+
+The world hash could not do it alone either. A remesh that skips a pass it owed
+leaves every block identical and the screen stale, which is exactly the failure
+the pass-selective rebuild could introduce. That is what `mesh_hash` is for, and
+it was itself checked: pointing the retexture rebuild at a no-op moved it to
+279224865 and left the other two untouched.
+
+The dirty set got the same treatment. A control build with the skip disabled --
+every column processed every tick, the old behaviour -- produces identical
+hashes at `CF_BIOME_RATE` 100, 2000 and 100000. The last eases a thousand times
+faster than the default, so biomes actually flip and the world diverges
+completely; the two builds still agree exactly. Ninety ticks at the default rate
+would not have tested the easing path at all.
+
+With a bounded queue the invariant changed: not "the mesh always equals a full
+rebuild" but "what the queue *finishes* equals a full rebuild". The dump frame
+drains to empty before hashing, and drained, it agrees with `CF_REMESH_ALL_AT`.
+
+**Two changes here are not identical, deliberately.** Spreading the tick moves
+the world hash -- the phases land on different frames, so retexturing and the
+water-flag sampling shift -- and vegetation every other period halves how fast
+trees grow. Everything else in the sequence holds all three hashes.
+
+### `scratch/frame_budget.sh`
+
+Runs the real game and asserts no frame after a 60-frame warmup exceeds a
+budget (default 16 ms, a frame at 60 Hz), and that the drained mesh equals a
+full rebuild. A unit test cannot do this; it needs the window, the GL context,
+the actors and the frame loop.
+
+Three things it had to get right, each of which it got wrong first: no
+`CF_DUMP_FRAME` in the timed runs, because that frame drains the queue and
+hashes four million voxels and is the longest frame in any run that has one (it
+reported 56 ms and failed the budget on its own instrumentation); the mesh hash
+read off the `state:` line specifically, since plain `grep mesh` also matches
+the startup line `mesh all (greedy sections)` and both sides came back empty and
+equal; and best-of-N across runs, worst-frame within a run, so a busy machine
+does not fail it while a real regression -- which fails every run -- still does.

@@ -373,7 +373,14 @@ mod CubeForge.Light do
     -- bounds. Taking 0 unconditionally made the box 126 layers tall instead of ~31.
     let cy0 = if get(la, ex, ey + 1, ez) >= max_level() do clampi(open_bottom(w, ex, ey, ez) - r, 0, 255)
               else clampi(ey - r, 0, 255) end
-    let above = copy_field(la, new())
+    -- The before-picture, for seeding the box top and for the section diff at
+    -- the end. Both read only y layers up to the scan box top, and a y range is
+    -- a contiguous prefix of the flat index, so this copies that prefix rather
+    -- than the whole 4 MB field: ~1.6 MB for an edit at tree height, and one
+    -- fewer 4 MB allocation per relight. sy1 is hoisted above its box for it.
+    let sy1 = clampi(ey + r + 1, 0, 255)
+    let above_len = if sy1 >= 254 do volume() else (sy1 + 2) * 16384 end
+    let above = copy_prefix(la, above_len)
     let la1 = zero_box_go(la, cx0, cx1, cy0, cy1, cz0, cz1)
     let la2 = seed_box_go(la1, w, above, cx0, cx1 - cx0 + 1, cz0, cy1, cy0, 0, (cx1 - cx0 + 1) * (cz1 - cz0 + 1))
     -- scan box: one wider, so the unchanged voxels around the edit feed inward
@@ -381,7 +388,6 @@ mod CubeForge.Light do
     let sx1 = clampi(ex + r + 1, 0, 127)
     let sz0 = clampi(ez - r - 1, 0, 127)
     let sz1 = clampi(ez + r + 1, 0, 127)
-    let sy1 = clampi(ey + r + 1, 0, 255)
     let sy0 = if cy0 <= 0 do 0 else clampi(cy0 - 1, 0, 255) end
     -- One y layer past the box top, so give1's reads of the layer above are in
     -- range; that layer is read-only and feeds the box as a boundary source.
@@ -392,9 +398,13 @@ mod CubeForge.Light do
     -- one of the pair. Two copies up front replace fourteen.
     let swept = box_sweep_go2(copy_prefix(la2, plen), copy_prefix(la2, plen), w, max_level(),
                               sx0, sx1, sy0, sy1, sz0, sz1, slo, plen - slo)
-    -- Overlay the swept prefix onto the untouched upper field. la2 was read by
-    -- the sweep, so it cannot itself be the destination (GAPS.md G21).
-    let out = CubeForge.Ffi.Window.u8_blit(copy_field(la2, new()), 0, swept, 0, plen)
+    -- Write the swept slice back into la2 itself. Only [slo, plen) differs --
+    -- the sweep started from copies of la2 and writes nothing outside that
+    -- slice -- so this is the same field the 4 MB copy produced, for a ~0.5 MB
+    -- blit and no allocation. The two copy_prefix calls above only READ la2,
+    -- and a NativeArray read borrows (GAPS.md G67), so it is uniquely owned
+    -- here and can be a blit destination.
+    let out = CubeForge.Ffi.Window.u8_blit(la2, slo, swept, slo, plen - slo)
     -- Mark over the SCAN box, not the cleared box: the sweep may also write into
     -- the one-voxel ring around it.
     Relit(out, mark_box(marks_new(), above, out, sx0, sx1, sy0, sy1, sz0, sz1))

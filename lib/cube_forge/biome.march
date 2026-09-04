@@ -8,10 +8,19 @@ mod CubeForge.Biome do
 
   alias CubeForge.Noise as N
 
-  -- height, water flag, eased temperature, eased moisture, biome id, hold counter, temperature base
+  -- height, water flag, eased temperature, eased moisture, biome id, hold counter,
+  -- temperature base, distance to water, active flag
   -- The base is the seeded noise octave per column: it never changes, so it is
   -- computed once at build rather than 16,384 times per tick.
-  type Field = Field(NativeU8Arr, NativeU8Arr, NativeFloatArr, NativeFloatArr, NativeU8Arr, NativeU8Arr, NativeFloatArr)
+  --
+  -- The last two carry the tick's dirty set. A column is ACTIVE when something
+  -- could still change there: an edit moved its surface, its distance to water
+  -- moved, or it is part-way through easing. Everything else is settled -- both
+  -- axes exactly at target and the classification agreed -- and a settled column
+  -- cannot change until one of those wakes it. Keeping the distances from the
+  -- previous tick is what makes the moisture half of that test a comparison
+  -- rather than a recomputation.
+  type Field = Field(NativeU8Arr, NativeU8Arr, NativeFloatArr, NativeFloatArr, NativeU8Arr, NativeU8Arr, NativeFloatArr, NativeU8Arr, NativeU8Arr)
 
   doc "Biome ids. The order is the Whittaker table read row by row, then the two gated ones."
   fn b_tundra() : Int do 0 end
@@ -89,7 +98,7 @@ mod CubeForge.Biome do
 
   pfn scan_go(w : CubeForge.World.World, n : Int, top : Int, i : Int,
               hs : NativeU8Arr, ws : NativeU8Arr) : Field do
-    if i >= n * n do Field(hs, ws, NativeArray.make_float(n * n, 0.0), NativeArray.make_float(n * n, 0.0), NativeArray.make_u8(n * n, 0), NativeArray.make_u8(n * n, 0), NativeArray.make_float(n * n, 0.0))
+    if i >= n * n do Field(hs, ws, NativeArray.make_float(n * n, 0.0), NativeArray.make_float(n * n, 0.0), NativeArray.make_u8(n * n, 0), NativeArray.make_u8(n * n, 0), NativeArray.make_float(n * n, 0.0), NativeArray.make_u8(n * n, reach()), NativeArray.make_u8(n * n, 0))
     else
       let h = surface_go(w, i % n, i / n, top)
       scan_go(w, n, top, i + 1, NativeArray.set_u8(hs, i, h), NativeArray.set_u8(ws, i, if wet_at(w, i % n, i / n, h) do 1 else 0 end))
@@ -150,7 +159,7 @@ mod CubeForge.Biome do
   fn distances(f : Field, w : CubeForge.World.World) : NativeU8Arr do
     let n = cols(w)
     match f do
-      Field(_, ws, _, _, _, _, _) -> sweep_go(seed_go(ws, n, 0, NativeArray.make_u8(n * n, reach())), n, 0)
+      Field(_, ws, _, _, _, _, _, _, _) -> sweep_go(seed_go(ws, n, 0, NativeArray.make_u8(n * n, reach())), n, 0)
     end
   end
 
@@ -162,7 +171,7 @@ mod CubeForge.Biome do
   -- avoids and what turned each write into a whole-array copy here.
   pfn classify_all(hs : NativeU8Arr, seed : Int, d : NativeU8Arr, n : Int, i : Int,
                    ta : NativeFloatArr, ma : NativeFloatArr, bs : NativeU8Arr, tb : NativeFloatArr) : Field do
-    if i >= n * n do Field(hs, NativeArray.make_u8(0, 0), ta, ma, bs, NativeArray.make_u8(n * n, 0), tb)
+    if i >= n * n do Field(hs, NativeArray.make_u8(0, 0), ta, ma, bs, NativeArray.make_u8(n * n, 0), tb, d, NativeArray.make_u8(n * n, 0))
     else
       let h = NativeArray.get_u8(hs, i)
       let dist = NativeArray.get_u8(d, i)
@@ -180,20 +189,20 @@ mod CubeForge.Biome do
     let f0 = scan_go(w, n, CubeForge.Light.sky_floor(w), 0, NativeArray.make_u8(n * n, 0), NativeArray.make_u8(n * n, 0))
     let d = distances(f0, w)
     match f0 do
-      Field(hs, ws, _, _, _, _, _) ->
+      Field(hs, ws, _, _, _, _, _, _, _) ->
         match classify_all(hs, seed, d, n, 0, NativeArray.make_float(n * n, 0.0), NativeArray.make_float(n * n, 0.0), NativeArray.make_u8(n * n, 0), NativeArray.make_float(n * n, 0.0)) do
-          Field(hs1, _, ta, ma, bs, hold, tb) -> Field(hs1, ws, ta, ma, bs, hold, tb)
+          Field(hs1, _, ta, ma, bs, hold, tb, ds, act) -> Field(hs1, ws, ta, ma, bs, hold, tb, ds, act)
         end
     end
   end
 
   fn height_of(f : Field, wx : Int, wz : Int) : Int do
-    match f do Field(hs, _, _, _, _, _, _) -> NativeArray.get_u8(hs, wx + 128 * wz) end
+    match f do Field(hs, _, _, _, _, _, _, _, _) -> NativeArray.get_u8(hs, wx + 128 * wz) end
   end
   fn biome_of(f : Field, wx : Int, wz : Int) : Int do
-    match f do Field(_, _, _, _, bs, _, _) -> NativeArray.get_u8(bs, wx + 128 * wz) end
+    match f do Field(_, _, _, _, bs, _, _, _, _) -> NativeArray.get_u8(bs, wx + 128 * wz) end
   end
-  fn field_biomes(f : Field) : NativeU8Arr do match f do Field(_, _, _, _, bs, _, _) -> bs end end
+  fn field_biomes(f : Field) : NativeU8Arr do match f do Field(_, _, _, _, bs, _, _, _, _) -> bs end end
 
 
   fn default_rate() : Float do 1.0 /. 10800.0 end
@@ -210,7 +219,7 @@ mod CubeForge.Biome do
     if x < 0 || z < 0 || x >= n || z >= n do f
     else
       match f do
-        Field(hs, ws, ta, ma, bs, hold, tb) ->
+        Field(hs, ws, ta, ma, bs, hold, tb, ds, act) ->
           let i = x + n * z
           let cur = NativeArray.get_u8(hs, i)
           let h1 = if y > cur && id != 0 do y
@@ -218,8 +227,93 @@ mod CubeForge.Biome do
                    else cur end end
           let hs1 = NativeArray.set_u8(copy_u8(hs, n * n), i, h1)
           let ws1 = NativeArray.set_u8(copy_u8(ws, n * n), i, if wet_at(w, x, z, h1) do 1 else 0 end)
-          Field(hs1, ws1, ta, ma, bs, hold, tb)
+          -- the surface moved, so this column's temperature target moved: wake it
+          Field(hs1, ws1, ta, ma, bs, hold, tb, ds, NativeArray.set_u8(copy_u8(act, n * n), i, 1))
       end
+    end
+  end
+
+  -- ── Batched edits ───────────────────────────────────────────────────────
+  -- note_edit copies both the heightmap and the water flags -- 32 KB -- because
+  -- the Scene holds the field too (GAPS G68). Retexturing pays that twice per
+  -- column, so a 32-column tick did 64 whole-array copies, 11 ms. These do one
+  -- copy of each for the whole batch.
+  --
+  -- Each edit is one column and touches only its own entry, so applying them
+  -- against the world AFTER all the block writes gives what a fold of note_edit
+  -- against each intermediate world gives: heights and the water flag both read
+  -- only the column being edited.
+  doc "Pack a single-column edit for note_edits: x and z under 128, y and id under 256."
+  fn pack_edit(x : Int, y : Int, z : Int, id : Int) : Int do ((x * 128 + z) * 256 + y) * 256 + id end
+  pfn edit_id(v : Int) : Int do v % 256 end
+  pfn edit_y(v : Int) : Int do (v / 256) % 256 end
+  pfn edit_z(v : Int) : Int do (v / 65536) % 128 end
+  pfn edit_x(v : Int) : Int do v / 8388608 end
+
+  -- One array threaded, the rest borrowed: the light.march idiom. Wrapping the
+  -- two arrays in a variant to return both at once would give each a refcount of
+  -- 2 and copy them on every write (GAPS G68), so this is two passes.
+  pfn heights_go(w : CubeForge.World.World, n : Int, cells : List(Int), hs : NativeU8Arr) : NativeU8Arr do
+    match cells do
+      Nil -> hs
+      Cons(v, rest) ->
+        let x = edit_x(v)
+        let z = edit_z(v)
+        if x < 0 || z < 0 || x >= n || z >= n do heights_go(w, n, rest, hs)
+        else
+          let y = edit_y(v)
+          let id = edit_id(v)
+          let i = x + n * z
+          let cur = NativeArray.get_u8(hs, i)
+          let h1 = if y > cur && id != 0 do y
+                   else if y == cur && id == 0 do surface_go(w, x, z, y - 1)
+                   else cur end end
+          heights_go(w, n, rest, NativeArray.set_u8(hs, i, h1))
+        end
+    end
+  end
+  pfn wets_go(w : CubeForge.World.World, n : Int, cells : List(Int), hs : NativeU8Arr, ws : NativeU8Arr) : NativeU8Arr do
+    match cells do
+      Nil -> ws
+      Cons(v, rest) ->
+        let x = edit_x(v)
+        let z = edit_z(v)
+        if x < 0 || z < 0 || x >= n || z >= n do wets_go(w, n, rest, hs, ws)
+        else
+          let i = x + n * z
+          wets_go(w, n, rest, hs, NativeArray.set_u8(ws, i, if wet_at(w, x, z, NativeArray.get_u8(hs, i)) do 1 else 0 end))
+        end
+    end
+  end
+
+  -- Wake every column a batch of edits touched.
+  pfn wake_go(n : Int, cells : List(Int), act : NativeU8Arr) : NativeU8Arr do
+    match cells do
+      Nil -> act
+      Cons(v, rest) ->
+        let x = edit_x(v)
+        let z = edit_z(v)
+        if x < 0 || z < 0 || x >= n || z >= n do wake_go(n, rest, act)
+        else wake_go(n, rest, NativeArray.set_u8(act, x + n * z, 1)) end
+    end
+  end
+
+  -- Wake every column in a box (the shape box_go rescans).
+  pfn wake_box_go(n : Int, x0 : Int, z0 : Int, x1 : Int, z1 : Int, x : Int, z : Int, act : NativeU8Arr) : NativeU8Arr do
+    if z > z1 do act
+    else if x > x1 do wake_box_go(n, x0, z0, x1, z1, x0, z + 1, act)
+    else if x < 0 || z < 0 || x >= n || z >= n do wake_box_go(n, x0, z0, x1, z1, x + 1, z, act)
+    else wake_box_go(n, x0, z0, x1, z1, x + 1, z, NativeArray.set_u8(act, x + n * z, 1)) end end end
+  end
+
+  doc "Apply a batch of single-column edits (see pack_edit) to the field, copying its arrays once for the whole batch rather than once per edit."
+  fn note_edits(f : Field, w : CubeForge.World.World, cells : List(Int)) : Field do
+    let n = cols(w)
+    match f do
+      Field(hs, ws, ta, ma, bs, hold, tb, ds, act) ->
+        let hs1 = heights_go(w, n, cells, copy_u8(hs, n * n))
+        Field(hs1, wets_go(w, n, cells, hs1, copy_u8(ws, n * n)), ta, ma, bs, hold, tb, ds,
+              wake_go(n, cells, copy_u8(act, n * n)))
     end
   end
 
@@ -228,63 +322,125 @@ mod CubeForge.Biome do
     if d > rate do cur +. rate else if d < 0.0 -. rate do cur -. rate else target end end
   end
 
-  pfn tick_go(hs : NativeU8Arr, ta0 : NativeFloatArr, ma0 : NativeFloatArr, bs0 : NativeU8Arr, hold0 : NativeU8Arr, tb : NativeFloatArr,
-              seed : Int, rate : Float, d : NativeU8Arr, n : Int, i : Int,
-              ta : NativeFloatArr, ma : NativeFloatArr, bs : NativeU8Arr, hold : NativeU8Arr) : Field do
-    if i >= n * n do Field(hs, NativeArray.make_u8(0, 0), ta, ma, bs, hold, tb)
+  -- Skips settled columns, and writes into the field's own arrays rather than
+  -- fresh ones: the first write copies (the Scene shares them, GAPS G68) and the
+  -- rest land in place, so a tick that changes nothing copies nothing. Reads come
+  -- from the same arrays being written, which is the same answer -- each column
+  -- is read at its own index before it is written.
+  pfn tick_go(hs : NativeU8Arr, tb : NativeFloatArr, rate : Float, d : NativeU8Arr, n : Int, i : Int,
+              ta : NativeFloatArr, ma : NativeFloatArr, bs : NativeU8Arr, hold : NativeU8Arr, act : NativeU8Arr) : Field do
+    if i >= n * n do Field(hs, NativeArray.make_u8(0, 0), ta, ma, bs, hold, tb, NativeArray.make_u8(0, 0), act)
+    else if NativeArray.get_u8(act, i) == 0 do tick_go(hs, tb, rate, d, n, i + 1, ta, ma, bs, hold, act)
     else
       let h = NativeArray.get_u8(hs, i)
       let dist = NativeArray.get_u8(d, i)
-      let t = ease(NativeArray.get_float(ta0, i), temp_from_base(NativeArray.get_float(tb, i), h), rate)
-      let m = ease(NativeArray.get_float(ma0, i), moisture_target(dist), rate)
+      let tt = temp_from_base(NativeArray.get_float(tb, i), h)
+      let mt = moisture_target(dist)
+      let t = ease(NativeArray.get_float(ta, i), tt, rate)
+      let m = ease(NativeArray.get_float(ma, i), mt, rate)
       let raw = classify(t, m, h, dist)
-      let cur = NativeArray.get_u8(bs0, i)
+      let cur = NativeArray.get_u8(bs, i)
       -- The hold counter: flip only after hold_ticks() consecutive disagreements,
       -- so a column parked on a threshold cannot alternate every tick.
-      let hc = if raw == cur do 0 else NativeArray.get_u8(hold0, i) + 1 end
+      let hc = if raw == cur do 0 else NativeArray.get_u8(hold, i) + 1 end
       let b1 = if hc >= hold_ticks() do raw else cur end
       let hc1 = if b1 == raw do 0 else hc end
-      tick_go(hs, ta0, ma0, bs0, hold0, tb, seed, rate, d, n, i + 1,
+      -- Settled: both axes sit exactly on their targets (ease assigns the target
+      -- itself once it is within a step, so this is exact) and the hold counter
+      -- is clear, which means the stored biome IS the classification of these
+      -- axes. Nothing here can move again until an edit or a distance change.
+      let settled = if t == tt do (if m == mt do hc1 == 0 else false end) else false end
+      let act1 = if settled do NativeArray.set_u8(act, i, 0) else act end
+      tick_go(hs, tb, rate, d, n, i + 1,
               NativeArray.set_float(ta, i, t), NativeArray.set_float(ma, i, m),
-              NativeArray.set_u8(bs, i, b1), NativeArray.set_u8(hold, i, hc1))
-    end
+              NativeArray.set_u8(bs, i, b1), NativeArray.set_u8(hold, i, hc1), act1)
+    end end
+  end
+
+  -- A column whose distance to water changed has a new moisture target.
+  pfn mark_dist_go(d : NativeU8Arr, ds0 : NativeU8Arr, n : Int, i : Int, act : NativeU8Arr) : NativeU8Arr do
+    if i >= n * n do act
+    else if NativeArray.get_u8(d, i) != NativeArray.get_u8(ds0, i) do mark_dist_go(d, ds0, n, i + 1, NativeArray.set_u8(act, i, 1))
+    else mark_dist_go(d, ds0, n, i + 1, act) end end
   end
 
 
   -- Water moves on its own (the water actors spread it every tick), so the
   -- water flag is rescanned whole every tick rather than hooked at each edit:
   -- two reads per column off the heightmap, 32k reads, and no site can forget.
-  pfn water_go(w : CubeForge.World.World, hs : NativeU8Arr, n : Int, i : Int, ws : NativeU8Arr) : NativeU8Arr do
-    if i >= n * n do ws
-    else water_go(w, hs, n, i + 1, NativeArray.set_u8(ws, i, if wet_at(w, i % n, i / n, NativeArray.get_u8(hs, i)) do 1 else 0 end)) end
+  --
+  -- Walked chunk by chunk, not column by column in world coordinates. Both do
+  -- the same 32k voxel reads and write the same flags, but W.block_at re-runs
+  -- Array.get on the chunk trie for EVERY read; hoisting that to one lookup per
+  -- 256 columns took this pass from 19 ms to under 2 -- it was the whole of the
+  -- 20 ms biome tick. Same idiom as light.march's per-chunk walks.
+  pfn water_chunk_go(c : CubeForge.Chunk.Chunk, hs : NativeU8Arr, n : Int, cx : Int, cz : Int, j : Int, ws : NativeU8Arr) : NativeU8Arr do
+    if j >= 256 do ws
+    else
+      let lx = j % 16
+      let lz = j / 16
+      let i = (16 * cx + lx) + n * (16 * cz + lz)
+      let h = NativeArray.get_u8(hs, i)
+      let wet = C.is_water(C.get_or_air(c, lx, h, lz)) || C.is_water(C.get_or_air(c, lx, h + 1, lz))
+      water_chunk_go(c, hs, n, cx, cz, j + 1, NativeArray.set_u8(ws, i, if wet do 1 else 0 end))
+    end
+  end
+  pfn water_go(w : CubeForge.World.World, hs : NativeU8Arr, n : Int, ci : Int, ws : NativeU8Arr) : NativeU8Arr do
+    let cn = n / 16
+    if ci >= cn * cn do ws
+    else water_go(w, hs, n, ci + 1, water_chunk_go(W.chunk_at(w, ci % cn, ci / cn), hs, n, ci % cn, ci / cn, 0, ws)) end
   end
 
-  doc "Rescan the surface of every column in the (2r+1)-square around (x, z): for edits that change many columns at once, such as leaf decay."
-  fn rescan_box(f : Field, w : CubeForge.World.World, x : Int, z : Int, r : Int) : Field do
+  doc """
+  Rescan the surface of every column in the (2r+1)-square around (x, z): for edits
+  that change many columns at once, such as leaf decay. [top] must be at or above
+  the highest block the edit wrote; each column starts its downward scan from the
+  higher of [top] and the height already stored for it, so an edit that only
+  removes blocks can pass 0.
+
+  It does NOT call Light.sky_floor. That walks every chunk down from y=255 --
+  2.1 million voxel reads, 21.5 ms -- to return a constant, which made a box
+  over one column cost as much as a box over the world (RESULTS: the 80 ms tick).
+  """
+  fn rescan_box(f : Field, w : CubeForge.World.World, x : Int, z : Int, r : Int, top : Int) : Field do
     let n = cols(w)
     match f do
-      Field(hs, ws, ta, ma, bs, hold, tb) ->
-        Field(box_go(w, n, CubeForge.Light.sky_floor(w), x - r, z - r, x + r, z + r, x - r, z - r, copy_u8(hs, n * n)), ws, ta, ma, bs, hold, tb)
+      Field(hs, ws, ta, ma, bs, hold, tb, ds, act) ->
+        Field(box_go(w, n, top, x - r, z - r, x + r, z + r, x - r, z - r, copy_u8(hs, n * n)), ws, ta, ma, bs, hold, tb, ds,
+              wake_box_go(n, x - r, z - r, x + r, z + r, x - r, z - r, copy_u8(act, n * n)))
     end
   end
   pfn box_go(w : CubeForge.World.World, n : Int, top : Int, x0 : Int, z0 : Int, x1 : Int, z1 : Int, x : Int, z : Int, hs : NativeU8Arr) : NativeU8Arr do
     if z > z1 do hs
     else if x > x1 do box_go(w, n, top, x0, z0, x1, z1, x0, z + 1, hs)
     else if x < 0 || z < 0 || x >= n || z >= n do box_go(w, n, top, x0, z0, x1, z1, x + 1, z, hs)
-    else box_go(w, n, top, x0, z0, x1, z1, x + 1, z, NativeArray.set_u8(hs, x + n * z, surface_go(w, x, z, top))) end end end
+    else
+      let stored = NativeArray.get_u8(hs, x + n * z)
+      let from = if top > stored do top else stored end
+      box_go(w, n, top, x0, z0, x1, z1, x + 1, z, NativeArray.set_u8(hs, x + n * z, surface_go(w, x, z, from)))
+    end end end
   end
 
-  doc "One tick: rescan water, recompute distances, ease both axes toward their targets by [rate], reclassify behind the hold counter. Writes fresh arrays."
+  doc """
+  One tick: rescan water, recompute distances, ease both axes toward their
+  targets by [rate], reclassify behind the hold counter.
+
+  Only ACTIVE columns are eased and reclassified. A settled column -- both axes
+  on target, hold counter clear -- cannot change until something wakes it, and
+  the three things that can are all accounted for: an edit through note_edit,
+  note_edits or rescan_box, each of which wakes what it touched, and a change in
+  the distance to water, which this compares against the distances the previous
+  tick kept. Before this, every tick eased and reclassified all 16,384 columns
+  to discover that almost none of them had moved.
+  """
   fn tick(f : Field, w : CubeForge.World.World, seed : Int, rate : Float) : Field do
     let n = cols(w)
-    let f1 = match f do Field(hs, _, ta, ma, bs, hold, tb) -> Field(hs, water_go(w, hs, n, 0, NativeArray.make_u8(n * n, 0)), ta, ma, bs, hold, tb) end
+    let f1 = match f do Field(hs, _, ta, ma, bs, hold, tb, ds, act) -> Field(hs, water_go(w, hs, n, 0, NativeArray.make_u8(n * n, 0)), ta, ma, bs, hold, tb, ds, act) end
     let d = distances(f1, w)
     match f1 do
-      Field(hs, ws, ta0, ma0, bs0, hold0, tb) ->
-        match tick_go(hs, ta0, ma0, bs0, hold0, tb, seed, rate, d, n, 0,
-                      NativeArray.make_float(n * n, 0.0), NativeArray.make_float(n * n, 0.0),
-                      NativeArray.make_u8(n * n, 0), NativeArray.make_u8(n * n, 0)) do
-          Field(hs1, _, ta, ma, bs, hold, tb1) -> Field(hs1, ws, ta, ma, bs, hold, tb1)
+      Field(hs, ws, ta0, ma0, bs0, hold0, tb, ds0, act0) ->
+        match tick_go(hs, tb, rate, d, n, 0, ta0, ma0, bs0, hold0, mark_dist_go(d, ds0, n, 0, act0)) do
+          Field(hs1, _, ta, ma, bs, hold, tb1, _, act1) -> Field(hs1, ws, ta, ma, bs, hold, tb1, d, act1)
         end
     end
   end
@@ -293,7 +449,7 @@ mod CubeForge.Biome do
   doc "Eased temperature / moisture / water flag / distance-cap for one column, for diagnostics."
   fn debug_axes(f : Field, wx : Int, wz : Int) : String do
     match f do
-      Field(_, ws, ta, ma, _, _, _) ->
+      Field(_, ws, ta, ma, _, _, _, _, _) ->
         let i = wx + 128 * wz
         "temp " ++ float_to_string(NativeArray.get_float(ta, i)) ++ " moist " ++ float_to_string(NativeArray.get_float(ma, i)) ++ " wet " ++ int_to_string(NativeArray.get_u8(ws, i))
     end
@@ -302,7 +458,7 @@ mod CubeForge.Biome do
 
   doc "Eased temperature 0..1 of one column."
   fn temp_of(f : Field, wx : Int, wz : Int) : Float do
-    match f do Field(_, _, ta, _, _, _, _) -> NativeArray.get_float(ta, wx + 128 * wz) end
+    match f do Field(_, _, ta, _, _, _, _, _, _) -> NativeArray.get_float(ta, wx + 128 * wz) end
   end
 
   doc "How much of a storm actually falls here, as a multiplier on the particle count. Deserts stay dry under the same storm that soaks a wetland; the sea and the mountains sit in between."
@@ -340,7 +496,7 @@ mod CubeForge.Biome do
       let x = ci % n
       let z = ci / n
       let h = height_of(f, x, z)
-      let wet = match f do Field(_, ws, _, _, _, _, _) -> NativeArray.get_u8(ws, ci) == 1 end
+      let wet = match f do Field(_, ws, _, _, _, _, _, _, _) -> NativeArray.get_u8(ws, ci) == 1 end
       let sfc = W.block_at(w, x, h, z)
       let want = palette(biome_of(f, x, z))
       if h > 0 && !wet && is_palette_block(sfc) && sfc != want do migrations_go(f, w, n, i + 1, left - 1, budget - 1, Cons(ci, acc))
@@ -357,7 +513,23 @@ mod CubeForge.Biome do
 
   doc "The column's water flag."
   fn is_wet(f : Field, wx : Int, wz : Int) : Bool do
-    match f do Field(_, ws, _, _, _, _, _) -> NativeArray.get_u8(ws, wx + 128 * wz) == 1 end
+    match f do Field(_, ws, _, _, _, _, _, _, _) -> NativeArray.get_u8(ws, wx + 128 * wz) == 1 end
+  end
+
+  -- A rolling hash of the field's discrete state: heights, water flags and biome
+  -- ids. The eased axes are floats and are deliberately left out -- this is an
+  -- oracle for "the world evolved the same way", and a float's last bit is not
+  -- that. March has no scalar xor, so this is Horner rather than FNV.
+  pfn hash_u8(a : NativeU8Arr, n : Int, i : Int, h : Int) : Int do
+    if i >= n do h
+    else hash_u8(a, n, i + 1, (h * 131 + NativeArray.get_u8(a, i)) % 1073741789) end
+  end
+  doc "A hash of the field's heights, water flags and biome ids: an oracle for regression tests over the whole field."
+  fn state_hash(f : Field, n : Int) : Int do
+    match f do
+      Field(hs, ws, _, _, bs, _, _, _, _) ->
+        hash_u8(bs, n * n, 0, hash_u8(ws, n * n, 0, hash_u8(hs, n * n, 0, 7)))
+    end
   end
 
 end

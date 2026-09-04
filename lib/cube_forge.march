@@ -49,12 +49,16 @@ mod CubeForge do
   pfn pair_a(w : Wx) : Float do match w do Wx(a, _) -> a end end
   pfn pair_b(w : Wx) : Float do match w do Wx(_, b) -> b end end
 
-  type Frame = Frame(Int, Float, CubeForge.Player.Player, Int, NativeFloatArr, NativeF32Arr, Bool, CubeForge.F32Buf.F32Buf, Bool, Float, Float, Bool, Int, CubeForge.Menu.Menu, CubeForge.F32Buf.F32Buf, Int, CubeForge.Audio.Sched)   -- ..., inventory open, slot a stack was lifted from (-1 = not dragging), escape menu, its vertex buffer, seed of the session to start next (-1 = keep playing), the note schedule
+  type Frame = Frame(Int, Float, CubeForge.Player.Player, Int, NativeFloatArr, NativeF32Arr, Bool, CubeForge.F32Buf.F32Buf, Bool, Float, Float, Bool, Int, CubeForge.Menu.Menu, CubeForge.F32Buf.F32Buf, Int, Float, Int, CubeForge.Audio.Sched)   -- ..., inventory open, slot a stack was lifted from (-1 = not dragging), escape menu, its vertex buffer, seed of the session to start next (-1 = keep playing), worst frame seen after warmup, the frame it was, and the note schedule
+  -- Frames before this are not counted toward the worst frame: the first few
+  -- carry one-time costs (the first draw of each buffer, the first time down
+  -- every path) that no steady-state budget should be measured against.
+  fn warmup_frames() : Int do 60 end
   -- Mutable-per-edit world state: world, per-slot vertex counts (opaque 0..63, water 64..127), outline buffer, current hit,
   -- selected block id, water actor pids (Array, one per chunk), per-chunk "has dirty cells" flags
   -- `p` is the water-actor Pid type: Pid(state) cannot be written in an annotation (GAPS.md G45), so it is a parameter.
   -- ... and the per-chunk section meshes
-  type Scene(p) = Scene(CubeForge.World.World, NativeIntArr, CubeForge.F32Buf.F32Buf, CubeForge.Raycast.Hit, Ui, Array.PVec(p), NativeIntArr, Array.PVec(CubeForge.ChunkMesh.ChunkMesh), CubeForge.Biome.Field)
+  type Scene(p) = Scene(CubeForge.World.World, NativeIntArr, CubeForge.F32Buf.F32Buf, CubeForge.Raycast.Hit, Ui, Array.PVec(p), NativeIntArr, Array.PVec(CubeForge.ChunkMesh.ChunkMesh), CubeForge.Biome.Field, NativeIntArr)   -- ..., and the sections whose mesh is owed a rebuild (pass bitmask per section slot)
   -- inventory + hotbar buffers (untextured, textured icons) + last built HUD key
   type Ui = Ui(CubeForge.Inventory.Inv, CubeForge.F32Buf.F32Buf, CubeForge.F32Buf.F32Buf, Int)
   fn ui_inv(u : Ui) : CubeForge.Inventory.Inv do match u do Ui(i, _, _, _) -> i end end
@@ -91,6 +95,21 @@ mod CubeForge do
   fn water_slot_base() : Int do 64 end
   fn foliage_slot_base() : Int do 128 end
   fn tick_period() : Int do 10 end
+  -- Which frame of the period each phase of the world tick runs on. Spread so
+  -- that no frame carries more than one of them; see the frame loop. The
+  -- retexture runs twice at half budget rather than once at full: it is the one
+  -- phase whose work is a batch of independent columns, so it is the one that
+  -- can be halved without being restructured.
+  fn water_slot() : Int do 0 end
+  fn field_slot() : Int do 2 end
+  fn veg_slot() : Int do 6 end
+  -- The retexture runs in halves, on two frames of the period. Quarters were
+  -- measured and are worse: four batches remesh overlapping sections four
+  -- times, and 131 fps against 137.
+  fn migrate_slots() : Int do 2 end
+  pfn is_migrate_slot(phase : Int) : Bool do
+    if phase == 4 do true else phase == 8 end
+  end
 
   -- ── Water actors ────────────────────────────────────────────────────────────
   -- Create the chunk-actor pool. The actors are spawned empty; `reload_water`
@@ -104,7 +123,7 @@ mod CubeForge do
   -- Tell the water actor about a player edit (and its neighbour when the cell is on a border).
   pfn notify_edit(sc, x : Int, y : Int, z : Int, id : Int) do
     match sc do
-      Scene(w, counts, outline, hit, ui, pids, flags, meshes, bio) ->
+      Scene(w, counts, outline, hit, ui, pids, flags, meshes, bio, pend) ->
         let n = World.side(w)
         let cx = World.floor_div16(x)
         let cz = World.floor_div16(z)
@@ -117,7 +136,7 @@ mod CubeForge do
           let f1 = NativeArray.set_int(flags, ci, 1)
           -- mirrors in the 4 neighbours: an edge cell changed
           let f2 = edge_notify(w, pids, f1, cx, cz, lx, y, lz, id)
-          Scene(w, counts, outline, hit, ui, pids, f2, meshes, bio)
+          Scene(w, counts, outline, hit, ui, pids, f2, meshes, bio, pend)
         end
     end
   end
@@ -211,7 +230,25 @@ mod CubeForge do
   pfn pow2(n : Int) : Int do pow2_go(n, 1) end
   pfn pow2_go(n : Int, acc : Int) : Int do if n <= 0 do acc else pow2_go(n - 1, 2 * acc) end end
 
-  type Applied = Applied(CubeForge.World.World, NativeIntArr, NativeIntArr, Array.PVec(CubeForge.ChunkMesh.ChunkMesh), Int)   -- world, counts, flags, meshes, sections remeshed
+  type Applied = Applied(CubeForge.World.World, NativeIntArr, NativeIntArr, Array.PVec(CubeForge.ChunkMesh.ChunkMesh), Int, NativeIntArr)   -- world, counts, flags, meshes, sections owed, pending
+
+  -- Owe the water pass on the sections of [smask] in chunk (cx, cz).
+  pfn owe_sections(pend : NativeIntArr, cx : Int, cz : Int, smask : Int, sy : Int, n : Int) : NativeIntArr do
+    if sy >= 16 do pend
+    else if cx < 0 || cz < 0 || cx >= n || cz >= n do pend
+    else if int_and(smask, pow2(sy)) != 0 do
+      let slot = CubeForge.Light.mark_slot(cx, cz, sy)
+      owe_sections(NativeArray.set_int(pend, slot, int_or(NativeArray.get_int(pend, slot), pass_water())), cx, cz, smask, sy + 1, n)
+    else owe_sections(pend, cx, cz, smask, sy + 1, n) end end end
+  end
+  -- ... and on the neighbours named by [mask] (bits: 1 = -z, 2 = +z, 4 = +x, 8 = -x),
+  -- whose culling a changed border cell also moves.
+  pfn owe_neighbours(pend : NativeIntArr, cx : Int, cz : Int, smask : Int, mask : Int, n : Int) : NativeIntArr do
+    let p1 = if int_and(mask, 4) != 0 do owe_sections(pend, cx + 1, cz, smask, 0, n) else pend end
+    let p2 = if int_and(mask, 8) != 0 do owe_sections(p1, cx - 1, cz, smask, 0, n) else p1 end
+    let p3 = if int_and(mask, 2) != 0 do owe_sections(p2, cx, cz + 1, smask, 0, n) else p2 end
+    if int_and(mask, 1) != 0 do owe_sections(p3, cx, cz - 1, smask, 0, n) else p3 end
+  end
 
   -- Bitmask (bit sy) of the sections touched by the cell changes in a reply.
   pfn section_mask(out : List(Int), acc : Int) : Int do
@@ -224,13 +261,56 @@ mod CubeForge do
   end
 
   -- Rebuild every section named in [mask] (bit sy) of chunk (cx, cz); concat+upload once. Returns Remeshed and the count of rebuilt sections.
-  pfn remesh_sections(world : CubeForge.World.World, cx : Int, cz : Int, mask : Int, sy : Int, m : CubeForge.ChunkMesh.ChunkMesh, empty : CubeForge.Chunk.Chunk, done : Int) : CubeForge.ChunkMesh.ChunkMesh do
+  -- ── The mesh oracle ──────────────────────────────────────────────────
+  -- Every vertex of every section of every chunk, hashed. The state hash covers
+  -- blocks and the biome field, which is the wrong oracle for a remesh change: a
+  -- rebuild that skips a pass it should have rebuilt leaves the world identical
+  -- and the screen stale. Verified against that failure: pointing the retexture
+  -- rebuild at a no-op moved this hash and left the other two untouched.
+  pfn hash_f32(a : NativeF32Arr, i : Int, n : Int, h : Int) : Int do
+    if i >= n do h
+    else hash_f32(a, i + 1, n, (h * 131 + float_to_int(NativeArray.get_f32(a, i) *. 64.0) + 8388608) % 1073741789) end
+  end
+  pfn hash_buf(b : CubeForge.F32Buf.F32Buf, h : Int) : Int do
+    hash_f32(F32Buf.storage(b), 0, F32Buf.len(b), (h * 131 + F32Buf.len(b)) % 1073741789)
+  end
+  pfn hash_secs(secs : Array.PVec(CubeForge.F32Buf.F32Buf), sy : Int, h : Int) : Int do
+    if sy >= 16 do h else hash_secs(secs, sy + 1, hash_buf(Array.get(secs, sy), h)) end
+  end
+  pfn mesh_hash_go(meshes, ci : Int, n : Int, h : Int) : Int do
+    if ci >= n * n do h
+    else
+      let m = Array.get(meshes, ci)
+      mesh_hash_go(meshes, ci + 1, n,
+                   hash_secs(CM.foliage_sections(m), 0, hash_secs(CM.water_sections(m), 0, hash_secs(CM.opaque_sections(m), 0, h))))
+    end
+  end
+  fn mesh_hash(meshes, n : Int) : Int do mesh_hash_go(meshes, 0, n, 7) end
+
+  -- Which passes of a section a remesh has to rebuild, as a bitmask so that the
+  -- pending queue can OR two edits' demands together. An edit that cannot move a
+  -- water cell or a leaf need not pay for those passes: the greedy mesh and its
+  -- per-vertex light lookups are the cost, and they are per pass.
+  fn pass_opaque() : Int do 1 end
+  fn pass_water() : Int do 2 end
+  fn pass_foliage() : Int do 4 end
+  doc "All three: a player's edit, which can change anything."
+  fn pass_all() : Int do 7 end
+  doc "Opaque and foliage, no water: growing or felling a tree."
+  fn pass_solid() : Int do 5 end
+
+  pfn rebuild_for(m : CubeForge.ChunkMesh.ChunkMesh, world : CubeForge.World.World, cx : Int, cz : Int, sy : Int, empty : CubeForge.Chunk.Chunk, passes : Int) : CubeForge.ChunkMesh.ChunkMesh do
+    CM.rebuild_section_sel(m, world, cx, cz, sy, empty,
+                           int_and(passes, pass_opaque()) != 0, int_and(passes, pass_water()) != 0, int_and(passes, pass_foliage()) != 0)
+  end
+
+  pfn remesh_sections(world : CubeForge.World.World, cx : Int, cz : Int, mask : Int, sy : Int, m : CubeForge.ChunkMesh.ChunkMesh, empty : CubeForge.Chunk.Chunk, passes : Int) : CubeForge.ChunkMesh.ChunkMesh do
     if sy >= 16 do m
     else
       -- a changed cell on a section boundary changes the adjacent section's culling too
       let hit = int_and(mask, pow2(sy)) != 0
-      let m1 = if hit do CM.rebuild_section(m, world, cx, cz, sy, empty) else m end
-      remesh_sections(world, cx, cz, mask, sy + 1, m1, empty, done)
+      let m1 = if hit do rebuild_for(m, world, cx, cz, sy, empty, passes) else m end
+      remesh_sections(world, cx, cz, mask, sy + 1, m1, empty, passes)
     end
   end
 
@@ -244,17 +324,17 @@ mod CubeForge do
     if sy >= 16 do acc else count_bits(mask, sy + 1, if int_and(mask, pow2(sy)) != 0 do acc + 1 else acc end) end
   end
 
-  pfn apply_all(w : CubeForge.World.World, pids, flags : NativeIntArr, counts : NativeIntArr, meshes, cis : List(Int), replies, empty : CubeForge.Chunk.Chunk, remeshed : Int) : Applied do
+  pfn apply_all(w : CubeForge.World.World, pids, flags : NativeIntArr, counts : NativeIntArr, meshes, cis : List(Int), replies, empty : CubeForge.Chunk.Chunk, remeshed : Int, pend : NativeIntArr) : Applied do
     match cis do
-      Nil -> Applied(w, counts, flags, meshes, remeshed)
+      Nil -> Applied(w, counts, flags, meshes, remeshed, pend)
       Cons(ci, rest) ->
         match replies do
-          Nil -> Applied(w, counts, flags, meshes, remeshed)
+          Nil -> Applied(w, counts, flags, meshes, remeshed, pend)
           Cons(r, rrest) ->
             match r do
               Err(e) ->
                 println("water tick error for chunk " ++ int_to_string(ci) ++ ": " ++ e)
-                apply_all(w, pids, flags, counts, meshes, rest, rrest, empty, remeshed)
+                apply_all(w, pids, flags, counts, meshes, rest, rrest, empty, remeshed, pend)
               Ok(out) ->
                 let n = World.side(w)
                 match apply_reply(w, pids, flags, ci, out, Nil) do
@@ -263,68 +343,107 @@ mod CubeForge do
                       let cx = ci % n
                       let cz = ci / n
                       let smask = widen_mask(section_mask(out, 0), 0, 0)
-                      let m1 = remesh_sections_water(w1, cx, cz, smask, 0, Array.get(meshes, ci), empty)
-                      let c1 = upload_chunk(m1, ci, counts)
-                      let meshes1 = Array.set(meshes, ci, m1)
-                      -- a changed border cell changes that neighbour's culling too: remesh those neighbours' same sections
-                      match remesh_neighbors_water(w1, cx, cz, c1, meshes1, empty, edge_mask(out, 0), smask) do
-                        Remeshed(c2, meshes2) -> apply_all(w1, pids, flags1, c2, meshes2, rest, rrest, empty, remeshed + count_bits(smask, 0, 0))
-                      end
-                    else apply_all(w1, pids, flags1, counts, meshes, rest, rrest, empty, remeshed) end
+                      -- The cells are in the world; the water pass of those
+                      -- sections is owed, and so is that of the neighbours whose
+                      -- culling a changed border cell moves. The queue pays it.
+                      let p1 = owe_sections(pend, cx, cz, smask, 0, n)
+                      apply_all(w1, pids, flags1, counts, meshes, rest, rrest, empty, remeshed + count_bits(smask, 0, 0),
+                                owe_neighbours(p1, cx, cz, smask, edge_mask(out, 0), n))
+                    else apply_all(w1, pids, flags1, counts, meshes, rest, rrest, empty, remeshed, pend) end
                 end
             end
         end
     end
   end
 
-  -- Remesh the sections in [smask] of the neighbour chunks named by [mask] (bits: 1 = -z, 2 = +z, 4 = +x, 8 = -x).
-  -- Water-only twins of the three below, for the water actors' replies: a reply
-  -- carries nothing but water cells, so only the water pass of each touched
-  -- section is rebuilt. The +-1 widening stays -- a water cell's top and bottom
-  -- faces cull against the section above and below -- but that is the cheap pass.
-  pfn remesh_sections_water(world : CubeForge.World.World, cx : Int, cz : Int, mask : Int, sy : Int, m : CubeForge.ChunkMesh.ChunkMesh, empty : CubeForge.Chunk.Chunk) : CubeForge.ChunkMesh.ChunkMesh do
+  -- Remesh every section any chunk marked dirty. Per-vertex light is baked into
+  -- the mesh, so a section whose light moved shows stale lighting until it is
+  -- rebuilt -- and a relight reaches much further than the edited cell.
+  -- ── The deferred remesh queue ────────────────────────────────────────────
+  -- The world tick's phases change blocks in bursts -- a retexture batch, a
+  -- tree -- and rebuilding every section they touch in the same frame is what
+  -- makes that frame long. The world changes at once, as it always did; the
+  -- MESH is owed, and paid off at a fixed number of sections a frame. That is
+  -- what bounds the frame, rather than a schedule tuned per phase.
+  --
+  -- The player's own edits do NOT go through here: mining has to be immediate,
+  -- and one edit is one section's worth of work anyway.
+  doc "Sections rebuilt per frame while the queue is not empty."
+  fn remesh_budget() : Int do 4 end
+
+  -- Owe [passes] on every section [marks] touched.
+  pfn stage_go(pend : NativeIntArr, marks : NativeIntArr, i : Int, passes : Int) : NativeIntArr do
+    if i >= 1024 do pend
+    else if NativeArray.get_int(marks, i) != 0 do
+      stage_go(NativeArray.set_int(pend, i, int_or(NativeArray.get_int(pend, i), passes)), marks, i + 1, passes)
+    else stage_go(pend, marks, i + 1, passes) end end
+  end
+
+  -- The OR of what a chunk's sections owe (0 when it owes nothing), and how many owe something.
+  pfn owed_mask(pend : NativeIntArr, cx : Int, cz : Int, sy : Int, acc : Int) : Int do
+    if sy >= 16 do acc
+    else owed_mask(pend, cx, cz, sy + 1, int_or(acc, NativeArray.get_int(pend, CubeForge.Light.mark_slot(cx, cz, sy)))) end
+  end
+  pfn owed_count(pend : NativeIntArr, cx : Int, cz : Int, sy : Int, acc : Int) : Int do
+    if sy >= 16 do acc
+    else owed_count(pend, cx, cz, sy + 1, if NativeArray.get_int(pend, CubeForge.Light.mark_slot(cx, cz, sy)) != 0 do acc + 1 else acc end) end
+  end
+  pfn drain_sections(world : CubeForge.World.World, cx : Int, cz : Int, pend : NativeIntArr, sy : Int,
+                     m : CubeForge.ChunkMesh.ChunkMesh, empty : CubeForge.Chunk.Chunk) : CubeForge.ChunkMesh.ChunkMesh do
     if sy >= 16 do m
     else
-      let m1 = if int_and(mask, pow2(sy)) != 0 do CM.rebuild_section_water(m, world, cx, cz, sy, empty) else m end
-      remesh_sections_water(world, cx, cz, mask, sy + 1, m1, empty)
+      let want = NativeArray.get_int(pend, CubeForge.Light.mark_slot(cx, cz, sy))
+      let m1 = if want != 0 do rebuild_for(m, world, cx, cz, sy, empty, want) else m end
+      drain_sections(world, cx, cz, pend, sy + 1, m1, empty)
     end
   end
-  pfn remesh_chunk_sections_water(w : CubeForge.World.World, cx : Int, cz : Int, smask : Int, counts : NativeIntArr, meshes, empty : CubeForge.Chunk.Chunk) : Remeshed do
-    if !World.in_bounds(w, cx, cz) do Remeshed(counts, meshes)
+  pfn clear_chunk(pend : NativeIntArr, cx : Int, cz : Int, sy : Int) : NativeIntArr do
+    if sy >= 16 do pend
+    else clear_chunk(NativeArray.set_int(pend, CubeForge.Light.mark_slot(cx, cz, sy), 0), cx, cz, sy + 1) end
+  end
+
+  type Drained = Drained(NativeIntArr, Array.PVec(CubeForge.ChunkMesh.ChunkMesh), NativeIntArr)   -- counts, meshes, pending
+
+  -- A chunk at a time, so each one uploads once however many of its sections it
+  -- owed. The budget is checked before a chunk is started, so a frame can
+  -- overshoot by at most the sections of one chunk.
+  pfn drain_go(w : CubeForge.World.World, pend : NativeIntArr, ci : Int, n : Int, counts : NativeIntArr,
+               meshes, empty : CubeForge.Chunk.Chunk, budget : Int) : Drained do
+    if ci >= n * n do Drained(counts, meshes, pend)
+    else if budget <= 0 do Drained(counts, meshes, pend)
     else
-      let ci = cx + World.side(w) * cz
-      let m1 = remesh_sections_water(w, cx, cz, smask, 0, Array.get(meshes, ci), empty)
-      Remeshed(upload_chunk(m1, ci, counts), Array.set(meshes, ci, m1))
-    end
+      let cx = ci % n
+      let cz = ci / n
+      let mask = owed_mask(pend, cx, cz, 0, 0)
+      if mask == 0 do drain_go(w, pend, ci + 1, n, counts, meshes, empty, budget)
+      else
+        let done = owed_count(pend, cx, cz, 0, 0)
+        let m1 = drain_sections(w, cx, cz, pend, 0, Array.get(meshes, ci), empty)
+        drain_go(w, clear_chunk(pend, cx, cz, 0), ci + 1, n, upload_chunk_passes(m1, ci, counts, mask),
+                 Array.set(meshes, ci, m1), empty, budget - done)
+      end
+    end end
   end
-  pfn remesh_neighbors_water(w : CubeForge.World.World, cx : Int, cz : Int, counts : NativeIntArr, meshes, empty : CubeForge.Chunk.Chunk, mask : Int, smask : Int) : Remeshed do
-    let r1 = if int_and(mask, 4) != 0 do remesh_chunk_sections_water(w, cx + 1, cz, smask, counts, meshes, empty) else Remeshed(counts, meshes) end
-    match r1 do
-      Remeshed(c1, m1) ->
-        let r2 = if int_and(mask, 8) != 0 do remesh_chunk_sections_water(w, cx - 1, cz, smask, c1, m1, empty) else Remeshed(c1, m1) end
-        match r2 do
-          Remeshed(c2, m2) ->
-            let r3 = if int_and(mask, 2) != 0 do remesh_chunk_sections_water(w, cx, cz + 1, smask, c2, m2, empty) else Remeshed(c2, m2) end
-            match r3 do
-              Remeshed(c3, m3) -> if int_and(mask, 1) != 0 do remesh_chunk_sections_water(w, cx, cz - 1, smask, c3, m3, empty) else Remeshed(c3, m3) end
-            end
+
+  doc "Pay off at most [budget] sections of the mesh the world owes."
+  pfn drain(sc, budget : Int) do
+    match sc do
+      Scene(w, counts, outline, hit, ui, pids, flags, meshes, bio, pend) ->
+        match drain_go(w, pend, 0, World.side(w), counts, meshes, Chunk.new(), budget) do
+          Drained(c1, m1, pend1) -> Scene(w, c1, outline, hit, ui, pids, flags, m1, bio, pend1)
         end
     end
   end
 
-
-  -- Remesh every section any chunk marked dirty. Per-vertex light is baked into
-  -- the mesh, so a section whose light moved shows stale lighting until it is
-  -- rebuilt -- and a relight reaches much further than the edited cell.
   pfn remesh_marked(w : CubeForge.World.World, marks : NativeIntArr, ci : Int, n : Int,
-                    counts : NativeIntArr, meshes, empty : CubeForge.Chunk.Chunk) : Remeshed do
+                    counts : NativeIntArr, meshes, empty : CubeForge.Chunk.Chunk, passes : Int) : Remeshed do
     if ci >= n * n do Remeshed(counts, meshes)
     else
       let smask = CubeForge.Light.section_mask(marks, ci % n, ci / n)
-      if smask == 0 do remesh_marked(w, marks, ci + 1, n, counts, meshes, empty)
+      if smask == 0 do remesh_marked(w, marks, ci + 1, n, counts, meshes, empty, passes)
       else
-        match remesh_chunk_sections(w, ci % n, ci / n, smask, counts, meshes, empty) do
-          Remeshed(c1, m1) -> remesh_marked(w, marks, ci + 1, n, c1, m1, empty)
+        match remesh_chunk_sections(w, ci % n, ci / n, smask, counts, meshes, empty, passes) do
+          Remeshed(c1, m1) -> remesh_marked(w, marks, ci + 1, n, c1, m1, empty, passes)
         end
       end
     end
@@ -349,12 +468,12 @@ mod CubeForge do
     if lz == 15 && cz < n - 1 do NativeArray.set_int(m6, CubeForge.Light.mark_slot(cx, cz + 1, sy), 1) else m6 end
   end
 
-  pfn remesh_chunk_sections(w : CubeForge.World.World, cx : Int, cz : Int, smask : Int, counts : NativeIntArr, meshes, empty : CubeForge.Chunk.Chunk) : Remeshed do
+  pfn remesh_chunk_sections(w : CubeForge.World.World, cx : Int, cz : Int, smask : Int, counts : NativeIntArr, meshes, empty : CubeForge.Chunk.Chunk, passes : Int) : Remeshed do
     if !World.in_bounds(w, cx, cz) do Remeshed(counts, meshes)
     else
       let ci = cx + World.side(w) * cz
-      let m1 = remesh_sections(w, cx, cz, smask, 0, Array.get(meshes, ci), empty, 0)
-      Remeshed(upload_chunk(m1, ci, counts), Array.set(meshes, ci, m1))
+      let m1 = remesh_sections(w, cx, cz, smask, 0, Array.get(meshes, ci), empty, passes)
+      Remeshed(upload_chunk_passes(m1, ci, counts, passes), Array.set(meshes, ci, m1))
     end
   end
 
@@ -381,7 +500,7 @@ mod CubeForge do
 
   pfn water_tick(sc, workers : Int, verbose : Bool) do
     match sc do
-      Scene(w, counts, outline, hit, sel, pids, flags, meshes, bio) ->
+      Scene(w, counts, outline, hit, sel, pids, flags, meshes, bio, pend) ->
         let n = World.side(w)
         let cis = flagged(flags, n * n - 1, n, Nil)
         match cis do
@@ -392,13 +511,13 @@ mod CubeForge do
             let flags1 = clear_flags(flags, cis)
             let replies = List.pmap_n(cis, fn ci -> Water.call_tick(Array.get(pids, ci)), workers)
             let t1 = Win.time()
-            match apply_all(w, pids, flags1, counts, meshes, cis, replies, Chunk.new(), 0) do
-              Applied(w1, counts1, flags2, meshes1, remeshed) ->
+            match apply_all(w, pids, flags1, counts, meshes, cis, replies, Chunk.new(), 0, pend) do
+              Applied(w1, counts1, flags2, meshes1, remeshed, pend1) ->
                 let t2 = Win.time()
                 if verbose do
-                  println("water tick: " ++ int_to_string(List.length(cis)) ++ " chunks, calls " ++ ms(t1 -. t0) ++ ", apply+remesh " ++ ms(t2 -. t1) ++ " (" ++ int_to_string(remeshed) ++ " sections remeshed), active cells " ++ int_to_string(active_cells(replies, 0)) ++ ", reply sizes " ++ reply_sizes(replies))
+                  println("water tick: " ++ int_to_string(List.length(cis)) ++ " chunks, calls " ++ ms(t1 -. t0) ++ ", apply " ++ ms(t2 -. t1) ++ " (" ++ int_to_string(remeshed) ++ " sections owed), active cells " ++ int_to_string(active_cells(replies, 0)) ++ ", reply sizes " ++ reply_sizes(replies))
                 else () end
-                Scene(w1, counts1, outline, hit, sel, pids, flags2, meshes1, bio)
+                Scene(w1, counts1, outline, hit, sel, pids, flags2, meshes1, bio, pend1)
             end
         end
     end
@@ -426,7 +545,7 @@ mod CubeForge do
   end
 
   pfn scene_water_count(sc, cx : Int, cz : Int) : Int do
-    match sc do Scene(w, _, _, _, _, _, _, _, _) -> Chunk.count_water(World.chunk_at(w, cx, cz)) end
+    match sc do Scene(w, _, _, _, _, _, _, _, _, _) -> Chunk.count_water(World.chunk_at(w, cx, cz)) end
   end
 
   fn reach() : Float do 8.0 end
@@ -441,15 +560,30 @@ mod CubeForge do
     end
   end
   pfn upload_chunk(m : CubeForge.ChunkMesh.ChunkMesh, slot : Int, counts : NativeIntArr) : NativeIntArr do
+    upload_chunk_passes(m, slot, counts, pass_all())
+  end
+
+  -- Upload only the passes that were rebuilt. Every remesh used to push all
+  -- three passes of all sixteen sections of the chunk whichever one it had
+  -- touched, so a water cell moving re-sent that chunk's terrain and leaves as
+  -- well. The vertex counts are still written for all three -- they are three
+  -- array stores, and a pass that was not rebuilt has the count it already had.
+  pfn upload_chunk_passes(m : CubeForge.ChunkMesh.ChunkMesh, slot : Int, counts : NativeIntArr, passes : Int) : NativeIntArr do
     let os = CM.opaque_sections(m)
     let ws = CM.water_sections(m)
-    Win.gfx_upload_begin(slot, CM.total_floats(os))
-    upload_sections(slot, os, 0, 0)
-    Win.gfx_upload_begin(water_slot_base() + slot, CM.total_floats(ws))
-    upload_sections(water_slot_base() + slot, ws, 0, 0)
     let fs = CM.foliage_sections(m)
-    Win.gfx_upload_begin(foliage_slot_base() + slot, CM.total_floats(fs))
-    upload_sections(foliage_slot_base() + slot, fs, 0, 0)
+    if int_and(passes, pass_opaque()) != 0 do
+      Win.gfx_upload_begin(slot, CM.total_floats(os))
+      upload_sections(slot, os, 0, 0)
+    else () end
+    if int_and(passes, pass_water()) != 0 do
+      Win.gfx_upload_begin(water_slot_base() + slot, CM.total_floats(ws))
+      upload_sections(water_slot_base() + slot, ws, 0, 0)
+    else () end
+    if int_and(passes, pass_foliage()) != 0 do
+      Win.gfx_upload_begin(foliage_slot_base() + slot, CM.total_floats(fs))
+      upload_sections(foliage_slot_base() + slot, fs, 0, 0)
+    else () end
     NativeArray.set_int(NativeArray.set_int(NativeArray.set_int(counts, slot, CM.opaque_vertices(m)),
                                             water_slot_base() + slot, CM.water_vertices(m)),
                         foliage_slot_base() + slot, CM.foliage_vertices(m))
@@ -476,7 +610,7 @@ mod CubeForge do
   -- culled against the neighbour, so the neighbour's mesh changes too).
   pfn edit_block(sc, x : Int, y : Int, z : Int, id : Int) do
     match sc do
-      Scene(world, counts, outline, hit, ui, pids, flags, meshes, bio) ->
+      Scene(world, counts, outline, hit, ui, pids, flags, meshes, bio, pend) ->
         let t0 = Win.time()
         let w0 = World.set_occupied(World.set_block(world, x, y, z, id), x, y, z, CubeForge.Light.occludes(id))
         let bio1 = Biome.note_edit(bio, w0, x, y, z, id)
@@ -490,12 +624,12 @@ mod CubeForge do
         let relit = CubeForge.Light.relight_marked(World.light(w0), w0, x, y, z)
         let world1 = World.set_light(w0, CubeForge.Light.relit_field(relit))
         let marks = mark_geometry(CubeForge.Light.relit_marks(relit), x, y, z, n)
-        match remesh_marked(world1, marks, 0, n, counts, meshes, Chunk.new()) do
+        match remesh_marked(world1, marks, 0, n, counts, meshes, Chunk.new(), pass_all()) do
           Remeshed(c1, m1) ->
             let t1 = Win.time()
             println((if id == 0 do "broke" else "placed" end) ++ " block at " ++ int_to_string(x) ++ "," ++ int_to_string(y) ++ "," ++ int_to_string(z)
                     ++ " — edit + section remesh " ++ ms(t1 -. t0))
-            notify_edit(Scene(world1, c1, outline, hit, ui, pids, flags, m1, bio1), x, y, z, id)
+            notify_edit(Scene(world1, c1, outline, hit, ui, pids, flags, m1, bio1, pend), x, y, z, id)
         end
     end
   end
@@ -526,7 +660,7 @@ mod CubeForge do
         let w2 = World.set_light(w1, CubeForge.Light.relit_field(relit))
         sync_occupancy(w2, x, z, base, base + trunk + 2)
         let marks1 = or_marks(mark_box(marks, x - 4, base, z - 4, x + 4, base + trunk + 2, z + 4, n, 0), CubeForge.Light.relit_marks(relit), 0)
-        veg_go(w2, Biome.rescan_box(bio, w2, x, z, Veg.decay_radius() + 1), marks1, seed, n, rest)
+        veg_go(w2, Biome.rescan_box(bio, w2, x, z, Veg.decay_radius() + 1, base + trunk + 2), marks1, seed, n, rest)
     end
   end
   pfn or_marks(a : NativeIntArr, b : NativeIntArr, i : Int) : NativeIntArr do
@@ -552,13 +686,13 @@ mod CubeForge do
       Nil -> sc
       _ ->
         match sc do
-          Scene(world, counts, outline, hit, ui, pids, flags, meshes, bio) ->
+          Scene(world, counts, outline, hit, ui, pids, flags, meshes, bio, pend) ->
             let n = World.side(world)
             match veg_go(world, bio, CubeForge.Light.marks_new(), seed, n, entries) do
               Migrated(w1, bio1, marks) ->
-                match remesh_marked(w1, marks, 0, n, counts, meshes, Chunk.new()) do
-                  Remeshed(c1, m1) -> Scene(w1, c1, outline, hit, ui, pids, flags, m1, bio1)
-                end
+                -- The tree stands in the world now; its sections are owed a
+                -- rebuild of opaque (the trunk) and foliage (the canopy).
+                Scene(w1, counts, outline, hit, ui, pids, flags, meshes, bio1, stage_go(pend, marks, 0, pass_solid()))
             end
         end
     end
@@ -582,16 +716,20 @@ mod CubeForge do
   -- needed; the touched sections are collected into one marks array and
   -- remeshed once. Doing it through edit_block cost ~7 ms per column, almost
   -- all of it a relight and a per-column section remesh.
-  pfn migrate_go(w : CubeForge.World.World, bio : CubeForge.Biome.Field, marks : NativeIntArr, n : Int, cols : List(Int)) : Migrated do
+  -- The field update is batched (Biome.note_edits) rather than one note_edit per
+  -- column: each column's height and water flag depend only on that column, so
+  -- noting them all against the finished world is the same answer for two array
+  -- copies instead of sixty-four.
+  pfn migrate_go(w : CubeForge.World.World, bio : CubeForge.Biome.Field, marks : NativeIntArr, n : Int, cols : List(Int), edits : List(Int)) : Migrated do
     match cols do
-      Nil -> Migrated(w, bio, marks)
+      Nil -> Migrated(w, Biome.note_edits(bio, w, edits), marks)
       Cons(ci, rest) ->
         let x = ci % (n * 16)
         let z = ci / (n * 16)
         let h = Biome.height_of(bio, x, z)
         let id = Biome.palette(Biome.biome_of(bio, x, z))
-        let w1 = World.set_block(w, x, h, z, id)
-        migrate_go(w1, Biome.note_edit(bio, w1, x, h, z, id), mark_geometry(marks, x, h, z, n), n, rest)
+        migrate_go(World.set_block(w, x, h, z, id), bio, mark_geometry(marks, x, h, z, n), n, rest,
+                   Cons(Biome.pack_edit(x, h, z, id), edits))
     end
   end
   type Migrated = Migrated(CubeForge.World.World, CubeForge.Biome.Field, NativeIntArr)
@@ -599,10 +737,10 @@ mod CubeForge do
   -- Ground truth: every section of every chunk from the current world and light.
   pfn remesh_everything(sc) do
     match sc do
-      Scene(world, counts, outline, hit, ui, pids, flags, meshes, bio) ->
+      Scene(world, counts, outline, hit, ui, pids, flags, meshes, bio, pend) ->
         let n = World.side(world)
-        match remesh_marked(world, all_marks(0, NativeArray.make_int(1024, 0)), 0, n, counts, meshes, Chunk.new()) do
-          Remeshed(c1, m1) -> Scene(world, c1, outline, hit, ui, pids, flags, m1, bio)
+        match remesh_marked(world, all_marks(0, NativeArray.make_int(1024, 0)), 0, n, counts, meshes, Chunk.new(), pass_all()) do
+          Remeshed(c1, m1) -> Scene(world, c1, outline, hit, ui, pids, flags, m1, bio, pend)
         end
     end
   end
@@ -613,13 +751,11 @@ mod CubeForge do
       Nil -> sc
       _ ->
         match sc do
-          Scene(world, counts, outline, hit, ui, pids, flags, meshes, bio) ->
+          Scene(world, counts, outline, hit, ui, pids, flags, meshes, bio, pend) ->
             let n = World.side(world)
-            match migrate_go(world, bio, CubeForge.Light.marks_new(), n, cols) do
+            match migrate_go(world, bio, CubeForge.Light.marks_new(), n, cols, Nil) do
               Migrated(w1, bio1, marks) ->
-                match remesh_marked(w1, marks, 0, n, counts, meshes, Chunk.new()) do
-                  Remeshed(c1, m1) -> Scene(w1, c1, outline, hit, ui, pids, flags, m1, bio1)
-                end
+                Scene(w1, counts, outline, hit, ui, pids, flags, meshes, bio1, stage_go(pend, marks, 0, pass_opaque()))
             end
         end
     end
@@ -723,11 +859,11 @@ mod CubeForge do
   -- leaf would mean dozens of chunk-section rebuilds for a single chop.
   pfn chop(sc, x : Int, y : Int, z : Int) do
     match sc do
-      Scene(world, counts, outline, hit, ui, pids, flags, meshes, bio) ->
+      Scene(world, counts, outline, hit, ui, pids, flags, meshes, bio, pend) ->
         let world1 = World.decay_leaves(world, x, y, z, decay_radius())
         let world2 = World.relight_at(world1, x, y, z)
         match remesh_region(world2, x, y, z, counts, meshes, Chunk.new(), 0) do
-          Remeshed(c1, m1) -> Scene(world2, c1, outline, hit, ui, pids, flags, m1, Biome.rescan_box(bio, world2, x, z, decay_radius()))
+          Remeshed(c1, m1) -> Scene(world2, c1, outline, hit, ui, pids, flags, m1, Biome.rescan_box(bio, world2, x, z, decay_radius(), 0), pend)
         end
     end
   end
@@ -765,7 +901,7 @@ mod CubeForge do
   -- [place_id] > 0 forces a block id for scripted edits.
   pfn interact(sc, p : CubeForge.Player.Player, break_held : Bool, place_now : Bool, place_id : Int, new_sel : Int, dt : Float) do
     match sc do
-      Scene(world, counts, outline, _, ui0, pids, flags, meshes, bio) ->
+      Scene(world, counts, outline, _, ui0, pids, flags, meshes, bio, pend) ->
         let inv0 = if new_sel > 0 do Inv.select(ui_inv(ui0), new_sel) else ui_inv(ui0) end
         let e = Player.eye(p)
         let d = Player.forward(Player.yaw(p), Player.pitch(p))
@@ -778,7 +914,7 @@ mod CubeForge do
         -- unbreakable block (bedrock: the world floor) resets, so no progress shows.
         let can_break = break_held && Ray.is_hit(hit) && World.breakable_at(world, Ray.bx(hit), Ray.by_(hit), Ray.bz(hit))
         let inv1 = if can_break do Inv.hold(inv0, Ray.bx(hit), Ray.by_(hit), Ray.bz(hit), dt) else Inv.release(inv0) end
-        let sc1 = Scene(world, counts, outline1, hit, ui_with_inv(ui0, inv1), pids, flags, meshes, bio)
+        let sc1 = Scene(world, counts, outline1, hit, ui_with_inv(ui0, inv1), pids, flags, meshes, bio, pend)
         if Inv.is_complete(inv1) do
           let id = World.block_at(world, Ray.bx(hit), Ray.by_(hit), Ray.bz(hit))
           let sc2 = edit_block(sc1, Ray.bx(hit), Ray.by_(hit), Ray.bz(hit), 0)
@@ -804,13 +940,13 @@ mod CubeForge do
 
   @[no_alloc]
   pfn set_inv(sc, inv : CubeForge.Inventory.Inv) do
-    match sc do Scene(w, c, o, h, u, p, f, m, b) -> Scene(w, c, o, h, ui_with_inv(u, inv), p, f, m, b) end
+    match sc do Scene(w, c, o, h, u, p, f, m, b, q) -> Scene(w, c, o, h, ui_with_inv(u, inv), p, f, m, b, q) end
   end
-  pfn scene_ui(sc) : Ui do match sc do Scene(_, _, _, _, u, _, _, _, _) -> u end end
+  pfn scene_ui(sc) : Ui do match sc do Scene(_, _, _, _, u, _, _, _, _, _) -> u end end
   @[no_alloc]
-  pfn scene_with_ui(sc, u : Ui) do match sc do Scene(w, c, o, h, _, p, f, m, b) -> Scene(w, c, o, h, u, p, f, m, b) end end
-  pfn scene_biome(sc) : CubeForge.Biome.Field do match sc do Scene(_, _, _, _, _, _, _, _, b) -> b end end
-  pfn scene_with_biome(sc, b : CubeForge.Biome.Field) do match sc do Scene(w, c, o, h, u, p, f, m, _) -> Scene(w, c, o, h, u, p, f, m, b) end end
+  pfn scene_with_ui(sc, u : Ui) do match sc do Scene(w, c, o, h, _, p, f, m, b, q) -> Scene(w, c, o, h, u, p, f, m, b, q) end end
+  pfn scene_biome(sc) : CubeForge.Biome.Field do match sc do Scene(_, _, _, _, _, _, _, _, b, _) -> b end end
+  pfn scene_with_biome(sc, b : CubeForge.Biome.Field) do match sc do Scene(w, c, o, h, u, p, f, m, _, q) -> Scene(w, c, o, h, u, p, f, m, b, q) end end
   fn inv_string(sc) : String do
     let i = ui_inv(scene_ui(sc))
     "inv " ++ slots_string(i, 0, "") ++ "sel=" ++ int_to_string(Inv.sel(i)) ++ " progress=" ++ float_to_string(Inv.progress(i))
@@ -827,12 +963,13 @@ mod CubeForge do
     end
   end
 
-  pfn scene_counts(sc) : NativeIntArr do match sc do Scene(_, c, _, _, _, _, _, _, _) -> c end end
-  pfn scene_world(sc) : CubeForge.World.World do match sc do Scene(w, _, _, _, _, _, _, _, _) -> w end end
-  pfn scene_has_hit(sc) : Bool do match sc do Scene(_, _, _, h, _, _, _, _, _) -> Ray.is_hit(h) end end
+  pfn scene_counts(sc) : NativeIntArr do match sc do Scene(_, c, _, _, _, _, _, _, _, _) -> c end end
+  pfn scene_world(sc) : CubeForge.World.World do match sc do Scene(w, _, _, _, _, _, _, _, _, _) -> w end end
+  pfn scene_meshes(sc) do match sc do Scene(_, _, _, _, _, _, _, m, _, _) -> m end end
+  pfn scene_has_hit(sc) : Bool do match sc do Scene(_, _, _, h, _, _, _, _, _, _) -> Ray.is_hit(h) end end
   fn scene_hit_string(sc) : String do
     match sc do
-      Scene(_, _, _, h, _, _, _, _, _) -> if Ray.is_hit(h) do int_to_string(Ray.bx(h)) ++ "," ++ int_to_string(Ray.by_(h)) ++ "," ++ int_to_string(Ray.bz(h)) ++ " face " ++ int_to_string(Ray.nx(h)) ++ "," ++ int_to_string(Ray.ny(h)) ++ "," ++ int_to_string(Ray.nz(h)) else "none" end
+      Scene(_, _, _, h, _, _, _, _, _, _) -> if Ray.is_hit(h) do int_to_string(Ray.bx(h)) ++ "," ++ int_to_string(Ray.by_(h)) ++ "," ++ int_to_string(Ray.bz(h)) ++ " face " ++ int_to_string(Ray.nx(h)) ++ "," ++ int_to_string(Ray.ny(h)) ++ "," ++ int_to_string(Ray.nz(h)) else "none" end
     end
   end
   -- FPS meter: window start time, frames in window, last displayed fps, HUD vertex buffer
@@ -1005,11 +1142,11 @@ mod CubeForge do
 
   fn frame_loop(f : Frame, k : Knobs, sc, nchunks : Int, proj : NativeFloatArr, map_proj : NativeFloatArr, fps : Fps, wxpid, seed : Int) : Frame do
     match f do
-      Frame(frame, last_t, player, sample, view, vp, map_mode, marker, flash, wcache, bcache, inv_open, drag_from, menu, menubuf, next_seed, sched) ->
+      Frame(frame, last_t, player, sample, view, vp, map_mode, marker, flash, wcache, bcache, inv_open, drag_from, menu, menubuf, next_seed, worst, worst_at, sched) ->
         match k do
         Knobs(max_frames, dump_frame, dump_path, autowalk, autospin, autoedit, autoswim, autoflow, workers, automap, day_len, sun_deg, shadow_dist, soft_shadows, autoinv, autobreak, weather_pin, precip_cap, biome_rate, biome_map, autocanal, biome_budget, veg_budget, time_pin, remesh_all_at, automenu, audio_mode, audio_log, autodive) ->
         if Win.should_close() || (max_frames >= 0 && frame >= max_frames) || next_seed >= 0 do
-          Frame(frame, last_t, player, sample, view, vp, map_mode, marker, flash, wcache, bcache, inv_open, drag_from, menu, menubuf, next_seed, sched)
+          Frame(frame, last_t, player, sample, view, vp, map_mode, marker, flash, wcache, bcache, inv_open, drag_from, menu, menubuf, next_seed, worst, worst_at, sched)
         else
           In.poll()
           -- I toggles the inventory. While it is open the cursor is released and no
@@ -1038,6 +1175,13 @@ mod CubeForge do
           let map_mode1 = if automap >= 0 && frame >= automap do true else map_mode0 end
           let now = Win.time()
           let dt = if now -. last_t > 0.1 do 0.1 else now -. last_t end
+          -- The frame that just ended, for the frame-budget gauge. Not dt: dt is
+          -- clamped for the physics, and a clamped spike is exactly the one worth
+          -- seeing. Uncapped runs (CF_VSYNC=0) measure the work; with vsync on
+          -- this measures the wait as well, so a budget is checked uncapped.
+          let elapsed = now -. last_t
+          let worst1 = if frame > warmup_frames() && elapsed > worst do elapsed else worst end
+          let worst_at1 = if frame > warmup_frames() && elapsed > worst do frame - 1 else worst_at end
           -- Cursor in NDC. The shim hands back framebuffer pixels, so the only
           -- conversion here is pixels to NDC, with y flipped (screen y grows down).
           -- Read only while the window is open: each of these extern calls returns
@@ -1112,27 +1256,66 @@ mod CubeForge do
           -- CF_AUTOCANAL=<frame>: a line of water beside the player, placed through
           -- edit_block so the biome field sees it the way a real edit would.
           let sc0d = if autocanal >= 0 && frame == autocanal do dig_canal(sc0c, player1, -4) else sc0c end
+          -- The world tick, spread over three frames of the period rather than
+          -- landing in one. The phases were already sequential and each is a
+          -- whole step on its own; running them in the same frame only ever
+          -- meant one frame carrying all of it. Together they cost ~25 ms, which
+          -- is a stall at any frame rate; apart they are ~8, ~8 and ~9.
+          --
+          -- The order within a period is unchanged -- water, then the field and
+          -- its retexturing, then vegetation -- and every rolling cursor still
+          -- advances once per period, since they are keyed on frame / tick_period().
+          -- What does change is that vegetation reads a field three frames older
+          -- than the retexture left it, which is why this moves the state hash
+          -- where every other step in this sequence held it.
+          let phase = frame % tick_period()
           -- water simulation tick
-          let sc1 = if frame % tick_period() == 0 do
-            let scw = water_tick(sc0d, workers, autoflow >= 0)
+          let scw = if phase == water_slot() do water_tick(sc0d, workers, autoflow >= 0) else sc0d end
+          -- The climate field.
+          let scb = if phase == field_slot() do
             let tb0 = Win.time()
-            let scb = scene_with_biome(scw, Biome.tick(scene_biome(scw), scene_world(scw), seed, Biome.default_rate() *. int_to_float(biome_rate) /. 100.0))
-            if autoflow >= 0 && frame % 100 == 0 do println("biome tick: " ++ ms(Win.time() -. tb0)) else () end
-            -- Retexture: the surface migrates toward the biome's palette, at most
-            -- biome_budget columns per tick, each one a real edit_block so relight,
-            -- remesh and the water actors all see it.
+            let f1 = scene_with_biome(scw, Biome.tick(scene_biome(scw), scene_world(scw), seed, Biome.default_rate() *. int_to_float(biome_rate) /. 100.0))
+            if autoflow >= 0 && frame % 100 == field_slot() do println("biome tick: " ++ ms(Win.time() -. tb0)) else () end
+            f1
+          else scw end
+          -- Retexturing: the surface migrates toward the biome's palette, each
+          -- column a real edit so relight, remesh and the water actors all see
+          -- it. Half the budget on each of two frames. Both halves read the same
+          -- window of the rolling cursor, which is keyed on the period, and the
+          -- first half's columns are no longer candidates by the time the second
+          -- runs -- so a period still retextures up to biome_budget columns from
+          -- the same window, in two smaller pieces.
+          let scm = if is_migrate_slot(phase) do
             let tm0 = Win.time()
-            let picks = Biome.migrations(scene_biome(scb), scene_world(scb), frame / tick_period(), 2048, biome_budget)
-            let scm = migrate(scb, picks)
-            if autoflow >= 0 && frame % 100 == 0 do println("biome migrate: " ++ int_to_string(List.length(picks)) ++ " columns in " ++ ms(Win.time() -. tm0)) else () end
+            let picks = Biome.migrations(scene_biome(scb), scene_world(scb), frame / tick_period(), 2048, biome_budget / migrate_slots())
+            let m1 = migrate(scb, picks)
+            if autoflow >= 0 && frame % 100 == 4 do println("biome migrate: " ++ int_to_string(List.length(picks)) ++ " columns in " ++ ms(Win.time() -. tm0)) else () end
+            m1
+          else scb end
+          -- One tree every other period, not every one. Growing a tree is the
+          -- one phase that is a single indivisible edit -- its relight and its
+          -- remesh are for one trunk -- so it cannot be halved by splitting the
+          -- batch the way the retexture is. Halving how often it runs is the
+          -- only lever it has, and trees grow half as fast for it.
+          let sc1pre = if if phase == veg_slot() do (frame / tick_period()) % 2 == 0 else false end do
             -- Vegetation: grow where the biome wants a tree and the cell says so,
             -- fell where it no longer does. Each one is a chop-sized edit.
             let tv0 = Win.time()
             let vpicks = Veg.candidates(scene_biome(scm), scene_world(scm), seed, frame / tick_period(), 2048, veg_budget)
             let scv = vegetate(scm, seed, vpicks)
-            if autoflow >= 0 && frame % 100 == 0 do println("biome veg: " ++ int_to_string(List.length(vpicks)) ++ " trees in " ++ ms(Win.time() -. tv0)) else () end
+            if autoflow >= 0 && frame % 100 == veg_slot() do println("biome veg: " ++ int_to_string(List.length(vpicks)) ++ " trees in " ++ ms(Win.time() -. tv0)) else () end
             scv
-          else sc0d end
+          else scm end
+          -- Pay off the mesh the world owes, a bounded number of sections a
+          -- frame. This is what holds the frame time down: the phases above
+          -- change blocks in bursts, and the rebuild is spread behind them.
+          --
+          -- On the frames BETWEEN the phases. Every phase sits on an even frame
+          -- of the period, so draining on the odd ones stops the rebuild from
+          -- stacking on top of the work that asked for it -- which was the whole
+          -- of the difference between a 14 ms frame and a 5 ms one. Five drain
+          -- frames a period is more throughput than the phases can generate.
+          let sc1 = if phase % 2 == 1 do drain(sc1pre, remesh_budget()) else sc1pre end
           if autoflow >= 0 && frame >= autoflow && (frame - autoflow) % 100 == 0 do
             let cx = World.floor_div16(float_to_int(Math.floor(V.x(Player.position(player1)))))
             let cz = World.floor_div16(float_to_int(Math.floor(V.z(Player.position(player1)))))
@@ -1141,7 +1324,7 @@ mod CubeForge do
                     ++ " chunk(" ++ int_to_string(cx) ++ "," ++ int_to_string(cz - 1) ++ ")=" ++ int_to_string(scene_water_count(sc1, cx, cz - 1)))
           else () end
           if autoedit >= 0 && (frame == autoedit - 1 || frame == autoedit + 20 || frame == autoedit + 40 || frame == autoedit + 61 || frame == autoedit + 121 || frame == autoedit + 181 || frame == autoedit + 241 || frame == autoedit + 301) do
-            println("frame " ++ int_to_string(frame) ++ " looking at " ++ scene_hit_string(sc1) ++ "; block there = " ++ int_to_string(match sc1 do Scene(w, _, _, h, _, _, _, _, _) -> World.block_at(w, Ray.bx(h), Ray.by_(h), Ray.bz(h)) end) ++ "; " ++ inv_string(sc1)
+            println("frame " ++ int_to_string(frame) ++ " looking at " ++ scene_hit_string(sc1) ++ "; block there = " ++ int_to_string(match sc1 do Scene(w, _, _, h, _, _, _, _, _, _) -> World.block_at(w, Ray.bx(h), Ray.by_(h), Ray.bz(h)) end) ++ "; " ++ inv_string(sc1)
                     ++ "; water cells in player chunk = " ++ int_to_string(scene_water_count(sc1, World.floor_div16(float_to_int(Math.floor(V.x(Player.position(player1))))), World.floor_div16(float_to_int(Math.floor(V.z(Player.position(player1))))))))
           else () end
           if autoswim && frame % 20 == 0 && frame <= 400 do
@@ -1304,6 +1487,16 @@ mod CubeForge do
             let pcz = float_to_int(V.z(Player.position(player1)))
             println("  biome at player column (" ++ int_to_string(pcx) ++ "," ++ int_to_string(pcz) ++ "): " ++ Biome.name(Biome.biome_of(scene_biome(sc1), pcx, pcz)) ++ " height " ++ int_to_string(Biome.height_of(scene_biome(sc1), pcx, pcz)) ++ " " ++ Biome.debug_axes(scene_biome(sc1), pcx, pcz))
             println("  weather " ++ float_to_string(wx) ++ " (overcast " ++ float_to_string(ov) ++ ", fog " ++ float_to_string(fog_density(wx)) ++ ", bolt " ++ float_to_string(bolt) ++ ", live " ++ int_to_string(live) ++ (if snowing do " snow" else " rain" end) ++ ")")
+            -- Behaviour oracle for refactors: the discrete field state and every
+            -- voxel, hashed. Resolution-independent, unlike a frame dump, and it
+            -- covers the columns the camera cannot see.
+            -- Drained to empty first: with a bounded queue the invariant is not
+            -- "the mesh always equals a full rebuild" but "what the queue
+            -- finishes equals a full rebuild", so the oracle settles it first.
+            let scq = drain(sc1, 4096)
+            println("  state: biome " ++ int_to_string(Biome.state_hash(scene_biome(scq), World.side(scene_world(scq)) * 16))
+                    ++ " world " ++ int_to_string(World.state_hash(scene_world(scq)))
+                    ++ " mesh " ++ int_to_string(mesh_hash(scene_meshes(scq), World.side(scene_world(scq)))))
           else () end
           if frame % 60 == 0 && autowalk do
             println("frame " ++ int_to_string(frame) ++ " player at " ++ V.to_string(Player.position(player1)) ++ " on_ground=" ++ (if Player.on_ground(player1) do "true" else "false" end))
@@ -1314,7 +1507,7 @@ mod CubeForge do
           if frame == 200 do
             println("live-object delta over frames 100..200: " ++ int_to_string(Win.live_allocs() - sample1) ++ " (" ++ int_to_string((Win.live_allocs() - sample1) / 100) ++ " per frame)")
           else () end
-          frame_loop(Frame(frame + 1, now, player1, sample1, view1, vp1, map_mode1, marker1, flash1, wnow, bnow, inv_open2, drag2, menu2, menubuf1, next_seed1, sched1), k, sc2, nchunks, proj, map_proj, fps1, wxpid, seed)
+          frame_loop(Frame(frame + 1, now, player1, sample1, view1, vp1, map_mode1, marker1, flash1, wnow, bnow, inv_open2, drag2, menu2, menubuf1, next_seed1, worst1, worst_at1, sched1), k, sc2, nchunks, proj, map_proj, fps1, wxpid, seed)
         end
         end
     end
@@ -1670,13 +1863,14 @@ mod CubeForge do
       reload_water(pids, n * n - 1, n, seed)
       println("reloaded " ++ int_to_string(n * n) ++ " water actors in " ++ ms(Win.time() -. tw0) ++ " (loads run asynchronously)")
       let biome0 = Biome.build(world, seed)
-      let scene = Scene(world, counts, F32Buf.new(256), Ray.miss(), Ui(Inv.new(), F32Buf.new(2048), F32Buf.new(256), -1), pids, spring_flags(world, biome0, 0, n, NativeArray.make_int(n * n, 0)), Array.from_list(meshes), biome0)
+      let scene = Scene(world, counts, F32Buf.new(256), Ray.miss(), Ui(Inv.new(), F32Buf.new(2048), F32Buf.new(256), -1), pids, spring_flags(world, biome0, 0, n, NativeArray.make_int(n * n, 0)), Array.from_list(meshes), biome0, CubeForge.Light.marks_new())
       let fps0 = Fps(t4, 0, 0, F32Buf.new(4096))
       Weather.send_seed(wxpid, seed)
-      match frame_loop(Frame(0, t4, player, 0, NativeArray.make_float(16, 0.0), NativeArray.make_f32(16, 0.0), false, F32Buf.new(64), Env.get_int("CF_FLASH", 0) == 1, 0.0, 0.0, false, -1, Menu.new(seed), F32Buf.new(2048), -1, Audio.sched_start(0)), k, scene, n * n, proj, map_proj, fps0, wxpid, seed) do
-        Frame(frames, _, p, _, _, _, _, _, _, _, _, _, _, _, _, ns, _) ->
+      match frame_loop(Frame(0, t4, player, 0, NativeArray.make_float(16, 0.0), NativeArray.make_f32(16, 0.0), false, F32Buf.new(64), Env.get_int("CF_FLASH", 0) == 1, 0.0, 0.0, false, -1, Menu.new(seed), F32Buf.new(2048), -1, 0.0, -1, Audio.sched_start(0)), k, scene, n * n, proj, map_proj, fps0, wxpid, seed) do
+        Frame(frames, _, p, _, _, _, _, _, _, _, _, _, _, _, _, ns, worst, worst_at, _) ->
           let t5 = Win.time()
           println("ran " ++ int_to_string(frames) ++ " frames in " ++ ms(t5 -. t4) ++ " (" ++ float_to_string(int_to_float(frames) /. (t5 -. t4)) ++ " fps, vsync on); player ended at " ++ V.to_string(Player.position(p)))
+          println("worst frame after warmup: " ++ ms(worst) ++ " at frame " ++ int_to_string(worst_at))
           ns
       end
     end
