@@ -30,6 +30,9 @@ Planned, not started. One entry per feature; each gets its own design doc under
 
 ## Compiler patches (from GAPS.md "Compiler patches")
 
+- [ ] Per-read `inc_rc` on borrowed `NativeArray` (G67) — blocks double-buffering
+      the skylight sweep, which is ~10 ms of every block edit. Same root as G31.
+
 - [ ] `march_bytes_borrow` unwrap (G8) — one line + test.
 - [ ] Zero-arg extern dead-binding drop (G16).
 - [ ] `dec_rc` for NativeArray bindings (G31).
