@@ -1274,7 +1274,13 @@ mod CubeForge do
           -- Pay off the mesh the world owes, a bounded number of sections a
           -- frame. This is what holds the frame time down: the phases above
           -- change blocks in bursts, and the rebuild is spread behind them.
-          let sc1 = drain(sc1pre, remesh_budget())
+          --
+          -- On the frames BETWEEN the phases. Every phase sits on an even frame
+          -- of the period, so draining on the odd ones stops the rebuild from
+          -- stacking on top of the work that asked for it -- which was the whole
+          -- of the difference between a 14 ms frame and a 5 ms one. Five drain
+          -- frames a period is more throughput than the phases can generate.
+          let sc1 = if phase % 2 == 1 do drain(sc1pre, remesh_budget()) else sc1pre end
           if autoflow >= 0 && frame >= autoflow && (frame - autoflow) % 100 == 0 do
             let cx = World.floor_div16(float_to_int(Math.floor(V.x(Player.position(player1)))))
             let cz = World.floor_div16(float_to_int(Math.floor(V.z(Player.position(player1)))))

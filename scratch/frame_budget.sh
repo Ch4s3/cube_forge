@@ -14,6 +14,11 @@
 # this program. A real regression fails every run, so best-of-N still catches
 # it; a busy machine does not.
 #
+# The budget is 16 ms -- a frame at 60 Hz -- against a program whose worst
+# frame is 11-13. That headroom is deliberate: it is roughly what a loaded
+# machine costs, and a test that fails when someone else is compiling is a test
+# people learn to ignore.
+#
 # The scenario is pinned so the run is repeatable: fixed seed, fixed sun and
 # clock, and CF_NOMOUSE, without which the camera yaw depends on where the
 # window manager put the pointer.
@@ -21,7 +26,7 @@ set -u
 
 cd "$(dirname "$0")/.."
 BIN=.march/build/release/cube_forge
-BUDGET_MS=${1:-20}
+BUDGET_MS=${1:-16}
 FRAMES=${2:-400}
 RUNS=${3:-3}
 

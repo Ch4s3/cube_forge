@@ -398,9 +398,13 @@ mod CubeForge.Light do
     -- one of the pair. Two copies up front replace fourteen.
     let swept = box_sweep_go2(copy_prefix(la2, plen), copy_prefix(la2, plen), w, max_level(),
                               sx0, sx1, sy0, sy1, sz0, sz1, slo, plen - slo)
-    -- Overlay the swept prefix onto the untouched upper field. la2 was read by
-    -- the sweep, so it cannot itself be the destination (GAPS.md G21).
-    let out = CubeForge.Ffi.Window.u8_blit(copy_field(la2, new()), 0, swept, 0, plen)
+    -- Write the swept slice back into la2 itself. Only [slo, plen) differs --
+    -- the sweep started from copies of la2 and writes nothing outside that
+    -- slice -- so this is the same field the 4 MB copy produced, for a ~0.5 MB
+    -- blit and no allocation. The two copy_prefix calls above only READ la2,
+    -- and a NativeArray read borrows (GAPS.md G67), so it is uniquely owned
+    -- here and can be a blit destination.
+    let out = CubeForge.Ffi.Window.u8_blit(la2, slo, swept, slo, plen - slo)
     -- Mark over the SCAN box, not the cleared box: the sweep may also write into
     -- the one-voxel ring around it.
     Relit(out, mark_box(marks_new(), above, out, sx0, sx1, sy0, sy1, sz0, sz1))
