@@ -1,0 +1,47 @@
+-- Top-down map view: Mat4.orthographic and the Marker mesh.
+mod CubeForge.Test.MapView do
+
+  needs IO.Spawn
+  import Test
+  alias CubeForge.Math.Mat4 as M
+  alias CubeForge.Math.Vec3 as V
+  alias CubeForge.Marker as Marker
+  alias CubeForge.F32Buf as B
+
+  pfn near(a : Float, b : Float) : Bool do Math.abs(a -. b) < 0.0001 end
+
+  describe "Mat4.orthographic" do
+    test "maps the box centre to the origin and the box corners to +-1" do
+      let p = M.orthographic(-10.0, 10.0, -5.0, 5.0, 0.1, 100.0)
+      match M.transform_point(p, V.new(0.0, 0.0, -50.0)) do
+        r -> Test.assert_true(near(M.x4(r) /. M.w4(r), 0.0) && near(M.y4(r) /. M.w4(r), 0.0), "centre column maps to NDC (0, 0)")
+      end
+      match M.transform_point(p, V.new(10.0, 5.0, -50.0)) do
+        r -> Test.assert_true(near(M.x4(r) /. M.w4(r), 1.0) && near(M.y4(r) /. M.w4(r), 1.0), "far corner maps to NDC (1, 1)")
+      end
+      -- orthographic w is always 1: no perspective divide distortion
+      match M.transform_point(p, V.new(0.0, 0.0, -1.0)) do
+        r -> Test.assert_true(near(M.w4(r), 1.0), "w is 1")
+      end
+    end
+  end
+
+  describe "Marker" do
+    test "is a flat quad of 6 vertices centred on (px, pz) at the fixed marker height" do
+      let m = Marker.build(B.new(64), 12.5, -7.0)
+      Test.assert_eq_int(B.len(m) / 7, 6, "6 vertices")
+      -- first vertex is the (x0, z0) corner: px - half, pz - half
+      Test.assert_true(near(Test.assert_some(B.get(m, 0), "x0"), 12.5 -. Marker.half_size()), "x0 corner")
+      Test.assert_true(near(Test.assert_some(B.get(m, 2), "z0"), -7.0 -. Marker.half_size()), "z0 corner")
+      Test.assert_true(near(Test.assert_some(B.get(m, 1), "y"), Marker.y()), "fixed marker height")
+      Test.assert_true(Marker.y() > 255.0, "the marker floats above the tallest possible chunk (255)")
+    end
+    test "rebuilding at a new position moves it (in place, same buffer capacity)" do
+      let m0 = Marker.build(B.new(64), 0.0, 0.0)
+      let m1 = Marker.build(m0, 20.0, 20.0)
+      Test.assert_true(near(Test.assert_some(B.get(m1, 0), "x0"), 20.0 -. Marker.half_size()), "moved")
+      Test.assert_eq_int(B.capacity(m1), B.capacity(m0), "no growth needed for a fixed 6-vertex mesh")
+    end
+  end
+
+end

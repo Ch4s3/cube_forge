@@ -24,6 +24,7 @@ mod CubeForge do
   alias CubeForge.Hud as Hud
   alias CubeForge.Raycast as Ray
   alias CubeForge.Outline as Outline
+  alias CubeForge.Marker as Marker
   alias CubeForge.Water as Water
   alias CubeForge.ChunkMesh as CM
   alias CubeForge.Inventory as Inv
@@ -32,10 +33,8 @@ mod CubeForge do
 
   -- Everything the frame loop threads through. A variant so the per-frame
   -- rebuild can reuse the cell (see GAPS.md G12).
-  -- frame, last_time, player, alloc_sample, view scratch (NativeFloatArr 16), vp upload buffer (NativeF32Arr 16),
-  -- flashlight state packed as (on ? 1 : 0) + (F held last frame ? 2 : 0) — the
-  -- key poll is level-triggered, so the toggle needs last frame's edge.
-  type Frame = Frame(Int, Float, CubeForge.Player.Player, Int, NativeFloatArr, NativeF32Arr, Int)
+  -- frame, last_time, player, alloc_sample, view scratch, vp upload buffer, map-view toggle, marker buffer, flashlight
+  type Frame = Frame(Int, Float, CubeForge.Player.Player, Int, NativeFloatArr, NativeF32Arr, Bool, CubeForge.F32Buf.F32Buf, Bool)
   -- Mutable-per-edit world state: world, per-slot vertex counts (opaque 0..63, water 64..127), outline buffer, current hit,
   -- selected block id, water actor pids (Array, one per chunk), per-chunk "has dirty cells" flags
   -- `p` is the water-actor Pid type: Pid(state) cannot be written in an annotation (GAPS.md G45), so it is a parameter.
@@ -54,7 +53,7 @@ mod CubeForge do
         let k = Inv.hud_key(inv)
         if k == key do u
         else
-          let hb1 = Hud.build_hotbar(hb, Inv.sel(inv), Inv.count(inv, 1), Inv.count(inv, 2), Inv.count(inv, 3), Inv.progress(inv))
+          let hb1 = Hud.build_hotbar(hb, Inv.sel(inv), Inv.count(inv, 1), Inv.count(inv, 2), Inv.count(inv, 3), Inv.count(inv, 4), Inv.progress(inv))
           Win.gfx_upload(252, F32Buf.storage(hb1), F32Buf.len(hb1))
           let ic1 = if key == -1 do
             let i1 = Hud.build_icons(ic)
@@ -441,7 +440,9 @@ mod CubeForge do
         let inv0 = if new_sel > 0 do Inv.select(ui_inv(ui0), new_sel) else ui_inv(ui0) end
         let e = Player.eye(p)
         let d = Player.forward(Player.yaw(p), Player.pitch(p))
-        let hit = Ray.cast(world, V.x(e), V.y(e), V.z(e), V.x(d), V.y(d), V.z(d), reach())
+        -- water is only a target while the water slot is selected (to place against / remove sources);
+        -- otherwise the ray passes through it so the bed can be worked from the surface or underwater
+        let hit = Ray.cast(world, V.x(e), V.y(e), V.z(e), V.x(d), V.y(d), V.z(d), reach(), Inv.sel(inv0) != 4)
         let outline1 = if Ray.is_hit(hit) do Outline.build(outline, Ray.bx(hit), Ray.by_(hit), Ray.bz(hit)) else F32Buf.clear(outline) end
         if Ray.is_hit(hit) do CubeForge.Ffi.Window.gfx_upload(254, F32Buf.storage(outline1), F32Buf.len(outline1)) else () end
         -- breaking: hold accumulates on the same target; release or a miss resets
@@ -477,7 +478,7 @@ mod CubeForge do
   pfn scene_with_ui(sc, u : Ui) do match sc do Scene(w, c, o, h, _, p, f, m) -> Scene(w, c, o, h, u, p, f, m) end end
   fn inv_string(sc) : String do
     let i = ui_inv(scene_ui(sc))
-    "inv grass=" ++ int_to_string(Inv.count(i, 1)) ++ " dirt=" ++ int_to_string(Inv.count(i, 2)) ++ " stone=" ++ int_to_string(Inv.count(i, 3)) ++ " sel=" ++ int_to_string(Inv.sel(i)) ++ " progress=" ++ float_to_string(Inv.progress(i))
+    "inv grass=" ++ int_to_string(Inv.count(i, 1)) ++ " dirt=" ++ int_to_string(Inv.count(i, 2)) ++ " stone=" ++ int_to_string(Inv.count(i, 3)) ++ " water=" ++ int_to_string(Inv.count(i, 4)) ++ " sel=" ++ int_to_string(Inv.sel(i)) ++ " progress=" ++ float_to_string(Inv.progress(i))
   end
 
   pfn scene_counts(sc) : NativeIntArr do match sc do Scene(_, c, _, _, _, _, _, _) -> c end end
@@ -522,17 +523,6 @@ mod CubeForge do
     if sun >= 0.25 do 0.0 else (0.25 -. sun) /. 0.25 end
   end
 
-  -- Toggle the flashlight on the frame F goes down. [st] packs the lamp state in
-  -- bit 0 and last frame's key state in bit 1.
-  pfn flash_step(st : Int, down : Bool) : Int do
-    let lamp = st % 2
-    let was = st / 2
-    let d = if down do 1 else 0 end
-    let lamp1 = if d == 1 && was == 0 do (lamp + 1) % 2 else lamp end
-    lamp1 + 2 * d
-  end
-  pfn flash_on(st : Int) : Bool do st % 2 == 1 end
-
   -- Gather this frame's input into a value the (Input-cap-free) Player module can consume.
   -- Block selection: keys 1-4; 0 when none is pressed this frame.
   pfn selected_key() : Int do
@@ -544,7 +534,7 @@ mod CubeForge do
     -- CF_AUTOWALK=1: scripted forward walk for headless collision verification.
     let mf = if autowalk do 1.0 else axis(In.key(In.key_s()), In.key(In.key_w())) end
     let mr = axis(In.key(In.key_a()), In.key(In.key_d()))
-    CubeForge.Player.Input(mf, mr, In.mouse_dx() +. autospin, In.mouse_dy(), In.key(In.key_space()) || autoswim)
+    CubeForge.Player.Input(mf, mr, In.mouse_dx() +. autospin, In.mouse_dy(), In.key(In.key_space()) || autoswim, In.key(In.key_shift()))
   end
 
   -- View matrix for the player's eye, written into the persistent scratch array in place.
@@ -552,6 +542,25 @@ mod CubeForge do
     let q = Q.from_yaw_pitch(Player.yaw(p), Player.pitch(p))
     let e = Player.eye(p)
     M.write_view(Q.x(q), Q.y(q), Q.z(q), Q.w(q), V.x(e), V.y(e), V.z(e), view)
+  end
+
+  -- Half-width, in blocks, of the area the map camera shows (a local overhead view, not the
+  -- whole world at once — the camera follows the player, see map_view below).
+  fn map_half_extent() : Float do 32.0 end
+  -- Orthographic projection has no perspective, so the camera's altitude does not affect zoom
+  -- (map_half_extent alone does) — it only has to clear the marker's height (Marker.y()) and the
+  -- tallest possible terrain (255), or the marker falls behind the camera and never renders.
+  fn map_altitude() : Float do 300.0 end
+
+  -- Top-down view-projection centred on the player's (x, z). Rebuilt fresh each map-view frame
+  -- (unlike the steady first-person camera, which updates a persistent buffer in place) since
+  -- map view is an occasional toggle, not part of the @[no_alloc] frame-loop hot path.
+  pfn map_view(map_proj : NativeFloatArr, p : CubeForge.Player.Player) : NativeF32Arr do
+    let pos = Player.position(p)
+    let eye = V.new(V.x(pos), map_altitude(), V.z(pos))
+    let target = V.new(V.x(pos), 0.0, V.z(pos))
+    let view_m = M.look_at(eye, target, V.new(0.0, 0.0, -1.0))
+    M.write_f32(M.mul(map_proj, view_m), NativeArray.make_f32(16, 0.0))
   end
 
   -- (kept for the allocation bisect) the temporary-matrix version
@@ -571,31 +580,38 @@ mod CubeForge do
 
   -- Frame loop. `max_frames < 0` means run until the window closes.
   -- Run-time knobs read once, outside the frame loop (an Env read allocates).
-  type Knobs = Knobs(Int, Int, String, Bool, Float, Int, Bool, Int, Int, Float)   -- max_frames, dump_frame, dump_path, autowalk, autospin, autoedit frame (<0 = off), autoswim, autoflow frame (<0 = off), workers, day length in seconds
+  type Knobs = Knobs(Int, Int, String, Bool, Float, Int, Bool, Int, Int, Int, Float)   -- max_frames, dump_frame, dump_path, autowalk, autospin, autoedit frame (<0 = off), autoswim, autoflow frame (<0 = off), workers, automap frame (<0 = off; forces map view on from this frame, for headless verification), day length in seconds
 
-  fn frame_loop(f : Frame, k : Knobs, sc, nchunks : Int, proj : NativeFloatArr, fps : Fps) : Frame do
+  fn frame_loop(f : Frame, k : Knobs, sc, nchunks : Int, proj : NativeFloatArr, map_proj : NativeFloatArr, fps : Fps) : Frame do
     match f do
-      Frame(frame, last_t, player, sample, view, vp, flash) ->
+      Frame(frame, last_t, player, sample, view, vp, map_mode, marker, flash) ->
         match k do
-        Knobs(max_frames, dump_frame, dump_path, autowalk, autospin, autoedit, autoswim, autoflow, workers, day_len) ->
+        Knobs(max_frames, dump_frame, dump_path, autowalk, autospin, autoedit, autoswim, autoflow, workers, automap, day_len) ->
         if Win.should_close() || (max_frames >= 0 && frame >= max_frames) do
-          Frame(frame, last_t, player, sample, view, vp, flash)
+          Frame(frame, last_t, player, sample, view, vp, map_mode, marker, flash)
         else
           In.poll()
           if In.key(In.key_escape()) do Win.request_close() else () end
           if In.button_pressed(In.button_left()) do CubeForge.Ffi.Input.capture_cursor(true) else () end
+          let map_mode0 = if In.key_pressed(In.key_m()) do !map_mode else map_mode end
+          let map_mode1 = if automap >= 0 && frame >= automap do true else map_mode0 end
           let now = Win.time()
           let dt = if now -. last_t > 0.1 do 0.1 else now -. last_t end
           let player1 = Player.update(player, read_input(autowalk, autospin, autoswim && frame >= 320), scene_world(sc), dt)
           let view1 = write_view(player1, view)
           let vp1 = M.mul_into_f32(proj, view1, vp)
+          -- The map camera follows the player (x, z) so it reads as a local overhead view, not a
+          -- fixed satellite shot of the whole world; it recomputes a fresh matrix each frame this
+          -- is shown, unlike the steady per-frame camera above (map view is an occasional toggle).
+          let render_vp = if map_mode1 do map_view(map_proj, player1) else vp1 end
           -- CF_AUTOEDIT=<frame>: scripted break at that frame and place 60 frames later (headless verification)
           -- scripted: hold break for 60 frames from `autoedit`, place the harvested block at +120, water at +180
-          let scripted_hold = autoedit >= 0 && frame >= autoedit && frame < autoedit + 60
+          let scripted_hold = autoedit >= 0 && ((frame >= autoedit && frame < autoedit + 60) || (frame >= autoedit + 240 && frame < autoedit + 300))
+          let scripted_sel = if autoedit >= 0 && frame >= autoedit + 240 && frame < autoedit + 300 do 4 else 0 end
           let scripted_place = autoedit >= 0 && frame == autoedit + 120
           let place_water = (autoedit >= 0 && frame == autoedit + 180) || (autoflow >= 0 && frame == autoflow)
           let sc0 = interact(sc, player1, In.button(In.button_left()) || scripted_hold, In.button_pressed(In.button_right()) || scripted_place || place_water,
-                             if place_water do Chunk.water() else -1 end, if scripted_place do 1 else selected_key() end, dt)
+                             if place_water do Chunk.water() else -1 end, if scripted_place do 1 else if scripted_sel > 0 do scripted_sel else selected_key() end end, dt)
           -- CF_AUTOFLOW: break the source again 600 frames after placing it
           let sc0b = if autoflow >= 0 && frame == autoflow + 600 do break_sources_near(sc0, player1) else sc0 end
           -- water simulation tick
@@ -607,24 +623,36 @@ mod CubeForge do
                     ++ " chunk(" ++ int_to_string(cx - 1) ++ "," ++ int_to_string(cz) ++ ")=" ++ int_to_string(scene_water_count(sc1, cx - 1, cz))
                     ++ " chunk(" ++ int_to_string(cx) ++ "," ++ int_to_string(cz - 1) ++ ")=" ++ int_to_string(scene_water_count(sc1, cx, cz - 1)))
           else () end
-          if autoedit >= 0 && (frame == autoedit - 1 || frame == autoedit + 20 || frame == autoedit + 40 || frame == autoedit + 61 || frame == autoedit + 121 || frame == autoedit + 181) do
-            println("frame " ++ int_to_string(frame) ++ " looking at " ++ scene_hit_string(sc1) ++ "; block there = " ++ int_to_string(match sc1 do Scene(w, _, _, h, _, _, _, _) -> World.block_at(w, Ray.bx(h), Ray.by_(h), Ray.bz(h)) end) ++ "; " ++ inv_string(sc1))
+          if autoedit >= 0 && (frame == autoedit - 1 || frame == autoedit + 20 || frame == autoedit + 40 || frame == autoedit + 61 || frame == autoedit + 121 || frame == autoedit + 181 || frame == autoedit + 241 || frame == autoedit + 301) do
+            println("frame " ++ int_to_string(frame) ++ " looking at " ++ scene_hit_string(sc1) ++ "; block there = " ++ int_to_string(match sc1 do Scene(w, _, _, h, _, _, _, _) -> World.block_at(w, Ray.bx(h), Ray.by_(h), Ray.bz(h)) end) ++ "; " ++ inv_string(sc1)
+                    ++ "; water cells in player chunk = " ++ int_to_string(scene_water_count(sc1, World.floor_div16(float_to_int(Math.floor(V.x(Player.position(player1))))), World.floor_div16(float_to_int(Math.floor(V.z(Player.position(player1))))))))
           else () end
           if autoswim && frame % 20 == 0 && frame <= 400 do
             println("frame " ++ int_to_string(frame) ++ " y=" ++ float_to_string(V.y(Player.position(player1))) ++ " in_water=" ++ (if Player.in_water(player1, scene_world(sc1)) do "true" else "false" end) ++ " eye_in_water=" ++ (if Player.eye_in_water(player1, scene_world(sc1)) do "true" else "false" end))
           else () end
-          let flash1 = flash_step(flash, In.key(In.key_f()))
-          let sun = sun_level(now, day_len)
+          let flash1 = if In.key_pressed(In.key_f()) do !flash else flash end
           let eye = Player.eye(player1)
           let look = Player.forward(Player.yaw(player1), Player.pitch(player1))
-          let moon = moon_level(sun)
+          -- The map view is a diagnostic overhead view: hold it at full daylight
+          -- and out of the flashlight beam, the same way the underwater tint is
+          -- suppressed there. Otherwise it would be unreadable at night.
+          let sun = if map_mode1 do 1.0 else sun_level(now, day_len) end
+          let moon = if map_mode1 do 0.0 else moon_level(sun) end
+          let flash_now = if map_mode1 do false else flash1 end
           Win.gfx_begin_frame(0.55 *. sun +. 0.030 *. moon, 0.75 *. sun +. 0.045 *. moon, 0.95 *. sun +. 0.110 *. moon)
-          Win.gfx_set_light(sun, V.x(eye), V.y(eye), V.z(eye), V.x(look), V.y(look), V.z(look), flash_on(flash1))
-          Win.gfx_set_view_proj(vp1)
+          Win.gfx_set_light(sun, V.x(eye), V.y(eye), V.z(eye), V.x(look), V.y(look), V.z(look), flash_now)
+          Win.gfx_set_view_proj(render_vp)
           draw_chunks(scene_counts(sc1), 0, nchunks)
           draw_water(scene_counts(sc1), 0, nchunks)
           if scene_has_hit(sc1) do CubeForge.Ffi.Window.gfx_draw_lines(254, Outline.vertex_count()) else () end
-          if Player.eye_in_water(player1, scene_world(sc1)) do CubeForge.Ffi.Window.gfx_draw_hud(253, 6, true) else () end
+          -- the underwater screen tint only makes sense from the real first-person eye
+          if map_mode1 do ()
+          else if Player.eye_in_water(player1, scene_world(sc1)) do CubeForge.Ffi.Window.gfx_draw_hud(253, 6, true) else () end end
+          let marker1 = if map_mode1 do Marker.build(marker, V.x(Player.position(player1)), V.z(Player.position(player1))) else marker end
+          if map_mode1 do
+            Win.gfx_upload(Marker.slot(), F32Buf.storage(marker1), F32Buf.len(marker1))
+            CubeForge.Ffi.Window.gfx_draw_marker(Marker.slot(), Marker.vertex_count())
+          else () end
           let fps1 = tick_fps(fps, now)
           Win.gfx_draw_hud(255, fps_hud_verts(fps1), false)
           let sc2 = scene_with_ui(sc1, refresh_hud(scene_ui(sc1)))
@@ -645,7 +673,7 @@ mod CubeForge do
           if frame == 200 do
             println("live-object delta over frames 100..200: " ++ int_to_string(Win.live_allocs() - sample1) ++ " (" ++ int_to_string((Win.live_allocs() - sample1) / 100) ++ " per frame)")
           else () end
-          frame_loop(Frame(frame + 1, now, player1, sample1, view1, vp1, flash1), k, sc2, nchunks, proj, fps1)
+          frame_loop(Frame(frame + 1, now, player1, sample1, view1, vp1, map_mode1, marker1, flash1), k, sc2, nchunks, proj, map_proj, fps1)
         end
         end
     end
@@ -653,7 +681,7 @@ mod CubeForge do
 
   -- Allocation bisect: run each per-frame piece N times and print the live-object delta.
   pfn repeat_update(p : CubeForge.Player.Player, w : CubeForge.World.World, i : Int) : CubeForge.Player.Player do
-    if i == 0 do p else repeat_update(Player.update(p, CubeForge.Player.Input(0.3, 0.0, 1.0, 0.5, false), w, 0.016), w, i - 1) end
+    if i == 0 do p else repeat_update(Player.update(p, CubeForge.Player.Input(0.3, 0.0, 1.0, 0.5, false, false), w, 0.016), w, i - 1) end
   end
   pfn repeat_view(proj : NativeFloatArr, p : CubeForge.Player.Player, dst : NativeF32Arr, i : Int) : NativeF32Arr do
     if i == 0 do dst else repeat_view(proj, p, view_proj(proj, p, dst), i - 1) end
@@ -735,7 +763,7 @@ mod CubeForge do
 
   -- Full-screen quad in NDC for the underwater tint: layer 1 (water), shade 0.6. Built once.
   pfn underwater_quad() : CubeForge.F32Buf.F32Buf do
-    let v = fn (b, x, y, u, t) -> b |> F32Buf.push3(x, y, 0.0) |> F32Buf.push(u) |> F32Buf.push(t) |> F32Buf.push(Texture.water_layer()) |> F32Buf.push(0.6)
+    let v = fn (b, x, y, u, t) -> b |> F32Buf.push3(x, y, 0.0) |> F32Buf.push(u) |> F32Buf.push(t) |> F32Buf.push(Texture.water_layer()) |> F32Buf.push(0.6) |> F32Buf.push(0.0)
     F32Buf.new(64) |> v(-1.0, -1.0, 0.0, 0.0) |> v(1.0, -1.0, 4.0, 0.0) |> v(1.0, 1.0, 4.0, 3.0)
                    |> v(-1.0, -1.0, 0.0, 0.0) |> v(1.0, 1.0, 4.0, 3.0) |> v(-1.0, 1.0, 0.0, 3.0)
   end
@@ -817,24 +845,28 @@ mod CubeForge do
         Win.gfx_upload(253, F32Buf.storage(uq), F32Buf.len(uq))
         Win.gfx_upload_texture(Texture.checkerboard(), Texture.size(), Texture.size(), Texture.layers())
         let proj = M.perspective(70.0 *. Math.pi() /. 180.0, 800.0 /. 600.0, 0.1, 500.0)
+        -- top-down map camera (M toggles it): orthographic, follows the player, zoomed to a local
+        -- area rather than the whole world (map_view builds the per-frame view matrix).
+        let map_proj = M.orthographic(0.0 -. map_half_extent(), map_half_extent(), 0.0 -. map_half_extent(), map_half_extent(), 0.1, 400.0)
         let autoswim = Env.get_int("CF_AUTOSWIM", 0) == 1
         let water_col = World.find_water(world)
         let spawn_pos = int_to_float(8 * n)
+        let ground_y = int_to_float(World.surface_y(world, 8 * n, 8 * n) + 1)
         let player = if autoswim && water_col >= 0 do
           println("autoswim: spawning over water column " ++ int_to_string(water_col % 4096) ++ "," ++ int_to_string(water_col / 4096))
-          Player.with_pitch(Player.new(int_to_float(water_col % 4096) +. 0.5, 90.0, int_to_float(water_col / 4096) +. 0.5), -0.6)
-        else Player.with_pitch(Player.new(spawn_pos, 100.0, spawn_pos), -0.6) end
+          Player.with_pitch(Player.new(int_to_float(water_col % 4096) +. 0.5, 90.0, int_to_float(water_col / 4096) +. 0.5), -1.4)
+        else Player.with_pitch(Player.new(spawn_pos, ground_y, spawn_pos), -0.1) end
         if Env.get_int("CF_ALLOC_PROBE", 0) == 1 do alloc_probe(world, proj) else () end
         let t4 = Win.time()
         let knobs = Knobs(max_frames, Env.get_int("CF_DUMP_FRAME", 30), Env.get("CF_DUMP", ""), Env.get_int("CF_AUTOWALK", 0) == 1,
-                          int_to_float(Env.get_int("CF_AUTOSPIN", 0)) /. 1000.0 /. Player.mouse_sens(), Env.get_int("CF_AUTOEDIT", -1), autoswim, Env.get_int("CF_AUTOFLOW", -1), workers, int_to_float(Env.get_int("CF_DAY", 1800)))
+                          int_to_float(Env.get_int("CF_AUTOSPIN", 0)) /. 1000.0 /. Player.mouse_sens(), Env.get_int("CF_AUTOEDIT", -1), autoswim, Env.get_int("CF_AUTOFLOW", -1), workers, Env.get_int("CF_AUTOMAP", -1), int_to_float(Env.get_int("CF_DAY", 1800)))
         let tw0 = Win.time()
         let pids = Array.from_list(spawn_water(n * n - 1, n, seed, Nil))
         println("spawned " ++ int_to_string(n * n) ++ " water actors in " ++ ms(Win.time() -. tw0) ++ " (loads run asynchronously)")
         let scene = Scene(world, counts, F32Buf.new(256), Ray.miss(), Ui(Inv.new(), F32Buf.new(2048), F32Buf.new(256), -1), pids, NativeArray.make_int(n * n, 0), Array.from_list(meshes))
         let fps0 = Fps(t4, 0, 0, F32Buf.new(4096))
-        match frame_loop(Frame(0, t4, player, 0, NativeArray.make_float(16, 0.0), NativeArray.make_f32(16, 0.0), Env.get_int("CF_FLASH", 0)), knobs, scene, n * n, proj, fps0) do
-          Frame(frames, _, p, _, _, _, _) ->
+        match frame_loop(Frame(0, t4, player, 0, NativeArray.make_float(16, 0.0), NativeArray.make_f32(16, 0.0), false, F32Buf.new(64), Env.get_int("CF_FLASH", 0) == 1), knobs, scene, n * n, proj, map_proj, fps0) do
+          Frame(frames, _, p, _, _, _, _, _, _) ->
             let t5 = Win.time()
             println("ran " ++ int_to_string(frames) ++ " frames in " ++ ms(t5 -. t4) ++ " (" ++ float_to_string(int_to_float(frames) /. (t5 -. t4)) ++ " fps, vsync on); player ended at " ++ V.to_string(Player.position(p)))
         end

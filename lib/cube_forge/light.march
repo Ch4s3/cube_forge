@@ -185,7 +185,7 @@ mod CubeForge.Light do
 
   -- ── Incremental relight ───────────────────────────────────────────────────
   --
-  -- The design doc called for an add/remove BFS pair. G59 rules that out: a
+  -- The design doc called for an add/remove BFS pair. G61 rules that out: a
   -- queue needs read-then-write on the same array. What survives the constraint
   -- is a bounded sweep. Light travels at most 15 blocks, so an edit can only
   -- change light within 15 of it — plus the whole column beneath, since capping

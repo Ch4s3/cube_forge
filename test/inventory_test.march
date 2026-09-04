@@ -12,14 +12,18 @@ mod CubeForge.Test.Inventory do
       let i = Inv.new()
       Test.assert_eq_int(Inv.count(i, 1) + Inv.count(i, 2) + Inv.count(i, 3), 0, "empty")
       Test.assert_false(Inv.can_place(i), "no grass to place")
-      Test.assert_true(Inv.can_place(Inv.select(i, 4)), "water is always placeable")
+      Test.assert_false(Inv.can_place(Inv.select(i, 4)), "no water collected yet")
     end
     test "harvest adds, consume removes, water yields nothing" do
       let i = Inv.harvest(Inv.harvest(Inv.harvest(Inv.new(), 3), 3), C.water())
       Test.assert_eq_int(Inv.count(i, 3), 2, "two stone")
       let j = Inv.consume(Inv.select(i, 3))
       Test.assert_eq_int(Inv.count(j, 3), 1, "one left")
-      Test.assert_eq_int(Inv.count(Inv.consume(Inv.select(j, 4)), 3), 1, "consuming water touches nothing")
+      Test.assert_eq_int(Inv.count(Inv.consume(Inv.select(j, 4)), 3), 1, "consuming water leaves stone alone")
+      let k = Inv.harvest(Inv.harvest(Inv.new(), C.water()), 7)   -- a source and a flow cell
+      Test.assert_eq_int(Inv.count(k, 4), 1, "only the source is collected")
+      Test.assert_true(Inv.can_place(Inv.select(k, 4)), "collected water can be placed")
+      Test.assert_eq_int(Inv.count(Inv.consume(Inv.select(k, 4)), 4), 0, "placing consumes it")
     end
     test "hold accumulates on one target and resets on another" do
       let i = Inv.hold(Inv.hold(Inv.new(), 1, 2, 3, 0.2), 1, 2, 3, 0.1)

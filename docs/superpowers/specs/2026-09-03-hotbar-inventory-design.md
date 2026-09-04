@@ -31,3 +31,10 @@
   at f+120 (count goes to 0), then water at f+180. Prints the inventory.
   Frame dump shows hotbar, icons, crosshair.
 - Per-frame allocation stays at 1 outside HUD rebuilds.
+
+## Amendment (2026-09-03 evening): water is collected, not unlimited
+- The water slot has a count. Holding on a water *source* with the water slot
+  selected collects it (+1, cell removed; at sea level the lake refills it);
+  flow cells yield nothing; placing water spends one. Water starts at 0.
+- Targeting rule: the ray ignores water unless the water slot is selected, so
+  mining in or through water never targets water.

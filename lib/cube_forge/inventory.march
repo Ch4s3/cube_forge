@@ -5,16 +5,17 @@ mod CubeForge.Inventory do
   alias CubeForge.Chunk as C
 
   -- grass, dirt, stone, selected slot (1..4; 4 = water), break progress 0..1, target x, y, z (or -1 when none)
-  type Inv = Inv(Int, Int, Int, Int, Float, Int, Int, Int)
+  type Inv = Inv(Int, Int, Int, Int, Int, Float, Int, Int, Int)
 
-  fn new() : Inv do Inv(0, 0, 0, 1, 0.0, 0, -1, 0) end
+  fn new() : Inv do Inv(0, 0, 0, 0, 1, 0.0, 0, -1, 0) end
   fn break_seconds() : Float do 0.4 end
 
-  fn sel(i : Inv) : Int do match i do Inv(_, _, _, s, _, _, _, _) -> s end end
-  fn progress(i : Inv) : Float do match i do Inv(_, _, _, _, p, _, _, _) -> p end end
+  fn sel(i : Inv) : Int do match i do Inv(_, _, _, _, s, _, _, _, _) -> s end end
+  fn progress(i : Inv) : Float do match i do Inv(_, _, _, _, _, p, _, _, _) -> p end end
+  doc "Count for a block id (4 = water sources)."
   fn count(i : Inv, id : Int) : Int do
     match i do
-      Inv(g, d, s, _, _, _, _, _) -> if id == 1 do g else if id == 2 do d else if id == 3 do s else 0 end end end
+      Inv(g, d, s, wt, _, _, _, _, _) -> if id == 1 do g else if id == 2 do d else if id == 3 do s else if id == 4 do wt else 0 end end end end
     end
   end
   doc "Block id in the selected slot."
@@ -23,27 +24,27 @@ mod CubeForge.Inventory do
   @[no_alloc]
   fn select(i : Inv, slot : Int) : Inv do
     if slot < 1 || slot > 4 do i
-    else match i do Inv(g, d, s, _, p, x, y, z) -> Inv(g, d, s, slot, p, x, y, z) end end
+    else match i do Inv(g, d, s, wt, _, p, x, y, z) -> Inv(g, d, s, wt, slot, p, x, y, z) end end
   end
 
-  doc "True if the selected block can be placed (water always; solids need a count)."
-  fn can_place(i : Inv) : Bool do sel(i) == 4 || count(i, sel(i)) > 0 end
+  doc "True if the selected block can be placed (every slot needs a count now, water included)."
+  fn can_place(i : Inv) : Bool do count(i, sel(i)) > 0 end
 
-  doc "Consume one of the selected block (no-op for water)."
+  doc "Consume one of the selected block."
   fn consume(i : Inv) : Inv do
     match i do
-      Inv(g, d, s, sl, p, x, y, z) ->
-        if sl == 1 do Inv(g - 1, d, s, sl, p, x, y, z) else if sl == 2 do Inv(g, d - 1, s, sl, p, x, y, z)
-        else if sl == 3 do Inv(g, d, s - 1, sl, p, x, y, z) else i end end end
+      Inv(g, d, s, wt, sl, p, x, y, z) ->
+        if sl == 1 do Inv(g - 1, d, s, wt, sl, p, x, y, z) else if sl == 2 do Inv(g, d - 1, s, wt, sl, p, x, y, z)
+        else if sl == 3 do Inv(g, d, s - 1, wt, sl, p, x, y, z) else if sl == 4 do Inv(g, d, s, wt - 1, sl, p, x, y, z) else i end end end end
     end
   end
 
-  doc "Add the yield of a broken block: one of its type for solids, nothing for water."
+  doc "Add the yield of a broken block: one of its type for solids, one water for a source; flow cells yield nothing."
   fn harvest(i : Inv, id : Int) : Inv do
     match i do
-      Inv(g, d, s, sl, p, x, y, z) ->
-        if id == 1 do Inv(g + 1, d, s, sl, p, x, y, z) else if id == 2 do Inv(g, d + 1, s, sl, p, x, y, z)
-        else if id == 3 do Inv(g, d, s + 1, sl, p, x, y, z) else i end end end
+      Inv(g, d, s, wt, sl, p, x, y, z) ->
+        if id == 1 do Inv(g + 1, d, s, wt, sl, p, x, y, z) else if id == 2 do Inv(g, d + 1, s, wt, sl, p, x, y, z)
+        else if id == 3 do Inv(g, d, s + 1, wt, sl, p, x, y, z) else if C.is_source(id) do Inv(g, d, s, wt + 1, sl, p, x, y, z) else i end end end end
     end
   end
 
@@ -51,17 +52,17 @@ mod CubeForge.Inventory do
   -- Advance breaking on target (x, y, z) by [dt]; a different target restarts. Returns the updated Inv.
   fn hold(i : Inv, x : Int, y : Int, z : Int, dt : Float) : Inv do
     match i do
-      Inv(g, d, s, sl, p, tx, ty, tz) ->
+      Inv(g, d, s, wt, sl, p, tx, ty, tz) ->
         let same = tx == x && ty == y && tz == z
         let p1 = if same do p +. dt /. break_seconds() else dt /. break_seconds() end
-        Inv(g, d, s, sl, if p1 > 1.0 do 1.0 else p1 end, x, y, z)
+        Inv(g, d, s, wt, sl, if p1 > 1.0 do 1.0 else p1 end, x, y, z)
     end
   end
 
   @[no_alloc]
   -- Release the button / lose the target: progress resets.
   fn release(i : Inv) : Inv do
-    match i do Inv(g, d, s, sl, _, _, _, _) -> Inv(g, d, s, sl, 0.0, 0, -1, 0) end
+    match i do Inv(g, d, s, wt, sl, _, _, _, _) -> Inv(g, d, s, wt, sl, 0.0, 0, -1, 0) end
   end
 
   fn is_complete(i : Inv) : Bool do progress(i) >= 1.0 end
@@ -69,7 +70,7 @@ mod CubeForge.Inventory do
   doc "A small integer that changes whenever the HUD needs a rebuild."
   fn hud_key(i : Inv) : Int do
     match i do
-      Inv(g, d, s, sl, p, _, _, _) -> ((g * 1000 + d) * 1000 + s) * 100 + sl * 20 + float_to_int(p *. 16.0)
+      Inv(g, d, s, wt, sl, p, _, _, _) -> (((g * 1000 + d) * 1000 + s) * 1000 + wt) * 100 + sl * 20 + float_to_int(p *. 16.0)
     end
   end
 

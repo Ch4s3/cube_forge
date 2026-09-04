@@ -27,29 +27,35 @@ mod CubeForge.Raycast do
     else 1000000000.0 end end
   end
 
+  -- [ignore_water]: pass through water cells (used while the eye is submerged).
+  pfn blocks_ray(w : CubeForge.World.World, x : Int, y : Int, z : Int, ignore_water : Bool) : Bool do
+    let id = W.block_at(w, x, y, z)
+    if id == 0 do false else if ignore_water do !CubeForge.Chunk.is_water(id) else true end end
+  end
+
   pfn step(w : CubeForge.World.World, x : Int, y : Int, z : Int,
            sx : Int, sy : Int, sz : Int, tmx : Float, tmy : Float, tmz : Float,
-           tdx : Float, tdy : Float, tdz : Float, max_t : Float, last_nx : Int, last_ny : Int, last_nz : Int, n : Int) : Hit do
+           tdx : Float, tdy : Float, tdz : Float, max_t : Float, last_nx : Int, last_ny : Int, last_nz : Int, n : Int, ignore_water : Bool) : Hit do
     if n > 256 do miss()
-    else if W.solid_at(w, x, y, z) do Hit(true, x, y, z, last_nx, last_ny, last_nz)
+    else if blocks_ray(w, x, y, z, ignore_water) do Hit(true, x, y, z, last_nx, last_ny, last_nz)
     else
       -- advance along the axis whose boundary is nearest
       if tmx < tmy && tmx < tmz do
-        if tmx > max_t do miss() else step(w, x + sx, y, z, sx, sy, sz, tmx +. tdx, tmy, tmz, tdx, tdy, tdz, max_t, 0 - sx, 0, 0, n + 1) end
+        if tmx > max_t do miss() else step(w, x + sx, y, z, sx, sy, sz, tmx +. tdx, tmy, tmz, tdx, tdy, tdz, max_t, 0 - sx, 0, 0, n + 1, ignore_water) end
       else if tmy < tmz do
-        if tmy > max_t do miss() else step(w, x, y + sy, z, sx, sy, sz, tmx, tmy +. tdy, tmz, tdx, tdy, tdz, max_t, 0, 0 - sy, 0, n + 1) end
+        if tmy > max_t do miss() else step(w, x, y + sy, z, sx, sy, sz, tmx, tmy +. tdy, tmz, tdx, tdy, tdz, max_t, 0, 0 - sy, 0, n + 1, ignore_water) end
       else
-        if tmz > max_t do miss() else step(w, x, y, z + sz, sx, sy, sz, tmx, tmy, tmz +. tdz, tdx, tdy, tdz, max_t, 0, 0, 0 - sz, n + 1) end
+        if tmz > max_t do miss() else step(w, x, y, z + sz, sx, sy, sz, tmx, tmy, tmz +. tdz, tdx, tdy, tdz, max_t, 0, 0, 0 - sz, n + 1, ignore_water) end
       end end
     end end
   end
 
   -- First solid block along the ray from (ox, oy, oz) in direction (dx, dy, dz), within max_dist.
-  fn cast(w : CubeForge.World.World, ox : Float, oy : Float, oz : Float, dx : Float, dy : Float, dz : Float, max_dist : Float) : Hit do
+  fn cast(w : CubeForge.World.World, ox : Float, oy : Float, oz : Float, dx : Float, dy : Float, dz : Float, max_dist : Float, ignore_water : Bool) : Hit do
     step(w, float_to_int(Math.floor(ox)), float_to_int(Math.floor(oy)), float_to_int(Math.floor(oz)),
          sign(dx), sign(dy), sign(dz),
          t_max0(ox, dx), t_max0(oy, dy), t_max0(oz, dz),
-         t_delta(dx), t_delta(dy), t_delta(dz), max_dist, 0, 0, 0, 0)
+         t_delta(dx), t_delta(dy), t_delta(dz), max_dist, 0, 0, 0, 0, ignore_water)
   end
 
 end

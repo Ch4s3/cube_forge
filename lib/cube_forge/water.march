@@ -126,18 +126,27 @@ mod CubeForge.Water do
     if C.is_water(n) && supported(c, e, x, y, z) do C.level_of(n) - 1 else 0 end
   end
 
+  -- Lakes are infinite: at or below sea level, a cell touching a source (beside it, or
+  -- under one) becomes a source itself, so a dug pit connected to a lake fills to the
+  -- lake's level. Above sea level only the finite-spread rule applies.
+  pfn source_neighbour(c : CubeForge.Chunk.Chunk, e : NativeU8Arr, x : Int, y : Int, z : Int) : Bool do
+    y <= C.sea_level() && (C.is_source(cell(c, e, x + 1, y, z)) || C.is_source(cell(c, e, x - 1, y, z))
+      || C.is_source(cell(c, e, x, y, z + 1)) || C.is_source(cell(c, e, x, y, z - 1)) || C.is_source(cell(c, e, x, y + 1, z)))
+  end
+
   -- Process one dirty cell: compute the level it should have from its neighbours.
   pfn process(st : Step, x : Int, y : Int, z : Int) : Step do
     let c = step_sim_chunk(st)
     let e = match step_sim(st) do Sim(_, ed, _, _, _, _) -> ed end
     let id = C.get(c, x, y, z)
     if C.is_source(id) || (id != 0 && !C.is_water(id)) do st
+    else if source_neighbour(c, e, x, y, z) do set_cell(st, x, y, z, C.water())
     else
       let from_above = if C.is_water(cell(c, e, x, y + 1, z)) do 7 else 0 end
       let lvl = max4(from_above, contrib(c, e, x + 1, y, z), contrib(c, e, x - 1, y, z), contrib(c, e, x, y, z + 1), contrib(c, e, x, y, z - 1))
       let new_id = if lvl < 1 do 0 else C.id_of_level(lvl) end
       if new_id != id do set_cell(st, x, y, z, new_id) else st end
-    end
+    end end
   end
 
   pfn max4(a : Int, b : Int, c : Int, d : Int, e : Int) : Int do
