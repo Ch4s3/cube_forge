@@ -4,73 +4,102 @@ mod CubeForge.Inventory do
 
   alias CubeForge.Chunk as C
 
-  -- grass, dirt, stone, selected slot (1..4; 4 = water), break progress 0..1, target x, y, z (or -1 when none)
-  type Inv = Inv(Int, Int, Int, Int, Int, Float, Int, Int, Int)
+  -- Slots map 1:1 to placeable blocks: 1 grass, 2 dirt, 3 stone, 4 water, 5 sand,
+  -- 6 snow, 7 granite. Counts per slot, then selected slot, break progress, target x, y, z.
+  type Inv = Inv(Int, Int, Int, Int, Int, Int, Int, Int, Float, Int, Int, Int)
 
-  fn new() : Inv do Inv(0, 0, 0, 0, 1, 0.0, 0, -1, 0) end
+  fn slots() : Int do 7 end
+  fn new() : Inv do Inv(0, 0, 0, 0, 0, 0, 0, 1, 0.0, 0, -1, 0) end
   fn break_seconds() : Float do 0.4 end
 
-  fn sel(i : Inv) : Int do match i do Inv(_, _, _, _, s, _, _, _, _) -> s end end
-  fn progress(i : Inv) : Float do match i do Inv(_, _, _, _, _, p, _, _, _) -> p end end
-  doc "Count for a block id (4 = water sources)."
-  fn count(i : Inv, id : Int) : Int do
+  fn sel(i : Inv) : Int do match i do Inv(_, _, _, _, _, _, _, s, _, _, _, _) -> s end end
+  fn progress(i : Inv) : Float do match i do Inv(_, _, _, _, _, _, _, _, p, _, _, _) -> p end end
+
+  doc "Block id placed by hotbar slot [slot] (1-7)."
+  fn block_of_slot(slot : Int) : Int do
+    if slot == 4 do C.water()
+    else if slot == 5 do C.sand()
+    else if slot == 6 do C.snow()
+    else if slot == 7 do C.granite()
+    else slot end end end end
+  end
+
+  doc "Hotbar slot a broken block goes into, or 0 if it is not collectable."
+  fn slot_of_block(id : Int) : Int do
+    if id == 1 || id == 2 || id == 3 do id
+    else if C.is_source(id) do 4
+    else if id == C.sand() do 5
+    else if id == C.snow() do 6
+    else if id == C.granite() do 7
+    else 0 end end end end end
+  end
+
+  doc "Count held in hotbar slot [slot] (1-7)."
+  fn count(i : Inv, slot : Int) : Int do
     match i do
-      Inv(g, d, s, wt, _, _, _, _, _) -> if id == 1 do g else if id == 2 do d else if id == 3 do s else if id == 4 do wt else 0 end end end end
+      Inv(c1, c2, c3, c4, c5, c6, c7, _, _, _, _, _) ->
+        if slot == 1 do c1 else if slot == 2 do c2 else if slot == 3 do c3 else if slot == 4 do c4
+        else if slot == 5 do c5 else if slot == 6 do c6 else if slot == 7 do c7 else 0 end end end end end end end
     end
   end
+
+  -- Add [d] to slot [slot]; slot 0 (a block that is not collectable) is a no-op.
+  pfn add(i : Inv, slot : Int, d : Int) : Inv do
+    match i do
+      Inv(c1, c2, c3, c4, c5, c6, c7, sl, p, x, y, z) ->
+        if slot == 1 do Inv(c1 + d, c2, c3, c4, c5, c6, c7, sl, p, x, y, z)
+        else if slot == 2 do Inv(c1, c2 + d, c3, c4, c5, c6, c7, sl, p, x, y, z)
+        else if slot == 3 do Inv(c1, c2, c3 + d, c4, c5, c6, c7, sl, p, x, y, z)
+        else if slot == 4 do Inv(c1, c2, c3, c4 + d, c5, c6, c7, sl, p, x, y, z)
+        else if slot == 5 do Inv(c1, c2, c3, c4, c5 + d, c6, c7, sl, p, x, y, z)
+        else if slot == 6 do Inv(c1, c2, c3, c4, c5, c6 + d, c7, sl, p, x, y, z)
+        else if slot == 7 do Inv(c1, c2, c3, c4, c5, c6, c7 + d, sl, p, x, y, z)
+        else i end end end end end end end
+    end
+  end
+
   doc "Block id in the selected slot."
-  fn selected_id(i : Inv) : Int do let s = sel(i) if s == 4 do C.water() else s end end
+  fn selected_id(i : Inv) : Int do block_of_slot(sel(i)) end
 
   @[no_alloc]
   fn select(i : Inv, slot : Int) : Inv do
-    if slot < 1 || slot > 4 do i
-    else match i do Inv(g, d, s, wt, _, p, x, y, z) -> Inv(g, d, s, wt, slot, p, x, y, z) end end
+    if slot < 1 || slot > slots() do i
+    else match i do Inv(c1, c2, c3, c4, c5, c6, c7, _, p, x, y, z) -> Inv(c1, c2, c3, c4, c5, c6, c7, slot, p, x, y, z) end end
   end
 
-  doc "True if the selected block can be placed (every slot needs a count now, water included)."
+  doc "True if the selected slot holds at least one block."
   fn can_place(i : Inv) : Bool do count(i, sel(i)) > 0 end
 
   doc "Consume one of the selected block."
-  fn consume(i : Inv) : Inv do
-    match i do
-      Inv(g, d, s, wt, sl, p, x, y, z) ->
-        if sl == 1 do Inv(g - 1, d, s, wt, sl, p, x, y, z) else if sl == 2 do Inv(g, d - 1, s, wt, sl, p, x, y, z)
-        else if sl == 3 do Inv(g, d, s - 1, wt, sl, p, x, y, z) else if sl == 4 do Inv(g, d, s, wt - 1, sl, p, x, y, z) else i end end end end
-    end
-  end
+  fn consume(i : Inv) : Inv do add(i, sel(i), -1) end
 
-  doc "Add the yield of a broken block: one of its type for solids, one water for a source; flow cells yield nothing."
-  fn harvest(i : Inv, id : Int) : Inv do
-    match i do
-      Inv(g, d, s, wt, sl, p, x, y, z) ->
-        if id == 1 do Inv(g + 1, d, s, wt, sl, p, x, y, z) else if id == 2 do Inv(g, d + 1, s, wt, sl, p, x, y, z)
-        else if id == 3 do Inv(g, d, s + 1, wt, sl, p, x, y, z) else if C.is_source(id) do Inv(g, d, s, wt + 1, sl, p, x, y, z) else i end end end end
-    end
-  end
+  doc "Add the yield of a broken block: one of its own kind, or nothing if not collectable."
+  fn harvest(i : Inv, id : Int) : Inv do add(i, slot_of_block(id), 1) end
 
-  @[no_alloc]
-  -- Advance breaking on target (x, y, z) by [dt]; a different target restarts. Returns the updated Inv.
+  -- Advance breaking on target (x, y, z) by [dt]; a different target restarts.
   fn hold(i : Inv, x : Int, y : Int, z : Int, dt : Float) : Inv do
     match i do
-      Inv(g, d, s, wt, sl, p, tx, ty, tz) ->
+      Inv(c1, c2, c3, c4, c5, c6, c7, sl, p, tx, ty, tz) ->
         let same = tx == x && ty == y && tz == z
         let p1 = if same do p +. dt /. break_seconds() else dt /. break_seconds() end
-        Inv(g, d, s, wt, sl, if p1 > 1.0 do 1.0 else p1 end, x, y, z)
+        Inv(c1, c2, c3, c4, c5, c6, c7, sl, if p1 > 1.0 do 1.0 else p1 end, x, y, z)
     end
   end
 
   @[no_alloc]
   -- Release the button / lose the target: progress resets.
   fn release(i : Inv) : Inv do
-    match i do Inv(g, d, s, wt, sl, _, _, _, _) -> Inv(g, d, s, wt, sl, 0.0, 0, -1, 0) end
+    match i do Inv(c1, c2, c3, c4, c5, c6, c7, sl, _, _, _, _) -> Inv(c1, c2, c3, c4, c5, c6, c7, sl, 0.0, 0, -1, 0) end
   end
 
   fn is_complete(i : Inv) : Bool do progress(i) >= 1.0 end
 
+
   doc "A small integer that changes whenever the HUD needs a rebuild."
   fn hud_key(i : Inv) : Int do
     match i do
-      Inv(g, d, s, wt, sl, p, _, _, _) -> (((g * 1000 + d) * 1000 + s) * 1000 + wt) * 100 + sl * 20 + float_to_int(p *. 16.0)
+      Inv(c1, c2, c3, c4, c5, c6, c7, sl, p, _, _, _) ->
+        ((((((c1 * 100 + c2) * 100 + c3) * 100 + c4) * 100 + c5) * 100 + c6) * 100 + c7) * 1000 + sl * 20 + float_to_int(p *. 16.0)
     end
   end
 

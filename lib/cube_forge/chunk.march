@@ -62,6 +62,28 @@ mod CubeForge.Chunk do
   @[no_alloc]
   fn set_idx(c : Chunk, i : Int, v : Int) : Chunk do match c do Chunk(a) -> Chunk(NativeArray.set_u8(a, i, v)) end end
   fn sea_level() : Int do 62 end
+  -- Solid ids start at 12: water occupies 4..11 (a source plus 7 flow levels).
+  fn sand() : Int do 12 end
+  fn snow() : Int do 13 end
+  doc "Granite: the rock exposed on cliff faces, distinct from the stone you mine underground."
+  fn granite() : Int do 14 end
+
+  doc """
+  Surface block for a column of height [h] whose steepest neighbour differs by
+  [slope]. Ordered so a rock face beats altitude, and a cliff beats a beach.
+  """
+  fn surface_id(h : Int, slope : Int) : Int do
+    if slope >= CubeForge.Noise.cliff_slope() do granite()
+    else if h >= CubeForge.Noise.snow_line() do snow()
+    else if h <= sea_level() + 1 && h >= sea_level() - 5 && slope <= 1 do sand()
+    else if h < sea_level() - 5 do 2      -- lake and sea bed below the sandy shallows
+    else 1 end end end end
+  end
+
+  doc "Block directly beneath the surface (4 deep); stone below that."
+  fn subsurface_id(surface : Int) : Int do
+    if surface == sand() do sand() else if surface == granite() do granite() else 2 end end
+  end
 
   -- ── M2 test terrain: a bumpy surface so every face direction is exercised ──
   pfn height_at(x : Int, z : Int) : Int do
@@ -70,13 +92,25 @@ mod CubeForge.Chunk do
     64 + float_to_int(3.0 *. Math.sin(fx *. 0.5) +. 2.0 *. Math.cos(fz *. 0.7)) + (if (x + z) % 7 == 0 do 2 else 0 end)
   end
 
-  -- Fill terrain up to [top], then water from top+1 up to sea level.
-  pfn fill_column(c : Chunk, x : Int, z : Int, y : Int, top : Int) : Chunk do
+  -- Fill terrain up to [top] with [surface] on top and [sub] just beneath it, then
+  -- water from top+1 up to sea level.
+  pfn fill_column_mat(c : Chunk, x : Int, z : Int, y : Int, top : Int, surface : Int, sub : Int) : Chunk do
     if y > top do fill_water(c, x, z, top + 1)
     else
-      let id = if y == top do 1 else if y > top - 3 do 2 else 3 end end
-      fill_column(set(c, x, y, z, id), x, z, y + 1, top)
+      let id = if y == top do surface else if y > top - 4 do sub else 3 end end
+      fill_column_mat(set(c, x, y, z, id), x, z, y + 1, top, surface, sub)
     end
+  end
+
+  -- Grass/dirt column, for the M2 test terrain.
+  pfn fill_column(c : Chunk, x : Int, z : Int, y : Int, top : Int) : Chunk do
+    fill_column_mat(c, x, z, y, top, 1, 2)
+  end
+
+  -- One generated column: height and slope decide the materials.
+  pfn fill_terrain_column(c : Chunk, x : Int, z : Int, wx : Int, wz : Int, seed : Int, h : Int) : Chunk do
+    let sfc = surface_id(h, CubeForge.Noise.slope(wx, wz, seed))
+    fill_column_mat(c, x, z, 0, h, sfc, subsurface_id(sfc))
   end
 
   pfn fill_water(c : Chunk, x : Int, z : Int, y : Int) : Chunk do
@@ -102,10 +136,10 @@ mod CubeForge.Chunk do
       let x = i % 16
       let z = i / 16
       let hs = CubeForge.Noise.height_x4(wx0 + x, wz0 + z, seed)
-      let c1 = fill_column(c, x, z, 0, float_to_int(Simd.extract_f32x4(hs, 0)))
-      let c2 = fill_column(c1, x + 1, z, 0, float_to_int(Simd.extract_f32x4(hs, 1)))
-      let c3 = fill_column(c2, x + 2, z, 0, float_to_int(Simd.extract_f32x4(hs, 2)))
-      let c4 = fill_column(c3, x + 3, z, 0, float_to_int(Simd.extract_f32x4(hs, 3)))
+      let c1 = fill_terrain_column(c, x, z, wx0 + x, wz0 + z, seed, float_to_int(Simd.extract_f32x4(hs, 0)))
+      let c2 = fill_terrain_column(c1, x + 1, z, wx0 + x + 1, wz0 + z, seed, float_to_int(Simd.extract_f32x4(hs, 1)))
+      let c3 = fill_terrain_column(c2, x + 2, z, wx0 + x + 2, wz0 + z, seed, float_to_int(Simd.extract_f32x4(hs, 2)))
+      let c4 = fill_terrain_column(c3, x + 3, z, wx0 + x + 3, wz0 + z, seed, float_to_int(Simd.extract_f32x4(hs, 3)))
       fill_noise_go(c4, i + 4, wx0, wz0, seed)
     end
   end
@@ -119,7 +153,7 @@ mod CubeForge.Chunk do
     else
       let x = i % 16
       let z = i / 16
-      fill_scalar_go(fill_column(c, x, z, 0, CubeForge.Noise.height(wx0 + x, wz0 + z, seed)), i + 1, wx0, wz0, seed)
+      fill_scalar_go(fill_terrain_column(c, x, z, wx0 + x, wz0 + z, seed, CubeForge.Noise.height(wx0 + x, wz0 + z, seed)), i + 1, wx0, wz0, seed)
     end
   end
   fn generate_scalar(wx0 : Int, wz0 : Int, seed : Int) : Chunk do fill_scalar_go(new(), 0, wx0, wz0, seed) end

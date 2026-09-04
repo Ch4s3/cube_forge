@@ -53,7 +53,8 @@ mod CubeForge do
         let k = Inv.hud_key(inv)
         if k == key do u
         else
-          let hb1 = Hud.build_hotbar(hb, Inv.sel(inv), Inv.count(inv, 1), Inv.count(inv, 2), Inv.count(inv, 3), Inv.count(inv, 4), Inv.progress(inv))
+          let hb1 = Hud.build_hotbar(hb, Inv.sel(inv), Inv.count(inv, 1), Inv.count(inv, 2), Inv.count(inv, 3), Inv.count(inv, 4),
+                                     Inv.count(inv, 5), Inv.count(inv, 6), Inv.count(inv, 7), Inv.progress(inv))
           Win.gfx_upload(252, F32Buf.storage(hb1), F32Buf.len(hb1))
           let ic1 = if key == -1 do
             let i1 = Hud.build_icons(ic)
@@ -478,7 +479,8 @@ mod CubeForge do
   pfn scene_with_ui(sc, u : Ui) do match sc do Scene(w, c, o, h, _, p, f, m) -> Scene(w, c, o, h, u, p, f, m) end end
   fn inv_string(sc) : String do
     let i = ui_inv(scene_ui(sc))
-    "inv grass=" ++ int_to_string(Inv.count(i, 1)) ++ " dirt=" ++ int_to_string(Inv.count(i, 2)) ++ " stone=" ++ int_to_string(Inv.count(i, 3)) ++ " water=" ++ int_to_string(Inv.count(i, 4)) ++ " sel=" ++ int_to_string(Inv.sel(i)) ++ " progress=" ++ float_to_string(Inv.progress(i))
+    "inv grass=" ++ int_to_string(Inv.count(i, 1)) ++ " dirt=" ++ int_to_string(Inv.count(i, 2)) ++ " stone=" ++ int_to_string(Inv.count(i, 3)) ++ " water=" ++ int_to_string(Inv.count(i, 4))
+      ++ " sand=" ++ int_to_string(Inv.count(i, 5)) ++ " snow=" ++ int_to_string(Inv.count(i, 6)) ++ " granite=" ++ int_to_string(Inv.count(i, 7)) ++ " sel=" ++ int_to_string(Inv.sel(i)) ++ " progress=" ++ float_to_string(Inv.progress(i))
   end
 
   pfn scene_counts(sc) : NativeIntArr do match sc do Scene(_, c, _, _, _, _, _, _) -> c end end
@@ -515,7 +517,14 @@ mod CubeForge do
   -- Gather this frame's input into a value the (Input-cap-free) Player module can consume.
   -- Block selection: keys 1-4; 0 when none is pressed this frame.
   pfn selected_key() : Int do
-    if In.key(In.key_1()) do 1 else if In.key(In.key_2()) do 2 else if In.key(In.key_3()) do 3 else if In.key(In.key_4()) do 4 else 0 end end end end
+    if In.key(In.key_1()) do 1
+    else if In.key(In.key_2()) do 2
+    else if In.key(In.key_3()) do 3
+    else if In.key(In.key_4()) do 4
+    else if In.key(In.key_5()) do 5
+    else if In.key(In.key_6()) do 6
+    else if In.key(In.key_7()) do 7
+    else 0 end end end end end end end
   end
 
   @[no_alloc(assume)]
@@ -782,11 +791,58 @@ mod CubeForge do
     List.fold_left(ms, 0, fn (acc, m) -> acc + Mesher.vertex_count(Mesher.opaque_buf(m)) + Mesher.vertex_count(Mesher.water_buf(m)))
   end
 
+  -- CF_TERRAIN_STATS=1: sample the generator over the world and report height and
+  -- surface-material distributions, so terrain tuning is measured rather than eyeballed.
+  pfn stats_go(n : Int, i : Int, seed : Int, lo : Int, hi : Int, sum : Int,
+               grass : Int, sand : Int, snow : Int, granite : Int, under : Int) : Unit do
+    let span = 16 * n
+    if i >= span * span / 16 do
+      let cols = span * span / 16
+      println("  height min=" ++ int_to_string(lo) ++ " max=" ++ int_to_string(hi) ++ " mean=" ++ int_to_string(sum / cols)
+              ++ "  (sea level " ++ int_to_string(Chunk.sea_level()) ++ ", snow line " ++ int_to_string(CubeForge.Noise.snow_line()) ++ ")")
+      println("  surface: grass " ++ int_to_string(grass * 100 / cols) ++ "%  sand " ++ int_to_string(sand * 100 / cols)
+              ++ "%  granite " ++ int_to_string(granite * 100 / cols) ++ "%  snow " ++ int_to_string(snow * 100 / cols)
+              ++ "%  underwater " ++ int_to_string(under * 100 / cols) ++ "%")
+    else
+      -- sample every 4th column in each direction
+      let wx = (i % (span / 4)) * 4
+      let wz = (i / (span / 4)) * 4
+      let h = CubeForge.Noise.height(wx, wz, seed)
+      let sfc = Chunk.surface_id(h, CubeForge.Noise.slope(wx, wz, seed))
+      stats_go(n, i + 1, seed,
+               if h < lo do h else lo end, if h > hi do h else hi end, sum + h,
+               if sfc == 1 do grass + 1 else grass end,
+               if sfc == Chunk.sand() do sand + 1 else sand end,
+               if sfc == Chunk.snow() do snow + 1 else snow end,
+               if sfc == Chunk.granite() do granite + 1 else granite end,
+               if h < Chunk.sea_level() do under + 1 else under end)
+    end
+  end
+
+  -- Pick a spawn column near the world centre: the HIGHEST flat, above-water column in a
+  -- 32x32 box. Flat alone is not enough — the floor of a pit is flat, and spawning there
+  -- boxes the camera in; the highest such column is open ground. Returns x + 4096 * z.
+  pfn find_spawn_go(n : Int, i : Int, seed : Int, best : Int, best_h : Int) : Int do
+    let centre = 8 * n
+    if i >= 1024 do if best_h > 0 do best else centre + 4096 * centre end
+    else
+      let cx = centre - 16 + i % 32
+      let cz = centre - 16 + i / 32
+      let h = CubeForge.Noise.height(cx, cz, seed)
+      let ok = h > Chunk.sea_level() + 1 && CubeForge.Noise.slope(cx, cz, seed) <= 1 && h > best_h
+      if ok do find_spawn_go(n, i + 1, seed, cx + 4096 * cz, h)
+      else find_spawn_go(n, i + 1, seed, best, best_h) end
+    end
+  end
+
   fn main(cap : Cap(IO)) : Unit do
     let max_frames = Env.get_int("CF_FRAMES", -1)
     let n = World.size()
     let workers = Env.get_int("CF_WORKERS", System.cpu_count())
-    let seed = Env.get_int("CF_SEED", 7)
+    -- CF_SEED unset: a new world each run, seeded from the clock. The seed is always
+    -- printed, so any world can be reproduced with CF_SEED=<n>.
+    let seed_env = Env.get_int("CF_SEED", -1)
+    let seed = if seed_env >= 0 do seed_env else int_and(System.monotonic_time() * 2654435761 + unix_time_ms(), 1073741823) end
     let headless = Env.get_int("CF_HEADLESS", 0) == 1
     -- `&&` does not short-circuit (GAPS.md G33), so the window open is gated with a nested if.
     let opened = if headless do 1 else Win.open(800, 600, "cube_forge") end
@@ -804,11 +860,13 @@ mod CubeForge do
       let meshes = mesh_all(world, n, workers)
       let t3 = System.monotonic_time()
       let nverts = count_verts(meshes, 0)
+      if Env.get_int("CF_TERRAIN_STATS", 0) == 1 do stats_go(n, 0, seed, 999, 0, 0, 0, 0, 0, 0, 0) else () end
       if headless do
         let tn0 = System.monotonic_time()
         let naive_verts = mesh_all_naive(world, n, workers)
         println("  naive mesher for comparison: " ++ int_to_string(System.monotonic_time() - tn0) ++ " ms wall, " ++ int_to_string(naive_verts) ++ " vertices")
       else () end
+      println("seed " ++ int_to_string(seed) ++ (if seed_env >= 0 do " (CF_SEED)" else " (random; set CF_SEED to reproduce)" end))
       println("world " ++ int_to_string(n) ++ "x" ++ int_to_string(n) ++ " chunks, " ++ int_to_string(workers) ++ " workers, "
               ++ int_to_string(Env.get_int("MARCH_NUM_SCHEDULERS", 4)) ++ " scheduler threads (MARCH_NUM_SCHEDULERS)")
       println("  terrain scalar noise: " ++ int_to_string(t1 - t0) ++ " ms   terrain F32x4 noise: " ++ int_to_string(t2 - t1) ++ " ms")
@@ -825,12 +883,14 @@ mod CubeForge do
         let map_proj = M.orthographic(0.0 -. map_half_extent(), map_half_extent(), 0.0 -. map_half_extent(), map_half_extent(), 0.1, 400.0)
         let autoswim = Env.get_int("CF_AUTOSWIM", 0) == 1
         let water_col = World.find_water(world)
-        let spawn_pos = int_to_float(8 * n)
-        let ground_y = int_to_float(World.surface_y(world, 8 * n, 8 * n) + 1)
+        let spawn_col = find_spawn_go(n, 0, seed, 0, 0)
+        let spawn_x = spawn_col % 4096
+        let spawn_z = spawn_col / 4096
+        let ground_y = int_to_float(World.surface_y(world, spawn_x, spawn_z) + 1)
         let player = if autoswim && water_col >= 0 do
           println("autoswim: spawning over water column " ++ int_to_string(water_col % 4096) ++ "," ++ int_to_string(water_col / 4096))
           Player.with_pitch(Player.new(int_to_float(water_col % 4096) +. 0.5, 90.0, int_to_float(water_col / 4096) +. 0.5), -1.4)
-        else Player.with_pitch(Player.new(spawn_pos, ground_y, spawn_pos), -0.1) end
+        else Player.with_pitch(Player.new(int_to_float(spawn_x) +. 0.5, ground_y, int_to_float(spawn_z) +. 0.5), -0.25) end
         if Env.get_int("CF_ALLOC_PROBE", 0) == 1 do alloc_probe(world, proj) else () end
         let t4 = Win.time()
         let knobs = Knobs(max_frames, Env.get_int("CF_DUMP_FRAME", 30), Env.get("CF_DUMP", ""), Env.get_int("CF_AUTOWALK", 0) == 1,

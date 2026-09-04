@@ -76,9 +76,11 @@ mod CubeForge.Hud do
       |> tvert(x0, y0, 0.0, 0.0, layer) |> tvert(x1, y1, 1.0, 1.0, layer) |> tvert(x0, y1, 0.0, 1.0, layer)
   end
 
-  fn slot_w() : Float do 0.16 end
-  fn slot_h() : Float do 0.21 end
-  fn slot_x0(i : Int) : Float do -0.34 +. int_to_float(i) *. 0.17 end
+  fn slots() : Int do 7 end
+  fn slot_w() : Float do 0.14 end
+  fn slot_h() : Float do 0.185 end
+  -- 7 slots of pitch 0.15, centred: leftmost starts at -(7 * 0.15) / 2 + a half-gap
+  fn slot_x0(i : Int) : Float do -0.520 +. int_to_float(i) *. 0.15 end
   fn slot_y0() : Float do -0.97 end
 
   -- one slot: background, selection border, count digits
@@ -94,12 +96,15 @@ mod CubeForge.Hud do
   end
 
   -- Untextured HUD: hotbar slots, selection, counts, crosshair, break progress. Rebuilt in place.
-  fn build_hotbar(b : CubeForge.F32Buf.F32Buf, sel : Int, grass : Int, dirt : Int, stone : Int, water : Int, progress : Float) : CubeForge.F32Buf.F32Buf do
+  fn build_hotbar(b : CubeForge.F32Buf.F32Buf, sel : Int, c1 : Int, c2 : Int, c3 : Int, c4 : Int, c5 : Int, c6 : Int, c7 : Int, progress : Float) : CubeForge.F32Buf.F32Buf do
     let b0 = B.clear(b)
-    let b1 = slot(b0, 0, sel == 1, grass, true)
-    let b2 = slot(b1, 1, sel == 2, dirt, true)
-    let b3 = slot(b2, 2, sel == 3, stone, true)
-    let b4 = slot(b3, 3, sel == 4, water, true)
+    let b1 = slot(b0, 0, sel == 1, c1, true)
+    let b2 = slot(b1, 1, sel == 2, c2, true)
+    let b3 = slot(b2, 2, sel == 3, c3, true)
+    let b3d = slot(b3, 3, sel == 4, c4, true)
+    let b3e = slot(b3d, 4, sel == 5, c5, true)
+    let b3f = slot(b3e, 5, sel == 6, c6, true)
+    let b4 = slot(b3f, 6, sel == 7, c7, true)
     -- crosshair
     let b5 = crect(b4, -0.004, -0.03, 0.004, 0.03, 1.0, 1.0, 1.0)
     let b6 = crect(b5, -0.03, -0.004, 0.03, 0.004, 1.0, 1.0, 1.0)
@@ -114,7 +119,9 @@ mod CubeForge.Hud do
   fn build_icons(b : CubeForge.F32Buf.F32Buf) : CubeForge.F32Buf.F32Buf do
     let pad = 0.03
     let icon = fn (bb, i, layer) -> trect(bb, slot_x0(i) +. pad, slot_y0() +. pad, slot_x0(i) +. slot_w() -. pad, slot_y0() +. slot_h() -. pad, layer)
+    -- slot order: grass, dirt, stone, water, sand, snow, granite -> texture layers
     B.clear(b) |> icon(0, 0.0) |> icon(1, 2.0) |> icon(2, 3.0) |> icon(3, 1.0)
+               |> icon(4, 4.0) |> icon(5, 5.0) |> icon(6, 6.0)
   end
 
   -- 
