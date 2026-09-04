@@ -267,3 +267,37 @@ Verification:
   something the pool introduces.
 - A bare `cmp` on two dumps never matches: the FPS counter differs between any
   two runs. `scratch/cmpframe.py` masks it.
+
+### Fullscreen performance
+
+Measured at 3200x2000 backing (`CF_WIDTH=1600 CF_HEIGHT=1000` on a 2x Retina
+display, 6.4M fragments — a stand-in for fullscreen, which GLFW reports as a
+1920x1200 scaled mode on this machine). Release, `CF_VSYNC=0`, seed 7,
+`CF_SUN=45`.
+
+|                      | before | after | frame time |
+|----------------------|--------|-------|------------|
+| clear weather        | 164 fps | **330 fps** | 6.09 → 3.03 ms |
+| storm (rain + fog)   | 143 fps | **511 fps** | 7.01 → 1.96 ms |
+| true fullscreen, clear | — | 602 fps | |
+| true fullscreen, storm | — | 705 fps | |
+
+At fullscreen the shadow ray-march was **66% of the frame** — rain was only
+0.9 ms of it. Two changes:
+
+1. **Two-level DDA.** A coarse occupancy texture, one texel per 8x8x8 voxels,
+   lets the trace cross open air eight blocks per fetch instead of one; it drops
+   into the fine grid only for cells that contain something. Per-cell solid
+   counts (16 KB) are maintained on block edits so a break can clear a coarse
+   texel exactly rather than conservatively.
+2. **Two weather early-outs.** `shad` is mixed toward 1.0 by `u_overcast`, so
+   above 0.98 the trace was ray-marching 64 blocks and discarding the answer;
+   likewise a fragment the fog has washed out by 98%. Both skip work whose
+   result is provably invisible. This is why the storm case is now *faster* than
+   the clear one.
+
+Neither trades quality. The two-level trace was verified **pixel-identical** to
+the single-level one at `CF_SUN` 12, 30 and 60, and after both a block break and
+a block place (`CF_AUTOEDIT`), which is what exercises the coarse-cell counts.
+
+New knobs: `CF_WIDTH`, `CF_HEIGHT`, `CF_FULLSCREEN=1`, `CF_VSYNC=0`.

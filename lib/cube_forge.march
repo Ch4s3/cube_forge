@@ -778,6 +778,7 @@ mod CubeForge do
             else () end
             println("player at " ++ V.to_string(Player.position(player1)) ++ " on_ground=" ++ (if Player.on_ground(player1) do "true" else "false" end))
             println("  sun level " ++ float_to_string(sun) ++ " dir (" ++ float_to_string(sdx) ++ ", " ++ float_to_string(sdy) ++ ", " ++ float_to_string(sdz) ++ ")  moon " ++ float_to_string(moon))
+            println("  framebuffer " ++ int_to_string(Win.fb_width()) ++ "x" ++ int_to_string(Win.fb_height()) ++ " (" ++ int_to_string(Win.fb_width() * Win.fb_height() / 1000) ++ "k fragments)")
             println("  weather " ++ float_to_string(wx) ++ " (overcast " ++ float_to_string(ov) ++ ", fog " ++ float_to_string(fog_density(wx)) ++ ", bolt " ++ float_to_string(bolt) ++ ", live " ++ int_to_string(live) ++ (if snowing do " snow" else " rain" end) ++ ")")
           else () end
           if frame % 60 == 0 && autowalk do
@@ -973,7 +974,7 @@ mod CubeForge do
     let seed = if seed_env >= 0 do seed_env else int_and(System.monotonic_time() * 2654435761 + unix_time_ms(), 1073741823) end
     let headless = Env.get_int("CF_HEADLESS", 0) == 1
     -- `&&` does not short-circuit (GAPS.md G33), so the window open is gated with a nested if.
-    let opened = if headless do 1 else Win.open(800, 600, "cube_forge") end
+    let opened = if headless do 1 else Win.open(Env.get_int("CF_WIDTH", 800), Env.get_int("CF_HEIGHT", 600), "cube_forge") end
     if opened == 0 do
       println("failed to open window")
     else
