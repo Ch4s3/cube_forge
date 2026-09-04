@@ -159,6 +159,8 @@ static const char *FS =
     "uniform vec3 u_sundir;\n"
     "uniform vec3 u_moondir;\n"
     "uniform int u_unlit;\n"
+    "uniform sampler3D u_occ;\n"
+    "uniform float u_shadow;\n"
     "out vec4 o_color;\n"
     /* The beam shape never varies at runtime, only its position, aim and
      * on/off state, so the cone half-angles are constants rather than uniforms. */
@@ -185,6 +187,38 @@ static const char *FS =
     "const float AMB    = 0.30;\n"
     "const float AMB_UP = 0.08;\n"
     "const float DIRECT = 0.62;\n"
+    /* World dimensions, for turning voxel coordinates into texture coordinates
+     * and for knowing when a ray has left the world. */
+    "const vec3 WORLD = vec3(128.0, 256.0, 128.0);\n"
+    "const int  MAX_STEPS = 256;\n"
+    /* Amanatides-Woo voxel DDA. Returns 1.0 when the ray reaches maxDist without
+     * hitting an occluder, 0.0 when something blocks it. Exact on axis-aligned
+     * voxels: no depth bias, no acne, no peter-panning. */
+    "float trace(vec3 p, vec3 dir, float maxDist){\n"
+    "  if (u_shadow <= 0.0) return 1.0;\n"
+    "  ivec3 v   = ivec3(floor(p));\n"
+    "  ivec3 stp = ivec3(sign(dir));\n"
+    /* An axis the ray does not move along must never step: its tMax stays at
+     * infinity so min() never selects it. */
+    "  bvec3 moving = greaterThan(abs(dir), vec3(1e-8));\n"
+    "  vec3  den    = mix(vec3(1.0), dir, moving);\n"
+    /* Distance to the next voxel boundary per axis. step(0,dir) picks the far
+     * face heading positive and the near face heading negative. */
+    "  vec3  tMax   = mix(vec3(1e30), (vec3(v) + step(0.0, dir) - p) / den, moving);\n"
+    "  vec3  tDelta = mix(vec3(1e30), 1.0 / abs(den), moving);\n"
+    "  for (int i = 0; i < MAX_STEPS; i++){\n"
+    "    float tNow = min(tMax.x, min(tMax.y, tMax.z));\n"
+    "    if (tNow > maxDist) return 1.0;\n"
+    "    if (tMax.x <= tMax.y && tMax.x <= tMax.z)      { v.x += stp.x; tMax.x += tDelta.x; }\n"
+    "    else if (tMax.y <= tMax.z)                     { v.y += stp.y; tMax.y += tDelta.y; }\n"
+    "    else                                           { v.z += stp.z; tMax.z += tDelta.z; }\n"
+    /* Leaving the world sideways or out of the top means the ray escaped; out
+     * of the bottom cannot happen for a light above, but is treated the same. */
+    "    if (v.x < 0 || v.y < 0 || v.z < 0 || v.x >= int(WORLD.x) || v.y >= int(WORLD.y) || v.z >= int(WORLD.z)) return 1.0;\n"
+    "    if (texture(u_occ, (vec3(v) + 0.5) / WORLD).r > 0.5) return 0.0;\n"
+    "  }\n"
+    "  return 1.0;\n"
+    "}\n"
     "void main(){\n"
     "  vec4 t = (u_use_tex == 1) ? texture(u_tex, vec3(v_uv, v_layer)) : vec4(v_uv, v_layer, 1.0);\n"
     "  float moon = clamp((MOON_UNTIL - u_sun) / MOON_UNTIL, 0.0, 1.0);\n"
@@ -193,14 +227,27 @@ static const char *FS =
     "  float ndlm = max(dot(v_normal, u_moondir), 0.0);\n"
     "  vec3  sunc = mix(SUN_WARM, SUN_WHITE, smoothstep(0.0, 0.50, u_sun));\n"
     "  float inten = clamp(u_sun / SET_AT, 0.0, 1.0);\n"
-    "  vec3  sky  = sunc * (inten * (amb + DIRECT * ndls))\n"
-    "             + MOON_TINT * (MOON_LEVEL * moon * (amb + DIRECT * ndlm));\n"
+    /* One directional trace, not two: the sun and moon are opposite ends of one
+     * arc, so only one is ever above the horizon. Skipped entirely when the
+     * face turns away from the light, when the light is out, or when the baked
+     * skylight already says this surface is sealed in the dark. */
+    "  vec3  origin = v_world + v_normal * 0.5;\n"
+    "  float shad = 1.0;\n"
+    "  if (v_shade > 0.001) {\n"
+    "    if (inten > 0.0 && ndls > 0.0)      shad = trace(origin, u_sundir,  u_shadow);\n"
+    "    else if (moon > 0.0 && ndlm > 0.0)  shad = trace(origin, u_moondir, u_shadow);\n"
+    "  }\n"
+    "  vec3  sky  = sunc * (inten * (amb + DIRECT * ndls * shad))\n"
+    "             + MOON_TINT * (MOON_LEVEL * moon * (amb + DIRECT * ndlm * shad));\n"
     "  vec3  baked = v_shade * sky;\n"
     "  vec3  L  = u_eye - v_world;\n"
     "  float d2 = dot(L, L);\n"
     "  vec3  Ln = L * inversesqrt(max(d2, 1e-6));\n"
     "  float spot  = smoothstep(COS_OUTER, COS_INNER, dot(-Ln, u_dir));\n"
     "  float flash = u_flash * spot * max(dot(v_normal, Ln), 0.0) / (1.0 + 0.02 * d2);\n"
+    /* The flashlight gets its own trace, toward the eye, and only when it would
+     * contribute anything at all. */
+    "  if (flash > 0.001) flash *= trace(origin, Ln, min(sqrt(d2), u_shadow));\n"
     "  vec3  world = baked + vec3(flash);\n"
     /* Overlays (HUD, outline, map marker) share this program but are not part of
      * the world: they keep their own vertex shade and skip lighting entirely. */
@@ -220,6 +267,7 @@ static GLuint g_vbo[CF_MAX_MESHES];
 static GLint  g_u_use_tex = -1;
 static GLint  g_u_sun = -1, g_u_eye = -1, g_u_dir = -1, g_u_flash = -1;
 static GLint  g_u_sundir = -1, g_u_moondir = -1, g_u_unlit = -1;
+static GLint  g_u_occ = -1, g_u_shadow = -1;
 static GLuint g_tex = 0;
 
 int64_t cf_gfx_init(void) {
@@ -239,6 +287,9 @@ int64_t cf_gfx_init(void) {
     g_u_sundir = glGetUniformLocation(g_prog, "u_sundir");
     g_u_moondir = glGetUniformLocation(g_prog, "u_moondir");
     g_u_unlit = glGetUniformLocation(g_prog, "u_unlit");
+    g_u_occ = glGetUniformLocation(g_prog, "u_occ");
+    g_u_shadow = glGetUniformLocation(g_prog, "u_shadow");
+    if (getenv("CF_DEBUG")) fprintf(stderr, "cf: uniforms occ=%d shadow=%d sundir=%d unlit=%d\n", g_u_occ, g_u_shadow, g_u_sundir, g_u_unlit);
     glGenVertexArrays(1, &g_vao);
     glGenBuffers(CF_MAX_MESHES, g_vbo);
     glUseProgram(g_prog);
@@ -313,6 +364,55 @@ void cf_gfx_upload_texture(void *arr, int64_t w, int64_t h, int64_t layers) {
     glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_REPEAT);
     glUseProgram(g_prog);
     glUniform1i(g_u_use_tex, 1);
+}
+
+/* ── Occupancy field: the shadow ray-marcher's view of the world ─────────────
+ * One byte per voxel, 1 where a block occludes light, as a GL_TEXTURE_3D on
+ * unit 1 (unit 0 is the block texture array). NEAREST and CLAMP_TO_EDGE: this
+ * is a lookup, not a filtered value, and a ray leaving the world must read the
+ * edge rather than wrap into the far side. */
+static GLuint g_occ = 0;
+static int64_t g_occ_w = 0, g_occ_h = 0, g_occ_d = 0;
+
+void cf_gfx_upload_occupancy(void *arr, int64_t w, int64_t h, int64_t d) {
+    if (narr_len(arr) < w * h * d) { fprintf(stderr, "cf: occupancy array too small\n"); return; }
+    GLint maxdim = 0;
+    glGetIntegerv(GL_MAX_3D_TEXTURE_SIZE, &maxdim);
+    /* GL 3.3 only guarantees 256, and the world's Y is exactly 256. Any real GPU
+     * is far above this, but rendering garbage silently is not acceptable. */
+    if (w > maxdim || h > maxdim || d > maxdim) {
+        fprintf(stderr, "cf: occupancy %lldx%lldx%lld exceeds GL_MAX_3D_TEXTURE_SIZE %d; shadows disabled\n",
+                (long long)w, (long long)h, (long long)d, (int)maxdim);
+        return;
+    }
+    if (!g_occ) glGenTextures(1, &g_occ);
+    g_occ_w = w; g_occ_h = h; g_occ_d = d;
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_3D, g_occ);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage3D(GL_TEXTURE_3D, 0, GL_R8, (GLsizei)w, (GLsizei)h, (GLsizei)d, 0,
+                 GL_RED, GL_UNSIGNED_BYTE, narr_data(arr));
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+    glActiveTexture(GL_TEXTURE0);
+    glUseProgram(g_prog);
+    glUniform1i(g_u_occ, 1);
+}
+
+/* One voxel changed: a single texel beats rebuilding 4 MB. */
+void cf_gfx_set_voxel(int64_t x, int64_t y, int64_t z, int64_t solid) {
+    if (!g_occ) return;
+    if (x < 0 || y < 0 || z < 0 || x >= g_occ_w || y >= g_occ_h || z >= g_occ_d) return;
+    unsigned char v = solid ? 255 : 0;   /* normalized R8: 255 samples as 1.0 */
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_3D, g_occ);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexSubImage3D(GL_TEXTURE_3D, 0, (GLint)x, (GLint)y, (GLint)z, 1, 1, 1,
+                    GL_RED, GL_UNSIGNED_BYTE, &v);
+    glActiveTexture(GL_TEXTURE0);
 }
 
 /* Translucent pass: blend, keep depth test, no depth writes, no culling (water
@@ -437,6 +537,13 @@ void cf_gfx_set_light(double sun, double ex, double ey, double ez,
 
 /* Direction TO the sun and TO the moon, in world space. Normalised here so the
  * caller can pass a raw arc position. Called once per frame with set_light. */
+/* Shadow reach in blocks; 0 disables the trace entirely. */
+void cf_gfx_set_shadow(double dist) {
+    if (!g_prog) return;
+    glUseProgram(g_prog);
+    glUniform1f(g_u_shadow, (float)dist);
+}
+
 void cf_gfx_set_sky(double sx, double sy, double sz, double mx, double my, double mz) {
     if (!g_prog) return;
     double sl = sqrt(sx*sx + sy*sy + sz*sz); if (sl < 1e-9) sl = 1.0;

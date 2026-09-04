@@ -44,6 +44,21 @@ mod CubeForge.Test.Light do
   end
   pfn first_difference(a : NativeU8Arr, b : NativeU8Arr) : Int do first_diff_go(a, b, 0) end
 
+
+  -- First voxel of chunk (cx, cz) where the occupancy field disagrees with
+  -- Light.is_opaque, or -1 when they agree everywhere.
+  pfn occ_mismatch(o : NativeU8Arr, c : CubeForge.Chunk.Chunk, cx : Int, cz : Int, i : Int) : Int do
+    if i >= 65536 do -1
+    else
+      let lx = i % 16
+      let ly = i / 256
+      let lz = (i / 16) % 16
+      let want = if L.is_opaque(C.get_idx(c, i)) do L.occ_solid() else 0 end
+      if NativeArray.get_u8(o, L.occ_index(16 * cx + lx, ly, 16 * cz + lz)) != want do i
+      else occ_mismatch(o, c, cx, cz, i + 1) end
+    end
+  end
+
   describe "Light.index" do
     test "corners map to the ends of the flat range" do
       Test.assert_eq_int(L.index(0, 0, 0), 0, "origin")
@@ -253,6 +268,31 @@ mod CubeForge.Test.Light do
       Test.assert_true(shade_of_face(b, 1.0, 0, n) >= 0.0, "underside still meshes")
       Test.assert_true(CubeForge.World.light_at(w0, 35, 7, 34) > 0, "light spilled under the slab")
       Test.assert_eq_int(CubeForge.World.light_at(w0, 34, 7, 34), 15, "directly under the shaft is full")
+    end
+  end
+
+  describe "Light.occupancy" do
+    test "marks exactly the opaque voxels, and never air or water" do
+      let w = CubeForge.World.generate(8, 1, 1)
+      let o = L.occupancy(w)
+      -- an all-air slab world is the clean case: only the stone layer occludes
+      let sw = slab_world(8)
+      let so = L.occupancy(sw)
+      Test.assert_eq_int(NativeArray.get_u8(so, L.occ_index(40, 8, 40)), L.occ_solid(), "the slab occludes")
+      Test.assert_eq_int(NativeArray.get_u8(so, L.occ_index(40, 9, 40)), 0, "air above does not")
+      Test.assert_eq_int(NativeArray.get_u8(so, L.occ_index(40, 7, 40)), 0, "air below does not")
+      -- water is transparent to light, so it must not cast a shadow
+      let ww = CubeForge.World.set_block(slab_world(8), 40, 20, 40, C.water())
+      let wo = L.occupancy(ww)
+      Test.assert_eq_int(NativeArray.get_u8(wo, L.occ_index(40, 20, 40)), 0, "water does not occlude")
+      Test.assert_true(NativeArray.get_u8(o, L.occ_index(64, 0, 64)) == L.occ_solid(), "bedrock depth of real terrain occludes")
+    end
+
+    test "agrees with is_opaque at every voxel of a chunk" do
+      let w = slab_world(8)
+      let o = L.occupancy(w)
+      let c = CubeForge.World.chunk_at(w, 2, 2)
+      Test.assert_eq_int(occ_mismatch(o, c, 2, 2, 0), -1, "no voxel disagrees with is_opaque")
     end
   end
 

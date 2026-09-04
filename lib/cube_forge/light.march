@@ -285,4 +285,55 @@ mod CubeForge.Light do
     CubeForge.Ffi.Window.u8_blit(copy_field(la2, new()), 0, swept, 0, plen)
   end
 
+  -- ── Occupancy: the shadow ray-marcher's view of the world ─────────────────
+  --
+  -- The light field cannot answer "does this voxel block light": an opaque
+  -- block and an unlit cave floor both read 0 there. This is a separate byte
+  -- per voxel, 1 where a block occludes, uploaded to the GPU as a 3D texture.
+  -- Air and water do not occlude, which falls out of `opacity` rather than
+  -- introducing a second notion of solidity.
+  --
+  -- March never keeps this: it is built once, handed to the shim and dropped.
+  -- A block edit updates a single texel instead, because the new block id
+  -- already says whether it occludes.
+
+  @[no_alloc]
+  fn occludes(id : Int) : Bool do is_opaque(id) end
+
+  @[no_alloc]
+  -- Index into the occupancy buffer. NOT `index`: glTexImage3D reads its data
+  -- as x fastest, then y, then z (offset = x + width*(y + height*z)), while the
+  -- light field is x, then z, then y. The two orders are transposed, and using
+  -- the light field's index here samples the world sideways.
+  fn occ_index(x : {Int | 0 <= _ && _ < 128}, y : {Int | 0 <= _ && _ < 256}, z : {Int | 0 <= _ && _ < 128})
+      : {Int | 0 <= _ && _ < 4194304} do
+    x + 128 * (y + 256 * z)
+  end
+
+  -- One chunk's 65536 voxels, with the chunk fetched once (GAPS.md G64).
+  pfn occ_chunk_go(o : NativeU8Arr, c : CubeForge.Chunk.Chunk, cx : Int, cz : Int, i : Int) : NativeU8Arr do
+    if i >= 65536 do o
+    else
+      let lx = i % 16
+      let ly = i / 256
+      let lz = (i / 16) % 16
+      let v = if occludes(C.get_idx(c, i)) do occ_solid() else 0 end
+      occ_chunk_go(NativeArray.set_u8(o, occ_index(16 * cx + lx, ly, 16 * cz + lz), v), c, cx, cz, i + 1)
+    end
+  end
+
+  pfn occ_go(o : NativeU8Arr, w : CubeForge.World.World, ci : Int, n : Int) : NativeU8Arr do
+    if ci >= n * n do o
+    else occ_go(occ_chunk_go(o, CubeForge.World.chunk_at(w, ci % n, ci / n), ci % n, ci / n, 0), w, ci + 1, n)
+    end
+  end
+
+  doc "Byte stored for an occluding voxel. 255, not 1: the GPU side is a normalized GL_R8 texture, where a stored 1 samples back as 1/255 and would never register as solid."
+  fn occ_solid() : Int do 255 end
+
+  doc "The world's occupancy field: occ_solid() where a voxel blocks light, 0 elsewhere. Built for upload, not retained."
+  fn occupancy(w : CubeForge.World.World) : NativeU8Arr do
+    occ_go(new(), w, 0, CubeForge.World.side(w))
+  end
+
 end

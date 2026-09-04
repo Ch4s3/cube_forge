@@ -389,6 +389,7 @@ mod CubeForge do
       Scene(world, counts, outline, hit, ui, pids, flags, meshes) ->
         let t0 = Win.time()
         let world1 = World.relight_at(World.set_block(world, x, y, z, id), x, y, z)
+        Win.gfx_set_voxel(x, y, z, CubeForge.Light.occludes(id))
         match remesh_cell(world1, x, y, z, counts, meshes, Chunk.new()) do
           Remeshed(c1, m1) ->
             let t1 = Win.time()
@@ -616,13 +617,13 @@ mod CubeForge do
 
   -- Frame loop. `max_frames < 0` means run until the window closes.
   -- Run-time knobs read once, outside the frame loop (an Env read allocates).
-  type Knobs = Knobs(Int, Int, String, Bool, Float, Int, Bool, Int, Int, Int, Float, Int)   -- max_frames, dump_frame, dump_path, autowalk, autospin, autoedit frame (<0 = off), autoswim, autoflow frame (<0 = off), workers, automap frame (<0 = off; forces map view on from this frame, for headless verification), day length in seconds, sun angle override in degrees (<0 = follow the clock)
+  type Knobs = Knobs(Int, Int, String, Bool, Float, Int, Bool, Int, Int, Int, Float, Int, Float)   -- max_frames, dump_frame, dump_path, autowalk, autospin, autoedit frame (<0 = off), autoswim, autoflow frame (<0 = off), workers, automap frame (<0 = off; forces map view on from this frame, for headless verification), day length in seconds, sun angle override in degrees (<0 = follow the clock), shadow reach in blocks (0 = off)
 
   fn frame_loop(f : Frame, k : Knobs, sc, nchunks : Int, proj : NativeFloatArr, map_proj : NativeFloatArr, fps : Fps) : Frame do
     match f do
       Frame(frame, last_t, player, sample, view, vp, map_mode, marker, flash) ->
         match k do
-        Knobs(max_frames, dump_frame, dump_path, autowalk, autospin, autoedit, autoswim, autoflow, workers, automap, day_len, sun_deg) ->
+        Knobs(max_frames, dump_frame, dump_path, autowalk, autospin, autoedit, autoswim, autoflow, workers, automap, day_len, sun_deg, shadow_dist) ->
         if Win.should_close() || (max_frames >= 0 && frame >= max_frames) do
           Frame(frame, last_t, player, sample, view, vp, map_mode, marker, flash)
         else
@@ -690,6 +691,9 @@ mod CubeForge do
                               (0.75 -. 0.38 *. da) *. inten +. 0.045 *. moon,
                               (0.95 -. 0.70 *. da) *. inten +. 0.110 *. moon)
           Win.gfx_set_sky(sdx, sdy, sdz, 0.0 -. sdx, 0.0 -. sdy, 0.0 -. sdz)
+          -- The map view is an overhead diagnostic; shadows there would only
+          -- obscure the terrain it exists to show.
+          Win.gfx_set_shadow(if map_mode1 do 0.0 else shadow_dist end)
           Win.gfx_set_light(sun, V.x(eye), V.y(eye), V.z(eye), V.x(look), V.y(look), V.z(look), flash_now)
           Win.gfx_set_view_proj(render_vp)
           draw_chunks(scene_counts(sc1), 0, nchunks)
@@ -923,6 +927,13 @@ mod CubeForge do
       let world = World.relight_all(world_dark)
       let t2b = System.monotonic_time()
       println("  skylight flood: " ++ int_to_string(t2b - t2) ++ " ms")
+      -- The shadow ray-marcher's view of the world. Built once and handed over;
+      -- March keeps no copy, since a block edit only needs one texel.
+      let occ_ms = if headless do 0 else
+        let to0 = System.monotonic_time()
+        Win.gfx_upload_occupancy(CubeForge.Light.occupancy(world), 128, 256, 128)
+        System.monotonic_time() - to0 end
+      if !headless do println("  occupancy upload: " ++ int_to_string(occ_ms) ++ " ms") else () end
       -- stage 2: meshing (needs neighbours; runs only after stage 1 completed)
       let meshes = mesh_all(world, n, workers)
       let t3 = System.monotonic_time()
@@ -961,7 +972,7 @@ mod CubeForge do
         if Env.get_int("CF_ALLOC_PROBE", 0) == 1 do alloc_probe(world, proj) else () end
         let t4 = Win.time()
         let knobs = Knobs(max_frames, Env.get_int("CF_DUMP_FRAME", 30), Env.get("CF_DUMP", ""), Env.get_int("CF_AUTOWALK", 0) == 1,
-                          int_to_float(Env.get_int("CF_AUTOSPIN", 0)) /. 1000.0 /. Player.mouse_sens(), Env.get_int("CF_AUTOEDIT", -1), autoswim, Env.get_int("CF_AUTOFLOW", -1), workers, Env.get_int("CF_AUTOMAP", -1), int_to_float(Env.get_int("CF_DAY", 1800)), Env.get_int("CF_SUN", -1))
+                          int_to_float(Env.get_int("CF_AUTOSPIN", 0)) /. 1000.0 /. Player.mouse_sens(), Env.get_int("CF_AUTOEDIT", -1), autoswim, Env.get_int("CF_AUTOFLOW", -1), workers, Env.get_int("CF_AUTOMAP", -1), int_to_float(Env.get_int("CF_DAY", 1800)), Env.get_int("CF_SUN", -1), int_to_float(Env.get_int("CF_SHADOW_DIST", 64)))
         let tw0 = Win.time()
         let pids = Array.from_list(spawn_water(n * n - 1, n, seed, Nil))
         println("spawned " ++ int_to_string(n * n) ++ " water actors in " ++ ms(Win.time() -. tw0) ++ " (loads run asynchronously)")

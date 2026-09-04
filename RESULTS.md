@@ -170,3 +170,65 @@ Two findings dominated the flood's cost and are written up in GAPS.md:
 - **G64** — `World.block_at` per voxel (chunk coords re-derived plus a PVec trie
   walk, 727 ns each) was 179 ms of the relight's 217 ms. Hoisting the chunk out
   of the column loop cut seeding 15x and the full flood from 1 724 ms to 521 ms.
+
+## Dynamic shadows (voxel ray-marched)
+
+The world's opacity is uploaded as a 128x256x128 `GL_R8` 3D texture (4 MB) and
+the fragment shader marches an Amanatides-Woo DDA toward the light. One trace
+for the sun or the moon (only one is ever above the horizon), one for the
+flashlight. `CF_SHADOW_DIST` sets the reach in blocks; `0` disables.
+
+| measure | value |
+|---|---|
+| occupancy build + upload | **52 ms**, once at startup |
+| block edit | one `glTexSubImage3D` texel; no re-flood, no remesh |
+| frame rate, 800x600 | 115 fps at reach 0, 24, 64 **and 300** — vsync-bound throughout |
+
+**The cost is below the vsync headroom on this machine even at whole-world
+reach**, so the 64-block default is conservative and could be raised.
+
+### Verification
+
+The DDA is GLSL and cannot be unit-tested. The March side is covered by
+`forge test` (the occupancy buffer agrees with `Light.is_opaque` at every voxel
+of a chunk, and water never occludes). The shader is verified by a scripted
+sweep: fix the world and the camera, vary only the sun angle, and measure how
+much of the frame the shadow pass darkens.
+
+```
+for a in 0 30 55 75 85; do
+  for d in 0 64; do
+    MARCH_PIN_MAIN=1 CF_SEED=7 CF_SUN=$a CF_SHADOW_DIST=$d \
+      CF_FRAMES=8 CF_DUMP_FRAME=5 CF_DUMP=/tmp/q_${a}_$d.bmp ./cube_forge
+  done
+done
+```
+
+| sun angle | pixels shadowed | mean brightness off → on |
+|---|---|---|
+| 0° (overhead) | **0.0%** | 134.9 → 134.9 |
+| 30° | 1.8% | 133.4 → 132.9 |
+| 55° | 10.7% | 128.3 → 124.7 |
+| 75° | **24.6%** | 103.5 → 99.2 |
+| 85° | 4.0% | 44.3 → 43.1 |
+
+The shape of that curve is the correctness argument. **0.0% with the sun
+overhead** is the load-bearing number: nothing on open terrain casts a shadow
+straight down, so any self-shadowing or ray-origin bug would show up here as
+spurious darkening. Coverage then rises as the sun lowers and lengthens
+shadows, and falls again at 85° because the light itself is nearly out and
+there is little brightness left to remove.
+
+### Two bugs this shook out, both silent
+
+- **Transposed axes.** The light field is indexed `x + 128*(z + 128*y)`, but
+  `glTexImage3D` reads its data as `x + width*(y + height*z)` — x, then *y*,
+  then z. Uploading the light field's layout samples the world sideways. The
+  occupancy buffer has its own `occ_index` for exactly this reason.
+- **`GL_R8` is normalized.** A stored byte of `1` samples back as `1/255`, so
+  the shader's `> 0.5` occluder test was never true and nothing cast a shadow
+  at all. Occluders are stored as `255`.
+
+Both produced plausible-looking output — the first darkened almost everything,
+the second nothing — which is why the sun-angle sweep above is the check that
+matters rather than a single screenshot.
