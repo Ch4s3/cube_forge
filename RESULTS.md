@@ -596,3 +596,51 @@ the window manager placed the window relative to the pointer, so two runs render
 different views and any comparison is meaningless. `scratch/cmpframe.py` also
 reads the BMP's real dimensions now; it had 800x600 hard-coded while dumps are
 1600x1200 on a 2x display, so it had been comparing a mis-sliced sub-region.
+
+## The compiler fix, measured end to end
+
+`GAPS.md` G67 was fixed in march (`lib/tir/borrow.ml`: `extern_borrow_table` had
+no `NativeArray` entries, so every array read looked like an ownership
+transfer). cube_forge was rebuilt against a toolchain identical to its pinned
+one except for that patch — same base commit, same runtime, same stdlib — so the
+comparison has one variable.
+
+Block-edit cost, 45 breaks each (3 runs of 15), idle machine:
+
+| | median | mean | min |
+|---|---|---|---|
+| pinned toolchain, allocating sweep | 12.48 ms | 12.90 | 11.81 |
+| **patched toolchain, same March code** | **7.11 ms** | 7.24 | 6.74 |
+| patched toolchain + ping-pong sweep | **6.42 ms** | 6.56 | 6.09 |
+
+**The compiler fix alone is a 43% cut with no change to cube_forge at all.** The
+per-iteration `inc_rc` on every `NativeArray.get_u8` was not just blocking the
+optimization below, it was the larger cost by far — an atomic-capable refcount
+bump on every one of the ~500 000 voxel reads a relight performs.
+
+The ping-pong sweep — two preallocated buffers with only the written y-slice
+re-synced, replacing fourteen 2 MB allocate-and-copy passes — is worth a further
+**10%**. That is much less than I predicted when I wrote it up as the fix G67 was
+blocking. The ~60 MB of memory traffic per edit was real, but it was never the
+dominant term; the refcount bumps were. Predicting which of two costs dominates
+is exactly the thing worth measuring rather than reasoning about, and I had it
+backwards.
+
+Combined with the relight-box bound from `b951435`, a block edit went from
+**26.5 ms to 6.4 ms**, and is no longer close to a frame's budget at 60 fps.
+
+### A measurement error worth recording
+
+The first A/B I ran gave 12.8 ms for a configuration that actually costs 7.1 ms,
+because the compiler's 80-minute differential-oracle run was still going in the
+background. Two of the three numbers above were wrong the first time for that
+reason alone. Check the machine is idle before believing a timing.
+
+### And a stale-artifact error
+
+This project's test count was reported as 78, then 79, for several sessions. It
+is **96**. `forge test` was reusing stale build artifacts and silently running a
+subset; a `rm -rf .march/build` shows all 96 on both toolchains. The G60/G62
+cross-check of declared-vs-run counts was itself unreliable, because the grep
+used to count declarations missed indentation variants. Both counts were wrong
+in the same direction, which is why they agreed.

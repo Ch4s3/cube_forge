@@ -284,10 +284,22 @@ mod CubeForge.Light do
   -- [plen] is the prefix length the sweep works within: only y layers up to the
   -- box top are touched, and those are a contiguous prefix of the flat index,
   -- so each level allocates and copies that prefix rather than the whole 4 MB.
-  pfn box_sweep_go(src : NativeU8Arr, w : CubeForge.World.World, lv : Int,
-                   x0 : Int, x1 : Int, y0 : Int, y1 : Int, z0 : Int, z1 : Int, plen : {Int | _ >= 1}) : NativeU8Arr do
+  -- Ping-pong between two buffers rather than allocating a fresh prefix per
+  -- level. Only the swept y-slice is ever written, so re-syncing that slice is
+  -- enough to make the destination a valid copy of the source: outside it the
+  -- two buffers have been identical since the sweep began.
+  --
+  -- This needs the source to stay uniquely owned across a pass that reads it
+  -- millions of times, which was impossible until march's borrow inference
+  -- learned that NativeArray reads borrow their array (GAPS.md G67).
+  pfn box_sweep_go2(src : NativeU8Arr, dst : NativeU8Arr, w : CubeForge.World.World, lv : Int,
+                    x0 : Int, x1 : Int, y0 : Int, y1 : Int, z0 : Int, z1 : Int,
+                    slo : Int, slen : {Int | _ >= 1}) : NativeU8Arr do
     if lv <= 1 do src
-    else box_sweep_go(box_level_go(src, copy_prefix(src, plen), w, lv, x0, x1, y0, y1, z0, z1), w, lv - 1, x0, x1, y0, y1, z0, z1, plen)
+    else
+      let d0 = CubeForge.Ffi.Window.u8_blit(dst, slo, src, slo, slen)
+      let d1 = box_level_go(src, d0, w, lv, x0, x1, y0, y1, z0, z1)
+      box_sweep_go2(d1, src, w, lv - 1, x0, x1, y0, y1, z0, z1, slo, slen)
     end
   end
 
@@ -374,7 +386,12 @@ mod CubeForge.Light do
     -- One y layer past the box top, so give1's reads of the layer above are in
     -- range; that layer is read-only and feeds the box as a boundary source.
     let plen = (sy1 + 2) * 16384
-    let swept = box_sweep_go(la2, w, max_level(), sx0, sx1, sy0, sy1, sz0, sz1, plen)
+    -- only the swept y-slice is written, so only it has to be re-synced per pass
+    let slo = sy0 * 16384
+    -- Both buffers are copies: [la2] itself is read again below, so it cannot be
+    -- one of the pair. Two copies up front replace fourteen.
+    let swept = box_sweep_go2(copy_prefix(la2, plen), copy_prefix(la2, plen), w, max_level(),
+                              sx0, sx1, sy0, sy1, sz0, sz1, slo, plen - slo)
     -- Overlay the swept prefix onto the untouched upper field. la2 was read by
     -- the sweep, so it cannot itself be the destination (GAPS.md G21).
     let out = CubeForge.Ffi.Window.u8_blit(copy_field(la2, new()), 0, swept, 0, plen)

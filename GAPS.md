@@ -939,6 +939,19 @@ are freed immediately.
 - **Would need:** the `dec_rc` of G31, or better, borrow inference recognising that
   a `NativeArray` passed only to `get_*` is read-only and needs no refcount
   traffic at all. The per-read `inc_rc` is also pure overhead in the hot loop.
+- **FIXED** 2026-09-04 in march `bfb16dac` (branch `claude/borrow-native-array-reads`),
+  the second of those: `extern_borrow_table` in `lib/tir/borrow.ml` had entries for
+  `ring_buf` and the whole string family but none for `NativeArray`, so every array
+  read counted as an ownership transfer. Adding `_get`/`_length`/`_sum`/`_to_list`
+  for the five array kinds — each checked against `runtime/march_runtime.c` to
+  confirm it never `march_decrc(arr)`, with `_set` excluded because its copy path
+  does — takes the whole read chain to `borrow` and the loop to zero refcount
+  traffic. Verified: 576 codegen tests, 33 TIR snapshot goldens, and the
+  differential oracle at 1110/1110 generated programs. Worth **43% of a block
+  edit's cost** in cube_forge with no change to cube_forge (see RESULTS.md).
+  Still open: the same leak through closure-apply wrappers, where a `List` read
+  keeps its parameter owned. Plan:
+  `docs/superpowers/plans/2026-09-04-g67-borrowed-array-reads.md`.
 
 ### G68. Per-element `NativeArray` writes are O(n) on a shared array, so a per-frame simulation is O(n^2)
 - The precipitation pool is 4 floats per particle and its geometry is 54. Written
