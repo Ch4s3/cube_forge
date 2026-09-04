@@ -1,0 +1,55 @@
+-- Precipitation — a pool of falling particles around the camera.
+--
+-- A pool, not a procedural lattice. A stateless hash-per-cell scheme is cheaper
+-- and trivially deterministic, but a particle with no state can only ever be a
+-- falling dot: splashes, collision and gusting all need somewhere to put
+-- per-particle state, and this is that place.
+--
+-- Four floats per particle: x, y, z, vy. Live particles are the first `live` of
+-- `cap`, so weather intensity turns the cost down by simulating fewer of them
+-- rather than by making each one cheaper.
+--
+-- The pool itself and its geometry live in the C shim, not here. That is a
+-- measured decision, not a stylistic one: March's NativeArray writes are
+-- functional, and on arrays this size each write copies the whole array, so
+-- both loops are O(n^2). The step alone ran 4000 particles at 5.9 fps and the
+-- geometry build was SIGKILLed for memory. See `cf_precip_frame` in
+-- native/cf_shim.c, and GAPS.md.
+--
+-- What stays here is policy: how many particles are live, whether it is snow,
+-- and where the slot is. The constants below are mirrored in the shim, which
+-- owns the per-particle loop.
+mod CubeForge.Precip do
+
+  alias CubeForge.Light as L
+  alias CubeForge.Vertex as Vx
+  alias CubeForge.Noise as N
+
+  doc "Mesh slot for the precipitation buffer (249; 250-254 are taken)."
+  fn slot() : Int do 249 end
+
+  doc "Horizontal radius of the cylinder particles live in, in blocks."
+  fn radius() : Float do 24.0 end
+
+  doc "Particles closer than this to the eye are not drawn. A drop half a block from the near plane covers the whole screen, so without this a handful of them cost more fill than the entire world does -- and they look like white bars, not rain."
+  fn near_cull() : Float do 1.2 end
+
+  doc "Height above the eye that particles respawn at."
+  fn ceiling() : Float do 20.0 end
+
+  doc "Fall speed in blocks per second: rain is fast and straight, snow slow."
+  fn rain_speed() : Float do 28.0 end
+  fn snow_speed() : Float do 2.5 end
+
+  doc "How much of the precipitation is snow at eye height [ey]: rain below the snow line, snow above it, blended over the eight blocks beneath it. Reuses the constant that already decides where the terrain wears snow, so the weather cannot contradict the ground it lands on."
+  fn snow_mix(ey : Float) : Float do
+    let line = int_to_float(N.snow_line())
+    if ey >= line do 1.0
+    else if ey <= line -. 8.0 do 0.0
+    else (ey -. (line -. 8.0)) /. 8.0 end end
+  end
+
+  doc "Vertices to draw for [live] particles: six per particle."
+  fn vertex_count(live : Int) : Int do live * 6 end
+
+end

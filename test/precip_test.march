@@ -1,0 +1,32 @@
+-- Precipitation policy. The pool itself lives in the C shim (March's functional
+-- array writes make the per-particle loop quadratic -- see cf_shim.c and
+-- GAPS.md), so what is unit-testable here is the policy: where snow starts.
+-- The skylight kill and the pool's bounds are covered end to end by the roof
+-- pixel test in docs/superpowers/plans/2026-09-03-weather.md Task 3.
+mod CubeForge.Test.Precip do
+
+  import Test
+  alias CubeForge.Precip as P
+
+  describe "Precip.snow_mix" do
+    test "rains below the snow line and snows above it" do
+      Test.assert_true(P.snow_mix(60.0) < 0.001, "sea level rains")
+      Test.assert_true(P.snow_mix(120.0) > 0.999, "peaks snow")
+      let mid = P.snow_mix(int_to_float(CubeForge.Noise.snow_line()) -. 4.0)
+      Test.assert_true(mid > 0.0 && mid < 1.0, "the blend band beneath the snow line")
+    end
+
+    test "the blend band is monotonic" do
+      let line = int_to_float(CubeForge.Noise.snow_line())
+      Test.assert_true(P.snow_mix(line -. 6.0) < P.snow_mix(line -. 2.0), "more snow higher up")
+    end
+  end
+
+  describe "Precip.vertex_count" do
+    test "is six vertices per live particle" do
+      Test.assert_eq_int(P.vertex_count(0), 0, "nothing live")
+      Test.assert_eq_int(P.vertex_count(4000), 24000, "a full pool")
+    end
+  end
+
+end

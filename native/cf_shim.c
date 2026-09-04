@@ -124,6 +124,7 @@ void    cf_win_request_close(void){ if (g_win) glfwSetWindowShouldClose(g_win, 1
  * for the flashlight and into the directional multiplier that used to be baked
  * into `shade` by the mesher.                                                  */
 #define CF_VERT_FLOATS 9
+#define CF_PRECIP_SLOT 249
 static GLuint g_prog = 0, g_vao = 0;
 static GLint  g_u_vp = -1, g_u_tex = -1;
 
@@ -486,6 +487,166 @@ void cf_gfx_draw_translucent(int64_t slot, int64_t nverts) {
  * whenever the sun sat near the horizon. */
 static void cf_unlit_begin(void) { glUniform1i(g_u_unlit, 1); }
 static void cf_unlit_end(void)   { glUniform1i(g_u_unlit, 0); }
+
+/* ── Precipitation ──────────────────────────────────────────────────────────
+ * The particle pool and its geometry live here rather than in March, and the
+ * reason is measured, not stylistic: March's NativeArray writes are functional,
+ * and on an array this size each write copies the whole thing. The pool step
+ * alone — three writes per particle over a 16,000-float array — ran 4000
+ * particles at 5.9 fps, and the geometry build on a 216,000-float array was
+ * worse: the process was SIGKILLed for memory. Both loops are O(n^2) in March
+ * and O(n) here.
+ *
+ * March keeps the policy — how hard it is raining, whether it is snow, the pool
+ * capacity — and this owns only the per-particle loop.
+ *
+ * Four floats per particle: x, y, z, vy. Six vertices per particle, nine floats
+ * each, matching the global vertex layout with effect 1 in the fx word. */
+#define CF_PRECIP_VTX  (6 * CF_VERT_FLOATS)
+static float  *g_pcl = NULL;      /* pool: 4 floats per particle */
+static float  *g_pcl_vtx = NULL;  /* geometry: CF_PRECIP_VTX floats per particle */
+static int64_t g_pcl_cap = 0;
+
+/* Rain falls fast and straight, snow slowly and sideways. */
+#define CF_RAIN_SPEED   28.0f
+#define CF_SNOW_SPEED    2.5f
+#define CF_PCL_RADIUS   24.0f     /* cylinder the pool lives in, around the eye */
+#define CF_PCL_CEILING  20.0f     /* spawn height above the eye */
+/* A drop half a block from the near plane covers the whole screen. Without this
+ * a handful of them cost more fill than the entire world, and they read as
+ * white bars rather than rain. */
+#define CF_PCL_NEAR      1.2f
+
+/* Deterministic hash in [0,1). Fixed constants, no global state: the same tick
+ * and index always give the same number, so CF_DUMP_FRAME still reproduces. */
+static float pcl_rnd(int64_t a, int64_t b) {
+    uint64_t h = (uint64_t)a * 0x9E3779B97F4A7C15ull ^ (uint64_t)b * 0xC2B2AE3D27D4EB4Full;
+    h ^= h >> 29; h *= 0xBF58476D1CE4E5B9ull; h ^= h >> 32;
+    return (float)((h >> 40) & 0xFFFFFF) / 16777216.0f;
+}
+
+/* Skylight lookup, matching CubeForge.Light.index: x + 128 * (z + 128 * y),
+ * and 0 (sealed) outside the world. */
+static int pcl_sky(const unsigned char *la, int x, int y, int z) {
+    if (x < 0 || x >= 128 || y < 0 || y >= 256 || z < 0 || z >= 128) return 0;
+    return la[(size_t)x + 128 * ((size_t)z + 128 * (size_t)y)];
+}
+
+static void pcl_respawn(int64_t i, float ex, float ey, float ez, int64_t tick) {
+    float ang = pcl_rnd(i, tick) * 6.283185307f;
+    float rad = sqrtf(pcl_rnd(i + 7919, tick)) * CF_PCL_RADIUS;
+    g_pcl[i * 4 + 0] = ex + rad * cosf(ang);
+    g_pcl[i * 4 + 1] = ey + CF_PCL_CEILING * pcl_rnd(i + 104729, tick);
+    g_pcl[i * 4 + 2] = ez + rad * sinf(ang);
+    g_pcl[i * 4 + 3] = 0.0f;
+}
+
+void cf_precip_init(int64_t cap) {
+    if (cap < 0) cap = 0;
+    if (cap > 1 << 20) cap = 1 << 20;
+    free(g_pcl); free(g_pcl_vtx);
+    g_pcl_cap = cap;
+    g_pcl = cap ? (float *)calloc((size_t)cap * 4, sizeof(float)) : NULL;
+    g_pcl_vtx = cap ? (float *)calloc((size_t)cap * CF_PRECIP_VTX, sizeof(float)) : NULL;
+    /* Below the world floor, so the first frame respawns everything around
+     * wherever the camera actually is rather than at the origin. */
+    for (int64_t i = 0; i < cap; i++) g_pcl[i * 4 + 1] = -1.0f;
+}
+
+static void pcl_vert(float *v, float x, float y, float z,
+                     float r, float g, float b, float fx) {
+    v[0] = x; v[1] = y; v[2] = z;
+    v[3] = r; v[4] = g; v[5] = b;   /* untextured colour rides in uv + layer */
+    v[6] = 1.0f;                    /* shade: unlit, so this is a pass-through */
+    v[7] = 0.0f;                    /* face */
+    v[8] = fx;                      /* effect 1 + alpha, packed */
+}
+
+/* Step every live particle, rebuild the geometry, and upload it. One call per
+ * frame from the frame loop. `snow` picks the look and the fall speed; `rx, rz`
+ * is the camera's right vector flattened to the horizontal plane. */
+void cf_precip_frame(void *light, int64_t live, int64_t snow,
+                     double ex, double ey, double ez,
+                     double rx, double rz, double dt, int64_t tick) {
+    if (!g_pcl || live <= 0) return;
+    if (live > g_pcl_cap) live = g_pcl_cap;
+    const unsigned char *la = light ? (const unsigned char *)narr_data(light) : NULL;
+
+    float speed = snow ? CF_SNOW_SPEED : CF_RAIN_SPEED;
+    float hw    = snow ? 0.06f : 0.025f;
+    float hh    = snow ? 0.06f : 0.45f;
+    float base_a = snow ? 0.85f : 0.45f;
+    float cr = snow ? 0.97f : 0.72f, cg = snow ? 0.98f : 0.80f, cb = snow ? 1.00f : 0.92f;
+    float ax = (float)rx * hw, az = (float)rz * hw;
+
+    for (int64_t i = 0; i < live; i++) {
+        float x = g_pcl[i * 4 + 0], y = g_pcl[i * 4 + 1], z = g_pcl[i * 4 + 2];
+        /* Snow wanders sideways; rain falls straight. */
+        float drift = snow ? sinf((float)tick * 0.02f + (float)i) * 0.6f : 0.0f;
+        x += drift * (float)dt;
+        y -= speed * (float)dt;
+
+        float dx = x - (float)ex, dz = z - (float)ez;
+        int out = dx * dx + dz * dz > CF_PCL_RADIUS * CF_PCL_RADIUS
+               || y < 0.0f || y > (float)ey + CF_PCL_CEILING;
+        /* The kill that matters: a cell with no skylight is under a roof, in a
+         * cave, or inside the terrain. Rain never falls indoors, and unlike a
+         * heightmap query this respects player edits as soon as they relight. */
+        int sealed = la && pcl_sky(la, (int)floorf(x), (int)floorf(y), (int)floorf(z)) == 0;
+        if (out || sealed) {
+            pcl_respawn(i, (float)ex, (float)ey, (float)ez, tick);
+            x = g_pcl[i * 4 + 0]; y = g_pcl[i * 4 + 1]; z = g_pcl[i * 4 + 2];
+        } else {
+            g_pcl[i * 4 + 0] = x; g_pcl[i * 4 + 1] = y;
+        }
+
+        /* Fade out toward the cylinder's edge so particles do not pop in and
+         * out of existence at the boundary. */
+        dx = x - (float)ex; dz = z - (float)ez;
+        float dy = y - (float)ey;
+        float hd = sqrtf(dx * dx + dz * dz) / CF_PCL_RADIUS;
+        float a = hd > 0.75f ? (1.0f - hd) * 4.0f : 1.0f;
+        if (a < 0.0f) a = 0.0f;
+        if (a > 1.0f) a = 1.0f;
+        /* Near-culled particles collapse to a zero-area quad, which the GPU
+         * discards before shading — cheaper than a branch in the draw call and
+         * it keeps the indexing pure arithmetic. */
+        if (dx * dx + dy * dy + dz * dz < CF_PCL_NEAR * CF_PCL_NEAR) a = 0.0f;
+        /* Killing a sealed particle is not enough on its own: respawning puts it
+         * somewhere else in the same cylinder, and underground EVERY cell is
+         * sealed, so the pool would refill instantly and rain inside solid rock.
+         * The draw has to be gated on where the particle actually ended up. */
+        if (la && pcl_sky(la, (int)floorf(x), (int)floorf(y), (int)floorf(z)) == 0) a = 0.0f;
+
+        float fx = (float)(1 * 256 + (int)(a * base_a * 255.0f + 0.5f));
+        float *v = g_pcl_vtx + i * CF_PRECIP_VTX;
+        float zero = (a == 0.0f) ? 0.0f : 1.0f;
+        float qx = zero * ax, qz = zero * az, qh = zero * hh;
+        pcl_vert(v + 0 * CF_VERT_FLOATS, x - qx, y - qh, z - qz, cr, cg, cb, fx);
+        pcl_vert(v + 1 * CF_VERT_FLOATS, x + qx, y - qh, z + qz, cr, cg, cb, fx);
+        pcl_vert(v + 2 * CF_VERT_FLOATS, x + qx, y + qh, z + qz, cr, cg, cb, fx);
+        pcl_vert(v + 3 * CF_VERT_FLOATS, x - qx, y - qh, z - qz, cr, cg, cb, fx);
+        pcl_vert(v + 4 * CF_VERT_FLOATS, x + qx, y + qh, z + qz, cr, cg, cb, fx);
+        pcl_vert(v + 5 * CF_VERT_FLOATS, x - qx, y + qh, z - qz, cr, cg, cb, fx);
+    }
+
+    glBindBuffer(GL_ARRAY_BUFFER, g_vbo[CF_PRECIP_SLOT]);
+    glBufferData(GL_ARRAY_BUFFER,
+                 (GLsizeiptr)(live * CF_PRECIP_VTX * (int64_t)sizeof(float)),
+                 g_pcl_vtx, GL_STREAM_DRAW);
+}
+
+/* Precipitation: blended and depth-write-off like water, but also unlit and
+ * untextured, so each particle keeps the colour it carries in its uv/layer
+ * slots instead of being dimmed by a sun it is supposed to be obscuring. */
+void cf_gfx_draw_precip(int64_t slot, int64_t nverts) {
+    if (slot < 0 || slot >= CF_MAX_MESHES || nverts <= 0) return;
+    cf_unlit_begin();
+    glUniform1i(g_u_use_tex, 0);
+    cf_gfx_draw_translucent(slot, nverts);
+    glUniform1i(g_u_use_tex, g_tex ? 1 : 0);
+    cf_unlit_end();
+}
 
 void cf_gfx_draw_marker(int64_t slot, int64_t nverts) {
     if (slot < 0 || slot >= CF_MAX_MESHES || nverts <= 0) return;
