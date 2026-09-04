@@ -45,3 +45,5 @@ Planned, not started. One entry per feature; each gets its own design doc under
 - [ ] Zero-arg extern dead-binding drop (G16).
 - [ ] `dec_rc` for NativeArray bindings (G31).
 - [ ] Aggregate RC for tuples/records (G28–G30) — the big one.
+
+- [x] **Inventory window with drag-and-drop** — done 2026-09-04 (`docs/superpowers/specs/2026-09-04-inventory-window-design.md`): `I` opens a 27-slot backpack over the 9-slot hotbar; slots hold an (item, count) pair in a `NativeIntArr` instead of the item being implied by slot position. Pickup routes hotbar-first. Stacks are unbounded, so the backpack is for organising rather than overflow.
