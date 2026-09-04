@@ -446,3 +446,54 @@ the same bytes.
 
 Cost: the 4 MB occupancy field is kept rather than built and dropped, and a
 block edit updates one byte of it alongside the GPU texel.
+
+## Lighting performance: bounding the sweep by the sky
+
+Profiling the flood (debug build) put the cost in one place:
+
+| phase | ms | share |
+|---|---|---|
+| `seed_all` | 127 | 7% |
+| **`spread` (the level sweep)** | **1721** | **90%** |
+| 14 x per-level alloc+copy | 56 | 3% |
+
+The sweep ran fourteen passes over all 4,194,304 voxels. Half of them were empty
+sky: `sky_floor` for this world is **127 of 256**, and every voxel above it is at
+full light with every neighbour also at full light, so it matched level 15 and
+called `give6` on six neighbours that could not be improved.
+
+Bounding every sweep pass at one layer above the highest **non-air** voxel:
+
+| | before | after |
+|---|---|---|
+| skylight flood (release) | 718 ms | **271 ms** (2.6x) |
+| occupancy build (release) | 69 ms | **49 ms** |
+| `spread` (debug) | 1721 ms | 611 ms |
+
+Non-air rather than opaque is load-bearing. Water is transparent but
+attenuating, so a lake sitting above the highest solid block would leave dimmed
+voxels above an opaque-only bound and the sweep would skip them. A test covers
+exactly that shape.
+
+The bound is computed by scanning each chunk's flat index downward -- that index
+runs `lx + 16*(lz + 16*ly)`, so higher indices are higher y and the scan stops at
+the chunk's topmost non-air voxel. The first attempt used `World.block_at` per
+voxel and made the flood *slower* (1721 -> 3998 ms), which is G64 a second time:
+that call re-derives chunk coordinates and walks a PVec trie, and it has no place
+in a bulk loop.
+
+### What did not work
+
+Rotating two preallocated buffers instead of allocating a fresh destination per
+pass would halve the copy traffic, since `copy_prefix` zeroes a buffer with
+`make_u8` and then overwrites every byte of it. A probe that reads a buffer once
+per iteration rotates safely. The sweep reads its source **twice** per pass, once
+for the copy and once for the scan, and `cf_u8_blit` then refuses the reuse with
+`rc=12196853`. That is G67 exactly: reads inflate the refcount permanently, at
+roughly one increment per read, so a buffer that has been swept can never again
+be uniquely owned. Left as a fresh allocation per pass, with the reasoning
+recorded at the call site.
+
+Per-edit relight is unchanged at 13-21 ms, and remains dominated by that same
+copy traffic (24 ms of a 43 ms debug relight is the fourteen prefix copies).
+G67 is what stands between it and a 2x improvement.

@@ -369,4 +369,28 @@ mod CubeForge.Test.Light do
     end
   end
 
+  describe "Light.sky_floor" do
+    test "sits above the highest non-air voxel, water included" do
+      let w = slab_world(8)
+      Test.assert_true(L.sky_floor(w) > 8, "above the slab")
+      -- Water is transparent but attenuating: a lake above the highest solid
+      -- block still dims what is under it, so the sweep bound has to clear the
+      -- water too, not just the stone.
+      let ww = CubeForge.World.set_block(w, 40, 100, 40, C.water())
+      Test.assert_true(L.sky_floor(ww) > 100, "above the water, not just the stone")
+    end
+
+    test "bounding the sweep does not change the result" do
+      -- A lake perched well above the highest solid block is the case an
+      -- opaque-only bound would have skipped.
+      let w0 = CubeForge.World.set_block(CubeForge.World.set_block(slab_world(8), 40, 100, 40, C.water()), 41, 100, 40, C.water())
+      let la = L.flood(w0)
+      Test.assert_eq_int(L.get(la, 40, 101, 40), 15, "above the water is full")
+      Test.assert_eq_int(L.get(la, 40, 100, 40), 13, "the water voxel is dimmed")
+      -- 14, not 13: the open columns beside the lake are at 15 and spread
+      -- sideways underneath it, which beats the 13 arriving down through water.
+      Test.assert_eq_int(L.get(la, 40, 99, 40), 14, "lateral light under the lake beats the attenuated column")
+    end
+  end
+
 end
