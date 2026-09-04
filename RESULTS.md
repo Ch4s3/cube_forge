@@ -672,3 +672,27 @@ prints on every run. A microbenchmark of `hud_key` says it is free, the
 definition looks like a field read, and the call site looks like a hash. This is
 the third time in this project that a per-frame allocation was only visible from
 the outside, and the argument for keeping that counter in the default output.
+
+## Biomes — phase 1, the field
+
+A per-column climate field (`docs/superpowers/specs/2026-09-04-biomes-design.md`):
+temperature from a seeded octave minus an elevation lapse, moisture from
+Chebyshev distance to water, eight biomes behind an alpine gate and a beach
+gate. Recomputed whole on `tick_period()`; nothing incremental except the
+heightmap, which `edit_block` updates in O(1) and `chop` rescans in a box.
+
+- **Tick cost: ~18 ms**, every ten frames, release build (`CF_AUTOFLOW` prints
+  it). 24 full passes for the distance sweep dominate; the temperature base is
+  cached at build so it is not 16,384 noise evaluations per tick. A frontier
+  sweep would be O(frontier) but the obvious queue is the G69 trap.
+- **Canal, end to end.** `CF_AUTOCANAL=10 CF_BIOME_RATE=20000`: the player's
+  column goes `grassland moist 0.25` -> frame 100 `moist 0.435 wet 1` (the
+  actors have flowed the canal three columns west) -> frame 890 `forest moist
+  1.0`. Map view differs by 724k pixels. `docs/biome-map.png` and
+  `docs/biome-map-canal.png`.
+- `CF_AUTOFLOW` cannot drive this test: it places through `interact`, which
+  needs a raycast hit, and with `CF_NOMOUSE` the crosshair sits on the horizon.
+  `CF_AUTOCANAL` lays nine water blocks beside the player through `edit_block`.
+- Two G68 corollaries found and recorded as **GAPS G69**: arrays wrapped in a
+  variant cell copy on every write (10.8 GB for 20 BFS passes), and a discarded
+  `set_*` result silently drops the write.

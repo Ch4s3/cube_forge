@@ -827,6 +827,46 @@ void cf_precip_frame(void *light, int64_t live, int64_t snow,
                  g_pcl_vtx, GL_STREAM_DRAW);
 }
 
+/* ── Biome map ──────────────────────────────────────────────────────────────
+ * One flat coloured quad per column, built here rather than in March: 16,384
+ * quads is 98k vertices, far past what March can push per tick (GAPS G68). Drawn
+ * through the marker path (unlit, untextured, depth-tested) at y = 259, under
+ * the marker at 260 and above any terrain. */
+#define CF_BIOME_SLOT 248
+#define CF_BIOME_Y    259.0f
+/* Order matches CubeForge.Biome: tundra, taiga, grassland, forest, desert,
+ * wetland, beach, alpine. */
+static const float CF_BIOME_RGB[8][3] = {
+    {0.86f, 0.90f, 0.95f}, {0.25f, 0.45f, 0.35f}, {0.55f, 0.75f, 0.30f}, {0.15f, 0.50f, 0.15f},
+    {0.90f, 0.80f, 0.45f}, {0.35f, 0.55f, 0.50f}, {0.95f, 0.90f, 0.70f}, {0.60f, 0.60f, 0.62f},
+};
+static float  *g_biome_vtx = NULL;
+static int64_t g_biome_cap = 0;
+
+void cf_biome_map_upload(void *biomes, int64_t n) {
+    int64_t cells = n * n;
+    if (cells > g_biome_cap) {
+        free(g_biome_vtx);
+        g_biome_vtx = (float *)malloc((size_t)cells * 6 * CF_VERT_FLOATS * sizeof(float));
+        g_biome_cap = cells;
+    }
+    const unsigned char *b = (const unsigned char *)narr_data(biomes);
+    for (int64_t i = 0; i < cells; i++) {
+        float x0 = (float)(i % n), z0 = (float)(i / n), x1 = x0 + 1.0f, z1 = z0 + 1.0f;
+        const float *c = CF_BIOME_RGB[b[i] & 7];
+        float *v = g_biome_vtx + i * 6 * CF_VERT_FLOATS;
+        /* winding matches the mesher's top face: (x0,z0)->(x0,z1)->(x1,z1)->(x1,z0) */
+        pcl_vert(v + 0 * CF_VERT_FLOATS, x0, CF_BIOME_Y, z0, c[0], c[1], c[2], 255.0f);
+        pcl_vert(v + 1 * CF_VERT_FLOATS, x0, CF_BIOME_Y, z1, c[0], c[1], c[2], 255.0f);
+        pcl_vert(v + 2 * CF_VERT_FLOATS, x1, CF_BIOME_Y, z1, c[0], c[1], c[2], 255.0f);
+        pcl_vert(v + 3 * CF_VERT_FLOATS, x0, CF_BIOME_Y, z0, c[0], c[1], c[2], 255.0f);
+        pcl_vert(v + 4 * CF_VERT_FLOATS, x1, CF_BIOME_Y, z1, c[0], c[1], c[2], 255.0f);
+        pcl_vert(v + 5 * CF_VERT_FLOATS, x1, CF_BIOME_Y, z0, c[0], c[1], c[2], 255.0f);
+    }
+    glBindBuffer(GL_ARRAY_BUFFER, g_vbo[CF_BIOME_SLOT]);
+    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(cells * 6 * CF_VERT_FLOATS * (int64_t)sizeof(float)), g_biome_vtx, GL_STATIC_DRAW);
+}
+
 /* Precipitation: blended and depth-write-off like water, but also unlit and
  * untextured, so each particle keeps the colour it carries in its uv/layer
  * slots instead of being dimmed by a sun it is supposed to be obscuring. */

@@ -74,7 +74,9 @@ Three arrays, all `NativeU8Arr(16384)`:
   from `Light.sky_floor`, then updated **O(1) per block edit**: an edit only
   changes a column's surface if it is at or above the current one.
 - **`water`** — whether the column's surface block is water, or the block
-  directly above it is. Same O(1) update rule.
+  directly above it is. *As built:* rescanned whole every tick (two reads per
+  column off the heightmap) rather than hooked per edit, because the water
+  actors move water every tick through a path no edit hook sees.
 - **`biome`** — the classification, rewritten each tick.
 
 Plus two more for the eased axes (§3). Roughly 80 KB in total.
@@ -107,6 +109,10 @@ a few more minutes for §5 to finish the surface. Long enough to read as
 consequence, short enough that the player who dug the canal sees it happen.
 
 `CF_BIOME_RATE` scales it, so the whole effect can be inspected without waiting.
+
+*As built:* the anti-flap is a **hold counter** rather than a value dead band —
+a column flips only after `hold_ticks()` (30) consecutive ticks of disagreement.
+It has the same effect on every axis at once and needs no per-threshold tuning.
 
 ## 4. Weather stays one system, felt locally
 

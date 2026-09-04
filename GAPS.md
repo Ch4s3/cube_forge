@@ -1009,3 +1009,20 @@ are freed immediately.
 - **Would need:** either field reads on shared variants that do not allocate, or
   a way to see at the call site that an accessor will copy. A lint for "accessor
   called in a loop over a value the function does not own" would catch the shape.
+
+### G69. Two more ways a `NativeArray` write silently becomes a whole-array copy
+Both found building the biome field, both variants of G68.
+- **Wrapping arrays in a variant cell.** A BFS carried its distance array and
+  ring queue as `Bfs(d, q, qn)` and rebuilt the cell on every push. The cell
+  holds a reference, the matched binding holds another, so each `set_int`
+  copied the array: 20 passes over 16,384 columns peaked at **10.8 GB** and the
+  test suite was SIGKILLed. The same work as a level sweep with the arrays as
+  plain threaded parameters (the `level_go` idiom in `light.march`) peaks at
+  120 MB across 840 passes.
+- **Discarding the write.** `let _ = NativeArray.set_int(d, i, 0)` compiles and
+  does nothing when the array is shared: the write goes into the copy that the
+  call returns, and the copy is dropped. The first BFS never seeded a single
+  water column and produced no error of any kind. A write's return value is
+  the array that was written; it must always be threaded.
+- **Would need:** a lint on a discarded `NativeArray.set_*` result, and ideally
+  a warning when an array reachable from a variant field is written.
