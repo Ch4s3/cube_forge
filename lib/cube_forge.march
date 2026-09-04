@@ -534,6 +534,23 @@ mod CubeForge do
     if sun >= 0.55 do 0.0 else (0.55 -. sun) /. 0.55 end
   end
 
+  doc "Fog density for weather intensity [w] 0..1. Clear weather is haze, not nothing, so distance always reads; a storm is roughly fifteen times denser. Squared so the first half of the range stays subtle."
+  fn fog_density(w : Float) : Float do 0.002 +. 0.028 *. w *. w end
+
+  doc "Overcast 0..1 from weather intensity: cloud builds faster than rain does, so the sky greys before it pours."
+  fn overcast_of(w : Float) : Float do
+    let o = w *. 1.4
+    if o > 1.0 do 1.0 else o end
+  end
+
+  doc "Weather intensity 0..1: CF_WEATHER (0..100) when pinned, otherwise the actor's value."
+  fn weather_now(pin : Int, actor_value : Float) : Float do
+    if pin < 0 do actor_value else int_to_float(pin) /. 100.0 end
+  end
+
+  doc "Blend a sky channel toward the overcast grey. The 0.85 is what makes cloud read as duller rather than merely greyer."
+  fn overcast_sky(c : Float, lum : Float, ov : Float) : Float do c +. (lum *. 0.85 -. c) *. ov end
+
   doc "Moonlight 0..1: full through the night, fading out as the sun climbs. Matches the ramp the fragment shader uses so the sky and the ground agree."
   fn moon_level(sun : Float) : Float do
     if sun >= 0.25 do 0.0 else (0.25 -. sun) /. 0.25 end
@@ -620,13 +637,13 @@ mod CubeForge do
 
   -- Frame loop. `max_frames < 0` means run until the window closes.
   -- Run-time knobs read once, outside the frame loop (an Env read allocates).
-  type Knobs = Knobs(Int, Int, String, Bool, Float, Int, Bool, Int, Int, Int, Float, Int, Float)   -- max_frames, dump_frame, dump_path, autowalk, autospin, autoedit frame (<0 = off), autoswim, autoflow frame (<0 = off), workers, automap frame (<0 = off; forces map view on from this frame, for headless verification), day length in seconds, sun angle override in degrees (<0 = follow the clock), shadow reach in blocks (0 = off)
+  type Knobs = Knobs(Int, Int, String, Bool, Float, Int, Bool, Int, Int, Int, Float, Int, Float, Int)   -- max_frames, dump_frame, dump_path, autowalk, autospin, autoedit frame (<0 = off), autoswim, autoflow frame (<0 = off), workers, automap frame (<0 = off; forces map view on from this frame, for headless verification), day length in seconds, sun angle override in degrees (<0 = follow the clock), shadow reach in blocks (0 = off), weather pin 0..100 (<0 = follow the actor)
 
   fn frame_loop(f : Frame, k : Knobs, sc, nchunks : Int, proj : NativeFloatArr, map_proj : NativeFloatArr, fps : Fps) : Frame do
     match f do
       Frame(frame, last_t, player, sample, view, vp, map_mode, marker, flash) ->
         match k do
-        Knobs(max_frames, dump_frame, dump_path, autowalk, autospin, autoedit, autoswim, autoflow, workers, automap, day_len, sun_deg, shadow_dist) ->
+        Knobs(max_frames, dump_frame, dump_path, autowalk, autospin, autoedit, autoswim, autoflow, workers, automap, day_len, sun_deg, shadow_dist, weather_pin) ->
         if Win.should_close() || (max_frames >= 0 && frame >= max_frames) do
           Frame(frame, last_t, player, sample, view, vp, map_mode, marker, flash)
         else
@@ -690,10 +707,17 @@ mod CubeForge do
           -- by the same intensity ramp the ground uses, plus the moon underneath.
           let inten = sun_intensity(sun)
           let da = dusk_amount(sun)
-          Win.gfx_begin_frame((0.55 +. 0.40 *. da) *. inten +. 0.030 *. moon,
-                              (0.75 -. 0.38 *. da) *. inten +. 0.045 *. moon,
-                              (0.95 -. 0.70 *. da) *. inten +. 0.110 *. moon)
+          -- Weather. The map view is a diagnostic, so it stays clear and unfogged.
+          let wx = if map_mode1 do 0.0 else weather_now(weather_pin, 0.0) end
+          let ov = overcast_of(wx)
+          let sr = (0.55 +. 0.40 *. da) *. inten +. 0.030 *. moon
+          let sg = (0.75 -. 0.38 *. da) *. inten +. 0.045 *. moon
+          let sb = (0.95 -. 0.70 *. da) *. inten +. 0.110 *. moon
+          let lum = 0.30 *. sr +. 0.59 *. sg +. 0.11 *. sb
+          Win.gfx_begin_frame(overcast_sky(sr, lum, ov), overcast_sky(sg, lum, ov), overcast_sky(sb, lum, ov))
           Win.gfx_set_sky(sdx, sdy, sdz, 0.0 -. sdx, 0.0 -. sdy, 0.0 -. sdz)
+          -- Must follow begin_frame: the fog colour is the clear colour it stashed.
+          Win.gfx_set_weather(fog_density(wx), ov, 0.0)
           -- The map view is an overhead diagnostic; shadows there would only
           -- obscure the terrain it exists to show.
           Win.gfx_set_shadow(if map_mode1 do 0.0 else shadow_dist end)
@@ -980,7 +1004,7 @@ mod CubeForge do
         if Env.get_int("CF_ALLOC_PROBE", 0) == 1 do alloc_probe(world, proj) else () end
         let t4 = Win.time()
         let knobs = Knobs(max_frames, Env.get_int("CF_DUMP_FRAME", 30), Env.get("CF_DUMP", ""), Env.get_int("CF_AUTOWALK", 0) == 1,
-                          int_to_float(Env.get_int("CF_AUTOSPIN", 0)) /. 1000.0 /. Player.mouse_sens(), Env.get_int("CF_AUTOEDIT", -1), autoswim, Env.get_int("CF_AUTOFLOW", -1), workers, Env.get_int("CF_AUTOMAP", -1), int_to_float(Env.get_int("CF_DAY", 1800)), Env.get_int("CF_SUN", -1), int_to_float(Env.get_int("CF_SHADOW_DIST", 64)))
+                          int_to_float(Env.get_int("CF_AUTOSPIN", 0)) /. 1000.0 /. Player.mouse_sens(), Env.get_int("CF_AUTOEDIT", -1), autoswim, Env.get_int("CF_AUTOFLOW", -1), workers, Env.get_int("CF_AUTOMAP", -1), int_to_float(Env.get_int("CF_DAY", 1800)), Env.get_int("CF_SUN", -1), int_to_float(Env.get_int("CF_SHADOW_DIST", 64)), Env.get_int("CF_WEATHER", -1))
         let tw0 = Win.time()
         let pids = Array.from_list(spawn_water(n * n - 1, n, seed, Nil))
         println("spawned " ++ int_to_string(n * n) ++ " water actors in " ++ ms(Win.time() -. tw0) ++ " (loads run asynchronously)")

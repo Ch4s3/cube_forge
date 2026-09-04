@@ -165,6 +165,10 @@ static const char *FS =
     "uniform int u_unlit;\n"
     "uniform sampler3D u_occ;\n"
     "uniform float u_shadow;\n"
+    "uniform float u_fog_density;\n"
+    "uniform vec3  u_fog_color;\n"
+    "uniform float u_overcast;\n"
+    "uniform float u_bolt;\n"
     "out vec4 o_color;\n"
     /* The beam shape never varies at runtime, only its position, aim and
      * on/off state, so the cone half-angles are constants rather than uniforms. */
@@ -226,7 +230,11 @@ static const char *FS =
     "void main(){\n"
     "  vec4 t = (u_use_tex == 1) ? texture(u_tex, vec3(v_uv, v_layer)) : vec4(v_uv, v_layer, 1.0);\n"
     "  float moon = clamp((MOON_UNTIL - u_sun) / MOON_UNTIL, 0.0, 1.0);\n"
-    "  float amb  = AMB + AMB_UP * v_normal.y;\n"
+    /* Cloud does not remove light, it diffuses it: ambient rises as the direct
+     * term falls, which is why an overcast day is flat rather than dark.
+     * u_bolt is the lightning spike, added to ambient so a strike lights the
+     * whole scene at once rather than from a direction. */
+    "  float amb  = (AMB + AMB_UP * v_normal.y) * (1.0 + 1.2 * u_overcast) + u_bolt;\n"
     "  float ndls = max(dot(v_normal, u_sundir),  0.0);\n"
     "  float ndlm = max(dot(v_normal, u_moondir), 0.0);\n"
     "  vec3  sunc = mix(SUN_WARM, SUN_WHITE, smoothstep(0.0, 0.50, u_sun));\n"
@@ -241,8 +249,14 @@ static const char *FS =
     "    if (inten > 0.0 && ndls > 0.0)      shad = trace(origin, u_sundir,  u_shadow);\n"
     "    else if (moon > 0.0 && ndlm > 0.0)  shad = trace(origin, u_moondir, u_shadow);\n"
     "  }\n"
-    "  vec3  sky  = sunc * (inten * (amb + DIRECT * ndls * shad))\n"
-    "             + MOON_TINT * (MOON_LEVEL * moon * (amb + DIRECT * ndlm * shad));\n"
+    /* Under cloud the sun is a source the size of the sky, so its shadows wash
+     * out. Softening the trace toward 1.0 is a cheat, not scattering, but it
+     * costs nothing and it is the difference between an overcast day and a
+     * clear one with grey paint on it. */
+    "  shad = mix(shad, 1.0, u_overcast);\n"
+    "  float direct = DIRECT * (1.0 - 0.85 * u_overcast);\n"
+    "  vec3  sky  = sunc * (inten * (amb + direct * ndls * shad))\n"
+    "             + MOON_TINT * (MOON_LEVEL * moon * (amb + direct * ndlm * shad));\n"
     "  vec3  baked = v_shade * sky;\n"
     "  vec3  L  = u_eye - v_world;\n"
     "  float d2 = dot(L, L);\n"
@@ -255,7 +269,24 @@ static const char *FS =
     "  vec3  world = baked + vec3(flash);\n"
     /* Overlays (HUD, outline, map marker) share this program but are not part of
      * the world: they keep their own vertex shade and skip lighting entirely. */
-    "  o_color = vec4(t.rgb * ((u_unlit == 1) ? vec3(v_shade) : world), t.a);\n"
+    "  vec3 lit = t.rgb * ((u_unlit == 1) ? vec3(v_shade) : world);\n"
+    "  int  fx  = int(v_fx + 0.5);\n"
+    "  float a  = float(fx & 255) / 255.0;\n"
+    /* Fog is for the world only. Overlays (HUD, crosshair, outline, marker) are
+     * drawn in NDC with z = 0, so `length(v_world - u_eye)` is a meaningless
+     * large number for them and a storm would grey out the hotbar. u_unlit
+     * already marks exactly that geometry.
+     *
+     * Effect 1 is precipitation, exempt for a different reason: it is the thing
+     * generating the fog, so mixing it toward the fog colour would fade the
+     * rain out exactly as the storm peaked.
+     *
+     * Exponential fog, so the far plane does not enter into it. */
+    "  if (u_unlit != 1 && (fx >> 8) != 1) {\n"
+    "    float d = length(v_world - u_eye);\n"
+    "    lit = mix(lit, u_fog_color, 1.0 - exp(-d * u_fog_density));\n"
+    "  }\n"
+    "  o_color = vec4(lit, t.a * a);\n"
     "}\n";
 
 static GLuint compile(GLenum kind, const char *src) {
@@ -272,6 +303,11 @@ static GLint  g_u_use_tex = -1;
 static GLint  g_u_sun = -1, g_u_eye = -1, g_u_dir = -1, g_u_flash = -1;
 static GLint  g_u_sundir = -1, g_u_moondir = -1, g_u_unlit = -1;
 static GLint  g_u_occ = -1, g_u_shadow = -1;
+static GLint  g_u_fog_density = -1, g_u_fog_color = -1, g_u_overcast = -1, g_u_bolt = -1;
+/* The clear colour, kept so the fog can reuse it: fog colour IS sky colour,
+ * so distant geometry dissolves into the horizon instead of popping at the
+ * far plane, and the two can never drift apart. */
+static float  g_fog_rgb[3] = {0.0f, 0.0f, 0.0f};
 static GLuint g_tex = 0;
 
 int64_t cf_gfx_init(void) {
@@ -293,6 +329,10 @@ int64_t cf_gfx_init(void) {
     g_u_unlit = glGetUniformLocation(g_prog, "u_unlit");
     g_u_occ = glGetUniformLocation(g_prog, "u_occ");
     g_u_shadow = glGetUniformLocation(g_prog, "u_shadow");
+    g_u_fog_density = glGetUniformLocation(g_prog, "u_fog_density");
+    g_u_fog_color = glGetUniformLocation(g_prog, "u_fog_color");
+    g_u_overcast = glGetUniformLocation(g_prog, "u_overcast");
+    g_u_bolt = glGetUniformLocation(g_prog, "u_bolt");
     if (getenv("CF_DEBUG")) fprintf(stderr, "cf: uniforms occ=%d shadow=%d sundir=%d unlit=%d\n", g_u_occ, g_u_shadow, g_u_sundir, g_u_unlit);
     glGenVertexArrays(1, &g_vao);
     glGenBuffers(CF_MAX_MESHES, g_vbo);
@@ -327,6 +367,7 @@ void cf_gfx_upload_part(int64_t slot, int64_t offset, void *arr, int64_t nfloats
 }
 
 void cf_gfx_begin_frame(double r, double g, double b) {
+    g_fog_rgb[0] = (float)r; g_fog_rgb[1] = (float)g; g_fog_rgb[2] = (float)b;
     glClearColor((float)r, (float)g, (float)b, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     glUseProgram(g_prog);
@@ -557,6 +598,17 @@ void cf_gfx_set_sky(double sx, double sy, double sz, double mx, double my, doubl
     glUseProgram(g_prog);
     glUniform3f(g_u_sundir,  (float)(sx/sl), (float)(sy/sl), (float)(sz/sl));
     glUniform3f(g_u_moondir, (float)(mx/ml), (float)(my/ml), (float)(mz/ml));
+}
+
+/* Fog density, cloud cover and the lightning spike. The fog colour is not a
+ * parameter: it is whatever cf_gfx_begin_frame last cleared to, so the fog and
+ * the sky are the same colour by construction. */
+void cf_gfx_set_weather(double fog_density, double overcast, double bolt) {
+    glUseProgram(g_prog);
+    glUniform1f(g_u_fog_density, (float)fog_density);
+    glUniform3f(g_u_fog_color, g_fog_rgb[0], g_fog_rgb[1], g_fog_rgb[2]);
+    glUniform1f(g_u_overcast, (float)overcast);
+    glUniform1f(g_u_bolt, (float)bolt);
 }
 
 /* Debug/verification hook: read back one pixel of the back buffer as 0xRRGGBB.
