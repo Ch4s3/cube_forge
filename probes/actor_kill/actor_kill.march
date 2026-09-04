@@ -1,0 +1,27 @@
+-- Does `kill` actually reclaim an actor, and what happens to a send afterwards?
+mod ActorKill do
+
+  needs IO.Console
+  needs IO.Spawn
+
+  actor Counter do
+    state { n : Int }
+    init { n: 0 }
+    on Bump(d : Int) do
+      { state with n: state.n + d }
+    end
+  end
+
+  fn main(_c : Cap(IO.Console), _s : Cap(IO.Spawn)) : Unit do
+    let p = spawn(Counter)
+    println("spawned, alive = " ++ (if is_alive(p) do "true" else "false" end))
+    let _ = send(p, Bump(1))
+    kill(p)
+    println("after kill, alive = " ++ (if is_alive(p) do "true" else "false" end))
+    match send(p, Bump(1)) do
+      None -> println("send after kill returned None (dropped)")
+      Some(_) -> println("send after kill returned Some")
+    end
+  end
+
+end

@@ -22,14 +22,15 @@ running game can act on that.
 
 - **The HUD font is digits only.** `Hud.glyph` holds 3x5 masks for 0-9 and
   nothing else, so no existing code can draw a word.
-- **March has no `Actor.stop`.** A session spawns 64 water actors and one
-  weather actor. If a new game spawned a fresh set, every restart would leak the
-  previous one, and nothing in the language can reclaim them.
-- **The actors can be reseeded instead.** `Water.send_load(pid, cx, cz, n, seed)`
-  makes a chunk actor regenerate itself from a new seed, and
-  `Weather.send_seed(pid, seed)` reseeds weather. Reusing the pool sidesteps the
-  missing `stop` entirely, so the actor pool outlives a session by design rather
-  than by accident.
+- **The actors can be reseeded, which is cheaper than replacing them.**
+  `Water.send_load(pid, cx, cz, n, seed)` makes a chunk actor regenerate itself
+  from a new seed, and `Weather.send_seed(pid, seed)` reseeds weather. A session
+  therefore reuses the pool: 65 messages, against 65 kills plus 65 spawns plus 65
+  loads for the alternative.
+
+  (This design note first claimed March had no way to stop an actor. It was
+  wrong — `kill(pid)` and `is_alive(pid)` are builtins and work. See GAPS.md
+  G75; the decision above stands on cost, not on necessity.)
 - **World setup is one linear block** running from terrain generation to the
   single `frame_loop` call at the end of `main`. Restarting requires extracting
   it.

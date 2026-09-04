@@ -1300,23 +1300,44 @@ number that a human has to have memorised.
   error. Failing that, `forge test` should print the modules it collected, so a
   vanished file is visible.
 
-### G75. There is no `Actor.stop`, so an actor is a permanent allocation
-`Actor` exposes `cast`, `call`, `reply`, `register`, `send_after` and
-`cancel_timer`, but nothing that stops an actor. `forge search -d "stop actor"`
-finds nothing.
+### G75. Bare builtins are invisible to `forge search` — WRONG AS FIRST WRITTEN
+**This entry originally claimed March has no way to stop an actor. That is
+false.** `kill(pid)` and `is_alive(pid)` exist and work:
 
-A cube_forge session runs 64 water actors and one weather actor. The obvious
-implementation of "new game" — build a new world and spawn its actors — would
-therefore leak the previous 65 on every restart, with no way in the language to
-reclaim them.
+```march
+let p = spawn(Counter)
+kill(p)
+is_alive(p)          -- false
+send(p, Bump(1))     -- None: the message is silently dropped
+```
 
-The feature is written the other way round instead: the pool is created once, in
-`main`, and every session reseeds the existing actors with `Water.send_load` and
-`Weather.send_seed`. That happens to be the better design here (it avoids 65
-spawns per restart), but it is not a design that was chosen freely — a program
-whose actors genuinely have per-session lifetimes has no answer at all.
-- **Would need:** `Actor.stop(pid)` (and a defined semantics for messages already
-  in the mailbox), or a supervisor-scoped lifetime that ends when the scope does.
+verified by `probes/actor_kill/actor_kill.march` on this toolchain.
+
+The real finding is the one that misled me. `kill` and `is_alive` are *bare
+builtins* — rows in `lib/tir/llvm_builtins.ml` (`march_kill`, `march_is_alive`),
+like `spawn`, `send` and `task_spawn` — and `forge search` indexes
+module-qualified names, so neither `forge search "kill"` nor
+`forge search -d "stop actor"` returns them. `forge search "kill"` returns
+`Process.kill` (SIGTERM to an OS process), which is a different thing wearing
+the same name, and `forge search "is_alive"` returns nothing at all.
+
+`forge search` is this project's documented first move for finding March code.
+When the answer is a builtin it silently returns either nothing or a same-named
+decoy, and there is no signal that the search space excluded builtins entirely.
+- **Would need:** `forge search` to index the builtin table alongside the stdlib,
+  so `kill` and `is_alive` are findable by the tool that is supposed to find
+  them. Failing that, a line in the empty-result message saying builtins are not
+  indexed.
+- **My error, not the tool's, was concluding from two empty searches that the
+  capability did not exist.** Two negative results from one index are one
+  negative result.
+
+#### What this does and does not change about the escape menu
+Nothing in the code. A new game still reseeds the existing actor pool with
+`Water.send_load` rather than killing and respawning it, because that is 65
+messages instead of 65 kills plus 65 spawns plus 65 loads, and the reload path
+already existed. What changes is the justification: the pool is reused because
+it is cheaper, not because the language left no alternative.
 
 ### Not a March gap: the VBO slot collision
 The menu first drew nothing because it uploaded to slot 250, which

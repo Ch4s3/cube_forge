@@ -1475,8 +1475,10 @@ mod CubeForge do
       end
       if Env.get_int("CF_ALLOC_PROBE", 0) == 1 do alloc_probe(world, proj) else () end
       let t4 = Win.time()
-      -- The actor pool outlives a session: March has no `Actor.stop`, so a new
-      -- game reseeds the existing chunk actors instead of spawning a second set.
+      -- The actor pool outlives a session: a new game reseeds the existing chunk
+      -- actors rather than killing and respawning them. `kill(pid)` does exist,
+      -- so this is a cost choice (64 messages, not 64 kills + 64 spawns + 64
+      -- loads) and not a workaround.
       let tw0 = Win.time()
       reload_water(pids, n * n - 1, n, seed)
       println("reloaded " ++ int_to_string(n * n) ++ " water actors in " ++ ms(Win.time() -. tw0) ++ " (loads run asynchronously)")

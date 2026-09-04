@@ -927,3 +927,8 @@ identical, 17349 objects over frames 100-200 in both, and unchanged by
 arrived with one of biomes, weather or vegetation. The "1 per frame" figures
 earlier in this file are stale for the current build; the number is not
 re-measured per feature, which is how it went unnoticed. Not chased here.
+
+**Correction (2026-09-04).** The commit message for this feature says the actors
+are reseeded "because March has no Actor.stop". That is wrong: `kill(pid)` and
+`is_alive(pid)` are builtins and work. The pool is reused because it is cheaper,
+not because it had to be. See GAPS.md G75.
