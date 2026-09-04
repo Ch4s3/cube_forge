@@ -565,3 +565,34 @@ recorded at the call site.
 Per-edit relight is unchanged at 13-21 ms, and remains dominated by that same
 copy traffic (24 ms of a 43 ms debug relight is the fourteen prefix copies).
 G67 is what stands between it and a 2x improvement.
+
+### Shadow tracing: two-level DDA
+
+An 8x8x8 coarse occupancy level lets the shadow trace cross open air eight
+blocks per texture fetch instead of one, dropping into the fine grid only for
+cells that hold something. Per-cell solid counts (16 KB, against the 4 MB fine
+copy the shadow design does not retain) keep the coarse level exact across block
+edits — without them a break could only be handled conservatively and the cell
+would stay marked solid forever.
+
+It is skipped when `abs(dir.y) < 0.35`. A ray near the horizon spends its whole
+length inside terrain, so nearly every coarse cell it crosses is occupied and
+the outer walk buys nothing; measured at **-14%** near sunset before the guard.
+The light direction is a uniform, so the branch is coherent across the draw.
+
+True fullscreen (1920x1200), soft shadows (the default), clear weather:
+
+| sun (deg from noon) | single-level | two-level + guard |
+|---------------------|--------------|-------------------|
+| 25                  | 93 fps       | **223 fps**       |
+| 45                  | 92 fps       | **181 fps**       |
+| 80 (near sunset)    | 126 fps      | 123 fps           |
+
+Pixel-identical to the single-level trace at sun 12/25/80 x hard/soft, and after
+a block break and a block place.
+
+**Frame dumps need `CF_NOMOUSE=1`.** Without it the camera yaw depends on where
+the window manager placed the window relative to the pointer, so two runs render
+different views and any comparison is meaningless. `scratch/cmpframe.py` also
+reads the BMP's real dimensions now; it had 800x600 hard-coded while dumps are
+1600x1200 on a 2x display, so it had been comparing a mis-sliced sub-region.

@@ -57,8 +57,17 @@ static void on_key(GLFWwindow *w, int key, int sc, int action, int mods) {
     if (action == GLFW_PRESS) { g_in.keys[key] = 1; g_in.keys_pressed[key] = 1; }
     else if (action == GLFW_RELEASE) g_in.keys[key] = 0;
 }
+/* CF_NOMOUSE=1 drops mouse look entirely. Without it a frame dump is not
+ * reproducible across runs: the window opens wherever the window manager puts
+ * it, and a stationary pointer that ends up inside one window and outside the
+ * next produces different cursor deltas, so the camera yaw differs and the whole
+ * frame changes. That silently invalidates any dump comparison spanning
+ * separate window sessions. */
+static int g_nomouse = -1;
 static void on_cursor(GLFWwindow *w, double x, double y) {
     (void)w;
+    if (g_nomouse < 0) { const char *e = getenv("CF_NOMOUSE"); g_nomouse = (e && atoi(e) == 1); }
+    if (g_nomouse) return;
     if (g_have_mouse) { g_in.mouse_dx += x - g_in.mouse_x; g_in.mouse_dy += y - g_in.mouse_y; }
     g_in.mouse_x = x; g_in.mouse_y = y; g_have_mouse = 1;
 }
@@ -177,6 +186,7 @@ static const char *FS =
     "uniform int u_unlit;\n"
     "uniform int u_cutout;\n"
     "uniform sampler3D u_occ;\n"
+    "uniform sampler3D u_occ_c;\n"
     "uniform float u_shadow;\n"
     "uniform float u_soft;\n"
     "uniform float u_fog_density;\n"
@@ -214,6 +224,8 @@ static const char *FS =
     "const vec3 WORLD = vec3(128.0, 256.0, 128.0);\n"
     "const int  MAX_STEPS = 256;\n"
     "const float SOFT_SPREAD = 0.035;\n"
+    "const float CS = 8.0;\n"          /* coarse cell size, matching CF_OCC_CS */
+    "const int  MAX_COARSE = 160;\n"
     /* Amanatides-Woo voxel DDA. Returns the distance at which the ray first
      * meets an occluder, or 1e30 when it reaches maxDist unobstructed. Exact on
      * axis-aligned voxels: no depth bias, no acne, no peter-panning.
@@ -224,26 +236,71 @@ static const char *FS =
      * at CF_SUN=12 CF_SHADOW_SOFT=0, missing an occluder. Forcing every coarse
      * cell occupied still reproduces it, so the fault is in splitting the DDA
      * into per-cell spans, not in the coarse data. See todos.md. */
-    "float traceDist(vec3 p, vec3 dir, float maxDist){\n"
-    "  ivec3 v   = ivec3(floor(p));\n"
+    /* Fine Amanatides-Woo DDA over the parametric span [t0, t1], returning the
+     * ABSOLUTE distance at which the ray first meets an occluder, or 1e30.
+     *
+     * `testEntry` is false for the span starting at the ray origin: the origin is
+     * pushed half a voxel along the normal and testing the voxel it sits in would
+     * make every lit surface shadow itself. Every LATER coarse cell must test its
+     * entry voxel, because the ray enters that cell there. */
+    "float traceSpan(vec3 p, vec3 dir, float t0, float t1, bool testEntry){\n"
+    "  vec3  q   = p + dir * t0;\n"
+    "  ivec3 v   = ivec3(floor(q));\n"
     "  ivec3 stp = ivec3(sign(dir));\n"
-    /* An axis the ray does not move along must never step: its tMax stays at
-     * infinity so min() never selects it. */
     "  bvec3 moving = greaterThan(abs(dir), vec3(1e-8));\n"
     "  vec3  den    = mix(vec3(1.0), dir, moving);\n"
-    /* Distance to the next voxel boundary per axis. step(0,dir) picks the far
-     * face heading positive and the near face heading negative. */
-    "  vec3  tMax   = mix(vec3(1e30), (vec3(v) + step(0.0, dir) - p) / den, moving);\n"
+    "  vec3  tMax   = mix(vec3(1e30), (vec3(v) + step(0.0, dir) - q) / den, moving);\n"
     "  vec3  tDelta = mix(vec3(1e30), 1.0 / abs(den), moving);\n"
+    "  if (testEntry && v.x >= 0 && v.y >= 0 && v.z >= 0 &&\n"
+    "      v.x < int(WORLD.x) && v.y < int(WORLD.y) && v.z < int(WORLD.z))\n"
+    "    if (texture(u_occ, (vec3(v) + 0.5) / WORLD).r > 0.5) return t0;\n"
+    "  float span = t1 - t0;\n"
     "  for (int i = 0; i < MAX_STEPS; i++){\n"
     "    float tNow = min(tMax.x, min(tMax.y, tMax.z));\n"
-    "    if (tNow > maxDist) return 1e30;\n"
+    "    if (tNow > span) return 1e30;\n"
     "    if (tMax.x <= tMax.y && tMax.x <= tMax.z) { v.x += stp.x; tMax.x += tDelta.x; }\n"
     "    else if (tMax.y <= tMax.z)                { v.y += stp.y; tMax.y += tDelta.y; }\n"
     "    else                                      { v.z += stp.z; tMax.z += tDelta.z; }\n"
-    /* Out of the world means the ray escaped to the sky. */
     "    if (v.x < 0 || v.y < 0 || v.z < 0 || v.x >= int(WORLD.x) || v.y >= int(WORLD.y) || v.z >= int(WORLD.z)) return 1e30;\n"
-    "    if (texture(u_occ, (vec3(v) + 0.5) / WORLD).r > 0.5) return tNow;\n"
+    "    if (texture(u_occ, (vec3(v) + 0.5) / WORLD).r > 0.5) return t0 + tNow;\n"
+    "  }\n"
+    "  return 1e30;\n"
+    "}\n"
+    /* Two-level Amanatides-Woo. The outer walk is over 8x8x8 coarse cells, each
+     * marked exactly when it holds a solid voxel, so a ray crossing open air
+     * covers eight blocks per texture fetch instead of one and drops into the
+     * fine grid only where there is something to hit. Coarse cells are visited in
+     * ray order, so the first fine hit is the nearest: the result is identical to
+     * the single-level trace, in far fewer steps. That matters most with soft
+     * shadows, which fire four of these per fragment. */
+    "float traceDist(vec3 p, vec3 dir, float maxDist){\n"
+    /* Skipping empty space only pays when there IS empty space. A ray near the
+     * horizon travels a long way through terrain, so almost every coarse cell it
+     * crosses is occupied and the outer walk is pure overhead -- measured at
+     * -14% near sunset against +100% at midday. The light direction is a uniform,
+     * so this branch is coherent across the whole draw and costs nothing.
+     * traceSpan over the full range IS the single-level trace. */
+    "  if (abs(dir.y) < 0.35) return traceSpan(p, dir, 0.0, maxDist, false);\n"
+    "  vec3  CW    = ceil(WORLD / CS);\n"
+    "  ivec3 c     = ivec3(floor(p / CS));\n"
+    "  ivec3 cstp  = ivec3(sign(dir));\n"
+    "  bvec3 cmov  = greaterThan(abs(dir), vec3(1e-8));\n"
+    "  vec3  cden  = mix(vec3(1.0), dir, cmov);\n"
+    "  vec3  ctMax = mix(vec3(1e30), ((vec3(c) + step(0.0, dir)) * CS - p) / cden, cmov);\n"
+    "  vec3  ctDel = mix(vec3(1e30), vec3(CS) / abs(cden), cmov);\n"
+    "  float tEnter = 0.0;\n"
+    "  for (int i = 0; i < MAX_COARSE; i++){\n"
+    "    if (tEnter > maxDist) return 1e30;\n"
+    "    if (c.x < 0 || c.y < 0 || c.z < 0 || c.x >= int(CW.x) || c.y >= int(CW.y) || c.z >= int(CW.z)) return 1e30;\n"
+    "    float tExit = min(ctMax.x, min(ctMax.y, ctMax.z));\n"
+    "    if (texture(u_occ_c, (vec3(c) + 0.5) / CW).r > 0.5) {\n"
+    "      float hit = traceSpan(p, dir, tEnter, min(tExit, maxDist), i > 0);\n"
+    "      if (hit < 1e29) return hit;\n"
+    "    }\n"
+    "    tEnter = tExit;\n"
+    "    if (ctMax.x <= ctMax.y && ctMax.x <= ctMax.z) { c.x += cstp.x; ctMax.x += ctDel.x; }\n"
+    "    else if (ctMax.y <= ctMax.z)                  { c.y += cstp.y; ctMax.y += ctDel.y; }\n"
+    "    else                                          { c.z += cstp.z; ctMax.z += ctDel.z; }\n"
     "  }\n"
     "  return 1e30;\n"
     "}\n"
@@ -364,6 +421,17 @@ static GLint  g_u_fog_density = -1, g_u_fog_color = -1, g_u_overcast = -1, g_u_b
  * far plane, and the two can never drift apart. */
 static float  g_fog_rgb[3] = {0.0f, 0.0f, 0.0f};
 static GLint  g_u_occ = -1, g_u_shadow = -1, g_u_soft = -1;
+/* Coarse occupancy: one texel per 8x8x8 block of voxels, set when ANY voxel in
+ * it is solid, so the shadow DDA can skip eight blocks at a time through the
+ * open air most sun rays traverse. `g_occ_count` is the per-cell solid count,
+ * which is what lets a block break clear a coarse texel exactly instead of
+ * leaving it conservatively marked forever -- 16 KB, against the 4 MB fine copy
+ * the shadow design deliberately does not retain. */
+#define CF_OCC_CS 8
+static GLuint    g_occ_c = 0;
+static uint16_t *g_occ_count = NULL;
+static int       g_occ_cw = 0, g_occ_ch = 0, g_occ_cd = 0;
+static GLint     g_u_occ_c = -1;
 static GLuint g_tex = 0;
 
 int64_t cf_gfx_init(void) {
@@ -387,6 +455,7 @@ int64_t cf_gfx_init(void) {
     g_u_occ = glGetUniformLocation(g_prog, "u_occ");
     g_u_shadow = glGetUniformLocation(g_prog, "u_shadow");
     g_u_soft = glGetUniformLocation(g_prog, "u_soft");
+    g_u_occ_c = glGetUniformLocation(g_prog, "u_occ_c");
     g_u_fog_density = glGetUniformLocation(g_prog, "u_fog_density");
     g_u_fog_color = glGetUniformLocation(g_prog, "u_fog_color");
     g_u_overcast = glGetUniformLocation(g_prog, "u_overcast");
@@ -502,9 +571,41 @@ void cf_gfx_upload_occupancy(void *arr, int64_t w, int64_t h, int64_t d) {
     glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+    /* Coarse level. Occupancy is indexed x + 128 * (y + 256 * z), matching
+     * CubeForge.Light.occ_index. */
+    g_occ_cw = (int)((w + CF_OCC_CS - 1) / CF_OCC_CS);
+    g_occ_ch = (int)((h + CF_OCC_CS - 1) / CF_OCC_CS);
+    g_occ_cd = (int)((d + CF_OCC_CS - 1) / CF_OCC_CS);
+    free(g_occ_count);
+    g_occ_count = (uint16_t *)calloc((size_t)g_occ_cw * g_occ_ch * g_occ_cd, sizeof(uint16_t));
+    unsigned char *coarse = (unsigned char *)calloc((size_t)g_occ_cw * g_occ_ch * g_occ_cd, 1);
+    const unsigned char *fine = (const unsigned char *)narr_data(arr);
+    for (int64_t z = 0; z < d; z++)
+        for (int64_t y = 0; y < h; y++)
+            for (int64_t x = 0; x < w; x++)
+                if (fine[x + w * (y + h * z)]) {
+                    size_t ci = (size_t)(x / CF_OCC_CS)
+                              + (size_t)g_occ_cw * ((size_t)(y / CF_OCC_CS)
+                              + (size_t)g_occ_ch * (size_t)(z / CF_OCC_CS));
+                    g_occ_count[ci]++;
+                    coarse[ci] = 255;
+                }
+    if (!g_occ_c) glGenTextures(1, &g_occ_c);
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_3D, g_occ_c);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage3D(GL_TEXTURE_3D, 0, GL_R8, g_occ_cw, g_occ_ch, g_occ_cd, 0,
+                 GL_RED, GL_UNSIGNED_BYTE, coarse);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+    free(coarse);
     glActiveTexture(GL_TEXTURE0);
     glUseProgram(g_prog);
     glUniform1i(g_u_occ, 1);
+    glUniform1i(g_u_occ_c, 2);
 }
 
 /* One voxel changed: a single texel beats rebuilding 4 MB. */
@@ -517,6 +618,24 @@ void cf_gfx_set_voxel(int64_t x, int64_t y, int64_t z, int64_t solid) {
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
     glTexSubImage3D(GL_TEXTURE_3D, 0, (GLint)x, (GLint)y, (GLint)z, 1, 1, 1,
                     GL_RED, GL_UNSIGNED_BYTE, &v);
+    /* Keep the coarse level exact. The count is what makes a break able to clear
+     * a coarse texel: without it a broken block could only be handled
+     * conservatively and the cell would stay marked solid forever. */
+    if (g_occ_count && g_occ_c) {
+        size_t ci = (size_t)(x / CF_OCC_CS)
+                  + (size_t)g_occ_cw * ((size_t)(y / CF_OCC_CS)
+                  + (size_t)g_occ_ch * (size_t)(z / CF_OCC_CS));
+        uint16_t before = g_occ_count[ci];
+        if (solid) g_occ_count[ci]++;
+        else if (g_occ_count[ci]) g_occ_count[ci]--;
+        if ((before > 0) != (g_occ_count[ci] > 0)) {
+            unsigned char cv = g_occ_count[ci] ? 255 : 0;
+            glActiveTexture(GL_TEXTURE2);
+            glBindTexture(GL_TEXTURE_3D, g_occ_c);
+            glTexSubImage3D(GL_TEXTURE_3D, 0, (GLint)(x / CF_OCC_CS), (GLint)(y / CF_OCC_CS),
+                            (GLint)(z / CF_OCC_CS), 1, 1, 1, GL_RED, GL_UNSIGNED_BYTE, &cv);
+        }
+    }
     glActiveTexture(GL_TEXTURE0);
 }
 
