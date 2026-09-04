@@ -83,14 +83,35 @@ static void on_fb_size(GLFWwindow *w, int width, int height) {
     (void)w; g_fb_w = width; g_fb_h = height; glViewport(0, 0, width, height);
 }
 
+/* March's scheduler runs `main` as an ordinary work-stealing green thread
+ * unless MARCH_PIN_MAIN=1: whichever OS scheduler thread happens to dequeue
+ * it runs it, and every later yield (an await, or the ~1ms cooperative
+ * preemption quantum) is a fresh chance to land on a different one. Cocoa
+ * (GLFW's backend here) requires every window/GL call happen on the one
+ * OS thread the process actually started on — unrelated to March, a
+ * decades-old AppKit constraint. Measured unpinned: 4 of 5 runs never
+ * touched the real main thread even before the first task was spawned
+ * (~1-in-`MARCH_NUM_SCHEDULERS` luck), and games that got past window
+ * creation still crashed later once preemption moved `main` off it.
+ *
+ * A C constructor runs before any Mach-O/ELF binary reaches its `main()`,
+ * hence before the runtime reads this env var — so setting it here reaches
+ * the scheduler in time. `setenv`'s third argument is 0 (don't overwrite),
+ * so an explicit `MARCH_PIN_MAIN=0` in the environment still disables it. */
+__attribute__((constructor))
+static void cf_force_pin_main(void) {
+    setenv("MARCH_PIN_MAIN", "1", 0);
+}
+
 /* ═══════════════════════════════ WINDOW DOMAIN ═══════════════════════════════ */
 
 int64_t cf_win_open(int64_t w, int64_t h, march_value title) {
     if (!pthread_main_np()) {
         fprintf(stderr, "cf: cf_win_open must run on the process main thread (GLFW/Cocoa requirement). "
-                        "Run with MARCH_PIN_MAIN=1 (pins `main` to scheduler 0 on the main thread; "
-                        "needs the runtime/pin-main-thread March runtime, see GAPS.md G15) "
-                        "or MARCH_NUM_SCHEDULERS=1 (serialises pmap).\n");
+                        "MARCH_PIN_MAIN is forced on by a constructor in this shim (cf_force_pin_main) "
+                        "unless explicitly overridden to 0 in the environment; if you see this without "
+                        "such an override, the constructor didn't run in time or the runtime lacks the "
+                        "pin-main-thread patch (see GAPS.md G15) — try MARCH_NUM_SCHEDULERS=1.\n");
         return 0;
     }
     if (!glfwInit()) { fprintf(stderr, "cf: glfwInit failed\n"); return 0; }
