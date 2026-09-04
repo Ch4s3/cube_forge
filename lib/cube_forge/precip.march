@@ -21,8 +21,6 @@
 -- owns the per-particle loop.
 mod CubeForge.Precip do
 
-  alias CubeForge.Light as L
-  alias CubeForge.Vertex as Vx
   alias CubeForge.Noise as N
 
   doc "Mesh slot for the precipitation buffer (249; 250-254 are taken)."

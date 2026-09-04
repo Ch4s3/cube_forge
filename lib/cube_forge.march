@@ -778,6 +778,7 @@ mod CubeForge do
             else () end
             println("player at " ++ V.to_string(Player.position(player1)) ++ " on_ground=" ++ (if Player.on_ground(player1) do "true" else "false" end))
             println("  sun level " ++ float_to_string(sun) ++ " dir (" ++ float_to_string(sdx) ++ ", " ++ float_to_string(sdy) ++ ", " ++ float_to_string(sdz) ++ ")  moon " ++ float_to_string(moon))
+            println("  weather " ++ float_to_string(wx) ++ " (overcast " ++ float_to_string(ov) ++ ", fog " ++ float_to_string(fog_density(wx)) ++ ", bolt " ++ float_to_string(bolt) ++ ", live " ++ int_to_string(live) ++ (if snowing do " snow" else " rain" end) ++ ")")
           else () end
           if frame % 60 == 0 && autowalk do
             println("frame " ++ int_to_string(frame) ++ " player at " ++ V.to_string(Player.position(player1)) ++ " on_ground=" ++ (if Player.on_ground(player1) do "true" else "false" end))
