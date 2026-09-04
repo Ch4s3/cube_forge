@@ -511,10 +511,15 @@ mod CubeForge do
     if pos && !neg do 1.0 else if neg && !pos do -1.0 else 0.0 end end
   end
 
-  doc "Sun level 0..1 over a day of [day] seconds (CF_DAY). Cosine, not sine, so the world starts at noon rather than at midnight; night is the clamped half of the cycle."
+  doc "Sun level 0..1 over a day of [day] seconds (CF_DAY, default 1800 = 30 minutes). Cosine, not sine, so the world starts at noon rather than at midnight; night is the clamped half of the cycle."
   fn sun_level(t : Float, day : Float) : Float do
     let phase = Math.cos(t *. 6.283185307 /. day)
     if phase < 0.0 do 0.0 else phase end
+  end
+
+  doc "Moonlight 0..1: full through the night, fading out as the sun climbs. Matches the ramp the fragment shader uses so the sky and the ground agree."
+  fn moon_level(sun : Float) : Float do
+    if sun >= 0.25 do 0.0 else (0.25 -. sun) /. 0.25 end
   end
 
   -- Toggle the flashlight on the frame F goes down. [st] packs the lamp state in
@@ -612,7 +617,8 @@ mod CubeForge do
           let sun = sun_level(now, day_len)
           let eye = Player.eye(player1)
           let look = Player.forward(Player.yaw(player1), Player.pitch(player1))
-          Win.gfx_begin_frame(0.55 *. sun, 0.75 *. sun, 0.95 *. sun)
+          let moon = moon_level(sun)
+          Win.gfx_begin_frame(0.55 *. sun +. 0.030 *. moon, 0.75 *. sun +. 0.045 *. moon, 0.95 *. sun +. 0.110 *. moon)
           Win.gfx_set_light(sun, V.x(eye), V.y(eye), V.z(eye), V.x(look), V.y(look), V.z(look), flash_on(flash1))
           Win.gfx_set_view_proj(vp1)
           draw_chunks(scene_counts(sc1), 0, nchunks)
@@ -821,7 +827,7 @@ mod CubeForge do
         if Env.get_int("CF_ALLOC_PROBE", 0) == 1 do alloc_probe(world, proj) else () end
         let t4 = Win.time()
         let knobs = Knobs(max_frames, Env.get_int("CF_DUMP_FRAME", 30), Env.get("CF_DUMP", ""), Env.get_int("CF_AUTOWALK", 0) == 1,
-                          int_to_float(Env.get_int("CF_AUTOSPIN", 0)) /. 1000.0 /. Player.mouse_sens(), Env.get_int("CF_AUTOEDIT", -1), autoswim, Env.get_int("CF_AUTOFLOW", -1), workers, int_to_float(Env.get_int("CF_DAY", 240)))
+                          int_to_float(Env.get_int("CF_AUTOSPIN", 0)) /. 1000.0 /. Player.mouse_sens(), Env.get_int("CF_AUTOEDIT", -1), autoswim, Env.get_int("CF_AUTOFLOW", -1), workers, int_to_float(Env.get_int("CF_DAY", 1800)))
         let tw0 = Win.time()
         let pids = Array.from_list(spawn_water(n * n - 1, n, seed, Nil))
         println("spawned " ++ int_to_string(n * n) ++ " water actors in " ++ ms(Win.time() -. tw0) ++ " (loads run asynchronously)")

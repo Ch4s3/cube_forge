@@ -157,15 +157,24 @@ static const char *FS =
      * on/off state, so the cone half-angles are constants rather than uniforms. */
     "const float COS_INNER = 0.97;\n"
     "const float COS_OUTER = 0.88;\n"
+    /* Moonlight: cool and dim, ramping in as the sun sets and gone shortly after
+     * it rises. It is multiplied by v_shade like sunlight is, so it reaches only
+     * sky-exposed surfaces — a sealed cave stays black at night and still needs
+     * the flashlight. MOON_LEVEL is the fraction of full daylight. */
+    "const vec3  MOON_TINT  = vec3(0.60, 0.72, 1.00);\n"
+    "const float MOON_LEVEL = 0.13;\n"
+    "const float MOON_UNTIL = 0.25;\n"
     "void main(){\n"
     "  vec4 t = (u_use_tex == 1) ? texture(u_tex, vec3(v_uv, v_layer)) : vec4(v_uv, v_layer, 1.0);\n"
-    "  float baked = v_shade * mix(0.06, 1.0, u_sun);\n"
+    "  float moon = clamp((MOON_UNTIL - u_sun) / MOON_UNTIL, 0.0, 1.0);\n"
+    "  vec3  sky  = vec3(u_sun) + MOON_TINT * (MOON_LEVEL * moon);\n"
+    "  vec3  baked = v_shade * sky;\n"
     "  vec3  L  = u_eye - v_world;\n"
     "  float d2 = dot(L, L);\n"
     "  vec3  Ln = L * inversesqrt(max(d2, 1e-6));\n"
     "  float spot  = smoothstep(COS_OUTER, COS_INNER, dot(-Ln, u_dir));\n"
     "  float flash = u_flash * spot * max(dot(v_normal, Ln), 0.0) / (1.0 + 0.02 * d2);\n"
-    "  o_color = vec4(t.rgb * (baked + flash), t.a);\n"
+    "  o_color = vec4(t.rgb * (baked + vec3(flash)), t.a);\n"
     "}\n";
 
 static GLuint compile(GLenum kind, const char *src) {

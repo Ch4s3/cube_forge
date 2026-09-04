@@ -146,6 +146,7 @@ Release build, headless, 8x8 chunks.
 | opaque vertices | 44 364 | **81 792** (+84%) |
 | full-world skylight flood | — | **521 ms** (one-off, at startup) |
 | incremental relight per block edit | — | **~50 ms** debug / ~22 ms release |
+| day/night cycle | — | 1800 s (30 min) by default; `CF_DAY` overrides |
 | mesh all 64 chunks | 755 ms | 1 676 ms |
 
 The opaque vertex rise is the accepted cost of smooth lighting: the greedy mask

@@ -114,7 +114,9 @@ The vertex shader gains `const vec3 NORMALS[6]` and `const float
 FACE_SHADE[6]` indexed by `a_face`, and outputs world position and normal.
 
 ```
-float baked = v_shade * face_shade * mix(0.06, 1.0, u_sun);
+float moon  = clamp((0.25 - u_sun) / 0.25, 0.0, 1.0);
+vec3  sky   = vec3(u_sun) + MOON_TINT * (MOON_LEVEL * moon);
+vec3  baked = v_shade * face_shade * sky;
 vec3  L     = u_eye - v_world;
 float spot  = smoothstep(u_cos_outer, u_cos_inner, dot(normalize(-L), u_dir));
 float flash = u_flash * spot * max(dot(v_normal, normalize(L)), 0.0)
@@ -125,7 +127,18 @@ o_color     = vec4(t.rgb * (baked + flash), t.a);
 One new shim entry point, `cf_gfx_set_light(sun, eye, dir, flash)`, called per
 frame. The cone half-angles `u_cos_inner` / `u_cos_outer` are shader constants,
 not uniforms — the flashlight's beam shape never varies at runtime, only its
-position, aim and on/off state. `u_sun` also drives the clear colour so the sky darkens with the world.
+position, aim and on/off state.
+
+Night is lit by a cool moonlight term (`MOON_TINT` 0.60/0.72/1.00 at
+`MOON_LEVEL` 0.13 of full daylight) that ramps in as the sun drops below 0.25,
+replacing the flat 0.06 ambient floor of the original design. Because it is
+multiplied by `v_shade` exactly as sunlight is, moonlight reaches only
+sky-exposed surfaces: a sealed cave stays black at night and still needs the
+flashlight. The clear colour carries the same ramp so the sky reads as dark navy
+rather than black.
+
+A full day is 1800 seconds (30 minutes) by default; `CF_DAY` overrides it, which
+is what makes night reachable in a screenshot or a headless run. `u_sun` also drives the clear colour so the sky darkens with the world.
 The `mix(0.06, 1.0, u_sun)` floor keeps silhouettes readable at night while
 leaving the flashlight something to do. `cf_win_time()` already exists to drive
 the clock; `F` toggles the flashlight.
