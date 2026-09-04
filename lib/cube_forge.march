@@ -533,6 +533,25 @@ mod CubeForge do
     M.write_view(Q.x(q), Q.y(q), Q.z(q), Q.w(q), V.x(e), V.y(e), V.z(e), view)
   end
 
+  -- Half-width, in blocks, of the area the map camera shows (a local overhead view, not the
+  -- whole world at once — the camera follows the player, see map_view below).
+  fn map_half_extent() : Float do 32.0 end
+  -- Orthographic projection has no perspective, so the camera's altitude does not affect zoom
+  -- (map_half_extent alone does) — it only has to clear the marker's height (Marker.y()) and the
+  -- tallest possible terrain (255), or the marker falls behind the camera and never renders.
+  fn map_altitude() : Float do 300.0 end
+
+  -- Top-down view-projection centred on the player's (x, z). Rebuilt fresh each map-view frame
+  -- (unlike the steady first-person camera, which updates a persistent buffer in place) since
+  -- map view is an occasional toggle, not part of the @[no_alloc] frame-loop hot path.
+  pfn map_view(map_proj : NativeFloatArr, p : CubeForge.Player.Player) : NativeF32Arr do
+    let pos = Player.position(p)
+    let eye = V.new(V.x(pos), map_altitude(), V.z(pos))
+    let target = V.new(V.x(pos), 0.0, V.z(pos))
+    let view_m = M.look_at(eye, target, V.new(0.0, 0.0, -1.0))
+    M.write_f32(M.mul(map_proj, view_m), NativeArray.make_f32(16, 0.0))
+  end
+
   -- (kept for the allocation bisect) the temporary-matrix version
   pfn view_proj(proj : NativeFloatArr, p : CubeForge.Player.Player, dst : NativeF32Arr) : NativeF32Arr do
     let q = Q.from_yaw_pitch(Player.yaw(p), Player.pitch(p))
@@ -552,7 +571,7 @@ mod CubeForge do
   -- Run-time knobs read once, outside the frame loop (an Env read allocates).
   type Knobs = Knobs(Int, Int, String, Bool, Float, Int, Bool, Int, Int, Int)   -- max_frames, dump_frame, dump_path, autowalk, autospin, autoedit frame (<0 = off), autoswim, autoflow frame (<0 = off), workers, automap frame (<0 = off; forces map view on from this frame, for headless verification)
 
-  fn frame_loop(f : Frame, k : Knobs, sc, nchunks : Int, proj : NativeFloatArr, map_vp : NativeF32Arr, fps : Fps) : Frame do
+  fn frame_loop(f : Frame, k : Knobs, sc, nchunks : Int, proj : NativeFloatArr, map_proj : NativeFloatArr, fps : Fps) : Frame do
     match f do
       Frame(frame, last_t, player, sample, view, vp, map_mode, marker) ->
         match k do
@@ -570,7 +589,10 @@ mod CubeForge do
           let player1 = Player.update(player, read_input(autowalk, autospin, autoswim && frame >= 320), scene_world(sc), dt)
           let view1 = write_view(player1, view)
           let vp1 = M.mul_into_f32(proj, view1, vp)
-          let render_vp = if map_mode1 do map_vp else vp1 end
+          -- The map camera follows the player (x, z) so it reads as a local overhead view, not a
+          -- fixed satellite shot of the whole world; it recomputes a fresh matrix each frame this
+          -- is shown, unlike the steady per-frame camera above (map view is an occasional toggle).
+          let render_vp = if map_mode1 do map_view(map_proj, player1) else vp1 end
           -- CF_AUTOEDIT=<frame>: scripted break at that frame and place 60 frames later (headless verification)
           -- scripted: hold break for 60 frames from `autoedit`, place the harvested block at +120, water at +180
           let scripted_hold = autoedit >= 0 && ((frame >= autoedit && frame < autoedit + 60) || (frame >= autoedit + 240 && frame < autoedit + 300))
@@ -630,7 +652,7 @@ mod CubeForge do
           if frame == 200 do
             println("live-object delta over frames 100..200: " ++ int_to_string(Win.live_allocs() - sample1) ++ " (" ++ int_to_string((Win.live_allocs() - sample1) / 100) ++ " per frame)")
           else () end
-          frame_loop(Frame(frame + 1, now, player1, sample1, view1, vp1, map_mode1, marker1), k, sc2, nchunks, proj, map_vp, fps1)
+          frame_loop(Frame(frame + 1, now, player1, sample1, view1, vp1, map_mode1, marker1), k, sc2, nchunks, proj, map_proj, fps1)
         end
         end
     end
@@ -798,13 +820,9 @@ mod CubeForge do
         Win.gfx_upload(253, F32Buf.storage(uq), F32Buf.len(uq))
         Win.gfx_upload_texture(Texture.checkerboard(), Texture.size(), Texture.size(), Texture.layers())
         let proj = M.perspective(70.0 *. Math.pi() /. 180.0, 800.0 /. 600.0, 0.1, 500.0)
-        -- top-down map camera (M toggles it): fixed above the world centre, orthographic
-        let world_extent = int_to_float(16 * n)
-        let map_half = world_extent /. 2.0 *. 1.05
-        let map_center = world_extent /. 2.0
-        let map_view_m = M.look_at(V.new(map_center, 300.0, map_center), V.new(map_center, 0.0, map_center), V.new(0.0, 0.0, -1.0))
-        let map_proj = M.orthographic(0.0 -. map_half, map_half, 0.0 -. map_half, map_half, 0.1, 400.0)
-        let map_vp = M.write_f32(M.mul(map_proj, map_view_m), NativeArray.make_f32(16, 0.0))
+        -- top-down map camera (M toggles it): orthographic, follows the player, zoomed to a local
+        -- area rather than the whole world (map_view builds the per-frame view matrix).
+        let map_proj = M.orthographic(0.0 -. map_half_extent(), map_half_extent(), 0.0 -. map_half_extent(), map_half_extent(), 0.1, 400.0)
         let autoswim = Env.get_int("CF_AUTOSWIM", 0) == 1
         let water_col = World.find_water(world)
         let spawn_pos = int_to_float(8 * n)
@@ -822,7 +840,7 @@ mod CubeForge do
         println("spawned " ++ int_to_string(n * n) ++ " water actors in " ++ ms(Win.time() -. tw0) ++ " (loads run asynchronously)")
         let scene = Scene(world, counts, F32Buf.new(256), Ray.miss(), Ui(Inv.new(), F32Buf.new(2048), F32Buf.new(256), -1), pids, NativeArray.make_int(n * n, 0), Array.from_list(meshes))
         let fps0 = Fps(t4, 0, 0, F32Buf.new(4096))
-        match frame_loop(Frame(0, t4, player, 0, NativeArray.make_float(16, 0.0), NativeArray.make_f32(16, 0.0), false, F32Buf.new(64)), knobs, scene, n * n, proj, map_vp, fps0) do
+        match frame_loop(Frame(0, t4, player, 0, NativeArray.make_float(16, 0.0), NativeArray.make_f32(16, 0.0), false, F32Buf.new(64)), knobs, scene, n * n, proj, map_proj, fps0) do
           Frame(frames, _, p, _, _, _, _, _) ->
             let t5 = Win.time()
             println("ran " ++ int_to_string(frames) ++ " frames in " ++ ms(t5 -. t4) ++ " (" ++ float_to_string(int_to_float(frames) /. (t5 -. t4)) ++ " fps, vsync on); player ended at " ++ V.to_string(Player.position(p)))
