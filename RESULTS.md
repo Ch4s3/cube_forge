@@ -307,3 +307,35 @@ fragments before the shadow trace runs) targets the real cost, and frustum
 culling — which does not exist yet either — is the cheaper first step. Both
 become worthwhile when chunk streaming raises the chunk count; neither is worth
 doing at 8x8.
+
+### Stale lighting after an edit (fixed)
+
+Per-vertex light is baked into the mesh, but the edit path only remeshed the
+edited cell's section (plus neighbours on a boundary), while `relight_at`
+changes light across a far wider box. Everything else kept stale lighting until
+something forced a rebuild.
+
+Measured before the fix, counting sections whose light actually moved against
+the one section being remeshed:
+
+| edit | sections whose light changed | sections remeshed |
+|---|---|---|
+| break a surface block | 0 | 1 |
+| place a block at y=90 | 2 | 1 |
+| place a block high in open air | **5** | 1 |
+| 3-block platform | **5** | 1 |
+
+`relight_marked` now returns a dirty `(chunk, section)` mask alongside the
+repaired field, and the edit remeshes exactly those. A block edit measures
+17-30 ms end to end, still dominated by the relight rather than the extra
+sections (~1.2 ms each). Blindly remeshing the whole relight box would have
+been ~173 ms, which is why the mask is worth having.
+
+The mask is one slot per (chunk, section) rather than a packed per-chunk
+bitmask: a bitmask means reading the accumulator before OR-ing into it, and
+reading an array before writing it turns every write into a full copy (G63).
+The mark pass is write-only; the 16-bit masks are derived in a separate read.
+
+The invariant is pinned by a test: for the edit that reaches furthest (a block
+placed high in open air, darkening the column beneath it), no voxel changes
+light in a section the mask failed to flag.

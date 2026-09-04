@@ -59,6 +59,23 @@ mod CubeForge.Test.Light do
     end
   end
 
+
+  -- The first (chunk, section) whose light changed but which the dirty mask did
+  -- not flag, or -1 when the mask covers every change. This is the invariant the
+  -- remesh depends on: an unmarked change is a section left showing stale light.
+  pfn unmarked_go(a : NativeU8Arr, b : NativeU8Arr, marks : NativeIntArr, i : Int) : Int do
+    if i >= 4194304 do -1
+    else if NativeArray.get_u8(a, i) == NativeArray.get_u8(b, i) do unmarked_go(a, b, marks, i + 1)
+    else
+      let slot = L.mark_slot((i % 128) / 16, ((i / 128) % 128) / 16, (i / 16384) / 16)
+      if NativeArray.get_int(marks, slot) == 0 do slot
+      else unmarked_go(a, b, marks, i + 1) end
+    end end
+  end
+  pfn marked_count(m : NativeIntArr, i : Int, acc : Int) : Int do
+    if i >= 1024 do acc else marked_count(m, i + 1, acc + NativeArray.get_int(m, i)) end
+  end
+
   describe "Light.index" do
     test "corners map to the ends of the flat range" do
       Test.assert_eq_int(L.index(0, 0, 0), 0, "origin")
@@ -293,6 +310,28 @@ mod CubeForge.Test.Light do
       let o = L.occupancy(w)
       let c = CubeForge.World.chunk_at(w, 2, 2)
       Test.assert_eq_int(occ_mismatch(o, c, 2, 2, 0), -1, "no voxel disagrees with is_opaque")
+    end
+  end
+
+  describe "Light.relight_marked" do
+    test "every section whose light changed is marked dirty" do
+      -- a block placed high in open air darkens the whole column beneath it,
+      -- which is the case that reaches furthest from the edit
+      let w0 = CubeForge.World.relight_all(CubeForge.World.generate(8, 7, 1))
+      let before = L.copy_field(CubeForge.World.light(w0), L.new())
+      let w1 = CubeForge.World.set_block(w0, 64, 140, 64, 3)
+      let r = L.relight_marked(CubeForge.World.light(w1), w1, 64, 140, 64)
+      Test.assert_true(marked_count(L.relit_marks(r), 0, 0) > 1, "the edit dirtied more than one section")
+      Test.assert_eq_int(unmarked_go(before, L.relit_field(r), L.relit_marks(r), 0), -1,
+                         "no changed section was left unmarked")
+    end
+
+    test "an edit that changes no light marks no sections" do
+      -- replacing a stone block with stone changes nothing at all
+      let w0 = CubeForge.World.relight_all(slab_world(8))
+      let w1 = CubeForge.World.set_block(w0, 40, 8, 40, 3)
+      let r = L.relight_marked(CubeForge.World.light(w1), w1, 40, 8, 40)
+      Test.assert_eq_int(marked_count(L.relit_marks(r), 0, 0), 0, "nothing dirtied")
     end
   end
 

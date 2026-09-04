@@ -256,8 +256,50 @@ mod CubeForge.Light do
     end
   end
 
-  doc "Repair the skylight field after the block at (ex, ey, ez) changed. [w] is the world after the edit."
-  fn relight_at(la : NativeU8Arr, w : CubeForge.World.World, ex : Int, ey : Int, ez : Int) : NativeU8Arr do
+  -- ── Which sections need remeshing ────────────────────────────────────────
+  --
+  -- Per-vertex light is baked into the mesh, so every section whose light moved
+  -- has to be rebuilt or it keeps showing stale lighting. The marks array has
+  -- one slot per (chunk, section), written 1 when any voxel in it changed.
+  --
+  -- One slot per pair rather than a packed per-chunk bitmask on purpose: a
+  -- bitmask would mean reading the accumulator before OR-ing a bit into it, and
+  -- reading an array before writing it turns every write into a full copy
+  -- (GAPS.md G63). This pass is write-only.
+
+  fn marks_new() : NativeIntArr do NativeArray.make_int(1024, 0) end
+
+  @[no_alloc]
+  fn mark_slot(cx : Int, cz : Int, sy : Int) : Int do cx + 8 * cz + 64 * sy end
+
+  pfn mark_row(m : NativeIntArr, a : NativeU8Arr, b : NativeU8Arr, x : Int, x1 : Int, y : Int, z : Int) : NativeIntArr do
+    if x > x1 do m
+    else if NativeArray.get_u8(a, index(x, y, z)) == NativeArray.get_u8(b, index(x, y, z)) do mark_row(m, a, b, x + 1, x1, y, z)
+    else mark_row(NativeArray.set_int(m, mark_slot(x / 16, z / 16, y / 16), 1), a, b, x + 1, x1, y, z) end end
+  end
+  pfn mark_plane(m : NativeIntArr, a : NativeU8Arr, b : NativeU8Arr, x0 : Int, x1 : Int, y : Int, z : Int, z1 : Int) : NativeIntArr do
+    if z > z1 do m else mark_plane(mark_row(m, a, b, x0, x1, y, z), a, b, x0, x1, y, z + 1, z1) end
+  end
+  pfn mark_box(m : NativeIntArr, a : NativeU8Arr, b : NativeU8Arr, x0 : Int, x1 : Int, y : Int, y1 : Int, z0 : Int, z1 : Int) : NativeIntArr do
+    if y > y1 do m else mark_box(mark_plane(m, a, b, x0, x1, y, z0, z1), a, b, x0, x1, y + 1, y1, z0, z1) end
+  end
+
+  doc "The 16-bit section mask for chunk (cx, cz), read out of a marks array."
+  fn section_mask(m : NativeIntArr, cx : Int, cz : Int) : Int do sec_mask_go(m, cx, cz, 0, 0) end
+  pfn sec_mask_go(m : NativeIntArr, cx : Int, cz : Int, sy : Int, acc : Int) : Int do
+    if sy >= 16 do acc
+    else if NativeArray.get_int(m, mark_slot(cx, cz, sy)) != 0 do sec_mask_go(m, cx, cz, sy + 1, acc + sec_bit(sy))
+    else sec_mask_go(m, cx, cz, sy + 1, acc) end end
+  end
+  pfn sec_bit(sy : Int) : Int do if sy <= 0 do 1 else 2 * sec_bit(sy - 1) end end
+
+  -- A repaired light field together with the sections whose light changed.
+  type Relit = Relit(NativeU8Arr, NativeIntArr)
+  fn relit_field(r : Relit) : NativeU8Arr do match r do Relit(f, _) -> f end end
+  fn relit_marks(r : Relit) : NativeIntArr do match r do Relit(_, m) -> m end end
+
+  doc "Repair the skylight field after the block at (ex, ey, ez) changed, reporting which sections moved. [w] is the world after the edit."
+  fn relight_marked(la : NativeU8Arr, w : CubeForge.World.World, ex : Int, ey : Int, ez : Int) : Relit do
     let r = relight_radius()
     let cx0 = clampi(ex - r, 0, 127)
     let cx1 = clampi(ex + r, 0, 127)
@@ -285,7 +327,15 @@ mod CubeForge.Light do
     let swept = box_sweep_go(la2, w, max_level(), sx0, sx1, sy0, sy1, sz0, sz1, plen)
     -- Overlay the swept prefix onto the untouched upper field. la2 was read by
     -- the sweep, so it cannot itself be the destination (GAPS.md G21).
-    CubeForge.Ffi.Window.u8_blit(copy_field(la2, new()), 0, swept, 0, plen)
+    let out = CubeForge.Ffi.Window.u8_blit(copy_field(la2, new()), 0, swept, 0, plen)
+    -- Mark over the SCAN box, not the cleared box: the sweep may also write into
+    -- the one-voxel ring around it.
+    Relit(out, mark_box(marks_new(), above, out, sx0, sx1, sy0, sy1, sz0, sz1))
+  end
+
+  doc "Repair the skylight field, discarding the dirty-section marks."
+  fn relight_at(la : NativeU8Arr, w : CubeForge.World.World, ex : Int, ey : Int, ez : Int) : NativeU8Arr do
+    relit_field(relight_marked(la, w, ex, ey, ez))
   end
 
   -- ── Occupancy: the shadow ray-marcher's view of the world ─────────────────
