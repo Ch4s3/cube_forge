@@ -94,24 +94,35 @@ mod CubeForge.Hud do
   fn slot_y0() : Float do -0.97 end
 
   -- ── Inventory panel geometry ────────────────────────────────────────────────
-  -- The backpack uses the hotbar's column pitch, so a backpack column sits
-  -- directly above the hotbar slot it can be dragged into.
+  -- While the panel is open the hotbar is drawn as its TOP row and the strip at
+  -- the bottom of the screen is hidden. Everything is then one contiguous grid,
+  -- so moving a stack between the backpack and the hotbar is a drag of one row
+  -- rather than a reach across the screen. The backpack shares the hotbar's
+  -- column pitch, so every column lines up top to bottom.
   fn pack_cols() : Int do 9 end
   fn pack_rows() : Int do 3 end
   fn pack_row_pitch() : Float do 0.17 end
-  doc "Bottom edge of backpack row [r], counting 0 as the top row."
-  fn pack_y0(r : Int) : Float do -0.30 -. int_to_float(r) *. pack_row_pitch() end
+  doc "Rows in the open panel: the hotbar, then the backpack."
+  fn panel_rows() : Int do 1 + pack_rows() end
+  doc "Extra space under the hotbar row, so the active slots read as their own group."
+  fn hotbar_gap() : Float do 0.05 end
+  doc "Bottom edge of panel row [r], counting 0 as the top row (the hotbar)."
+  fn panel_y0(r : Int) : Float do
+    -0.24 -. int_to_float(r) *. pack_row_pitch() -. (if r > 0 do hotbar_gap() else 0.0 end)
+  end
 
   doc """
   Bottom-left corner of slot [s] in the unified index space: 0..8 the hotbar,
-  9..35 the backpack in reading order. Returned as x; use [slot_oy] for y, so
-  that no tuple is allocated (March boxes small aggregates, GAPS.md G28).
+  9..35 the backpack in reading order. [open] moves the hotbar into the panel's
+  top row. Returned as separate x and y so that no tuple is allocated (March
+  boxes small aggregates, GAPS.md G28).
   """
   fn slot_ox(s : Int) : Float do
     if s < slots() do slot_x0(s) else slot_x0((s - slots()) % pack_cols()) end
   end
-  fn slot_oy(s : Int) : Float do
-    if s < slots() do slot_y0() else pack_y0((s - slots()) / pack_cols()) end
+  fn slot_oy(s : Int, open : Bool) : Float do
+    if s < slots() do (if open do panel_y0(0) else slot_y0() end)
+    else panel_y0(1 + (s - slots()) / pack_cols()) end
   end
 
   doc """
@@ -127,16 +138,16 @@ mod CubeForge.Hud do
     if s >= n do -1
     else
       let x0 = slot_ox(s)
-      let y0 = slot_oy(s)
+      let y0 = slot_oy(s, n > slots())
       if nx >= x0 && nx <= x0 +. slot_w() && ny >= y0 && ny <= y0 +. slot_h() do s
       else slot_at_go(nx, ny, s + 1, n) end
     end
   end
 
   -- one slot: background, selection border, count digits
-  pfn slot(b : CubeForge.F32Buf.F32Buf, i : Int, selected : Bool, count : Int, show_count : Bool) : CubeForge.F32Buf.F32Buf do
+  pfn slot(b : CubeForge.F32Buf.F32Buf, i : Int, selected : Bool, count : Int, show_count : Bool, open : Bool) : CubeForge.F32Buf.F32Buf do
     let x0 = slot_ox(i)
-    let y0 = slot_oy(i)
+    let y0 = slot_oy(i, open)
     let x1 = x0 +. slot_w()
     let y1 = y0 +. slot_h()
     let e = 0.012
@@ -154,7 +165,7 @@ mod CubeForge.Hud do
     if s >= n do b
     else
       let c = if s == drag_from do 0 else CubeForge.Inventory.count_at(inv, s) end
-      slots_go(slot(b, s, s == sel - 1, c, c > 0), inv, sel, drag_from, s + 1, n)
+      slots_go(slot(b, s, s == sel - 1, c, c > 0, n > slots()), inv, sel, drag_from, s + 1, n)
     end
   end
 
@@ -165,7 +176,7 @@ mod CubeForge.Hud do
     -- dim the world and lay a panel behind the backpack grid
     let bp = if open do
       let d = arect(b0, -1.0, -1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.55)
-      arect(d, -0.62, pack_y0(pack_rows() - 1) -. 0.03, 0.62, pack_y0(0) +. slot_h() +. 0.03, 0.18, 0.18, 0.21, 0.92)
+      arect(d, -0.62, panel_y0(panel_rows() - 1) -. 0.03, 0.62, panel_y0(0) +. slot_h() +. 0.03, 0.18, 0.18, 0.21, 0.92)
     else b0 end
     let n = if open do slots() + pack_cols() * pack_rows() else slots() end
     let b4 = slots_go(bp, inv, sel, drag_from, 0, n)
@@ -192,7 +203,7 @@ mod CubeForge.Hud do
       let b1 = if id == 0 || s == drag_from do b
                else
                  let x0 = slot_ox(s)
-                 let y0 = slot_oy(s)
+                 let y0 = slot_oy(s, n > slots())
                  trect(b, x0 +. pad, y0 +. pad, x0 +. slot_w() -. pad, y0 +. slot_h() -. pad,
                        CubeForge.Texture.layer_for(id))
                end

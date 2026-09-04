@@ -15,7 +15,7 @@
 - A source gives as `L = 8` and is always written back as id 4. Units moving *into* a source are absorbed.
 - `source_neighbour` (lake promotion at or below sea level) runs first, unchanged.
 - Cross-edge push: giver decrements and emits `kind_spill() + dir * 1048576 + slot * 256 + u`; receiver adds `u` capped at 7 and bounces the remainder as a spill in `opposite(dir)`.
-- Every `NativeArray`/`Chunk` write is threaded, never discarded (GAPS G69).
+- Every `NativeArray`/`Chunk` write is threaded, never discarded (GAPS G70).
 - Build cycle per task: `forge check && forge build && forge lint --strict && forge test`.
 
 ---

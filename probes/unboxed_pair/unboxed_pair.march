@@ -1,0 +1,45 @@
+-- Same two-float aggregate, but reached through a closure the way the engine's
+-- probe harness reaches it. `march_live_allocs` is the runtime's live-object
+-- counter, declared here directly.
+mod Unbox2 do
+  needs IO
+  needs IO.Console
+  needs IO.Foreign
+
+  extern "c" : Cap(IO.Foreign) do
+    fn x_live_allocs(): Int = "march_live_allocs"
+  end
+
+  type Pair = Pair(Float, Float)
+  pfn fst(p : Pair) : Float do match p do Pair(a, _) -> a end end
+  pfn snd(p : Pair) : Float do match p do Pair(_, b) -> b end end
+
+  pfn go(i : Int, acc : Float) : Float do
+    if i == 0 do acc
+    else
+      let p = if i % 2 == 0 do Pair(1.0, 2.0) else Pair(3.0, 4.0) end
+      go(i - 1, acc +. fst(p) +. snd(p))
+    end
+  end
+
+  pfn measure(name : String, f) : Unit do
+    let a = x_live_allocs()
+    let _r = f(())
+    println("  " ++ name ++ ": live delta over 100 iterations = " ++ int_to_string(x_live_allocs() - a))
+  end
+
+  -- If the box were transient, live objects would return to the baseline after
+  -- the loop. If it leaks, the delta scales with the iteration count.
+  pfn scale(n : Int) : Unit do
+    let a = x_live_allocs()
+    let r = go(n, 0.0)
+    println("  " ++ int_to_string(n) ++ " iterations -> live delta " ++ int_to_string(x_live_allocs() - a)
+            ++ " (result " ++ float_to_string(r) ++ ")")
+  end
+
+  fn main(_cap : Cap(IO)) : Unit do
+    scale(100)
+    scale(1000)
+    scale(10000)
+  end
+end

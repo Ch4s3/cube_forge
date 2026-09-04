@@ -1159,6 +1159,15 @@ mod CubeForge do
     if i == 0 do acc else repeat_key_pressed(i - 1, acc + (if In.key_pressed(In.key_i()) do 1 else 0 end)) end
   end
 
+  -- Build a two-float aggregate in one branch of an if and read both fields.
+  pfn repeat_wx(i : Int, acc : Float) : Float do
+    if i == 0 do acc
+    else
+      let w = if i % 2 == 0 do Wx(1.0, 2.0) else Wx(3.0, 4.0) end
+      repeat_wx(i - 1, acc +. pair_a(w) +. pair_b(w))
+    end
+  end
+
   pfn alloc_probe(world : CubeForge.World.World, proj : NativeFloatArr) : Unit do
     println("allocation bisect (net live objects; >0 means a leak):")
     measure("extern Float returns (time, mouse_dx)", fn _ -> repeat_time(100, 0.0))
@@ -1173,6 +1182,7 @@ mod CubeForge do
     measure("mul_into_f32 only", fn _ -> NativeArray.get_f32(repeat_mul_into(proj, NativeArray.make_float(16, 0.0), NativeArray.make_f32(16, 0.0), 100), 0))
     measure("Player.eye only", fn _ -> repeat_eye(Player.new(8.0, 70.0, 8.0), 100, 0.0))
     measure("Quat.from_yaw_pitch only", fn _ -> repeat_fyp(100, 0.0))
+    measure("Wx(Float, Float) built in a branch", fn _ -> repeat_wx(100, 0.0))
     measure("Inv.hud_key", fn _ -> repeat_hud_key(100, Inv.harvest(Inv.new(), 3), 0))
     measure("Inv.item_at", fn _ -> repeat_item_at(100, Inv.harvest(Inv.new(), 3), 0))
     measure("Hud.slot_at", fn _ -> repeat_slot_at(100, 0))

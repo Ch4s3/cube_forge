@@ -673,6 +673,59 @@ definition looks like a field read, and the call site looks like a hash. This is
 the third time in this project that a per-frame allocation was only visible from
 the outside, and the argument for keeping that counter in the default output.
 
+## Latest March main, measured
+
+`origin/main` at `7419c689`, eight commits past the toolchain this project pins,
+built with the G67 NativeArray borrow fix applied on top (main does not have
+it). Three of those commits target this project's gaps directly: unboxed small
+scalar aggregates, stack promotion through non-retaining callees, and
+`@[no_alloc(transient)]`.
+
+### What the borrow fix is actually worth
+
+Measuring startup meshing across three toolchains on an idle machine finally
+put a number on the G67 fix that I had missed:
+
+| toolchain | mesh all, 64 chunks | per chunk |
+|---|---|---|
+| `137737f3` + pin-main (what this project pinned) | 1 378 ms | 21.5 ms |
+| the same, plus the NativeArray borrow fix | **372 ms** | **5.8 ms** |
+| `7419c689` + the same fix | 380 ms | 5.9 ms |
+
+**3.7x on startup meshing**, identical vertex counts. I had only measured the
+borrow fix against block-edit cost (43%) and never against meshing, so this
+project's headline number for that fix was badly understated. Earlier figures in
+this file of 1 900-2 100 ms for meshing were also inflated by compiler builds
+running in the background; 1 378 ms is the idle-machine number for the old
+toolchain.
+
+### What latest main adds on top: nothing here, and one regression
+
+Meshing, frame rate and the 115 tests are unchanged. Six of this engine's types
+now unbox — `Vec3`, `Quat`, `Mat4.Vec4`, `Player.Sweep`, `Weather.Phase` and the
+weather pair — but the frame loop's allocation went from **1 live object per
+frame to 2**, traced to that two-float pair.
+
+It is a **leak**, not a cost. The live-object delta scales exactly with the
+iteration count — 10 000 iterations leak 10 001 objects — and it fires only when
+the aggregate is built inside a branch:
+
+| shape, 5 000 iterations | boxed | unboxed |
+|---|---|---|
+| built with no branch | 3 | 3 |
+| built in an `if` | 1 | **5 001** |
+| built in a callee | 1 | 1 |
+
+The two arms of an `if` merge through a join slot typed `ptr`, so the unboxed
+struct is materialised onto the heap to pass through it — and that box is never
+decremented. The boxed build emits seven `march_decrc_local` in the same
+function where the unboxed build emits one. GAPS.md **G69** has the IR;
+`probes/unboxed_pair/` has both repros.
+
+That is why it is a compiler bug rather than a reason to avoid the feature: the
+same program without the branch allocates nothing on either toolchain, so the
+heap traffic is not inherent to unboxing. This project stays on `137737f3` +
+pin-main + the borrow fix until it is fixed upstream.
 ## Biomes — phase 1, the field
 
 A per-column climate field (`docs/superpowers/specs/2026-09-04-biomes-design.md`):
@@ -684,7 +737,7 @@ heightmap, which `edit_block` updates in O(1) and `chop` rescans in a box.
 - **Tick cost: ~18 ms**, every ten frames, release build (`CF_AUTOFLOW` prints
   it). 24 full passes for the distance sweep dominate; the temperature base is
   cached at build so it is not 16,384 noise evaluations per tick. A frontier
-  sweep would be O(frontier) but the obvious queue is the G69 trap.
+  sweep would be O(frontier) but the obvious queue is the G70 trap.
 - **Canal, end to end.** `CF_AUTOCANAL=10 CF_BIOME_RATE=20000`: the player's
   column goes `grassland moist 0.25` -> frame 890 `forest moist 0.917`, and the
   biome map changes along the pond and its reach (83,883 px of an 800x600
@@ -694,7 +747,7 @@ heightmap, which `edit_block` updates in O(1) and `chop` rescans in a box.
 - `CF_AUTOFLOW` cannot drive this test: it places through `interact`, which
   needs a raycast hit, and with `CF_NOMOUSE` the crosshair sits on the horizon.
   `CF_AUTOCANAL` lays nine water blocks beside the player through `edit_block`.
-- Two G68 corollaries found and recorded as **GAPS G69**: arrays wrapped in a
+- Two G68 corollaries found and recorded as **GAPS G70**: arrays wrapped in a
   variant cell copy on every write (10.8 GB for 20 BFS passes), and a discarded
   `set_*` result silently drops the write.
 

@@ -1010,7 +1010,82 @@ are freed immediately.
   a way to see at the call site that an accessor will copy. A lint for "accessor
   called in a loop over a value the function does not own" would catch the shape.
 
-### G69. Two more ways a `NativeArray` write silently becomes a whole-array copy
+### G69. An unboxed small aggregate built inside a branch leaks, one object per construction
+- `c0275445` on March main represents a single-constructor variant whose fields
+  are all scalars, arity 2..4, as an inline LLVM struct value. When such a value
+  is built inside a branch, it **leaks**: one heap object per construction, never
+  freed.
+- It is a leak, not a transient allocation. The live-object delta scales exactly
+  with the iteration count:
+
+  | iterations | boxed (`137737f3`) | unboxed (`7419c689`) |
+  |---|---|---|
+  | 100 | 3 | 103 |
+  | 1 000 | 1 | 1 001 |
+  | 10 000 | 1 | **10 001** |
+
+- The trigger is narrow. Three shapes, same type, same toolchain
+  (`probes/unboxed_pair/narrow.march`, 5 000 iterations each):
+
+  | shape | boxed | unboxed |
+  |---|---|---|
+  | `let p = Pair(1.0, 2.0)` — no branch | 3 | 3 |
+  | `let p = if c do Pair(..) else Pair(..) end` | 1 | **5 001** |
+  | `let p = make(x)` — built in a callee | 1 | 1 |
+
+  Only the branch case leaks. Without a branch the value stays in registers and
+  never reaches the heap at all.
+
+- **Mechanism, from the emitted IR.** The two arms of an `if` merge through a
+  join slot typed `ptr`, so an unboxed struct has to be materialised onto the
+  heap to pass through it. The new codegen does exactly that:
+
+  ```llvm
+  %ubmk20 = insertvalue %ub.Pair poison, double 1.0, 0    ; build the struct value
+  %ubmk21 = insertvalue %ub.Pair %ubmk20, double 2.0, 1
+  %ubbox22 = call ptr @march_alloc(i64 32)                ; box it for the join slot
+  store i32 0, ptr %ubtag23                               ; tag
+  %ubf24 = extractvalue %ub.Pair %ubmk21, 0               ; copy the fields back out
+  store double %ubf24, ptr %ubfp25
+  %ubf26 = extractvalue %ub.Pair %ubmk21, 1
+  store double %ubf26, ptr %ubfp27
+  store ptr %ubbox22, ptr %res_slot18                     ; the arm's result is a pointer
+  ```
+
+  The boxed build allocates in the same place — but it emits **seven**
+  `march_decrc_local` in this function against the unboxed build's **one**. The
+  box created by the `%ubbox` materialisation is never decremented, so it is
+  never freed. Perceus does not have a case for a heap value the unboxing path
+  invents after RC insertion has already decided what exists.
+
+- **This is why it is a compiler bug and not a cost of the representation.**
+  The same program with the branch hoisted allocates nothing on either
+  toolchain, so the heap traffic is not inherent to unboxing — it comes from one
+  materialisation site, and the leak comes from that site being invisible to the
+  RC pass. Nothing about the language semantics requires it.
+- In this engine it cost the frame loop one extra live object per frame (1 -> 2),
+  from a two-float weather-cache pair built in exactly that shape.
+- The change's own write-up
+  (`specs/progress/2026-09-03-unboxed-small-scalar-aggregates.md`) measured this
+  engine at `9cd1ffb` and reported allocation unchanged, which was true then —
+  the weather pair was written after that commit, so no branch-built aggregate
+  existed to trip it.
+- **Would need:** a drop for the materialised box — the RC pass has to see it —
+  or, better, keep the value unboxed through the join by typing the join slot as
+  the struct rather than a pointer, in which case nothing is allocated at all.
+
+#### Two method notes
+The first check I ran was a static count of `march_alloc` call sites in the loop
+body. It said the new toolchain emitted *fewer* allocations, 4 against 6, and I
+nearly reported no regression on the strength of it. Call sites are not
+executions, and a net-live-object count is not an allocation count: both builds
+allocate here, and only one frees.
+
+My first stated mechanism was also wrong. I guessed that extracting a field from
+an unboxed struct yields a raw double that must be re-boxed as a March `Float`.
+The IR shows the fields stay raw doubles throughout; the leaked object is the
+aggregate itself, boxed to cross a branch join.
+### G70. Two more ways a `NativeArray` write silently becomes a whole-array copy
 Both found building the biome field, both variants of G68.
 - **Wrapping arrays in a variant cell.** A BFS carried its distance array and
   ring queue as `Bfs(d, q, qn)` and rebuilt the cell on every push. The cell
