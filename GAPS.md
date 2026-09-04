@@ -788,3 +788,35 @@ that nothing promotes to the stack — the language has no unboxed aggregate.
 The frame loop's measured residue is still 1 live object per frame; the
 contract's stricter count is roughly a dozen short-lived cells per frame that
 are freed immediately.
+
+## Lighting notes (skylight flood-fill)
+
+### G59. G21 rules out a BFS queue over a NativeArray; level-synchronous sweeps are the workaround
+- A light BFS must read `la[n]` to decide whether the neighbour is darker and
+  then write `la[n]`. G21 makes that a full 4 MB copy **per write**: a probe of
+  1M read-then-write iterations on a 4 MB `NativeU8Arr` reached a 229 GB peak
+  footprint and was OOM-killed, against a write-only loop of the same shape
+  costing nothing.
+- Every variant fails identically: the read in a guard (`if 1 <= get(a, i)`),
+  the read hoisted to a `let`, and the read moved into a separate `pfn` helper
+  with the write in a write-only helper. G21's "hoisting into a `let` does not
+  help" extends to hoisting into a *function*: what matters is that the array is
+  still live at the write.
+- The same trap bites the obvious double-buffer fix. Swapping `src` and `dst`
+  each level fails on the second level, because `src` was read during the first
+  and a shared array cannot be a blit destination — `cf_u8_blit` reports
+  `rc=2` and aborts. A fresh destination per level is the working shape.
+- **Done instead:** `lib/cube_forge/light.march` propagates with a
+  level-synchronous downward sweep over levels 15..2 instead of a queue. Every
+  pass reads one array and writes a *different* one (the proven
+  `F32Buf.copy_into` shape). Skylight is naturally level-ordered, so one
+  downward sweep is complete: a voxel written during level L always receives a
+  value `< L`, so a later iteration of the same sweep picks it up.
+- Two things made it affordable: `cf_u8_blit` (the u8 twin of `cf_f32_blit`),
+  which turns the per-level field copy into a `memcpy`; and an early-out in
+  `give1` that tests the neighbour's current light *before* the chunk lookup,
+  since the best a neighbour can receive is `lv - 1`. The early-out alone took
+  the lighting tests from 49 s to 21 s — open sky is almost entirely that case.
+- **Would need:** the G21 fix (borrowed-param inference, so a read that is dead
+  before the write does not keep the array live). With it, the queue-based BFS
+  in the design doc would be directly expressible and strictly faster.

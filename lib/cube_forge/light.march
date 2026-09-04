@@ -44,38 +44,6 @@ mod CubeForge.Light do
   @[no_alloc]
   fn is_opaque(id : Int) : Bool do opacity(id) >= max_level() end
 
-  -- ── BFS queue: ring buffer, head/tail packed past the ring ────────────────
-  -- Capacity is the frontier bound, not the visited-set bound. The widest
-  -- skylight frontier is a few 128x128 layers (~16k entries); 2^20 is ample.
-
-  fn q_cap() : Int do 1048576 end
-
-  doc "An empty BFS queue."
-  fn queue_new() : NativeIntArr do NativeArray.make_int(1048578, 0) end
-
-  @[no_alloc] fn q_head(q : NativeIntArr) : Int do NativeArray.get_int(q, 1048576) end
-  @[no_alloc] fn q_tail(q : NativeIntArr) : Int do NativeArray.get_int(q, 1048577) end
-  @[no_alloc] fn q_empty(q : NativeIntArr) : Bool do q_head(q) == q_tail(q) end
-  @[no_alloc] fn q_len(q : NativeIntArr) : Int do (q_tail(q) - q_head(q) + 1048576) % 1048576 end
-  @[no_alloc]
-  -- Push one entry. Overwrites the oldest entry if the ring is full.
-  fn q_push(q : NativeIntArr, v : Int) : NativeIntArr do
-    let t = q_tail(q)
-    NativeArray.set_int(NativeArray.set_int(q, t, v), 1048577, (t + 1) % 1048576)
-  end
-
-  @[no_alloc] fn q_peek(q : NativeIntArr) : Int do NativeArray.get_int(q, q_head(q)) end
-
-  @[no_alloc]
-  fn q_pop(q : NativeIntArr) : NativeIntArr do
-    NativeArray.set_int(q, 1048576, (q_head(q) + 1) % 1048576)
-  end
-  @[no_alloc]
-  -- Drop every entry without reallocating.
-  fn q_clear(q : NativeIntArr) : NativeIntArr do
-    NativeArray.set_int(NativeArray.set_int(q, 1048576, 0), 1048577, 0)
-  end
-
   -- ── Seeding: sunlight down each column ────────────────────────────────────
 
   @[no_alloc]
@@ -104,20 +72,6 @@ mod CubeForge.Light do
     seed_column_go(la, w, x, z, y, lv)
   end
 
-  pfn seed_column_q_go(q : NativeIntArr, w : CubeForge.World.World, x : Int, z : Int, y : Int, lv : Int) : NativeIntArr do
-    if y < 0 do q
-    else
-      let l = column_step(w, x, y, z, lv)
-      if l <= 0 do q
-      else seed_column_q_go(q_push(q, index(x, y, z)), w, x, z, y - 1, l) end
-    end
-  end
-
-  doc "Enqueue the same voxels seed_column writes, for the spread pass."
-  fn seed_column_q(q : NativeIntArr, w : CubeForge.World.World, x : Int, z : Int, y : Int, lv : Int) : NativeIntArr do
-    seed_column_q_go(q, w, x, z, y, lv)
-  end
-
   pfn seed_all_go(la : NativeU8Arr, w : CubeForge.World.World, i : Int) : NativeU8Arr do
     if i >= 16384 do la
     else seed_all_go(seed_column_go(la, w, i % 128, i / 128, 255, max_level()), w, i + 1) end
@@ -126,6 +80,80 @@ mod CubeForge.Light do
   doc "Seed every column of the world."
   fn seed_all(la : NativeU8Arr, w : CubeForge.World.World) : NativeU8Arr do
     seed_all_go(la, w, 0)
+  end
+
+  -- ── Spread: level-synchronous downward sweep ─────────────────────────────
+  --
+  -- Not a queue. Reading a NativeArray before writing it in the same function
+  -- bumps its refcount and turns every set into a full 4 MB copy (GAPS.md G21,
+  -- the same trap F32Buf documents), so a BFS that reads `la[n]` to compare and
+  -- then writes `la[n]` is not expressible in place. Every pass below reads one
+  -- array and writes a different one — the proven F32Buf.copy_into shape.
+  --
+  -- Skylight is naturally level-ordered, so one downward sweep over levels
+  -- 15..2 is complete: a voxel written at level L is always written with a
+  -- value < L, so it is picked up by a later iteration of the same sweep.
+
+  doc "Copy the whole field from [src] into [dst] (one memcpy in the shim)."
+  fn copy_field(src : NativeU8Arr, dst : NativeU8Arr) : NativeU8Arr do
+    CubeForge.Ffi.Window.u8_blit(dst, 0, src, 0, 4194304)
+  end
+
+  @[no_alloc]
+  -- Give light to the single neighbour (x, y, z) from a voxel at level [lv].
+  -- Reads [src], writes [dst].
+  pfn give1(src : NativeU8Arr, dst : NativeU8Arr, w : CubeForge.World.World, x : Int, y : Int, z : Int, lv : Int) : NativeU8Arr do
+    if x < 0 || x >= 128 || y < 0 || y >= 256 || z < 0 || z >= 128 do dst
+    -- The best this neighbour could receive is lv - 1, so when it already has
+    -- that much there is nothing to do — and no reason to pay for the chunk
+    -- lookup below. Open sky is almost entirely this case.
+    else if lv - 1 <= NativeArray.get_u8(src, index(x, y, z)) do dst
+    else
+      let id = CubeForge.World.block_at(w, x, y, z)
+      if is_opaque(id) do dst
+      else
+        let nl = lv - 1 - opacity(id)
+        if nl <= 0 do dst
+        else if nl <= NativeArray.get_u8(src, index(x, y, z)) do dst
+        else NativeArray.set_u8(dst, index(x, y, z), nl) end end
+      end
+    end end
+  end
+
+  @[no_alloc]
+  pfn give6(src : NativeU8Arr, dst : NativeU8Arr, w : CubeForge.World.World, x : Int, y : Int, z : Int, lv : Int) : NativeU8Arr do
+    let d1 = give1(src, dst, w, x + 1, y, z, lv)
+    let d2 = give1(src, d1, w, x - 1, y, z, lv)
+    let d3 = give1(src, d2, w, x, y + 1, z, lv)
+    let d4 = give1(src, d3, w, x, y - 1, z, lv)
+    let d5 = give1(src, d4, w, x, y, z + 1, lv)
+    give1(src, d5, w, x, y, z - 1, lv)
+  end
+
+  -- One level of the sweep: every voxel at exactly [lv] gives to its neighbours.
+  pfn level_go(src : NativeU8Arr, dst : NativeU8Arr, w : CubeForge.World.World, lv : Int, i : Int) : NativeU8Arr do
+    if i >= 4194304 do dst
+    else if NativeArray.get_u8(src, i) != lv do level_go(src, dst, w, lv, i + 1)
+    else level_go(src, give6(src, dst, w, i % 128, i / 16384, (i / 128) % 128, lv), w, lv, i + 1) end end
+  end
+
+  -- Sweep levels [lv] down to 2. Each level writes into a FRESH buffer rather
+  -- than swapping the previous pair: `src` is read during the level, which
+  -- leaves its refcount at 2, and a shared array cannot be a blit destination
+  -- (GAPS.md G21). Fifteen 4 MB allocations per flood buys a memcpy per level.
+  pfn sweep_go(src : NativeU8Arr, w : CubeForge.World.World, lv : Int) : NativeU8Arr do
+    if lv <= 1 do src
+    else sweep_go(level_go(src, copy_field(src, new()), w, lv, 0), w, lv - 1) end
+  end
+
+  doc "Propagate [la] to a fixed point."
+  fn spread(la : NativeU8Arr, w : CubeForge.World.World) : NativeU8Arr do
+    sweep_go(la, w, max_level())
+  end
+
+  doc "Compute the world's skylight from scratch: seed every column, then spread."
+  fn flood(w : CubeForge.World.World) : NativeU8Arr do
+    spread(seed_all(new(), w), w)
   end
 
 end

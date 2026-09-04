@@ -302,6 +302,23 @@ void *cf_f32_blit(void *dst, int64_t di, void *src, int64_t si, int64_t n) {
     return dst;
 }
 
+/* The u8 twin of cf_f32_blit, for the skylight field: copy n bytes from
+ * src[si..] into dst[di..] under the same rc == 1 contract. The lighting sweep
+ * copies the whole 4 MB field once per level, which is a memcpy here and 4.2M
+ * March-level get/set pairs otherwise. */
+void *cf_u8_blit(void *dst, int64_t di, void *src, int64_t si, int64_t n) {
+    int64_t rc = *(int64_t *)dst;
+    if (rc != 1) { fprintf(stderr, "cf_u8_blit: destination is shared (rc=%lld); refusing to write in place\n", (long long)rc); abort(); }
+    if (n <= 0) return dst;
+    if (di < 0 || si < 0 || di + n > narr_len(dst) || si + n > narr_len(src)) {
+        fprintf(stderr, "cf_u8_blit: out of range (di=%lld si=%lld n=%lld dst=%lld src=%lld)\n",
+                (long long)di, (long long)si, (long long)n, (long long)narr_len(dst), (long long)narr_len(src));
+        abort();
+    }
+    memcpy((unsigned char *)narr_data(dst) + di, (const unsigned char *)narr_data(src) + si, (size_t)n);
+    return dst;
+}
+
 /* Debug/verification hook: read back one pixel of the back buffer as 0xRRGGBB.
  * Call after drawing and before swap. */
 int64_t cf_gfx_read_pixel(int64_t x, int64_t y) {

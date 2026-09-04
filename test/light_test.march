@@ -17,6 +17,21 @@ mod CubeForge.Test.Light do
     CubeForge.World.World(Array.from_list(air_chunks(63, Nil)), 8)
   end
 
+
+  -- A world-wide stone layer at [y]. Built chunk-locally: World.set_block copies
+  -- the whole 64KB chunk per call (copy-on-write against the world it is shared
+  -- with), so 16384 of them would allocate a gigabyte.
+  pfn slab_cells(c : CubeForge.Chunk.Chunk, i : Int, y : Int) : CubeForge.Chunk.Chunk do
+    if i >= 256 do c
+    else slab_cells(C.set(c, i % 16, y, i / 16, 3), i + 1, y) end
+  end
+  pfn slab_chunks(i : Int, y : Int, acc : List(CubeForge.Chunk.Chunk)) : List(CubeForge.Chunk.Chunk) do
+    if i < 0 do acc else slab_chunks(i - 1, y, Cons(slab_cells(C.new(), 0, y), acc)) end
+  end
+  pfn slab_world(y : Int) : CubeForge.World.World do
+    CubeForge.World.World(Array.from_list(slab_chunks(63, y, Nil)), 8)
+  end
+
   describe "Light.index" do
     test "corners map to the ends of the flat range" do
       Test.assert_eq_int(L.index(0, 0, 0), 0, "origin")
@@ -52,21 +67,6 @@ mod CubeForge.Test.Light do
     end
   end
 
-  describe "Light queue" do
-    test "pushes and pops in FIFO order" do
-      let q0 = L.queue_new()
-      Test.assert_true(L.q_empty(q0), "new queue is empty")
-      let q1 = L.q_push(L.q_push(L.q_push(q0, 10), 20), 30)
-      Test.assert_eq_int(L.q_len(q1), 3, "three entries")
-      Test.assert_eq_int(L.q_peek(q1), 10, "first in")
-      let q2 = L.q_pop(q1)
-      Test.assert_eq_int(L.q_peek(q2), 20, "second")
-      let q3 = L.q_pop(q2)
-      Test.assert_eq_int(L.q_peek(q3), 30, "third")
-      Test.assert_true(L.q_empty(L.q_pop(q3)), "drained")
-    end
-  end
-
   describe "Light.seed_all" do
     test "an all-air world is fully lit from top to bottom" do
       let w = air_world()
@@ -96,11 +96,24 @@ mod CubeForge.Test.Light do
     end
   end
 
-  describe "Light.seed_column_q" do
-    test "every lit voxel of a column is enqueued" do
-      let w = CubeForge.World.set_block(air_world(), 40, 100, 40, 3)
-      let q = L.seed_column_q(L.queue_new(), w, 40, 40, 255, L.max_level())
-      Test.assert_eq_int(L.q_len(q), 155, "y 101..255 above the block")
+  describe "Light.spread" do
+    test "light rounds a corner, losing one per step" do
+      let w0 = slab_world(100)
+      let w1 = CubeForge.World.set_block(w0, 40, 100, 40, 0)
+      let la = L.flood(w1)
+      Test.assert_eq_int(L.get(la, 40, 99, 40), 15, "under the shaft stays full")
+      Test.assert_eq_int(L.get(la, 41, 99, 40), 14, "one step along the gallery")
+      Test.assert_eq_int(L.get(la, 42, 99, 40), 13, "two steps")
+      Test.assert_eq_int(L.get(la, 54, 99, 40), 1, "fourteen steps, the last light")
+      Test.assert_eq_int(L.get(la, 55, 99, 40), 0, "fifteen steps, dark")
+    end
+
+    test "a sealed cavity stays dark" do
+      let w = slab_world(100)
+      let la = L.flood(w)
+      Test.assert_eq_int(L.get(la, 40, 101, 40), 15, "above the slab")
+      Test.assert_eq_int(L.get(la, 40, 99, 40), 0, "below the slab")
+      Test.assert_eq_int(L.get(la, 40, 0, 40), 0, "far below the slab")
     end
   end
 
