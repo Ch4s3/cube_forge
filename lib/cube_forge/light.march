@@ -1,0 +1,79 @@
+-- Light — the world skylight field: one byte per voxel, value 0..15, in a
+-- single flat NativeU8Arr of 128 * 256 * 128. Index x + 128 * (z + 128 * y),
+-- the same world-space coordinates World uses.
+--
+-- One array for the whole world, not one per chunk: a per-chunk array lives
+-- inside World's Array.PVec and is therefore shared, so NativeArray.set_u8
+-- could never write in place (GAPS.md G54) and every BFS write would allocate.
+--
+-- The BFS queue is a ring buffer over a NativeIntArr whose head and tail live
+-- in the two slots past the ring (the Mesher.fill_mask idiom), so the hot loop
+-- threads one value and returns one value — no aggregate, no allocation.
+mod CubeForge.Light do
+
+  alias CubeForge.Chunk as C
+
+  fn size_x() : Int do 128 end
+  fn size_y() : Int do 256 end
+  fn size_z() : Int do 128 end
+  fn volume() : Int do 4194304 end
+  fn max_level() : Int do 15 end
+  @[no_alloc]
+  -- Flat world index of a voxel; the refinements let Z3 discharge the bound.
+  fn index(x : {Int | 0 <= _ && _ < 128}, y : {Int | 0 <= _ && _ < 256}, z : {Int | 0 <= _ && _ < 128})
+      : {Int | 0 <= _ && _ < 4194304} do
+    x + 128 * (z + 128 * y)
+  end
+
+  doc "A dark light field."
+  fn new() : NativeU8Arr do NativeArray.make_u8(4194304, 0) end
+  @[no_alloc]
+  -- Light at a world coordinate; 0 outside the world.
+  fn get(la : NativeU8Arr, x : Int, y : Int, z : Int) : Int do
+    if x < 0 || x >= 128 || y < 0 || y >= 256 || z < 0 || z >= 128 do 0
+    else NativeArray.get_u8(la, index(x, y, z)) end
+  end
+  @[no_alloc]
+  -- Light absorbed per step by a voxel of block [id]: 0 air, 2 water, 15 (total) otherwise.
+  fn opacity(id : Int) : Int do
+    if id == 0 do 0
+    else if C.is_water(id) do 2
+    else max_level() end end
+  end
+
+  @[no_alloc]
+  fn is_opaque(id : Int) : Bool do opacity(id) >= max_level() end
+
+  -- ── BFS queue: ring buffer, head/tail packed past the ring ────────────────
+  -- Capacity is the frontier bound, not the visited-set bound. The widest
+  -- skylight frontier is a few 128x128 layers (~16k entries); 2^20 is ample.
+
+  fn q_cap() : Int do 1048576 end
+
+  doc "An empty BFS queue."
+  fn queue_new() : NativeIntArr do NativeArray.make_int(1048578, 0) end
+
+  @[no_alloc] fn q_head(q : NativeIntArr) : Int do NativeArray.get_int(q, 1048576) end
+  @[no_alloc] fn q_tail(q : NativeIntArr) : Int do NativeArray.get_int(q, 1048577) end
+  @[no_alloc] fn q_empty(q : NativeIntArr) : Bool do q_head(q) == q_tail(q) end
+  @[no_alloc] fn q_len(q : NativeIntArr) : Int do (q_tail(q) - q_head(q) + 1048576) % 1048576 end
+  @[no_alloc]
+  -- Push one entry. Overwrites the oldest entry if the ring is full.
+  fn q_push(q : NativeIntArr, v : Int) : NativeIntArr do
+    let t = q_tail(q)
+    NativeArray.set_int(NativeArray.set_int(q, t, v), 1048577, (t + 1) % 1048576)
+  end
+
+  @[no_alloc] fn q_peek(q : NativeIntArr) : Int do NativeArray.get_int(q, q_head(q)) end
+
+  @[no_alloc]
+  fn q_pop(q : NativeIntArr) : NativeIntArr do
+    NativeArray.set_int(q, 1048576, (q_head(q) + 1) % 1048576)
+  end
+  @[no_alloc]
+  -- Drop every entry without reallocating.
+  fn q_clear(q : NativeIntArr) : NativeIntArr do
+    NativeArray.set_int(NativeArray.set_int(q, 1048576, 0), 1048577, 0)
+  end
+
+end
