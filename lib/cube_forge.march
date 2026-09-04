@@ -33,6 +33,10 @@ mod CubeForge do
   alias CubeForge.Weather as Weather
   alias CubeForge.Biome as Biome
   alias CubeForge.Veg as Veg
+  alias CubeForge.Audio as Audio
+  alias CubeForge.Tone as Tone
+  alias CubeForge.Wind as Wind
+  alias CubeForge.Ffi.Audio as Aud
 
   fn ms(seconds : Float) : String do float_to_string(seconds *. 1000.0) ++ "ms" end
 
@@ -44,7 +48,7 @@ mod CubeForge do
   pfn pair_a(w : Wx) : Float do match w do Wx(a, _) -> a end end
   pfn pair_b(w : Wx) : Float do match w do Wx(_, b) -> b end end
 
-  type Frame = Frame(Int, Float, CubeForge.Player.Player, Int, NativeFloatArr, NativeF32Arr, Bool, CubeForge.F32Buf.F32Buf, Bool, Float, Float, Bool, Int)   -- ..., inventory open, slot a stack was lifted from (-1 = not dragging)
+  type Frame = Frame(Int, Float, CubeForge.Player.Player, Int, NativeFloatArr, NativeF32Arr, Bool, CubeForge.F32Buf.F32Buf, Bool, Float, Float, Bool, Int, CubeForge.Audio.Sched)   -- ..., inventory open, slot a stack was lifted from (-1 = not dragging), the note schedule
   -- Mutable-per-edit world state: world, per-slot vertex counts (opaque 0..63, water 64..127), outline buffer, current hit,
   -- selected block id, water actor pids (Array, one per chunk), per-chunk "has dirty cells" flags
   -- `p` is the water-actor Pid type: Pid(state) cannot be written in an annotation (GAPS.md G45), so it is a parameter.
@@ -600,6 +604,32 @@ mod CubeForge do
     end
   end
 
+  doc "Blocks either side of the listener the leaf sample reaches."
+  fn leaf_radius() : Int do 6 end
+  doc "Stride of the leaf lattice. Every second block: a full per-voxel sweep of this box would be 2197 World.block_at calls a tick, which is exactly the cost GAPS G64 warns about, and the answer wanted here is one gain."
+  fn leaf_stride() : Int do 2 end
+
+  -- Foliage blocks on a coarse lattice around (x, y, z). Deliberately sparse:
+  -- the result is a gain, not geometry, so a sample is as good as a census.
+  pfn leaf_scan(w : CubeForge.World.World, x : Int, y : Int, z : Int, i : Int, n : Int, hits : Int) : Int do
+    if i >= n do hits
+    else
+      let side = 2 * leaf_radius() / leaf_stride() + 1
+      let dx = (i % side) * leaf_stride() - leaf_radius()
+      let dy = (i / side % side) * leaf_stride() - leaf_radius()
+      let dz = (i / (side * side)) * leaf_stride() - leaf_radius()
+      let hit = if Chunk.is_foliage(World.block_at(w, x + dx, y + dy, z + dz)) do 1 else 0 end
+      leaf_scan(w, x, y, z, i + 1, n, hits + hit)
+    end
+  end
+
+  doc "How much of the canopy is around the listener, 0..1."
+  fn leaf_amount(w : CubeForge.World.World, x : Int, y : Int, z : Int) : Float do
+    let side = 2 * leaf_radius() / leaf_stride() + 1
+    let n = side * side * side
+    Audio.leaf_fraction(leaf_scan(w, x, y, z, 0, n, 0), n)
+  end
+
   doc "Radius searched for orphaned leaves when a log is broken."
   fn decay_radius() : Int do 4 end
 
@@ -814,11 +844,16 @@ mod CubeForge do
   end
 
   @[no_alloc(assume)]
-  pfn read_input(autowalk : Bool, autospin : Float, autoswim : Bool) : CubeForge.Player.Input do
+  pfn read_input(autowalk : Bool, autospin : Float, autoswim : Bool, autodive : Bool) : CubeForge.Player.Input do
     -- CF_AUTOWALK=1: scripted forward walk for headless collision verification.
     let mf = if autowalk do 1.0 else axis(In.key(In.key_s()), In.key(In.key_w())) end
     let mr = axis(In.key(In.key_a()), In.key(In.key_d()))
-    CubeForge.Player.Input(mf, mr, In.mouse_dx() +. autospin, In.mouse_dy(), In.key(In.key_space()) || autoswim, In.key(In.key_shift()))
+    -- CF_AUTODIVE=1 is CF_AUTOSWIM's opposite: it spawns over the same water
+    -- column and holds the sink key instead of the swim key, so the eye ends up
+    -- under the surface. Without it there is no headless way to reach the
+    -- underwater state at all, and the bed that plays there cannot be checked.
+    CubeForge.Player.Input(mf, mr, In.mouse_dx() +. autospin, In.mouse_dy(),
+                           In.key(In.key_space()) || autoswim, In.key(In.key_shift()) || autodive)
   end
 
   -- View matrix for the player's eye, written into the persistent scratch array in place.
@@ -864,15 +899,15 @@ mod CubeForge do
 
   -- Frame loop. `max_frames < 0` means run until the window closes.
   -- Run-time knobs read once, outside the frame loop (an Env read allocates).
-  type Knobs = Knobs(Int, Int, String, Bool, Float, Int, Bool, Int, Int, Int, Float, Int, Float, Bool, Int, Int, Int, Int, Int, Bool, Int, Int, Int)   -- max_frames, dump_frame, dump_path, autowalk, autospin, autoedit frame (<0 = off), autoswim, autoflow frame (<0 = off), workers, automap frame (<0 = off; forces map view on from this frame, for headless verification), day length in seconds, sun angle override in degrees (<0 = follow the clock), shadow reach in blocks (0 = off), soft shadow edges, autobreak frame (<0 = off): break the column under the player every 20 frames, for a repeatable edit benchmark, weather pin 0..100 (<0 = follow the actor), precipitation pool capacity, biome ease rate in percent (100 = one CF_DAY per full swing), draw the biome map in map view, autocanal frame (<0 = off): lay a 9-block line of water three columns east of the player, aim-independent, for the biome end-to-end test, biome migration budget: surface columns retextured per tick, vegetation budget: trees grown or felled per tick
+  type Knobs = Knobs(Int, Int, String, Bool, Float, Int, Bool, Int, Int, Int, Float, Int, Float, Bool, Int, Int, Int, Int, Int, Bool, Int, Int, Int, Int, Bool, Bool)   -- max_frames, dump_frame, dump_path, autowalk, autospin, autoedit frame (<0 = off), autoswim, autoflow frame (<0 = off), workers, automap frame (<0 = off; forces map view on from this frame, for headless verification), day length in seconds, sun angle override in degrees (<0 = follow the clock), shadow reach in blocks (0 = off), soft shadow edges, autobreak frame (<0 = off): break the column under the player every 20 frames, for a repeatable edit benchmark, weather pin 0..100 (<0 = follow the actor), precipitation pool capacity, biome ease rate in percent (100 = one CF_DAY per full swing), draw the biome map in map view, autocanal frame (<0 = off): lay a 9-block line of water three columns east of the player, aim-independent, for the biome end-to-end test, biome migration budget: surface columns retextured per tick, vegetation budget: trees grown or felled per tick, audio mode (0 off, 1 device, 2 null device -- render a tick per push straight into the WAV, for reproducible headless dumps), audio log, autodive
 
   fn frame_loop(f : Frame, k : Knobs, sc, nchunks : Int, proj : NativeFloatArr, map_proj : NativeFloatArr, fps : Fps, wxpid, seed : Int) : Frame do
     match f do
-      Frame(frame, last_t, player, sample, view, vp, map_mode, marker, flash, wcache, bcache, inv_open, drag_from) ->
+      Frame(frame, last_t, player, sample, view, vp, map_mode, marker, flash, wcache, bcache, inv_open, drag_from, sched) ->
         match k do
-        Knobs(max_frames, dump_frame, dump_path, autowalk, autospin, autoedit, autoswim, autoflow, workers, automap, day_len, sun_deg, shadow_dist, soft_shadows, autoinv, autobreak, weather_pin, precip_cap, biome_rate, biome_map, autocanal, biome_budget, veg_budget) ->
+        Knobs(max_frames, dump_frame, dump_path, autowalk, autospin, autoedit, autoswim, autoflow, workers, automap, day_len, sun_deg, shadow_dist, soft_shadows, autoinv, autobreak, weather_pin, precip_cap, biome_rate, biome_map, autocanal, biome_budget, veg_budget, audio_mode, audio_log, autodive) ->
         if Win.should_close() || (max_frames >= 0 && frame >= max_frames) do
-          Frame(frame, last_t, player, sample, view, vp, map_mode, marker, flash, wcache, bcache, inv_open, drag_from)
+          Frame(frame, last_t, player, sample, view, vp, map_mode, marker, flash, wcache, bcache, inv_open, drag_from, sched)
         else
           In.poll()
           -- I toggles the inventory. While it is open the cursor is released and no
@@ -921,7 +956,7 @@ mod CubeForge do
                         else sc end
           let drag2 = if dropped do -1 else drag1 end
           let player1 = if inv_open2 do player
-                        else Player.update(player, read_input(autowalk, autospin, autoswim && frame >= 320), scene_world(sc_drag), dt) end
+                        else Player.update(player, read_input(autowalk, autospin, autoswim && frame >= 320, autodive && frame >= 320), scene_world(sc_drag), dt) end
           let view1 = write_view(player1, view)
           let vp1 = M.mul_into_f32(proj, view1, vp)
           -- The map camera follows the player (x, z) so it reads as a local overhead view, not a
@@ -1034,7 +1069,8 @@ mod CubeForge do
           let pscale = Biome.precip_scale(Biome.biome_of(scene_biome(sc1), bcx, bcz))
           let live0 = float_to_int(int_to_float(precip_cap) *. wx *. pscale)
           let live = if live0 > precip_cap do precip_cap else live0 end
-          let snowing = Precip.snow_mix(Biome.temp_of(scene_biome(sc1), bcx, bcz)) > 0.5
+          let snowmix = Precip.snow_mix(Biome.temp_of(scene_biome(sc1), bcx, bcz))
+          let snowing = snowmix > 0.5
           -- Camera right, flattened to the horizontal plane and normalised.
           let rlen = Math.sqrt(V.z(look) *. V.z(look) +. V.x(look) *. V.x(look))
           let rl = if rlen < 0.0001 do 1.0 else rlen end
@@ -1043,6 +1079,54 @@ mod CubeForge do
                              V.x(Player.eye(player1)), V.y(Player.eye(player1)), V.z(Player.eye(player1)),
                              (0.0 -. V.z(look)) /. rl, V.x(look) /. rl, pdt, frame)
           else () end
+          -- Audio. One push per tick_period(), the cadence Weather already runs
+          -- at; nine frames in ten cost nothing. Everything below is pure until
+          -- the two extern calls at the end, and the synthesiser it hands to
+          -- runs on miniaudio's own thread -- the render thread never waits on
+          -- it. The note goes first so a note and its mix land in the same tick
+          -- under CF_AUDIO=2, where set_mix is what renders the samples.
+          let sched1 = if audio_mode == 0 do sched
+            else if frame % tick_period() != 0 do sched
+            else
+              let tick = frame / tick_period()
+              let bid = Biome.biome_of(scene_biome(sc1), bcx, bcz)
+              let under = Player.eye_in_water(player1, scene_world(sc1))
+              let py = float_to_int(V.y(Player.eye(player1)))
+              let expo = Audio.exposure(py, World.light_at(scene_world(sc1), bcx, py, bcz))
+              let leafy = leaf_amount(scene_world(sc1), bcx, py, bcz)
+              let m = Audio.mix(bid, wx, Wind.at(tick, seed, wx), snowmix, expo, leafy, under)
+              let fired = if Audio.due(sched, tick) do
+                let gap = Audio.gap_ticks(Audio.rate_of(bid), tick, seed)
+                let pc = Audio.pitch_class(sched, seed)
+                Aud.note(Tone.hz(Tone.midi(pc, Audio.octave_of(bid))),
+                         Audio.note_seconds(gap), Audio.timbre_of(bid), Audio.note_gain())
+                if audio_log do
+                  println("note t" ++ int_to_string(tick) ++ " row[" ++ int_to_string(Audio.index_of(sched))
+                          ++ "] pc " ++ int_to_string(pc) ++ " form " ++ int_to_string(Audio.form_of_sched(sched))
+                          ++ "+" ++ int_to_string(Audio.transpose_of_sched(sched))
+                          ++ " oct " ++ int_to_string(Audio.octave_of(bid))
+                          ++ " " ++ float_to_string(Tone.hz(Tone.midi(pc, Audio.octave_of(bid)))) ++ " Hz for "
+                          ++ float_to_string(Audio.note_seconds(gap)) ++ "s")
+                else () end
+                Audio.advance(sched, tick, Audio.rate_of(bid), Audio.form_of(bid), Audio.transpose_of(bid), seed)
+              else sched end
+              Aud.set_mix(Audio.rain_of(m), Audio.wind_of(m), Audio.leaves_of(m),
+                          Audio.water_of(m), Audio.cutoff_of(m), Audio.music_of(m))
+              -- CF_AUDIO_LOG=1: one line a second. What each bed is actually
+              -- being asked for beats inferring it back out of the spectrum.
+              if audio_log && tick % Audio.ticks_per_second() == 0 do
+                println("audio t" ++ int_to_string(tick) ++ " " ++ Biome.name(bid)
+                        ++ " rain " ++ float_to_string(Audio.rain_of(m))
+                        ++ " wind " ++ float_to_string(Audio.wind_of(m))
+                        ++ " leaves " ++ float_to_string(Audio.leaves_of(m))
+                        ++ " water " ++ float_to_string(Audio.water_of(m))
+                        ++ " cutoff " ++ float_to_string(Audio.cutoff_of(m))
+                        ++ " | wx " ++ float_to_string(wx) ++ " gust " ++ float_to_string(Wind.at(tick, seed, wx))
+                        ++ " snow " ++ float_to_string(snowmix) ++ " expo " ++ float_to_string(expo)
+                        ++ " leafy " ++ float_to_string(leafy) ++ " y " ++ int_to_string(py))
+              else () end
+              fired
+            end end
           -- The map view is an overhead diagnostic; shadows there would only
           -- obscure the terrain it exists to show.
           Win.gfx_set_shadow(if map_mode1 do 0.0 else shadow_dist end, soft_shadows)
@@ -1093,7 +1177,7 @@ mod CubeForge do
           if frame == 200 do
             println("live-object delta over frames 100..200: " ++ int_to_string(Win.live_allocs() - sample1) ++ " (" ++ int_to_string((Win.live_allocs() - sample1) / 100) ++ " per frame)")
           else () end
-          frame_loop(Frame(frame + 1, now, player1, sample1, view1, vp1, map_mode1, marker1, flash1, wnow, bnow, inv_open2, drag2), k, sc2, nchunks, proj, map_proj, fps1, wxpid, seed)
+          frame_loop(Frame(frame + 1, now, player1, sample1, view1, vp1, map_mode1, marker1, flash1, wnow, bnow, inv_open2, drag2, sched1), k, sc2, nchunks, proj, map_proj, fps1, wxpid, seed)
         end
         end
     end
@@ -1117,7 +1201,7 @@ mod CubeForge do
   end
   pfn repeat_input(i : Int, acc : Float) : Float do
     if i == 0 do acc else
-      repeat_input(i - 1, acc +. Player.input_forward(read_input(false, 0.0, false)))
+      repeat_input(i - 1, acc +. Player.input_forward(read_input(false, 0.0, false, false)))
     end
   end
   pfn measure(name : String, f) : Unit do
@@ -1374,12 +1458,14 @@ mod CubeForge do
         -- area rather than the whole world (map_view builds the per-frame view matrix).
         let map_proj = M.orthographic(0.0 -. map_half_extent(), map_half_extent(), 0.0 -. map_half_extent(), map_half_extent(), 0.1, 400.0)
         let autoswim = Env.get_int("CF_AUTOSWIM", 0) == 1
+        let audio_mode = Env.get_int("CF_AUDIO", 1)
+        let autodive = Env.get_int("CF_AUTODIVE", 0) == 1
         let water_col = World.find_water(world)
         let spawn_col = find_spawn_go(n, 0, seed, 0, 0)
         let spawn_x = spawn_col % 4096
         let spawn_z = spawn_col / 4096
         let ground_y = int_to_float(World.surface_y(world, spawn_x, spawn_z) + 1)
-        let player = if autoswim && water_col >= 0 do
+        let player = if (autoswim || autodive) && water_col >= 0 do
           println("autoswim: spawning over water column " ++ int_to_string(water_col % 4096) ++ "," ++ int_to_string(water_col / 4096))
           Player.with_pitch(Player.new(int_to_float(water_col % 4096) +. 0.5, 90.0, int_to_float(water_col / 4096) +. 0.5), -1.4)
         else
@@ -1391,7 +1477,21 @@ mod CubeForge do
         if Env.get_int("CF_ALLOC_PROBE", 0) == 1 do alloc_probe(world, proj) else () end
         let t4 = Win.time()
         let knobs = Knobs(max_frames, Env.get_int("CF_DUMP_FRAME", 30), Env.get("CF_DUMP", ""), Env.get_int("CF_AUTOWALK", 0) == 1,
-                          int_to_float(Env.get_int("CF_AUTOSPIN", 0)) /. 1000.0 /. Player.mouse_sens(), Env.get_int("CF_AUTOEDIT", -1), autoswim, Env.get_int("CF_AUTOFLOW", -1), workers, Env.get_int("CF_AUTOMAP", -1), int_to_float(Env.get_int("CF_DAY", 1800)), Env.get_int("CF_SUN", -1), int_to_float(Env.get_int("CF_SHADOW_DIST", 64)), Env.get_int("CF_SHADOW_SOFT", 1) == 1, Env.get_int("CF_AUTOINV", -1), Env.get_int("CF_AUTOBREAK", -1), Env.get_int("CF_WEATHER", -1), Env.get_int("CF_PRECIP", 4000), Env.get_int("CF_BIOME_RATE", 100), Env.get_int("CF_BIOME_MAP", 0) == 1, Env.get_int("CF_AUTOCANAL", -1), Env.get_int("CF_BIOME_BUDGET", 32), Env.get_int("CF_VEG_BUDGET", 1))
+                          int_to_float(Env.get_int("CF_AUTOSPIN", 0)) /. 1000.0 /. Player.mouse_sens(), Env.get_int("CF_AUTOEDIT", -1), autoswim, Env.get_int("CF_AUTOFLOW", -1), workers, Env.get_int("CF_AUTOMAP", -1), int_to_float(Env.get_int("CF_DAY", 1800)), Env.get_int("CF_SUN", -1), int_to_float(Env.get_int("CF_SHADOW_DIST", 64)), Env.get_int("CF_SHADOW_SOFT", 1) == 1, Env.get_int("CF_AUTOINV", -1), Env.get_int("CF_AUTOBREAK", -1), Env.get_int("CF_WEATHER", -1), Env.get_int("CF_PRECIP", 4000), Env.get_int("CF_BIOME_RATE", 100), Env.get_int("CF_BIOME_MAP", 0) == 1, Env.get_int("CF_AUTOCANAL", -1), Env.get_int("CF_BIOME_BUDGET", 32), Env.get_int("CF_VEG_BUDGET", 1), audio_mode, Env.get_int("CF_AUDIO_LOG", 0) == 1, autodive)
+        -- Audio. CF_AUDIO: 0 off, 1 a real device, 2 no device at all -- in
+        -- which case each mix push renders its own tick of samples straight
+        -- into the WAV, so a scripted headless run dumps the same file every
+        -- time. CF_AUDIO_DUMP=<path> tees the mix either way.
+        if audio_mode > 0 do
+          if Aud.start(if audio_mode == 2 do 1 else 0 end) == 0 do println("audio: no device, running silent")
+          else println("audio: " ++ (if audio_mode == 2 do "null device (dump only)" else "device open" end)) end
+        else () end
+        let dump_wav = Env.get("CF_AUDIO_DUMP", "")
+        if audio_mode > 0 do
+          if dump_wav != "" do
+            if Aud.dump_begin(dump_wav) == 1 do println("audio: teeing to " ++ dump_wav) else println("audio: could not open " ++ dump_wav) end
+          else () end
+        else () end
         let tw0 = Win.time()
         let pids = Array.from_list(spawn_water(n * n - 1, n, seed, Nil))
         println("spawned " ++ int_to_string(n * n) ++ " water actors in " ++ ms(Win.time() -. tw0) ++ " (loads run asynchronously)")
@@ -1399,11 +1499,12 @@ mod CubeForge do
         let fps0 = Fps(t4, 0, 0, F32Buf.new(4096))
         let wxpid = Weather.spawn_weather()
         Weather.send_seed(wxpid, seed)
-        match frame_loop(Frame(0, t4, player, 0, NativeArray.make_float(16, 0.0), NativeArray.make_f32(16, 0.0), false, F32Buf.new(64), Env.get_int("CF_FLASH", 0) == 1, 0.0, 0.0, false, -1), knobs, scene, n * n, proj, map_proj, fps0, wxpid, seed) do
-          Frame(frames, _, p, _, _, _, _, _, _, _, _, _, _) ->
+        match frame_loop(Frame(0, t4, player, 0, NativeArray.make_float(16, 0.0), NativeArray.make_f32(16, 0.0), false, F32Buf.new(64), Env.get_int("CF_FLASH", 0) == 1, 0.0, 0.0, false, -1, Audio.sched_start(0)), knobs, scene, n * n, proj, map_proj, fps0, wxpid, seed) do
+          Frame(frames, _, p, _, _, _, _, _, _, _, _, _, _, _) ->
             let t5 = Win.time()
             println("ran " ++ int_to_string(frames) ++ " frames in " ++ ms(t5 -. t4) ++ " (" ++ float_to_string(int_to_float(frames) /. (t5 -. t4)) ++ " fps, vsync on); player ended at " ++ V.to_string(Player.position(p)))
         end
+        if audio_mode > 0 do Aud.close() else () end
         Win.close()
       end
     end

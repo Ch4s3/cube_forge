@@ -12,7 +12,7 @@ license = ""
 # auditable unsafe surface. Two extern blocks on the March side split it into
 # the Window and Input capability domains.
 [ffi]
-sources = ["native/cf_shim.c", "native/glad/gl.c"]
+sources = ["native/cf_shim.c", "native/glad/gl.c", "native/cf_audio.c"]
 # forge has no separate cflags/include field; the shim sources are compiled on
 # the same clang line as the link, so -I flags ride along in `link`.
 link = ["-Inative", "-I/opt/homebrew/include", "-L/opt/homebrew/lib", "-lglfw"]

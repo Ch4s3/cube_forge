@@ -39,6 +39,9 @@ for both the mountain bed and the leaf bed, and it needs nothing threaded
 through `Frame`. If precipitation later wants a slant, the same function
 answers.
 
+It is strength only. A direction was in the first draft of this design and is
+not in the code: nothing consumes one. Add it when something does.
+
 ## Data flow
 
 Once per `tick_period()` — every 10 frames, about 6 Hz, the cadence `Weather`
@@ -126,9 +129,15 @@ is windy, and a cave at the same altitude is not.
 **Leaves.** Bandpassed noise with a faster, shallower wobble than the wind bed,
 so it reads as rustle rather than as more wind. Gain is `Wind.at(...) *
 leaf_fraction`. The leaf fraction comes from sampling a coarse lattice around
-the player — every second block in a radius of 6, about 170 reads per tick —
-counting `Chunk.is_foliage`. A full per-voxel scan is what G64 warns against;
-the lattice is deliberately coarse because the answer is a gain, not geometry.
+the player — every second block in a radius of 6, 343 reads per tick — counting
+`Chunk.is_foliage`. A full per-voxel scan is what G64 warns against; the lattice
+is deliberately coarse because the answer is a gain, not geometry.
+
+`full_canopy()`, the share of that box which counts as a full canopy, is 0.045
+and is a measurement rather than a judgement: standing under a generated forest
+fills about 2.5% of the lattice, because most of a cube around a player is air
+and ground. The first draft asked for 30% and the leaf bed was inaudible in
+every forest in the world.
 Because both beds share one wind term, the leaves cannot rustle while the peaks
 are silent.
 
@@ -143,9 +152,15 @@ the cutoff; C slews toward it.
 
 ```
 cutoff = 18000 Hz  clear
-       ->  4000 Hz  at snow_mix 1.0
+       ->  4000 Hz  at snowfall 1.0
        ->   700 Hz  eye_in_water     (dominates; underwater wins over snow)
 ```
+
+The filter is driven by *snowfall*, which is `weather intensity * snow_mix`,
+not by `snow_mix` alone. `snow_mix` is a property of temperature: it reads 1.0
+on a bright still morning in the tundra. Keying the muffle on it directly meant
+a clear cold day sounded like a blizzard — caught by running a dump at a cold
+seed, and now pinned by a test.
 
 Snow and water interpolate the same filter, and the underwater value takes
 precedence rather than compounding. The cutoff falls monotonically as either
@@ -176,10 +191,32 @@ drives the mixer from a fixed-step loop instead, so a scripted headless run
 (`CF_AUTOWALK`, `CF_WEATHER`, `CF_AUTOSWIM`) produces a deterministic file you
 can listen to — the audio equivalent of the BMP dumps.
 
-**Knobs.** `CF_AUDIO=0` disables audio entirely and is the default when no
-window opened, so `forge test` and headless CI never touch a sound device.
-`CF_AUDIO_MUSIC=0..100` and `CF_AUDIO_AMB=0..100` pin the two master gains for
-listening to one half at a time.
+**Knobs.**
+
+- `CF_AUDIO` — 0 off, 1 a real device (the default), 2 the null device.
+- `CF_AUDIO_DUMP=<path>` — tee the mix to a 16-bit stereo WAV.
+- `CF_AUDIO_LOG=1` — one line a second giving every bed gain, the cutoff and the
+  inputs behind them, plus a line per note with its row position, form,
+  transposition and frequency. Reading what the mixer was asked for beats
+  inferring it back out of a spectrum, and it is how the two bugs above were
+  found.
+- `CF_AUTODIVE=1` — spawns over water like `CF_AUTOSWIM` but holds the sink key
+  instead of the swim key, so the eye ends up under the surface. Added because
+  there was otherwise no headless way to reach the underwater state at all, and
+  therefore no way to check the bed that plays there.
+
+Note that the whole app requires `MARCH_PIN_MAIN=1` on macOS (G15); without it
+it segfaults before the frame loop, with or without audio.
+
+## Levels
+
+The four beds are brought to about the same RMS at full gain by per-bed trims in
+`cf_audio.c`, and those trims are arithmetic rather than taste. A brown-noise
+integrator `y = a*y + b*n` has stationary standard deviation
+`b*sd(n)/sqrt(1 - a^2)`, which for the wind and water beds is roughly ten times
+what round-number multipliers assumed. The first working version measured -5.5
+dBFS RMS, pinned against the limiter for the whole run. It now sits at about
+-18 dBFS RMS with -6 dBFS peaks in a storm, which is where ambience belongs.
 
 ## What this does not do
 

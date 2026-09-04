@@ -114,6 +114,26 @@ mod CubeForge.Test.Audio do
       Test.assert_eq_int(cutoff_out_of_range(0), -1, "all 1728 combinations stay in 100..20000 Hz")
     end
 
+    test "a cold biome in clear weather is not muffled" do
+      -- snow_mix is a property of temperature, not of the sky: it reads 1.0 on
+      -- a bright still day in the tundra. Nothing is falling, so nothing should
+      -- be muffled.
+      let still = Audio.mix(Biome.b_tundra(), 0.0, 0.3, 1.0, 0.5, 0.0, false)
+      Test.assert_true(Audio.cutoff_of(still) > 15000.0, "clear cold air is as open as clear warm air")
+    end
+
+    test "muffles in proportion to the snow actually falling" do
+      let light = Audio.mix(Biome.b_tundra(), 0.3, 0.3, 1.0, 0.5, 0.0, false)
+      let heavy = Audio.mix(Biome.b_tundra(), 1.0, 0.3, 1.0, 0.5, 0.0, false)
+      Test.assert_true(Audio.cutoff_of(heavy) < Audio.cutoff_of(light), "a blizzard is duller than a flurry")
+      Test.assert_true(Audio.cutoff_of(heavy) < 6000.0, "a blizzard is properly muffled")
+    end
+
+    test "rain in a warm storm does not muffle" do
+      let rainy = Audio.mix(Biome.b_wetland(), 1.0, 0.3, 0.0, 0.5, 0.0, false)
+      Test.assert_true(Audio.cutoff_of(rainy) > 15000.0, "rain is loud, not dull")
+    end
+
     test "snow silences the rain" do
       let wet = Audio.mix(Biome.b_grassland(), 1.0, 0.5, 0.0, 0.5, 0.5, false)
       let snowy = Audio.mix(Biome.b_grassland(), 1.0, 0.5, 1.0, 0.5, 0.5, false)
@@ -146,6 +166,61 @@ mod CubeForge.Test.Audio do
       Test.assert_true(Audio.leaves_of(Audio.mix(Biome.b_forest(), 0.0, 1.0, 0.0, 0.2, 1.0, false)) > 0.3, "windy forest")
       Test.assert_true(Audio.leaves_of(Audio.mix(Biome.b_forest(), 0.0, 0.0, 0.0, 0.2, 1.0, false)) < 0.001, "still forest is silent")
       Test.assert_true(Audio.leaves_of(Audio.mix(Biome.b_desert(), 0.0, 1.0, 0.0, 0.2, 0.0, false)) < 0.001, "no leaves, no rustle")
+    end
+  end
+
+  describe "Audio.exposure" do
+    test "sea level is sheltered and the snow line is exposed" do
+      Test.assert_true(Audio.exposure(62, 15) < 0.001, "sea level")
+      Test.assert_true(Audio.exposure(95, 15) > 0.999, "snow line")
+    end
+
+    test "a cave is sheltered however high it is" do
+      Test.assert_true(Audio.exposure(95, 0) < 0.001, "no sky, no wind")
+      Test.assert_true(Audio.exposure(200, 0) < 0.001, "still no sky")
+    end
+
+    test "does not run away above the snow line" do
+      Test.assert_true(Audio.exposure(250, 15) <= 1.0, "clamped at the top")
+      Test.assert_true(Audio.exposure(0, 15) >= 0.0, "clamped at the bottom")
+    end
+
+    test "rises with height and with open sky" do
+      Test.assert_true(Audio.exposure(90, 15) > Audio.exposure(70, 15), "higher is windier")
+      Test.assert_true(Audio.exposure(90, 15) > Audio.exposure(90, 7), "more sky is windier")
+    end
+  end
+
+  describe "Audio.leaf_fraction" do
+    test "rises with the share of sampled blocks that were foliage" do
+      Test.assert_true(Math.abs(Audio.leaf_fraction(0, 343) -. 0.0) < 0.001, "no leaves")
+      Test.assert_true(Audio.leaf_fraction(8, 343) > Audio.leaf_fraction(4, 343), "denser is louder")
+    end
+
+    test "a real forest is loud, not a rumour" do
+      -- The lattice samples a 13-block cube, 343 points, and standing under the
+      -- canopy of a generated forest fills about 2.5% of it with leaves (seed
+      -- 13, measured). If a bed needs a solid wall of foliage to be heard it is
+      -- never heard, so full_canopy() is set from that measurement, not from
+      -- what "a lot of leaves" sounds like it should mean.
+      Test.assert_true(Audio.leaf_fraction(9, 343) > 0.5, "standing in a forest is at least half a canopy")
+      Test.assert_true(Audio.leaf_fraction(3, 343) < 0.35, "a lone tree is not a forest")
+    end
+
+    test "saturates rather than running away in dense canopy" do
+      Test.assert_true(Audio.leaf_fraction(60, 343) > 0.999, "clamped at the top")
+    end
+
+    test "survives an empty sample" do
+      Test.assert_true(Math.abs(Audio.leaf_fraction(0, 0) -. 0.0) < 0.001, "no division by zero")
+    end
+  end
+
+  describe "Audio.note_seconds" do
+    test "a note lasts most of the gap before the next one" do
+      Test.assert_true(Audio.note_seconds(Audio.min_gap()) > 1.5, "the shortest note is still long")
+      Test.assert_true(Audio.note_seconds(Audio.max_gap()) < 9.0, "the longest note still ends")
+      Test.assert_true(Audio.note_seconds(Audio.max_gap()) > Audio.note_seconds(Audio.min_gap()), "longer gap, longer note")
     end
   end
 

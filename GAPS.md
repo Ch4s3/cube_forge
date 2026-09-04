@@ -1269,3 +1269,45 @@ workers are reading at the same moment.
 preemption quantum from 1 ms to 50 ms changed nothing (390 → 360 ms at 4
 threads), so the `sigprocmask`/`_sigtramp` traffic in the profile is
 `swapcontext`'s signal-mask save/restore, not the preemption daemon.
+
+## Procedural audio notes
+
+### G71. `init` is a reserved word, and the parse error points at the whole function
+
+`fn init(mode : Int) : Int do x_aud_init(mode) end` in an ordinary module body
+is a bare "parse error" repeated once per downstream reference — 72 of them for
+one function. Renaming the function to `start` fixes it; the parameter name
+`mode` is fine. `init` joins `by`, `on`, `opaque` and `spawn` (G19, G65, G42,
+G34) on the list of identifiers that are silently reserved, and like those the
+error names neither the word nor the reason.
+
+`probes/` reproduction: any module with `fn init(x : Int) : Int do x end`.
+
+### G72. A single-letter module alias silently resolves to the wrong module
+
+`alias CubeForge.Biome as B` in one module and `alias CubeForge.Audio as A` in
+its test compiled and typechecked cleanly, then failed at link time with
+
+```
+"_CubeForge.Biome.append", referenced from: ___march_test_34__
+"_CubeForge.Biome.capacity", referenced from: ___march_test_92__
+"_CubeForge.Biome.clear", referenced from: _CubeForge.Marker.build
+```
+
+`append`, `capacity`, `clear` and `get` are `F32Buf`'s, not `Biome`'s: calls
+from *other* modules entirely were rewritten into the `Biome` namespace.
+Renaming the aliases to `Biome` and `Audio` fixed it outright. This is G48 (an
+alias resolving to the wrong module at link time) with a sharper edge: the
+damage is not confined to the module that declares the alias, and the symbols
+named in the error belong to a module the failing file never mentions.
+
+Practical rule for this codebase: do not alias a module to a single letter. `N`
+for `Noise` survives only because nothing else claims it.
+
+### G41 again: the capability ceiling charges a pure test for the whole graph
+
+`test/audio_test.march` calls nothing but pure functions, and needs
+`IO.Spawn`, `IO.Clock`, `IO.Console` and `IO.Process` declared because
+`CubeForge.Audio` aliases `CubeForge.Biome`. `test/biome_test.march` aliases
+`Biome` directly and needs only `IO.Spawn`, so the ceiling is not simply the
+transitive closure of the alias graph either.

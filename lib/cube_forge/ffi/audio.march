@@ -1,0 +1,40 @@
+-- Audio capability domain. Every entry point is a thin binding onto
+-- native/cf_audio.c, which owns the device, the callback thread and the
+-- per-sample loop. Nothing about music or weather is decided here; the numbers
+-- arrive already decided from CubeForge.Audio.
+--
+-- Every extern is wrapped in an ordinary fn: an extern called qualified from
+-- another module typechecks but fails at link time (GAPS G5).
+mod CubeForge.Ffi.Audio do
+
+  needs IO.Foreign
+  needs Audio
+
+  extern "cf_shim" : Cap(Audio) do
+    fn x_aud_init(mode: Int): Int = "cf_aud_init"
+    fn x_aud_close(): Unit = "cf_aud_close"
+    fn x_aud_set_mix(rain: Float, wind: Float, leaves: Float, water: Float, cutoff: Float, music: Float): Unit = "cf_aud_set_mix"
+    fn x_aud_note(hz: Float, dur: Float, timbre: Int, gain: Float): Unit = "cf_aud_note"
+    fn x_aud_dump_begin(path: String): Int = "cf_aud_dump_begin"
+    fn x_aud_dump_end(): Unit = "cf_aud_dump_end"
+  end
+
+  doc "Open the audio device. Mode 0 opens a real one; mode 1 opens none and renders one tick per set_mix instead, which is what makes a headless dump reproducible. Returns 1 on success."
+  fn start(m : Int) : Int do x_aud_init(m) end
+
+  doc "Stop the device and close any WAV tee."
+  fn close() : Unit do x_aud_close() end
+
+  doc "One tick's worth of mixer parameters: four bed gains 0..1, the master lowpass cutoff in Hz, and the music level."
+  fn set_mix(rain : Float, wind : Float, leaves : Float, water : Float, cutoff : Float, music : Float) : Unit do
+    x_aud_set_mix(rain, wind, leaves, water, cutoff, music)
+  end
+
+  doc "Start one note: [hz] pitch, [dur] seconds at full level before the release, [timbre] waveform id from Audio.timbre_of, [gain] 0..1."
+  fn note(hz : Float, dur : Float, timbre : Int, gain : Float) : Unit do x_aud_note(hz, dur, timbre, gain) end
+
+  doc "Begin teeing the mix to a 16-bit stereo WAV at [path]. Returns 1 on success."
+  fn dump_begin(path : String) : Int do x_aud_dump_begin(path) end
+  fn dump_end() : Unit do x_aud_dump_end() end
+
+end

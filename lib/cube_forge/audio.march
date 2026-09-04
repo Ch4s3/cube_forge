@@ -35,11 +35,14 @@ mod CubeForge.Audio do
   doc "Cutoff with the eye under water."
   fn water_hz() : Float do 700.0 end
 
-  doc "Master lowpass cutoff in Hz. Snow closes it down; water closes it further and takes precedence rather than compounding, because a head under water hears the same dull world whatever is falling on the surface above it."
-  fn cutoff(snow : Float, under : Bool) : Float do
+  doc "Master lowpass cutoff in Hz for [snowfall] -- how much snow is actually coming down, not how cold it is. Snow closes it; water closes it further and takes precedence rather than compounding, because a head under water hears the same dull world whatever is falling on the surface above it."
+  fn cutoff(snowfall : Float, under : Bool) : Float do
     if under do water_hz()
-    else open_hz() +. (snow_hz() -. open_hz()) *. clamp01(snow) end
+    else open_hz() +. (snow_hz() -. open_hz()) *. clamp01(snowfall) end
   end
+
+  doc "How much snow is actually falling: the share of the precipitation that is snow, times how much precipitation there is. Snow.mix is a property of temperature alone -- it reads 1.0 on a bright still day in the tundra -- so the muffle has to be gated on the weather as well, or a clear cold morning would sound like a blizzard."
+  fn snowfall(wx : Float, snow : Float) : Float do clamp01(wx) *. clamp01(snow) end
 
   -- ── The beds ──────────────────────────────────────────────────────────────
 
@@ -65,7 +68,23 @@ mod CubeForge.Audio do
     -- rustling on a still day or a gale passing through silent trees.
     let leaves = surface *. leaf_max() *. clamp01(wind) *. clamp01(leaf)
     let water = (1.0 -. surface) *. water_max()
-    Mix(rain, windbed, leaves, water, cutoff(snow, under), music_max())
+    Mix(rain, windbed, leaves, water, cutoff(snowfall(wx, snow), under), music_max())
+  end
+
+  doc "Share of the sampled box that counts as a full canopy. Measured, not guessed: standing under a generated forest fills about 2.5% of the 343-point lattice with leaves, because most of a cube around a player is air and ground. Ask for a third and the bed is silent in every forest there is."
+  fn full_canopy() : Float do 0.045 end
+
+  doc "How loud the trees are, from [hits] foliage blocks out of [samples] sampled around the listener."
+  fn leaf_fraction(hits : Int, samples : Int) : Float do
+    if samples <= 0 do 0.0
+    else clamp01(int_to_float(hits) /. (int_to_float(samples) *. full_canopy())) end
+  end
+
+  doc "How exposed the listener is to the wind: how far above sea level they stand, ramped to full at the snow line, times how much sky is over their head. Both terms matter -- a peak is windy and a cave at the same height is not."
+  fn exposure(y : Int, sky : Int) : Float do
+    let height = int_to_float(y - CubeForge.Noise.sea_level())
+              /. int_to_float(CubeForge.Noise.snow_line() - CubeForge.Noise.sea_level())
+    clamp01(height) *. clamp01(int_to_float(sky) /. int_to_float(CubeForge.Light.max_level()))
   end
 
   -- ── The biome table ───────────────────────────────────────────────────────
@@ -151,6 +170,12 @@ mod CubeForge.Audio do
     else if jittered > max_gap() do max_gap()
     else jittered end end
   end
+
+  doc "How long a note sounds at full level before its release, for a gap of [gap] ticks: most of the way to the next note, so the tails overlap a little and the line is never quite empty."
+  fn note_seconds(gap : Int) : Float do 0.6 *. int_to_float(gap) /. int_to_float(ticks_per_second()) end
+
+  doc "Level a note is struck at. The music sits under the world, not over it."
+  fn note_gain() : Float do 0.8 end
 
   -- tick the next note is due, position in the row, form and transposition in force
   type Sched = Sched(Int, Int, Int, Int)
