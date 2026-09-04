@@ -704,10 +704,25 @@ toolchain.
 Meshing, frame rate and the 115 tests are unchanged. Six of this engine's types
 now unbox — `Vec3`, `Quat`, `Mat4.Vec4`, `Player.Sweep`, `Weather.Phase` and the
 weather pair — but the frame loop's allocation went from **1 live object per
-frame to 2**, traced to that two-float pair. Unboxed, it allocates once per
-construction where the boxed representation allocated nothing: GAPS.md **G69**,
-with a standalone repro in `probes/unboxed_pair/`.
+frame to 2**, traced to that two-float pair.
 
-So this project stays on `137737f3` + pin-main + the borrow fix for now. The
-regression is a compiler bug rather than a reason to avoid the feature, and it
-is worth reporting upstream before pinning forward.
+It is a **leak**, not a cost. The live-object delta scales exactly with the
+iteration count — 10 000 iterations leak 10 001 objects — and it fires only when
+the aggregate is built inside a branch:
+
+| shape, 5 000 iterations | boxed | unboxed |
+|---|---|---|
+| built with no branch | 3 | 3 |
+| built in an `if` | 1 | **5 001** |
+| built in a callee | 1 | 1 |
+
+The two arms of an `if` merge through a join slot typed `ptr`, so the unboxed
+struct is materialised onto the heap to pass through it — and that box is never
+decremented. The boxed build emits seven `march_decrc_local` in the same
+function where the unboxed build emits one. GAPS.md **G69** has the IR;
+`probes/unboxed_pair/` has both repros.
+
+That is why it is a compiler bug rather than a reason to avoid the feature: the
+same program without the branch allocates nothing on either toolchain, so the
+heap traffic is not inherent to unboxing. This project stays on `137737f3` +
+pin-main + the borrow fix until it is fixed upstream.

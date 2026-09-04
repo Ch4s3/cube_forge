@@ -1,0 +1,55 @@
+-- Narrowing the trigger: is it building the aggregate at all, or only building
+-- it in a branch whose join point is a pointer slot?
+mod Unbox3 do
+  needs IO
+  needs IO.Console
+  needs IO.Foreign
+
+  extern "c" : Cap(IO.Foreign) do
+    fn x_live_allocs(): Int = "march_live_allocs"
+  end
+
+  type Pair = Pair(Float, Float)
+  pfn fst(p : Pair) : Float do match p do Pair(a, _) -> a end end
+  pfn snd(p : Pair) : Float do match p do Pair(_, b) -> b end end
+
+  -- A: built unconditionally, no branch
+  pfn straight(i : Int, acc : Float) : Float do
+    if i == 0 do acc
+    else
+      let p = Pair(1.0, 2.0)
+      straight(i - 1, acc +. fst(p) +. snd(p))
+    end
+  end
+
+  -- B: built in a branch (the shape that leaks)
+  pfn branched(i : Int, acc : Float) : Float do
+    if i == 0 do acc
+    else
+      let p = if i % 2 == 0 do Pair(1.0, 2.0) else Pair(3.0, 4.0) end
+      branched(i - 1, acc +. fst(p) +. snd(p))
+    end
+  end
+
+  -- C: built unconditionally, returned from a helper across a call boundary
+  pfn make(a : Float) : Pair do Pair(a, a +. 1.0) end
+  pfn viacall(i : Int, acc : Float) : Float do
+    if i == 0 do acc
+    else
+      let p = make(int_to_float(i))
+      viacall(i - 1, acc +. fst(p) +. snd(p))
+    end
+  end
+
+  pfn scale(name : String, f) : Unit do
+    let a = x_live_allocs()
+    let r = f(5000)
+    println("  " ++ name ++ ": 5000 iterations -> live delta " ++ int_to_string(x_live_allocs() - a) ++ " (" ++ float_to_string(r) ++ ")")
+  end
+
+  fn main(_cap : Cap(IO)) : Unit do
+    scale("no branch      ", fn n -> straight(n, 0.0))
+    scale("built in branch", fn n -> branched(n, 0.0))
+    scale("across a call  ", fn n -> viacall(n, 0.0))
+  end
+end
