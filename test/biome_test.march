@@ -152,4 +152,41 @@ mod CubeForge.Test.Biome do
     end
   end
 
+  pfn apply_palette(f : CubeForge.Biome.Field, w : CubeForge.World.World, cols : List(Int)) : CubeForge.World.World do
+    match cols do
+      Nil -> w
+      Cons(ci, rest) -> apply_palette(f, CubeForge.World.set_block(w, ci % 128, Biome.height_of(f, ci % 128, ci / 128), ci / 128, Biome.palette(Biome.biome_of(f, ci % 128, ci / 128))), rest)
+    end
+  end
+  pfn all_mismatched(f : CubeForge.Biome.Field, w : CubeForge.World.World, cols : List(Int)) : Bool do
+    match cols do
+      Nil -> true
+      Cons(ci, rest) ->
+        let x = ci % 128
+        let z = ci / 128
+        let sfc = CubeForge.World.block_at(w, x, Biome.height_of(f, x, z), z)
+        if sfc == Biome.palette(Biome.biome_of(f, x, z)) do false else all_mismatched(f, w, rest) end
+    end
+  end
+
+  describe "Biome.migrations" do
+    test "returns only mismatched palette surfaces, within budget, and none once applied" do
+      -- set_block copies a whole chunk per call (see light_test), so only re-top one chunk: x, z in 0..15
+      let w = grass_top16(flat_world(66), 0, 66)
+      let f = Biome.build(w, 7)
+      let m = Biome.migrations(f, w, 0, 256, 5)
+      Test.assert_true(List.length(m) <= 5, "budget respected")
+      Test.assert_true(all_mismatched(f, w, m), "every pick disagrees with its palette")
+      let w2 = apply_palette(f, w, Biome.migrations(f, w, 0, 256, 256))
+      Test.assert_eq_int(List.length(Biome.migrations(f, w2, 0, 256, 256)), 0, "nothing left in that range")
+    end
+    test "stone is never a palette block; a stone surface never migrates" do
+      let w = flat_world(66)
+      Test.assert_eq_int(List.length(Biome.migrations(Biome.build(w, 7), w, 0, 2048, 64)), 0, "stone stays")
+    end
+  end
+  pfn grass_top16(w : CubeForge.World.World, i : Int, h : Int) : CubeForge.World.World do
+    if i >= 256 do w else grass_top16(CubeForge.World.set_block(w, i % 16, h - 1, i / 16, 1), i + 1, h) end
+  end
+
 end

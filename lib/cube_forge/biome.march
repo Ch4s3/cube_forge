@@ -316,4 +316,42 @@ mod CubeForge.Biome do
     else 1.0 end end end end end end
   end
 
+
+  -- ── Surface palette and migration ─────────────────────────────────────────
+  doc "The surface block a biome wants. Granite is absent on purpose: cliff faces stay on the slope rule in every biome."
+  fn palette(id : Int) : Int do
+    if id == b_tundra() do C.snow()
+    else if id == b_taiga() do 2                       -- dirt
+    else if id == b_desert() || id == b_beach() do C.sand()
+    else if id == b_wetland() do C.clay()
+    else if id == b_alpine() do C.gravel()
+    else 1 end end end end end                         -- grass: grassland, forest
+  end
+
+  doc "Only these ever migrate: the natural surface blocks. Granite, stone, water, logs, leaves and bedrock are never rewritten."
+  fn is_palette_block(id : Int) : Bool do
+    id == 1 || id == 2 || id == C.sand() || id == C.snow() || id == C.gravel() || id == C.clay()
+  end
+
+  pfn migrations_go(f : Field, w : CubeForge.World.World, n : Int, i : Int, left : Int, budget : Int, acc : List(Int)) : List(Int) do
+    if left <= 0 || budget <= 0 do acc
+    else
+      let ci = i % (n * n)
+      let x = ci % n
+      let z = ci / n
+      let h = height_of(f, x, z)
+      let wet = match f do Field(_, ws, _, _, _, _, _) -> NativeArray.get_u8(ws, ci) == 1 end
+      let sfc = W.block_at(w, x, h, z)
+      let want = palette(biome_of(f, x, z))
+      if h > 0 && !wet && is_palette_block(sfc) && sfc != want do migrations_go(f, w, n, i + 1, left - 1, budget - 1, Cons(ci, acc))
+      else migrations_go(f, w, n, i + 1, left - 1, budget, acc) end
+    end
+  end
+
+  doc "Column indices whose surface should become their biome's palette block: scans [scan] columns starting where tick [tick] leaves off (a stateless cursor), returns at most [budget]. Dry columns only, palette blocks only."
+  fn migrations(f : Field, w : CubeForge.World.World, tick : Int, scan : Int, budget : Int) : List(Int) do
+    let n = cols(w)
+    migrations_go(f, w, n, (tick * scan) % (n * n), scan, budget, Nil)
+  end
+
 end

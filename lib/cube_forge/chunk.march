@@ -67,6 +67,10 @@ mod CubeForge.Chunk do
   fn oak_leaves() : Int do 17 end
   fn pine_log() : Int do 18 end
   fn pine_leaves() : Int do 19 end
+  doc "Scree above the treeline: the alpine surface."
+  fn gravel() : Int do 20 end
+  doc "Wetland mud."
+  fn clay() : Int do 21 end
   fn is_log(id : Int) : Bool do id == oak_log() || id == pine_log() end
   fn is_foliage(id : Int) : Bool do id == oak_leaves() || id == pine_leaves() end
 

@@ -728,3 +728,22 @@ the column's eased temperature (cold below 0.33, blended over 0.08) rather than
 desert 0.15, tundra 0.5, beach 0.8, grassland and alpine 0.9, forest and taiga
 1.0, wetland 1.3, capped at `CF_PRECIP`. Under `CF_WEATHER=100` the player's
 grassland column runs 3,600 particles; after the canal turns it to forest, 4,000.
+
+## Biomes — phase 3, the surface migrates
+
+Two new blocks, gravel (20) and clay (21); dirt already existed as id 2. Each
+biome has a palette block (tundra snow, taiga dirt, grassland and forest grass,
+desert and beach sand, wetland clay, alpine gravel; granite stays on the slope
+rule), and each tick up to `CF_BIOME_BUDGET` (default 32) dry columns whose
+surface is a palette block that disagrees with their biome are rewritten. A
+stateless cursor (`tick * 2048 mod 16384`) sweeps the world in eight ticks.
+
+The first version applied each pick through `edit_block`: **~7 ms per column**
+(8 columns 60 ms, 64 columns 470 ms), nearly all of it a relight and a
+per-column section remesh. A palette swap never changes opacity, so the relight
+is wasted; the batch now writes every pick with `set_block`, collects the
+touched sections into one marks array and remeshes once: **8 columns 7 ms, 64
+columns 15 ms**, pixel-identical output. `docs/biome-retexture.png` is a fresh
+world after 900 frames — snow on the cold lowland, clay ringing the lake,
+gravel above the treeline; `docs/biome-retexture-canal.png` shows clay forming
+around the pond.
