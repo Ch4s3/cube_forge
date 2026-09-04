@@ -1009,3 +1009,50 @@ are freed immediately.
 - **Would need:** either field reads on shared variants that do not allocate, or
   a way to see at the call site that an accessor will copy. A lint for "accessor
   called in a loop over a value the function does not own" would catch the shape.
+
+### G69. Unboxing a small scalar aggregate turns zero allocations into one per iteration
+- `c0275445` on March main represents a single-constructor variant whose fields
+  are all scalars, arity 2..4, as an inline LLVM struct value. For a two-float
+  pair built in a branch and read immediately, that is **worse than the boxed
+  representation it replaced**, by 100 iterations to 0:
+
+  ```march
+  type Pair = Pair(Float, Float)
+  pfn go(i : Int, acc : Float) : Float do
+    if i == 0 do acc
+    else
+      let p = if i % 2 == 0 do Pair(1.0, 2.0) else Pair(3.0, 4.0) end
+      go(i - 1, acc +. fst(p) +. snd(p))
+    end
+  end
+  ```
+
+  | toolchain | live objects per 100 iterations |
+  |---|---|
+  | `137737f3` + NativeArray borrow fix (boxed `Pair`) | **0** |
+  | `7419c689` + the same fix (unboxed `Pair`) | **100** |
+
+  Deterministic across repeats, and it reproduces standalone with no closure
+  involved. Probe: `probes/unboxed_pair/`.
+- The likely mechanism: a `Float` is itself a heap value, so extracting a field
+  from an *unboxed* struct yields a raw double that must be boxed before it can
+  be used as a March `Float`. The boxed representation stored already-boxed
+  floats, so extraction handed back the existing box and allocated nothing. The
+  optimization pays for itself only when the extracted scalars stay raw.
+- In this engine it cost the frame loop **one extra live object per frame**
+  (1 -> 2), traced to a two-float weather-cache pair. Startup meshing and frame
+  rate were unchanged, so this is the whole of the regression here.
+- The change's own write-up
+  (`specs/progress/2026-09-03-unboxed-small-scalar-aggregates.md`) measured this
+  engine at 9cd1ffb and reported allocation "unchanged, +0.04%", which was true
+  of the code as it stood then — the weather pair was added after.
+- **Would need:** keep the scalars raw through the extraction, or fall back to
+  the boxed representation when a field is consumed as a boxed scalar.
+
+#### A method note
+The first check I ran was a static count of `march_alloc` call sites in the
+emitted IR for the loop body. It said the new toolchain emitted *fewer*
+allocations (4 against 6), and I nearly reported no regression on the strength
+of it. Call sites are not executions: the two extra sites in the boxed build sit
+outside the loop, and the one site that matters in the unboxed build runs every
+iteration. Only the runtime counter showed it.

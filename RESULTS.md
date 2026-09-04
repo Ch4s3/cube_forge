@@ -672,3 +672,42 @@ prints on every run. A microbenchmark of `hud_key` says it is free, the
 definition looks like a field read, and the call site looks like a hash. This is
 the third time in this project that a per-frame allocation was only visible from
 the outside, and the argument for keeping that counter in the default output.
+
+## Latest March main, measured
+
+`origin/main` at `7419c689`, eight commits past the toolchain this project pins,
+built with the G67 NativeArray borrow fix applied on top (main does not have
+it). Three of those commits target this project's gaps directly: unboxed small
+scalar aggregates, stack promotion through non-retaining callees, and
+`@[no_alloc(transient)]`.
+
+### What the borrow fix is actually worth
+
+Measuring startup meshing across three toolchains on an idle machine finally
+put a number on the G67 fix that I had missed:
+
+| toolchain | mesh all, 64 chunks | per chunk |
+|---|---|---|
+| `137737f3` + pin-main (what this project pinned) | 1 378 ms | 21.5 ms |
+| the same, plus the NativeArray borrow fix | **372 ms** | **5.8 ms** |
+| `7419c689` + the same fix | 380 ms | 5.9 ms |
+
+**3.7x on startup meshing**, identical vertex counts. I had only measured the
+borrow fix against block-edit cost (43%) and never against meshing, so this
+project's headline number for that fix was badly understated. Earlier figures in
+this file of 1 900-2 100 ms for meshing were also inflated by compiler builds
+running in the background; 1 378 ms is the idle-machine number for the old
+toolchain.
+
+### What latest main adds on top: nothing here, and one regression
+
+Meshing, frame rate and the 115 tests are unchanged. Six of this engine's types
+now unbox — `Vec3`, `Quat`, `Mat4.Vec4`, `Player.Sweep`, `Weather.Phase` and the
+weather pair — but the frame loop's allocation went from **1 live object per
+frame to 2**, traced to that two-float pair. Unboxed, it allocates once per
+construction where the boxed representation allocated nothing: GAPS.md **G69**,
+with a standalone repro in `probes/unboxed_pair/`.
+
+So this project stays on `137737f3` + pin-main + the borrow fix for now. The
+regression is a compiler bug rather than a reason to avoid the feature, and it
+is worth reporting upstream before pinning forward.
