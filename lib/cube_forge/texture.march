@@ -4,7 +4,14 @@ mod CubeForge.Texture do
 
   fn size() : Int do 16 end
 
-  pfn put_rgba(a : NativeU8Arr, off : Int, r : Int, g : Int, b : Int, alpha : Int) : NativeU8Arr do
+  -- NativeArray.set_u8 truncates mod 256 rather than saturating, so a bright base colour
+  -- plus a positive speckle wraps to near-black (snow at 250 + 12 became 6). Clamp first.
+  pfn byte(v : Int) : Int do if v < 0 do 0 else if v > 255 do 255 else v end end end
+
+  pfn put_rgba(a : NativeU8Arr, off : Int, r0 : Int, g0 : Int, b0 : Int, alpha : Int) : NativeU8Arr do
+    let r = byte(r0)
+    let g = byte(g0)
+    let b = byte(b0)
     let a1 = NativeArray.set_u8(a, off, r)
     let a2 = NativeArray.set_u8(a1, off + 1, g)
     let a3 = NativeArray.set_u8(a2, off + 2, b)
@@ -45,19 +52,31 @@ mod CubeForge.Texture do
     end
   end
 
-  doc "16x16 RGBA texture array, layer-major: 0 grass checkerboard, 1 water, 2 dirt, 3 stone."
+  doc """
+  16x16 RGBA texture array, layer-major: 0 grass, 1 water, 2 dirt, 3 stone,
+  4 sand, 5 snow, 6 granite.
+  """
   fn checkerboard() : NativeU8Arr do
-    let a0 = checker_go(NativeArray.make_u8(4 * 16 * 16 * 4, 0), 0)
+    let a0 = checker_go(NativeArray.make_u8(7 * 16 * 16 * 4, 0), 0)
     let a1 = water_go(a0, 0)
     let a2 = speckle_go(a1, 2, 0, 134, 96, 67)
-    speckle_go(a2, 3, 0, 128, 128, 132)
+    let a3 = speckle_go(a2, 3, 0, 128, 128, 132)
+    let a4 = speckle_go(a3, 4, 0, 219, 203, 146)
+    let a5 = speckle_go(a4, 5, 0, 242, 246, 250)
+    speckle_go(a5, 6, 0, 150, 141, 138)
   end
 
-  fn layers() : Int do 4 end
+  fn layers() : Int do 7 end
   fn water_layer() : Float do 1.0 end
   doc "Texture layer for a block id."
   fn layer_for(id : Int) : Float do
-    if id == 2 do 2.0 else if id == 3 do 3.0 else if id >= 4 && id <= 11 do 1.0 else 0.0 end end end
+    if id == 2 do 2.0
+    else if id == 3 do 3.0
+    else if id >= 4 && id <= 11 do 1.0
+    else if id == 12 do 4.0
+    else if id == 13 do 5.0
+    else if id == 14 do 6.0
+    else 0.0 end end end end end end
   end
 
 end

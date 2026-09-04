@@ -1,0 +1,87 @@
+-- Terrain generator: ridged noise, determinism, SIMD/scalar agreement, material rules.
+-- Helpers are module-level: `pfn` is not allowed inside `describe`/`test` (GAPS.md G59).
+mod CubeForge.Test.Terrain do
+
+  needs IO.Spawn
+  import Test
+  alias CubeForge.Noise as N
+  alias CubeForge.Chunk as C
+
+  pfn ridged_in_range(i : Int, lo : Float, hi : Float) : Bool do
+    if i >= 400 do lo >= 0.0 && hi <= 1.0
+    else
+      let v = N.ridged(int_to_float(i) *. 0.37, int_to_float(i) *. 0.11, 3)
+      ridged_in_range(i + 1, if v < lo do v else lo end, if v > hi do v else hi end)
+    end
+  end
+
+  pfn seeds_differ(i : Int) : Bool do
+    if i >= 60 do false
+    else if N.height(i, i * 2, 7) != N.height(i, i * 2, 8) do true
+    else seeds_differ(i + 1) end end
+  end
+
+  pfn height_span(i : Int, lo : Int, hi : Int) : Bool do
+    if i >= 400 do lo < C.sea_level() && hi > C.sea_level() + 20
+    else
+      let h = N.height(i % 128, i / 128 * 7, 5)
+      height_span(i + 1, if h < lo do h else lo end, if h > hi do h else hi end)
+    end
+  end
+
+  pfn lanes_match(i : Int) : Bool do
+    if i >= 40 do true
+    else
+      let wx = i * 3
+      let wz = i * 5 + 1
+      let hs = N.height_x4(wx, wz, 11)
+      let l0 = float_to_int(Simd.extract_f32x4(hs, 0)) == N.height(wx, wz, 11)
+      let l1 = float_to_int(Simd.extract_f32x4(hs, 1)) == N.height(wx + 1, wz, 11)
+      let l2 = float_to_int(Simd.extract_f32x4(hs, 2)) == N.height(wx + 2, wz, 11)
+      let l3 = float_to_int(Simd.extract_f32x4(hs, 3)) == N.height(wx + 3, wz, 11)
+      if l0 && l1 && l2 && l3 do lanes_match(i + 1) else false end
+    end
+  end
+
+  describe "ridged noise" do
+    test "stays within [0, 1]" do
+      Test.assert_true(ridged_in_range(0, 1.0, 0.0), "ridged noise in range")
+    end
+  end
+
+  describe "height" do
+    test "is deterministic for a seed and differs across seeds" do
+      Test.assert_eq_int(N.height(30, 40, 7), N.height(30, 40, 7), "same seed, same height")
+      Test.assert_true(seeds_differ(0), "a different seed gives different terrain")
+    end
+    test "spans a range that brackets sea level" do
+      Test.assert_true(height_span(0, 999, 0), "terrain reaches above and below sea level")
+    end
+  end
+
+  describe "SIMD and scalar generators agree" do
+    -- The 4-wide path is a separate implementation of the same formula; if they drift,
+    -- `generate` and `generate_scalar` silently produce different worlds.
+    test "height_x4 lanes match height for the same columns" do
+      Test.assert_true(lanes_match(0), "all four lanes match the scalar height")
+    end
+  end
+
+  describe "surface materials" do
+    test "cliff beats altitude, and a steep shore is rock rather than beach" do
+      Test.assert_eq_int(C.surface_id(120, 6), C.granite(), "steep high ground is granite, not snow")
+      Test.assert_eq_int(C.surface_id(120, 0), C.snow(), "flat high ground is snow")
+      Test.assert_eq_int(C.surface_id(C.sea_level(), 6), C.granite(), "steep shore is a cliff")
+      Test.assert_eq_int(C.surface_id(C.sea_level(), 0), C.sand(), "flat shore is a beach")
+      Test.assert_eq_int(C.surface_id(80, 0), 1, "flat mid ground is grass")
+      Test.assert_eq_int(C.surface_id(C.sea_level() - 20, 0), 2, "deep bed is dirt, not sand")
+    end
+    test "subsurface follows the surface for sand and granite, dirt otherwise" do
+      Test.assert_eq_int(C.subsurface_id(C.sand()), C.sand(), "sand over sand")
+      Test.assert_eq_int(C.subsurface_id(C.granite()), C.granite(), "granite over granite")
+      Test.assert_eq_int(C.subsurface_id(1), 2, "grass over dirt")
+      Test.assert_eq_int(C.subsurface_id(C.snow()), 2, "snow over dirt")
+    end
+  end
+
+end

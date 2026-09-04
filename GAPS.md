@@ -817,6 +817,31 @@ are freed immediately.
   as a hard error (or at minimum print a per-file warning naming the file
   and the count of tests it could not run), never a silent partial run.
 
+---
+
+## Terrain generation notes
+
+### G61. A `NativeU8Arr` store wraps mod 256 silently, and near-white textures came out red
+- `Texture.speckle_go` adds a per-texel variation of up to +12 to a base colour.
+  For snow (242, 246, 250) that overflows: `set_u8` truncates mod 256 rather
+  than saturating (documented in `stdlib/native_array.march`: "stores truncate
+  mod 2^w two's-complement... never trap"), so 250 + 12 became 6 and the snow
+  texture rendered as a red/black grid. Nothing warns: the value is an `Int`
+  right up to the store, and every intermediate is in range.
+- **Done instead:** an explicit `byte(v)` clamp before every channel store.
+- **Would need:** a saturating store (`set_u8_sat`) or, at minimum, a refinement
+  on `set_u8`'s value parameter (`{Int | 0 <= _ && _ < 256}`) so an out-of-range
+  literal or an obviously-unclamped expression is caught rather than wrapped.
+  This is the same class as G18/G52: the narrow-width array API is silent where
+  it could be loud.
+
+### G62. The `forge test` silent skip (G60) bit twice more in one session
+- `terrain_test.march` was dropped whole, twice: once for a `pfn` inside a
+  `test` body (G59's restriction) and once for a stale capability declaration
+  in an unrelated test file. Both times `forge test` reported a clean run with
+  the *previous* test count. Cross-checking `grep -c '  test "'` against the
+  reported count is currently the only way to know the suite ran what you wrote.
+
 ## Lighting notes (skylight flood-fill)
 
 ### G63. G21 rules out a BFS queue over a NativeArray; level-synchronous sweeps are the workaround

@@ -48,6 +48,9 @@ mod CubeForge.Ffi.Input do
   fn key_2() : Int do 50 end
   fn key_3() : Int do 51 end
   fn key_4() : Int do 52 end
+  fn key_5() : Int do 53 end
+  fn key_6() : Int do 54 end
+  fn key_7() : Int do 55 end
   fn button_left() : Int do 0 end
   fn button_right() : Int do 1 end
 

@@ -4,6 +4,7 @@ mod CubeForge.Test.Flow do
   needs IO.Spawn
   needs IO.Console
   needs IO.Process
+  needs IO.Clock
   needs IO.Foreign
   needs Window
   import Test
