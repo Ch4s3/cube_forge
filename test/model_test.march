@@ -1,0 +1,144 @@
+-- Micro-voxel models: the palette, the shapes, the greedy templates and the set.
+mod CubeForge.Test.Model do
+
+  needs IO.Foreign
+  needs Window
+  import Test
+  alias CubeForge.Model as Md
+  alias CubeForge.Vertex as Vx
+
+  pfn near(a : Float, b : Float) : Bool do Math.abs(a -. b) < 0.0001 end
+  pfn fl(s : CubeForge.Model.Set, k : Int, v : Int, f : Int) : Float do Md.at(s, Md.offset(s, k) + v * Vx.floats() + f) end
+  pfn verts(s : CubeForge.Model.Set, k : Int) : Int do Md.floats(s, k) / Vx.floats() end
+
+  -- every vertex position of template k inside [0, 1]
+  pfn inside_go(s : CubeForge.Model.Set, k : Int, v : Int, n : Int) : Bool do
+    if v >= n do true
+    else
+      let x = fl(s, k, v, 0)
+      let y = fl(s, k, v, 1)
+      let z = fl(s, k, v, 2)
+      if x < 0.0 || x > 1.0 || y < 0.0 || y > 1.0 || z < 0.0 || z > 1.0 do false else inside_go(s, k, v + 1, n) end
+    end
+  end
+  pfn all_inside(s : CubeForge.Model.Set, k : Int) : Bool do
+    if k >= Md.count() do true else if inside_go(s, k, 0, verts(s, k)) do all_inside(s, k + 1) else false end end
+  end
+  pfn all_capped(s : CubeForge.Model.Set, k : Int) : Bool do
+    if k >= Md.count() do true
+    else if Md.faces(s, k) > 0 && Md.faces(s, k) <= Md.face_cap(k) do all_capped(s, k + 1) else false end end
+  end
+  -- the highest y among vertices whose face is d, and the x of one such vertex (the first)
+  pfn top_y_go(s : CubeForge.Model.Set, k : Int, v : Int, n : Int, d : Float, best : Float) : Float do
+    if v >= n do best
+    else
+      let f = fl(s, k, v, 7)
+      let y = fl(s, k, v, 1)
+      top_y_go(s, k, v + 1, n, d, if near(f, d) && y > best do y else best end)
+    end
+  end
+  -- palette index of the first vertex with face d at height y
+  pfn colour_at_go(s : CubeForge.Model.Set, k : Int, v : Int, n : Int, d : Float, y : Float) : Int do
+    if v >= n do 0 - 1
+    else if near(fl(s, k, v, 7), d) && near(fl(s, k, v, 1), y) do float_to_int(fl(s, k, v, 3) *. 16.0) + 16 * float_to_int(fl(s, k, v, 4) *. 16.0)
+    else colour_at_go(s, k, v + 1, n, d, y) end end
+  end
+  -- extreme x among vertices at the template's highest / lowest y
+  pfn x_at_y_go(s : CubeForge.Model.Set, k : Int, v : Int, n : Int, y : Float, best : Float, want_max : Bool) : Float do
+    if v >= n do best
+    else
+      let x = fl(s, k, v, 0)
+      let hit = near(fl(s, k, v, 1), y)
+      let b1 = if !hit do best else if want_max do (if x > best do x else best end) else (if x < best do x else best end) end end
+      x_at_y_go(s, k, v + 1, n, y, b1, want_max)
+    end
+  end
+  pfn min_y_go(s : CubeForge.Model.Set, k : Int, v : Int, n : Int, best : Float) : Float do
+    if v >= n do best else min_y_go(s, k, v + 1, n, if fl(s, k, v, 1) < best do fl(s, k, v, 1) else best end) end
+  end
+  pfn max_y_go(s : CubeForge.Model.Set, k : Int, v : Int, n : Int, best : Float) : Float do
+    if v >= n do best else max_y_go(s, k, v + 1, n, if fl(s, k, v, 1) > best do fl(s, k, v, 1) else best end) end
+  end
+  pfn same_floats(s : CubeForge.Model.Set, a : Int, b : Int, i : Int) : Bool do
+    if Md.floats(s, a) != Md.floats(s, b) do false
+    else if i >= Md.floats(s, a) do true
+    else if near(Md.at(s, Md.offset(s, a) + i), Md.at(s, Md.offset(s, b) + i)) do same_floats(s, a, b, i + 1) else false end end end
+  end
+
+  describe "Model palette" do
+    test "texel coordinates hit the centre of texel k" do
+      Test.assert_true(near(Md.palette_u(17), 1.5 /. 16.0), "u of 17")
+      Test.assert_true(near(Md.palette_v(17), 1.5 /. 16.0), "v of 17")
+      Test.assert_true(near(Md.palette_u(0), 0.5 /. 16.0), "u of 0")
+      Test.assert_true(near(Md.palette_layer(), 89.0), "the palette layer")
+    end
+    test "species colours are the caps, gills are darker" do
+      Test.assert_eq_int(Md.colour_r(Md.c_cap(5)), CubeForge.Species.colour_r(5), "cap red is the species red")
+      Test.assert_true(Md.colour_r(Md.c_gill(5)) < Md.colour_r(Md.c_cap(5)) || Md.colour_g(Md.c_gill(5)) < Md.colour_g(Md.c_cap(5)), "gill darker")
+      Test.assert_eq_int(Md.colour_g(Md.c_frond()), 150, "frond green")
+    end
+  end
+
+  describe "Model shapes" do
+    test "a mushroom has soil, stem and cap in the right places" do
+      let g = Md.mushroom(3)
+      Test.assert_eq_int(Md.cell(g, 3, 0, 3), Md.c_soil_dark(), "soil")
+      Test.assert_eq_int(Md.cell(g, 3, 2, 3), Md.c_stem(), "stem")
+      Test.assert_eq_int(Md.cell(g, 2, 4, 2), Md.c_gill(3), "gills under the cap")
+      Test.assert_eq_int(Md.cell(g, 3, 7, 3), Md.c_cap(3), "cap top")
+      Test.assert_eq_int(Md.cell(g, 1, 5, 1), 0, "the widest layer's corner is knocked out")
+      Test.assert_eq_int(Md.cell(g, 0, 7, 0), 0, "air at the corner")
+    end
+    test "a frond rises at the trunk side and droops outward" do
+      let g = Md.frond(0)
+      Test.assert_eq_int(Md.cell(g, 0, 7, 3), Md.c_midrib(), "midrib at the root, high")
+      Test.assert_eq_int(Md.cell(g, 7, 3, 3), Md.c_midrib(), "midrib at the tip, low")
+      Test.assert_true(Md.cell(g, 0, 7, 2) != 0 && Md.cell(g, 0, 7, 4) != 0, "three wide")
+      Test.assert_eq_int(Md.cell(g, 0, 7, 5), 0, "not four")
+      let m = Md.frond(2)
+      Test.assert_eq_int(Md.cell(m, 7, 7, 3), Md.c_midrib(), "-x: the root is on the +x side")
+    end
+    test "bush variants differ and stand on stems" do
+      let a = Md.bush(0)
+      Test.assert_eq_int(Md.cell(a, 2, 0, 2), Md.c_bush_stem(), "a stem from the ground")
+      Test.assert_true(Md.cell(a, 2, 2, 2) == Md.c_bush() || Md.cell(a, 2, 2, 2) == Md.c_bush_light(), "a plate above it")
+    end
+  end
+
+  describe "Model templates" do
+    test "every template is inside the cell, non-empty and under its face cap" do
+      let s = Md.build()
+      Test.assert_true(all_inside(s, 0), "positions within [0, 1]")
+      Test.assert_true(all_capped(s, 0), "0 < faces <= cap for all twenty")
+      Test.assert_eq_int(Md.floats(s, 0) % (6 * Vx.floats()), 0, "whole quads")
+    end
+    test "the mushroom's top is the cap colour and its underside the gills" do
+      let s = Md.build()
+      let k = Md.t_mushroom(5)
+      let top = top_y_go(s, k, 0, verts(s, k), 0.0, 0.0 -. 1.0)
+      Test.assert_true(near(top, 1.0), "the cap reaches the top of the cell")
+      Test.assert_eq_int(colour_at_go(s, k, 0, verts(s, k), 0.0, 1.0), Md.c_cap(5), "top face: species 5 cap")
+      Test.assert_eq_int(colour_at_go(s, k, 0, verts(s, k), 1.0, 0.5), Md.c_gill(5), "the underside at y 4/8: gills")
+    end
+    test "the +x frond's highest vertices sit at the -x edge and its lowest toward +x" do
+      let s = Md.build()
+      let k = Md.t_frond(0)
+      let n = verts(s, k)
+      let hi = max_y_go(s, k, 0, n, 0.0 -. 1.0)
+      let lo = min_y_go(s, k, 0, n, 2.0)
+      Test.assert_true(x_at_y_go(s, k, 0, n, hi, 2.0, false) < 0.13, "the top is at the trunk side")
+      Test.assert_true(x_at_y_go(s, k, 0, n, lo, 0.0 -. 1.0, true) > 0.87, "the bottom is at the tip")
+      Test.assert_true(!same_floats(s, Md.t_frond(0), Md.t_frond(2), 0), "the -x frond is a different template")
+      Test.assert_true(Md.faces(s, Md.t_umbrella()) > 0 && Md.faces(s, Md.t_tuft()) > 0, "umbrella and tuft exist")
+    end
+    test "bush variants are distinct templates; the set's offsets are monotone" do
+      let s = Md.build()
+      Test.assert_true(!same_floats(s, Md.t_bush(0), Md.t_bush(1), 0), "variants 0 and 1 differ")
+      Test.assert_true(!same_floats(s, Md.t_bush(2), Md.t_bush(3), 0), "variants 2 and 3 differ")
+      Test.assert_eq_int(Md.offset(s, 0), 0, "first at 0")
+      Test.assert_true(Md.offset(s, 1) > 0, "second after the first")
+      Test.assert_eq_int(Md.offset(s, Md.count()), Md.offset(s, Md.count() - 1) + Md.floats(s, Md.count() - 1), "the end offset closes the blob")
+    end
+  end
+
+end
