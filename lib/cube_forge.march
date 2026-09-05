@@ -797,6 +797,52 @@ mod CubeForge do
     end
   end
 
+  -- Every column at once, for session start: blocks and `shown` only. Light
+  -- is flooded afterwards, so nothing here relights. Walked chunk by chunk
+  -- with one batched write each: World.set_block copies the 64 KB chunk per
+  -- call, and 2,500 wild columns through it cost 700 ms of memcpy.
+  pfn shown_cells_go(w : CubeForge.World.World, bio : CubeForge.Biome.Field, myc : CubeForge.Myc.Field, cols : Int, cx : Int, cz : Int, j : Int, cells : List(Int)) : List(Int) do
+    if j >= 256 do cells
+    else
+      let x = 16 * cx + j % 16
+      let z = 16 * cz + j / 16
+      let want = Myc.wanted(myc, cols, x + cols * z)
+      if want == 0 do shown_cells_go(w, bio, myc, cols, cx, cz, j + 1, cells)
+      else
+        let h = Biome.height_of(bio, x, z)
+        let sfc = World.block_at(w, x, h, z)
+        let new_id = Chunk.myc_id(Chunk.myc_base(sfc), Species.glow(want))
+        if h <= 0 || Biome.is_wet(bio, x, z) || new_id == 0 do shown_cells_go(w, bio, myc, cols, cx, cz, j + 1, cells)
+        else shown_cells_go(w, bio, myc, cols, cx, cz, j + 1, Cons(Chunk.index(j % 16, h, j / 16) * 256 + new_id, cells)) end
+      end
+    end
+  end
+  pfn shown_mark_go(w : CubeForge.World.World, bio : CubeForge.Biome.Field, myc : CubeForge.Myc.Field, cols : Int, cx : Int, cz : Int, j : Int) : CubeForge.World.World do
+    if j >= 256 do w
+    else
+      let x = 16 * cx + j % 16
+      let z = 16 * cz + j / 16
+      let want = Myc.wanted(myc, cols, x + cols * z)
+      -- shown follows exactly the columns whose block was written
+      let h = Biome.height_of(bio, x, z)
+      let ok = if want == 0 do false else if h <= 0 do false else if Biome.is_wet(bio, x, z) do false else Chunk.is_myc(World.block_at(w, x, h, z)) end end end
+      shown_mark_go(if ok do World.set_shown(w, x, z, want) else w end, bio, myc, cols, cx, cz, j + 1)
+    end
+  end
+  pfn apply_shown_all(w : CubeForge.World.World, bio : CubeForge.Biome.Field, myc : CubeForge.Myc.Field, n : Int, ci : Int) : CubeForge.World.World do
+    if ci >= n * n do w
+    else
+      let cx = ci % n
+      let cz = ci / n
+      let cells = shown_cells_go(w, bio, myc, n * 16, cx, cz, 0, Nil)
+      let w1 = match cells do
+        Nil -> w
+        _ -> World.set_cells(w, cx, cz, cells)
+      end
+      apply_shown_all(shown_mark_go(w1, bio, myc, n * 16, cx, cz, 0), bio, myc, n, ci + 1)
+    end
+  end
+
   pfn migrate_myc(sc, cols : List(Int), glow_budget : Int) do
     match cols do
       Nil -> sc
@@ -1934,9 +1980,21 @@ mod CubeForge do
     let world_scalar = World.generate_scalar(n, seed, workers)
     let t1 = System.monotonic_time()
     let world_dark = World.generate(n, seed, workers)
+    -- stage 1a: the climate and the wild fungus. The biome field is pure over
+    -- the terrain, and the wild patches are written as blocks NOW, before the
+    -- light flood, so glowing wild mycelium is lit by the flood rather than
+    -- by a relight per column. CF_WILD=0 keeps a world bare.
+    let tw0 = System.monotonic_time()
+    let biome0 = Biome.build(world_dark, seed)
+    let tw1 = System.monotonic_time()
+    let cols = n * 16
+    let myc0 = if Env.get_int("CF_WILD", 1) == 1 do Myc.wild(Myc.build(cols), cols, Biome.temps(biome0), Biome.moists(biome0), seed) else Myc.build(cols) end
+    let tw2 = System.monotonic_time()
+    let world_wild = apply_shown_all(world_dark, biome0, myc0, n, 0)
+    println("  biome field: " ++ int_to_string(tw1 - tw0) ++ " ms, wild fungus: " ++ myc_summary(myc0, cols, 1, "") ++ "in " ++ int_to_string(tw2 - tw1) ++ " ms, applied in " ++ int_to_string(System.monotonic_time() - tw2) ++ " ms")
     let t2 = System.monotonic_time()
     -- stage 1b: skylight and block light (need the finished terrain, including neighbours)
-    let world_lit = World.relight_all(world_dark)
+    let world_lit = World.relight_all(world_wild)
     let t2b = System.monotonic_time()
     println("  light flood (sky + block): " ++ int_to_string(t2b - t2) ++ " ms")
     -- The shadow ray-marcher's view of the world. Built once and handed over;
@@ -1997,8 +2055,7 @@ mod CubeForge do
       let tw0 = Win.time()
       reload_water(pids, n * n - 1, n, seed)
       println("reloaded " ++ int_to_string(n * n) ++ " water actors in " ++ ms(Win.time() -. tw0) ++ " (loads run asynchronously)")
-      let biome0 = Biome.build(world, seed)
-      let scene = Scene(world, counts, F32Buf.new(256), Ray.miss(), Ui(Inv.new(), F32Buf.new(2048), F32Buf.new(256), -1), pids, spring_flags(world, biome0, 0, n, NativeArray.make_int(n * n, 0)), Array.from_list(meshes), biome0, CubeForge.Light.marks_new(), Myc.build(n * 16))
+      let scene = Scene(world, counts, F32Buf.new(256), Ray.miss(), Ui(Inv.new(), F32Buf.new(2048), F32Buf.new(256), -1), pids, spring_flags(world, biome0, 0, n, NativeArray.make_int(n * n, 0)), Array.from_list(meshes), biome0, CubeForge.Light.marks_new(), myc0)
       let fps0 = Fps(t4, 0, 0, F32Buf.new(4096))
       Weather.send_seed(wxpid, seed)
       match frame_loop(Frame(0, t4, player, 0, NativeArray.make_float(16, 0.0), NativeArray.make_f32(16, 0.0), false, F32Buf.new(64), Env.get_int("CF_FLASH", 0) == 1, 0.0, 0.0, false, -1, Menu.new(seed), F32Buf.new(2048), -1, 0.0, -1, Audio.sched_start(0)), k, scene, n * n, proj, map_proj, fps0, wxpid, seed) do
