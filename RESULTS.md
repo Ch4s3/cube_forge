@@ -1479,3 +1479,35 @@ tick. `tick_all` looks at every column and is the oracle: under a static
 climate the two agree bit for bit over 300 ticks of a contest (tested); under
 a drifting climate the active tick lags by at most `climate_eps` of climate,
 by design.
+
+
+## Fungus follow-ups: cap faces, bodies fall with the network, the scan pre-pass (2026-09-05)
+
+| | before | after |
+|---|---|---|
+| fruit candidate scan, 2,048 columns per fruit slot, release, wild world | 0.3-0.6 ms | **0.03-0.05 ms** |
+| `scratch/frame_budget.sh` | 8.85-9.3 ms | 9.35 ms best of 3 (two runs at 11.3, the phase costs unchanged) |
+
+**Small mushrooms** show their cap layer on the top and bottom faces and the
+silhouette on the sides; from the air they read as a cap now, not a splayed
+shape. No new layers: the cap block's texture already existed.
+
+**Bodies fall with the network.** The fruit scan used to read two blocks per
+column to find bodies whose ground had lost their species and list them for
+felling. Now the migration that clears a column's ground fells the body
+standing on it in the same step (its cap glow joins the slot's relight
+anchor), and the scan only grows. That let the scan take a per-row species
+pre-pass like the tick's: an empty row costs one byte, and a column is read
+from the world only after its species, vigour, shown, canonical and roll
+checks all pass. Verified with a mature Lanterncap patch on grassland at
+`CF_MYC_RATE=300 CF_FRUIT_RATE=100000`: three bodies at frame 900 with zero
+orphans; by frame 5000 the patch had withered to the 24 lakeside columns
+still damp enough, one body stood on them, and zero orphans -- the two whose
+ground went were felled with it. `orphans` is now in the dump summary.
+
+**A bug found on the way.** The migration read the surface at the heightmap's
+top, and a body standing on a column IS the heightmap's top there. The cap
+could not carry mycelium, so the column's `shown` was cleared, and the next
+scan saw a body on ground that showed nothing and felled it. Every body
+decayed within a scan window of growing. The migration, `can_plant` and the
+dump diagnostic now read the ground through `Fruit.base_of`.
