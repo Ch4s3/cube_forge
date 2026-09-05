@@ -20,8 +20,10 @@ heightmap path.
   (a few degrees), so bands cross a cliff at an angle rather than ruling it.
 - **warp**: the low-frequency term folds the bands gently; without it the
   bands are planes and every cliff in the world shows the same stripes.
-- **thickness**: `band_thickness` 4, with the hash nudging each band ±1 so
-  they are not a ruler.
+- **thickness**: `band_thickness` 4. *As built:* fixed, not nudged; the
+  tilt already makes a band's visible thickness vary along a face, and a
+  per-band nudge would have needed the band index to know its own
+  boundary.
 - **region**: `floor(wx / 64), floor(wz / 64)`, so the band sequence changes
   across the map and two distant cliffs do not match.
 
@@ -30,13 +32,13 @@ at 10%, and two **new blocks** at 15% between them:
 
 | id | block | look |
 |---|---|---|
-| 47 | sandstone | pale, faintly layered |
-| 48 | shale | grey-blue, thin lines |
+| 67 | sandstone | pale, thick beds |
+| 68 | shale | grey-blue, thin beds |
 
-Ids 47 and 48 are the first free above the mycelium range (26..46); the fruit
-and palm ids sit higher. Two texture layers (`Texture.layers()` 89 -> 91),
-generated procedurally like the rest. Both harvest as **stone** (one inventory
-slot, no new items) in this phase; a later phase can give them slots.
+Ids 67 and 68 are the first free above the fruit range (47..64) and the
+palms (65, 66). Two texture layers, 89 and 90 (`Texture.layers()` 89 -> 91),
+`bedded_go`: a speckle with a darker lamina every few pixels. Both harvest
+as **stone** (`Inventory.yield_of`; one slot, no new items) in this phase.
 
 The four-block subsurface keeps its rule (dirt, sand or granite by surface),
 so the bands start below it; the deep basalt band (`deep_stone_depth`) and
@@ -66,9 +68,10 @@ column and rehashes only when `k` changes. Well under a millisecond a chunk.
 
 ## 5. Measured
 
-- World build time, unchanged to within noise.
-- Vertex count from `mesh all` before and after (seed 7, age 50), expected
-  up a few percent on cliff-heavy seeds.
+*As built, 2026-09-05*, seed 7, age 50, headless: `mesh all` 224,208
+vertices before, 226,722 after (+1.1%); the surface mix identical (grass
+59%, sand 8%, granite 10%, snow 6%, underwater 18%); world build unchanged
+within noise.
 
 ## 6. Tests
 

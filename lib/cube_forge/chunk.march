@@ -94,6 +94,9 @@ mod CubeForge.Chunk do
   fn mud() : Int do 24 end
   doc "Glowing mushroom cap: the first emissive block. Placeholder until the fungus fruit blocks land; the block-light channel is verified with it."
   fn glow_cap() : Int do 25 end
+  doc "Sandstone and shale: two of the rock strata's bands (see rock_id). Both harvest as stone."
+  fn sandstone() : Int do 67 end
+  fn shale() : Int do 68 end
   doc "Palm trunk and frond: the oasis tree. Fronds are foliage in every sense leaves are."
   fn palm_log() : Int do 65 end
   fn palm_frond() : Int do 66 end
@@ -179,8 +182,63 @@ mod CubeForge.Chunk do
     64 + float_to_int(3.0 *. Math.sin(fx *. 0.5) +. 2.0 *. Math.cos(fz *. 0.7)) + (if (x + z) % 7 == 0 do 2 else 0 end)
   end
 
+  -- ── Rock strata ─────────────────────────────────────────────────────────────
+  -- Under the four-block subsurface the rock is bedded: bands band_thickness()
+  -- blocks tall, dipping a few degrees across the world (a fixed tilt from the
+  -- seed) and folded gently by a low-frequency warp, so a cliff shows bands at
+  -- an angle and two cliffs do not show the same stripes. The material of a
+  -- band is a hash of its index and a 64-block region, so the sequence changes
+  -- across the map. A material rule only: nothing here moves a height.
+  doc "Blocks per band."
+  fn band_thickness() : Int do 4 end
+  doc "The per-column offset the bands are read against: tilt plus warp, in blocks. One noise sample per column."
+  fn band_offset(wx : Int, wz : Int, seed : Int) : Float do
+    let tilt_x = (CubeForge.Noise.hash2(3, 7, seed + 1202) -. 0.5) *. 0.16
+    let tilt_z = (CubeForge.Noise.hash2(11, 5, seed + 1203) -. 0.5) *. 0.16
+    tilt_x *. int_to_float(wx) +. tilt_z *. int_to_float(wz)
+      +. 6.0 *. (CubeForge.Noise.value2(int_to_float(wx) *. 0.02, int_to_float(wz) *. 0.02, seed + 1200) -. 0.5)
+  end
+  doc "Band index of height [y] in a column with band offset [off]."
+  fn band_of(y : Int, off : Float) : Int do
+    float_to_int(Math.floor((int_to_float(y) +. off) /. int_to_float(band_thickness())))
+  end
+  doc "The rock of band [k] in region (rx, rz): stone 55%, basalt 20%, granite 10%, sandstone 7.5%, shale 7.5%. Never bedrock."
+  fn band_material(k : Int, rx : Int, rz : Int, seed : Int) : Int do
+    let h = CubeForge.Noise.hash2(k * 31 + rx, rz * 17 + k, seed + 1201)
+    if h < 0.55 do 3 else if h < 0.75 do basalt() else if h < 0.85 do granite()
+    else if h < 0.925 do sandstone() else shale() end end end end
+  end
+  doc "The rock at (wx, y, wz): band_material of the band the column's offset puts [y] in. What fills a column between its subsurface and the deep stone band."
+  fn rock_id(wx : Int, y : Int, wz : Int, seed : Int) : Int do
+    band_material(band_of(y, band_offset(wx, wz, seed)), wx / 64, wz / 64, seed)
+  end
+
+  -- Fill terrain up to [top] with [surface] on top, [sub] for four beneath it,
+  -- the strata below that (bedded rock by band; the deep basalt band and the
+  -- bedrock floor keep their depths), then water from top+1 up to sea level.
+  -- The band and its material are carried down the column and rehashed only
+  -- when the band changes: one hash per band crossed, not per block.
+  pfn fill_column_strata(c : Chunk, x : Int, z : Int, y : Int, top : Int, surface : Int, sub : Int,
+                         off : Float, rx : Int, rz : Int, seed : Int, band : Int, rock : Int) : Chunk do
+    if y > top do fill_water(c, x, z, top + 1)
+    else
+      let k = band_of(y, off)
+      let rock1 = if k == band do rock else band_material(k, rx, rz, seed) end
+      let id = if y < bedrock_depth() do bedrock()
+               else if y == top do surface
+               else if y > top - 4 do sub
+               else if y < deep_stone_depth() do basalt()
+               else rock1 end end end end
+      fill_column_strata(set(c, x, y, z, id), x, z, y + 1, top, surface, sub, off, rx, rz, seed, k, rock1)
+    end
+  end
+  doc "A generated column: [surface], four of [sub], then the strata of world column (wx, wz)."
+  fn fill_column_world(c : Chunk, x : Int, z : Int, wx : Int, wz : Int, seed : Int, top : Int, surface : Int, sub : Int) : Chunk do
+    fill_column_strata(c, x, z, 0, top, surface, sub, band_offset(wx, wz, seed), wx / 64, wz / 64, seed, -99999, 3)
+  end
+
   -- Fill terrain up to [top] with [surface] on top and [sub] just beneath it, then
-  -- water from top+1 up to sea level.
+  -- water from top+1 up to sea level. The M2 test terrain: plain stone, no strata.
   pfn fill_column_mat(c : Chunk, x : Int, z : Int, y : Int, top : Int, surface : Int, sub : Int) : Chunk do
     if y > top do fill_water(c, x, z, top + 1)
     else
@@ -201,7 +259,7 @@ mod CubeForge.Chunk do
   -- One generated column: height and slope decide the materials.
   pfn fill_terrain_column(c : Chunk, x : Int, z : Int, wx : Int, wz : Int, seed : Int, h : Int) : Chunk do
     let sfc = surface_id(h, CubeForge.Noise.slope(wx, wz, seed))
-    fill_column_mat(c, x, z, 0, h, sfc, subsurface_id(sfc))
+    fill_column_world(c, x, z, wx, wz, seed, h, sfc, subsurface_id(sfc))
   end
 
   pfn fill_water(c : Chunk, x : Int, z : Int, y : Int) : Chunk do
@@ -267,20 +325,20 @@ mod CubeForge.Chunk do
     Math.max_int(Math.max_int(d0, d1), Math.max_int(d2, d3))
   end
 
-  pfn fill_noise_go(c : Chunk, i : Int, hs : NativeIntArr) : Chunk do
+  pfn fill_noise_go(c : Chunk, i : Int, hs : NativeIntArr, wx0 : Int, wz0 : Int, seed : Int) : Chunk do
     if i >= 256 do c
     else
       let x = i % 16
       let z = i / 16
       let h = hmap_at(hs, x, z)
       let sfc = surface_id(h, slope_at(hs, x, z))
-      fill_noise_go(fill_column_mat(c, x, z, 0, h, sfc, subsurface_id(sfc)), i + 1, hs)
+      fill_noise_go(fill_column_world(c, x, z, wx0 + x, wz0 + z, seed, h, sfc, subsurface_id(sfc)), i + 1, hs, wx0, wz0, seed)
     end
   end
 
   doc "Generate the chunk whose world origin is (wx0, wz0) from the noise heightmap."
   fn generate(wx0 : Int, wz0 : Int, seed : Int) : Chunk do
-    plant(fill_noise_go(new(), 0, heights(wx0, wz0, seed)), wx0, wz0, seed)
+    plant(fill_noise_go(new(), 0, heights(wx0, wz0, seed), wx0, wz0, seed), wx0, wz0, seed)
   end
 
   -- ── Vegetation ──────────────────────────────────────────────────────────────

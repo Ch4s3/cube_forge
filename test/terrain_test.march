@@ -202,6 +202,50 @@ mod CubeForge.Test.Terrain do
     end
   end
 
+  -- Strata: walk a column from the deep band up to the subsurface and check
+  -- every block is a rock, each band is contiguous and band_thickness() tall
+  -- (the first and last may be cut), and the column matches rock_id.
+  pfn rocks_ok(c : CubeForge.Chunk.Chunk, wx : Int, wz : Int, seed : Int, y : Int, top : Int) : Bool do
+    if y > top do true
+    else
+      let id = C.get(c, wx % 16, y, wz % 16)
+      let rock = id == 3 || id == C.basalt() || id == C.granite() || id == C.sandstone() || id == C.shale()
+      if rock && id == C.rock_id(wx, y, wz, seed) do rocks_ok(c, wx, wz, seed, y + 1, top) else false end
+    end
+  end
+  pfn runs_ok(wx : Int, wz : Int, seed : Int, y : Int, run : Int, band : Int) : Bool do
+    if y >= 200 do true
+    else
+      let k = C.band_of(y, C.band_offset(wx, wz, seed))
+      if k == band do runs_ok(wx, wz, seed, y + 1, run + 1, band)
+      else if run == 0 || run == C.band_thickness() || y < C.band_thickness() + 1 do runs_ok(wx, wz, seed, y + 1, 1, k)
+      else false end end
+    end
+  end
+
+  describe "rock strata" do
+    test "a generated column is bedded rock between the deep band and the subsurface" do
+      let c = C.generate(32, 48, 5)
+      let h = N.height(37, 55, 5)
+      Test.assert_true(rocks_ok(c, 37, 55, 5, C.deep_stone_depth(), h - 4), "rock only, and rock_id's rock")
+      Test.assert_eq_int(C.get(c, 5, C.deep_stone_depth() - 1, 7), C.basalt(), "the deep basalt band is still under it")
+      Test.assert_eq_int(C.get(c, 5, 1, 7), C.bedrock(), "and bedrock under that")
+    end
+    test "bands are contiguous runs of band_thickness() in a column" do
+      Test.assert_true(runs_ok(37, 55, 5, 0, 0, -1), "every full band is band_thickness() tall")
+    end
+    test "rock_id is a function of the world column, the same from any chunk" do
+      Test.assert_eq_int(C.rock_id(40, 30, 40, 9), C.rock_id(40, 30, 40, 9), "deterministic")
+      Test.assert_true(C.band_material(3, 0, 0, 9) != C.bedrock(), "never bedrock")
+    end
+    test "sandstone and shale have their own layers and harvest as stone" do
+      Test.assert_true(CubeForge.Texture.layer_for(C.sandstone()) == 89.0, "sandstone layer")
+      Test.assert_true(CubeForge.Texture.layer_for(C.shale()) == 90.0, "shale layer")
+      Test.assert_eq_int(CubeForge.Inventory.yield_of(C.sandstone()), 3, "sandstone yields stone")
+      Test.assert_eq_int(CubeForge.Inventory.yield_of(C.shale()), 3, "shale yields stone")
+    end
+  end
+
   describe "deep stone band" do
     test "test_terrain uses basalt below deep_stone_depth, stone above it" do
       let c = C.test_terrain()
