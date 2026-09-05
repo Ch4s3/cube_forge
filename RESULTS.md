@@ -1559,3 +1559,64 @@ could not carry mycelium, so the column's `shown` was cleared, and the next
 scan saw a body on ground that showed nothing and felled it. Every body
 decayed within a scan window of growing. The migration, `can_plant` and the
 dump diagnostic now read the ground through `Fruit.base_of`.
+
+
+## Fungus climate feedback (2026-09-05)
+
+The network changes the ground it holds. Plan
+`docs/superpowers/plans/2026-09-05-fungus-climate-feedback.md`.
+
+| species | temperature pull | moisture pull |
+|---|---|---|
+| Frostcap | -0.09 | 0 |
+| Pinewart | -0.04 | +0.07 |
+| Meadowbell | 0 | -0.09 |
+| Lanterncap | 0 | +0.09 |
+| Marshlight | +0.03 | +0.12 |
+| Sunshelf | +0.09 | -0.09 |
+
+Distinct species in a column's 3x3 sum, capped at 0.3 per axis; `CF_MYC_FEEDBACK`
+scales. Every pull points at the species' own core, which is the stability
+argument the original spec asked for: a species never weakens its own footing,
+so the loop only reinforces and cannot cycle; where two species pull against
+each other the sum favours one, which then strengthens itself through the
+contest that already resolves mixed ground.
+
+Seed 7, spawn, ground moisture 0.25 (grassland), `CF_BIOME_RATE=100000` so the
+climate eases within the run:
+
+| planting | offset (moisture) | eased moisture | biome |
+|---|---|---|---|
+| a mature Marshlight patch alone | +0.08 (at the first tuning) | 0.33 | grassland |
+| Marshlight + Lanterncap + Pinewart, one interleaved patch (`CF_AUTOPLANT_SPECIES2/3` with `CF_AUTOPLANT_MATURE`) | +0.28 | **0.53** | **forest** |
+
+The first tuning (pulls 0.05-0.08, cap 0.2) reached +0.19 with the three and
+left the ground at 0.44: nothing could cross from a band's middle. The pulls
+went up so that the largest single pull (0.12) is under the 0.25 from
+grassland's centre to the damp threshold and the three damp species together
+(0.28) are over it. Three patches planted three columns apart did NOT mix:
+`plant_patch` overwrites, so the collection only met along thin rings. The
+interleaved patch is what a player would plant on purpose, alternating
+species; it is `Myc.plant_mix`. `docs/fungus-feedback-map.png` is the map at
+frame 1200: the patch, and the forest colour under it where grassland was.
+
+**Cost.** The first version scaled and copied the whole 32k-entry offset array
+every tick and had the biome compare four floats per column: the field slot
+went from 1.7 to 8.7 ms in release and the budget failed at 12.9. Neither pass
+was needed. The field keeps its raw pulls up to date where species change
+(nine columns per change), reports which rows moved, and the biome scales and
+clamps only the columns it evaluates, looking at a whole row when its pulls
+moved. Field slot now: biome tick 2.7 ms (1.7 before feedback; the extra is
+the patch rows it evaluates while their offsets settle), mycelium tick 1.2-1.4
+ms; budget **9.84 ms**.
+
+Two lessons for the next per-column array: a plain 32k `set_f32` pass in March
+costs 1.8 ms in release, so anything per tick must be proportional to change,
+not to the world; and a merge of three scripted plantings is not a mix.
+
+**Save/load, merged in from main during this work.** A load rebuilds the
+mycelium field from the seed (`Myc.wild`), so wild patches return but any
+planted or spread network is lost, and its surface blocks migrate back to
+bare ground; the biome's eased axes are rebuilt at target the same way. Both
+are the "cannot be rebuilt from the voxels" risk the two specs carry. Listed
+in `todos.md`.
