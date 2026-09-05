@@ -1433,3 +1433,49 @@ small, 5 medium, 1 giant.
 `CF_AUTOPLANT_MATURE=1` plants a full-vigour patch at once, which with
 `CF_MYC_RATE=0` stays whatever the climate says: the way to put a chosen
 species' fruit in front of the camera without waiting.
+
+
+## Mycelium tick: the active set (2026-09-05)
+
+Plan `docs/superpowers/plans/2026-09-05-myc-tick-active-set.md`. Release,
+pinned wild world at seed 7 (fourteen patches, 2,527 columns), the `myc tick`
+print on the field slot:
+
+| | before | after |
+|---|---|---|
+| first ninety seconds, wild-patch rims easing from full vigour to their fractional fitness | 3.2 ms | **1.1-1.3 ms** |
+| settled (dirty 3-5 columns) | 3.2 ms | **0.30-0.35 ms** |
+| during a fast planted growth (`CF_MYC_RATE=5000`) | -- | 0.17-0.37 ms median, 4.6 ms on the tick the patch is planted |
+| `scratch/frame_budget.sh`, 12 ms budget | 8.74 ms | **8.85-9.09 ms** |
+
+Four things had to be true before a settled world ticked cheaply, and each
+one was found by the counts in the print (`biome active`, `myc dirty`):
+
+- **A dirty flag per column**, set when the column changed or is unsettled,
+  and a column is looked at when it or a neighbour is dirty. The fresh arrays
+  start as memcpys of the old ones (`u8_blit` / `f32_blit`; vigour moved to
+  f32 to be blittable), so a column not looked at costs nothing. This alone
+  went 3.2 -> 2.1 ms: not enough, because
+- **the biome flags ~3,500 columns active** for the first half hour of a
+  session (its easing toward moisture targets that the water actors keep
+  moving), and waking on those flags re-evaluated every patch column under
+  them every tick. The tick now remembers the climate each column was last
+  evaluated at and wakes only when it has moved by `climate_eps()` = 0.004
+  -- about 0.07 of fitness on a band edge, every fifty ticks under the
+  biome's day-long easing instead of every tick. No reporting contract with
+  the biome: a climate that moves under a column wakes it by itself.
+- **f32 storage against f64 targets**: a column whose fitness is not
+  f32-representable could never sit exactly on it and never settled. Settled
+  is now within `settle_eps()` = 0.002 of the target, below what the map or
+  the readout can show.
+- **Neighbours read only species, reach, and whether vigour clears the spread
+  threshold**, so a column easing toward its target re-evaluates itself
+  (dirty 1) without waking its 3x3 (dirty 2).
+
+The remaining 0.3 ms is the per-column scan for dirty flags and climate
+movement (16k columns, six reads each) plus the memcpys; the 1.2 ms of the
+first ninety seconds is ~600 rim columns legitimately easing at 1/540 per
+tick. `tick_all` looks at every column and is the oracle: under a static
+climate the two agree bit for bit over 300 ticks of a contest (tested); under
+a drifting climate the active tick lags by at most `climate_eps` of climate,
+by design.
