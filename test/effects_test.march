@@ -67,4 +67,24 @@ mod CubeForge.Test.Effects do
     end
   end
 
+
+  -- Sweep [t] to [stop] in steps, checking the stamp changes exactly when the summary does.
+  pfn sweep(e : CubeForge.Effects.Effects, t : Float, stop : Float, prev_stamp : Int, prev_sum : String) : Bool do
+    if t > stop do true
+    else
+      let st = Ef.stamp(e, t)
+      let sm = Ef.summary(e, t)
+      if (st != prev_stamp) != (sm != prev_sum) do false
+      else sweep(e, t +. 0.05, stop, st, sm) end
+    end
+  end
+
+  describe "Effects.stamp" do
+    test "changes exactly when the summary text would, and never allocates to find out" do
+      let e = Ef.apply(Ef.apply(Ef.new(), Ef.k_speed(), 0.0), Ef.k_lantern(), 3.3)
+      Test.assert_true(sweep(e, 0.0, 40.0, Ef.stamp(e, 0.0 -. 0.05), Ef.summary(e, 0.0 -. 0.05)), "stamp and summary agree on every change over 40 s")
+      Test.assert_eq_int(Ef.stamp(Ef.new(), 5.0), 0, "nothing active is stamp 0")
+    end
+  end
+
 end
