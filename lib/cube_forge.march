@@ -621,9 +621,9 @@ mod CubeForge do
         Win.gfx_set_voxel(x, y, z, CubeForge.Light.occludes(id))
         let n = World.side(w0)
         -- accessors, not a match: a dotted constructor pattern does not parse (GAPS.md G24/G25)
-        let relit = CubeForge.Light.relight_marked(World.light(w0), w0, x, y, z)
-        let world1 = World.set_light(w0, CubeForge.Light.relit_field(relit))
-        let marks = mark_geometry(CubeForge.Light.relit_marks(relit), x, y, z, n)
+        let relit = World.relight_marked(w0, x, y, z)
+        let world1 = World.relit_world(relit)
+        let marks = mark_geometry(World.relit_marks(relit), x, y, z, n)
         match remesh_marked(world1, marks, 0, n, counts, meshes, Chunk.new(), pass_all()) do
           Remeshed(c1, m1) ->
             let t1 = Win.time()
@@ -663,10 +663,10 @@ mod CubeForge do
         -- sections the tree's box never touched, and a section whose light moved
         -- but whose mesh was not rebuilt renders stale. The relight reports
         -- exactly which sections it changed; those join the geometry marks.
-        let relit = CubeForge.Light.relight_marked(World.light(w1), w1, x, base + (if bush do 1 else 4 end), z)
-        let w2 = World.set_light(w1, CubeForge.Light.relit_field(relit))
+        let relit = World.relight_marked(w1, x, base + (if bush do 1 else 4 end), z)
+        let w2 = World.relit_world(relit)
         sync_occupancy(w2, x, z, base, base + trunk + 2)
-        let marks1 = or_marks(mark_box(marks, x - 4, base, z - 4, x + 4, base + trunk + 2, z + 4, n, 0), CubeForge.Light.relit_marks(relit), 0)
+        let marks1 = or_marks(mark_box(marks, x - 4, base, z - 4, x + 4, base + trunk + 2, z + 4, n, 0), World.relit_marks(relit), 0)
         veg_go(w2, Biome.rescan_box(bio, w2, x, z, Veg.decay_radius() + 1, base + trunk + 2), marks1, seed, n, rest)
     end
   end
@@ -836,6 +836,16 @@ mod CubeForge do
       let id = World.block_at(scene_world(sc), px, y, pz)
       set_inv(edit_block(sc, px, y, pz, 0), Inv.harvest(ui_inv(scene_ui(sc)), id))
     end
+  end
+
+  -- A glow cap on the surface three columns east of the player (the air block
+  -- above the topmost collidable one).
+  pfn place_glow(sc, p : CubeForge.Player.Player) do
+    let pos = Player.position(p)
+    let px = float_to_int(Math.floor(V.x(pos))) + 3
+    let pz = float_to_int(Math.floor(V.z(pos)))
+    let y = World.surface_y(scene_world(sc), px, pz)
+    if y < 0 || y >= 254 do sc else edit_block(sc, px, y + 1, pz, Chunk.glow_cap()) end
   end
 
   doc "Blocks either side of the listener the leaf sample reaches."
@@ -1151,13 +1161,13 @@ mod CubeForge do
 
   -- Frame loop. `max_frames < 0` means run until the window closes.
   -- Run-time knobs read once, outside the frame loop (an Env read allocates).
-  type Knobs = Knobs(Int, Int, String, Bool, Float, Int, Bool, Int, Int, Int, Float, Int, Float, Bool, Int, Int, Int, Int, Int, Bool, Int, Int, Int, Int, Int, Int, Int, Bool, Bool)   -- max_frames, dump_frame, dump_path, autowalk, autospin, autoedit frame (<0 = off), autoswim, autoflow frame (<0 = off), workers, automap frame (<0 = off; forces map view on from this frame, for headless verification), day length in seconds, sun angle override in degrees (<0 = follow the clock), shadow reach in blocks (0 = off), soft shadow edges, autobreak frame (<0 = off): break the column under the player every 20 frames, for a repeatable edit benchmark, weather pin 0..100 (<0 = follow the actor), precipitation pool capacity, biome ease rate in percent (100 = one CF_DAY per full swing), draw the biome map in map view, autocanal frame (<0 = off): lay a 9-block line of water three columns east of the player, aim-independent, for the biome end-to-end test, biome migration budget: surface columns retextured per tick, vegetation budget: trees grown or felled per tick, time pin in seconds (<0 = live clock) for the water animation, remesh-all frame (<0 = off): rebuild every section of every chunk at that frame, a ground truth for stale-mesh hunts, automenu frame (<0 = off): open the escape menu at that frame and start a new game five frames later, for the restart test, audio mode (0 off, 1 device, 2 null device -- render a tick per push straight into the WAV, for reproducible headless dumps), audio log, autodive
+  type Knobs = Knobs(Int, Int, String, Bool, Float, Int, Bool, Int, Int, Int, Float, Int, Float, Bool, Int, Int, Int, Int, Int, Bool, Int, Int, Int, Int, Int, Int, Int, Bool, Bool, Int)   -- max_frames, dump_frame, dump_path, autowalk, autospin, autoedit frame (<0 = off), autoswim, autoflow frame (<0 = off), workers, automap frame (<0 = off; forces map view on from this frame, for headless verification), day length in seconds, sun angle override in degrees (<0 = follow the clock), shadow reach in blocks (0 = off), soft shadow edges, autobreak frame (<0 = off): break the column under the player every 20 frames, for a repeatable edit benchmark, weather pin 0..100 (<0 = follow the actor), precipitation pool capacity, biome ease rate in percent (100 = one CF_DAY per full swing), draw the biome map in map view, autocanal frame (<0 = off): lay a 9-block line of water three columns east of the player, aim-independent, for the biome end-to-end test, biome migration budget: surface columns retextured per tick, vegetation budget: trees grown or felled per tick, time pin in seconds (<0 = live clock) for the water animation, remesh-all frame (<0 = off): rebuild every section of every chunk at that frame, a ground truth for stale-mesh hunts, automenu frame (<0 = off): open the escape menu at that frame and start a new game five frames later, for the restart test, audio mode (0 off, 1 device, 2 null device -- render a tick per push straight into the WAV, for reproducible headless dumps), audio log, autodive, autoglow frame (<0 = off): place a glow cap three columns east of the player, through edit_block, for the block-light end-to-end check
 
   fn frame_loop(f : Frame, k : Knobs, sc, nchunks : Int, proj : NativeFloatArr, map_proj : NativeFloatArr, fps : Fps, wxpid, seed : Int) : Frame do
     match f do
       Frame(frame, last_t, player, sample, view, vp, map_mode, marker, flash, wcache, bcache, inv_open, drag_from, menu, menubuf, next_seed, worst, worst_at, sched) ->
         match k do
-        Knobs(max_frames, dump_frame, dump_path, autowalk, autospin, autoedit, autoswim, autoflow, workers, automap, day_len, sun_deg, shadow_dist, soft_shadows, autoinv, autobreak, weather_pin, precip_cap, biome_rate, biome_map, autocanal, biome_budget, veg_budget, time_pin, remesh_all_at, automenu, audio_mode, audio_log, autodive) ->
+        Knobs(max_frames, dump_frame, dump_path, autowalk, autospin, autoedit, autoswim, autoflow, workers, automap, day_len, sun_deg, shadow_dist, soft_shadows, autoinv, autobreak, weather_pin, precip_cap, biome_rate, biome_map, autocanal, biome_budget, veg_budget, time_pin, remesh_all_at, automenu, audio_mode, audio_log, autodive, autoglow) ->
         if Win.should_close() || (max_frames >= 0 && frame >= max_frames) || next_seed >= 0 do
           Frame(frame, last_t, player, sample, view, vp, map_mode, marker, flash, wcache, bcache, inv_open, drag_from, menu, menubuf, next_seed, worst, worst_at, sched)
         else
@@ -1268,7 +1278,11 @@ mod CubeForge do
           let sc0c = if autobreak >= 0 && frame >= autobreak && (frame - autobreak) % 20 == 0 do break_under(sc0b, player1) else sc0b end
           -- CF_AUTOCANAL=<frame>: a line of water beside the player, placed through
           -- edit_block so the biome field sees it the way a real edit would.
-          let sc0d = if autocanal >= 0 && frame == autocanal do dig_canal(sc0c, player1, -4) else sc0c end
+          let sc0d0 = if autocanal >= 0 && frame == autocanal do dig_canal(sc0c, player1, -4) else sc0c end
+          -- CF_AUTOGLOW=<frame>: a glow cap on the surface three columns east
+          -- of the player, through edit_block so both light fields are repaired
+          -- and the affected sections remeshed, the way a real placement would.
+          let sc0d = if autoglow >= 0 && frame == autoglow do place_glow(sc0d0, player1) else sc0d0 end
           -- The world tick, spread over three frames of the period rather than
           -- landing in one. The phases were already sequential and each is a
           -- whole step on its own; running them in the same frame only ever
@@ -1780,7 +1794,7 @@ mod CubeForge do
         else () end
       else () end
       let knobs = Knobs(max_frames, Env.get_int("CF_DUMP_FRAME", 30), Env.get("CF_DUMP", ""), Env.get_int("CF_AUTOWALK", 0) == 1,
-                        int_to_float(Env.get_int("CF_AUTOSPIN", 0)) /. 1000.0 /. Player.mouse_sens(), Env.get_int("CF_AUTOEDIT", -1), autoswim, Env.get_int("CF_AUTOFLOW", -1), workers, Env.get_int("CF_AUTOMAP", -1), int_to_float(Env.get_int("CF_DAY", 1800)), Env.get_int("CF_SUN", -1), int_to_float(Env.get_int("CF_SHADOW_DIST", 64)), Env.get_int("CF_SHADOW_SOFT", 1) == 1, Env.get_int("CF_AUTOINV", -1), Env.get_int("CF_AUTOBREAK", -1), Env.get_int("CF_WEATHER", -1), Env.get_int("CF_PRECIP", 4000), Env.get_int("CF_BIOME_RATE", 100), Env.get_int("CF_BIOME_MAP", 0) == 1, Env.get_int("CF_AUTOCANAL", -1), Env.get_int("CF_BIOME_BUDGET", 32), Env.get_int("CF_VEG_BUDGET", 1), Env.get_int("CF_TIME", -1), Env.get_int("CF_REMESH_ALL_AT", -1), Env.get_int("CF_AUTOMENU", -1), audio_mode, Env.get_int("CF_AUDIO_LOG", 0) == 1, Env.get_int("CF_AUTODIVE", 0) == 1)
+                        int_to_float(Env.get_int("CF_AUTOSPIN", 0)) /. 1000.0 /. Player.mouse_sens(), Env.get_int("CF_AUTOEDIT", -1), autoswim, Env.get_int("CF_AUTOFLOW", -1), workers, Env.get_int("CF_AUTOMAP", -1), int_to_float(Env.get_int("CF_DAY", 1800)), Env.get_int("CF_SUN", -1), int_to_float(Env.get_int("CF_SHADOW_DIST", 64)), Env.get_int("CF_SHADOW_SOFT", 1) == 1, Env.get_int("CF_AUTOINV", -1), Env.get_int("CF_AUTOBREAK", -1), Env.get_int("CF_WEATHER", -1), Env.get_int("CF_PRECIP", 4000), Env.get_int("CF_BIOME_RATE", 100), Env.get_int("CF_BIOME_MAP", 0) == 1, Env.get_int("CF_AUTOCANAL", -1), Env.get_int("CF_BIOME_BUDGET", 32), Env.get_int("CF_VEG_BUDGET", 1), Env.get_int("CF_TIME", -1), Env.get_int("CF_REMESH_ALL_AT", -1), Env.get_int("CF_AUTOMENU", -1), audio_mode, Env.get_int("CF_AUDIO_LOG", 0) == 1, Env.get_int("CF_AUTODIVE", 0) == 1, Env.get_int("CF_AUTOGLOW", -1))
       let pids = Array.from_list(spawn_water(n * n - 1, n, Nil))
       let wxpid = Weather.spawn_weather()
       session_loop(seed, n, workers, headless, seed_env >= 0, knobs, proj, map_proj, pids, wxpid, autoswim)
@@ -1813,10 +1827,10 @@ mod CubeForge do
     let t1 = System.monotonic_time()
     let world_dark = World.generate(n, seed, workers)
     let t2 = System.monotonic_time()
-    -- stage 1b: skylight (needs the finished terrain, including neighbours)
+    -- stage 1b: skylight and block light (need the finished terrain, including neighbours)
     let world_lit = World.relight_all(world_dark)
     let t2b = System.monotonic_time()
-    println("  skylight flood: " ++ int_to_string(t2b - t2) ++ " ms")
+    println("  light flood (sky + block): " ++ int_to_string(t2b - t2) ++ " ms")
     -- The shadow ray-marcher's view of the world. Built once and handed over;
     -- March keeps no copy, since a block edit only needs one texel.
     let to0 = System.monotonic_time()

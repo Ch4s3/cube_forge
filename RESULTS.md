@@ -1174,3 +1174,50 @@ read off the `state:` line specifically, since plain `grep mesh` also matches
 the startup line `mesh all (greedy sections)` and both sides came back empty and
 equal; and best-of-N across runs, worst-frame within a run, so a busy machine
 does not fail it while a real regression -- which fails every run -- still does.
+
+## Block light (fungus phase 1, 2026-09-05)
+
+A second per-voxel light channel, seeded from `Light.emission(id)` instead of
+the sky and propagated by the same level-synchronous sweep (GAPS G63). Design
+`docs/superpowers/specs/2026-09-04-fungus-design.md` §6, plan
+`docs/superpowers/plans/2026-09-05-fungus-phase1-block-light.md`.
+
+| | before | after |
+|---|---|---|
+| startup light flood (debug, 8x8 chunks) | 521 ms (skylight only, §Lighting) | **642-708 ms** (skylight + block light, three runs) |
+| placing a glow cap: edit + relight both fields + section remesh (debug) | — | **52-61 ms** |
+| `scratch/frame_budget.sh`, 12 ms budget, release | 8.84-10.8 ms | **8.84 ms** best of 3, drained mesh equals full rebuild |
+
+The block flood costs roughly what the skylight flood does, because the sweep
+is the same fourteen passes over the same prefix of the field; a world with no
+emitters still pays it. The scan bound is `sky_floor + max_level()` rather than
+`sky_floor`, since block light climbs into the open air above the terrain where
+skylight has nothing to do -- the first flood test caught exactly that: a cap
+in the open lit five blocks up as 0.
+
+Verification: eleven new tests. Every incremental block relight (place, remove,
+wall off, world edge, a second emitter just outside the box) equals a full
+re-flood, `World.relight_marked` repairs both fields and unions the section
+marks, and a lit corner refuses to greedy-merge with dark ones. End to end:
+`CF_AUTOGLOW=100` places a glow cap three columns east of the player through
+`edit_block`; against the same pinned night scene without it (`CF_SEED=7
+CF_SUN=180 CF_TIME=0 CF_WEATHER=0 CF_AUTOSPIN=8 CF_NOMOUSE=1`, dump at frame
+200) the frames differ in **396 895 pixels**, all of them the lit ground and
+slope beside the cap. `docs/lighting-glow.png` is that frame.
+
+Two things worth knowing for the next emissive block:
+
+- The vertex layout did not grow. The shade float carries both channels as
+  `2 * round(blk * 255) + sky`, so every overlay that already pushed a plain
+  shade in [0, 1] decodes as sky-only with no change. The shader unpacks with
+  `floor(v * 0.5)`; interpolation across a triangle is exact because the
+  encoding is linear in both parts and the sky part never leaves [0, 1].
+- Greedy keys went from 6-bit to 10-bit corners (48 bits with the id). Block
+  light varies per vertex like skylight does, so it limits merge runs the
+  same way; the budget above says that is affordable at one emitter, and the
+  fungus phases that add thousands will have to measure it again.
+
+An `env $E` with an unquoted variable in zsh does NOT word-split: all the
+knobs became one `CF_NOMOUSE` value, the run had no seed, no sun pin and no
+frame cap, and the "off" dump was a daytime frame of a different world. Write
+the knobs out, or quote-split with `${=E}`.

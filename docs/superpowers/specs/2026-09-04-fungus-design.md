@@ -175,6 +175,17 @@ invisible at noon and full at midnight. Glow does not cast in the DDA shadow
 trace. Block light varies per vertex and so limits greedy merge runs the way
 skylight already does — the accepted cost of the lighting design.
 
+*As built (phase 1, 2026-09-05):* the field is a world-flat `NativeU8Arr` on
+`World` beside skylight, not a third array in `Chunk` -- the skylight field
+already lives there for the reason `light.march` gives (a per-chunk array is
+shared and cannot be written in place). Propagation is the level-synchronous
+sweep, not a BFS (GAPS G63), with a scan bound `max_level()` layers above the
+sky floor so block light can climb into open air. The vertex packing is
+`2 * round(blk * 255) + sky` in the existing shade float rather than two
+nibbles, so overlay vertices needed no change. Emission is a function of the
+block id alone for now; the glow cap (id 22) is a placeholder emitter at 10.
+Measurements in `RESULTS.md`.
+
 ## 7. Items and interaction
 
 - **Spores** — one item per species, stacking. Sources: harvesting fruit,
