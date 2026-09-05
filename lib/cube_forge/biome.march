@@ -84,6 +84,14 @@ mod CubeForge.Biome do
 
   fn cols(w : CubeForge.World.World) : Int do W.side(w) * 16 end
 
+  doc """
+  The stride the Field's accessors index by. The field is allocated at the
+  world's runtime size (cols(w) above); this is the compile-time width the
+  accessors are written against, and world_size_test asserts they agree. It is a
+  literal for the same reason Light.index's bounds are -- see World.cols.
+  """
+  fn stride() : Int do 128 end
+
   -- Highest non-air block in a column, scanning down from [top]. 0 if none.
   pfn surface_go(w : CubeForge.World.World, wx : Int, wz : Int, y : Int) : Int do
     if y <= 0 do 0
@@ -197,10 +205,10 @@ mod CubeForge.Biome do
   end
 
   fn height_of(f : Field, wx : Int, wz : Int) : Int do
-    match f do Field(hs, _, _, _, _, _, _, _, _) -> NativeArray.get_u8(hs, wx + 128 * wz) end
+    match f do Field(hs, _, _, _, _, _, _, _, _) -> NativeArray.get_u8(hs, wx + stride() * wz) end
   end
   fn biome_of(f : Field, wx : Int, wz : Int) : Int do
-    match f do Field(_, _, _, _, bs, _, _, _, _) -> NativeArray.get_u8(bs, wx + 128 * wz) end
+    match f do Field(_, _, _, _, bs, _, _, _, _) -> NativeArray.get_u8(bs, wx + stride() * wz) end
   end
   fn field_biomes(f : Field) : NativeU8Arr do match f do Field(_, _, _, _, bs, _, _, _, _) -> bs end end
 
@@ -450,7 +458,7 @@ mod CubeForge.Biome do
   fn debug_axes(f : Field, wx : Int, wz : Int) : String do
     match f do
       Field(_, ws, ta, ma, _, _, _, _, _) ->
-        let i = wx + 128 * wz
+        let i = wx + stride() * wz
         "temp " ++ float_to_string(NativeArray.get_float(ta, i)) ++ " moist " ++ float_to_string(NativeArray.get_float(ma, i)) ++ " wet " ++ int_to_string(NativeArray.get_u8(ws, i))
     end
   end
@@ -458,7 +466,7 @@ mod CubeForge.Biome do
 
   doc "Eased temperature 0..1 of one column."
   fn temp_of(f : Field, wx : Int, wz : Int) : Float do
-    match f do Field(_, _, ta, _, _, _, _, _, _) -> NativeArray.get_float(ta, wx + 128 * wz) end
+    match f do Field(_, _, ta, _, _, _, _, _, _) -> NativeArray.get_float(ta, wx + stride() * wz) end
   end
 
   doc "How much of a storm actually falls here, as a multiplier on the particle count. Deserts stay dry under the same storm that soaks a wetland; the sea and the mountains sit in between."
@@ -513,7 +521,7 @@ mod CubeForge.Biome do
 
   doc "The column's water flag."
   fn is_wet(f : Field, wx : Int, wz : Int) : Bool do
-    match f do Field(_, ws, _, _, _, _, _, _, _) -> NativeArray.get_u8(ws, wx + 128 * wz) == 1 end
+    match f do Field(_, ws, _, _, _, _, _, _, _) -> NativeArray.get_u8(ws, wx + stride() * wz) == 1 end
   end
 
   -- A rolling hash of the field's discrete state: heights, water flags and biome

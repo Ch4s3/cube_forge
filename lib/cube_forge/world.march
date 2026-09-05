@@ -10,7 +10,11 @@ mod CubeForge.World do
 
   type World = World(Array.PVec(CubeForge.Chunk.Chunk), NativeU8Arr, NativeU8Arr, Int)   -- chunks, skylight field, occupancy field, side length in chunks
 
+  doc "The world's side in chunks. The one number the world's size comes from."
   fn size() : Int do 8 end
+
+  doc "Columns per side: size() chunks of 16."
+  fn cols() : Int do 16 * size() end
 
   fn side(w : World) : Int do match w do World(_, _, _, n) -> n end end
 
