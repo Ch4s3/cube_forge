@@ -16,8 +16,10 @@ mod CubeForge.Myc do
   type Field = Field(NativeU8Arr, NativeFloatArr, NativeU8Arr, NativeU8Arr, NativeU8Arr)
 
   -- ── Tuning ────────────────────────────────────────────────────────────────
-  doc "Hops a planting can spread."
-  fn plant_reach() : Int do 8 end
+  doc "Columns a planting can spread along an axis."
+  fn plant_radius() : Int do 8 end
+  doc "Reach a planting starts with, in half-hops: a straight hop costs 2 and a diagonal 3, so the patch is an octagon of radius plant_radius()."
+  fn plant_reach() : Int do 2 * plant_radius() end
   doc "Vigour a newly claimed or planted column starts at."
   fn seed_vigour() : Float do 0.25 end
   doc "A column spreads once its vigour reaches this."
@@ -139,7 +141,11 @@ mod CubeForge.Myc do
       else
         let i = nx + n * nz
         let c = NativeArray.get_u8(sps, i)
-        let r = NativeArray.get_u8(rc, i)
+        -- Reach is in half-hops: a straight hop costs 2 and a diagonal 3 (about
+        -- sqrt 2), so a patch grows as an octagon rather than the square that
+        -- Chebyshev spread gives or the diamond that Manhattan gives.
+        let hop = if ndx(k) != 0 do (if ndz(k) != 0 do 3 else 2 end) else 2 end
+        let r = NativeArray.get_u8(rc, i) - hop + 1
         let strong = if c == 0 do false else if r <= 0 do false else NativeArray.get_float(vg, i) >= spread_vigour() end end
         if !strong do claimant_go(sps, vg, rc, n, x, z, t, m, own, ownfit, k + 1, best)
         else if c == own do claimant_go(sps, vg, rc, n, x, z, t, m, own, ownfit, k + 1, best)

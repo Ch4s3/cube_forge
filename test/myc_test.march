@@ -78,9 +78,9 @@ mod CubeForge.Test.Myc do
       let n = 40
       let f0 = Myc.plant(Myc.build(n), n, 20, 20, 3)
       -- fast rate so vigour is not the limit; enough ticks for every hop's hold to mature
-      let f1 = tick_n(f0, n, uniform(n, 0.5), uniform(n, 0.3), 0.1, (Myc.plant_reach() + 2) * (Myc.hold_ticks() + 12))
-      Test.assert_eq_int(radius_go(f1, n, 3, 20, 20, 0, 0), Myc.plant_reach(), "exactly the reach")
-      Test.assert_eq_int(Myc.reach_of(f1, n, 20 + Myc.plant_reach(), 20), 0, "the rim has no reach left")
+      let f1 = tick_n(f0, n, uniform(n, 0.5), uniform(n, 0.3), 0.1, (Myc.plant_radius() + 2) * (Myc.hold_ticks() + 12))
+      Test.assert_eq_int(radius_go(f1, n, 3, 20, 20, 0, 0), Myc.plant_radius(), "exactly the radius")
+      Test.assert_eq_int(Myc.reach_of(f1, n, 20 + Myc.plant_radius(), 20), 0, "the rim has no reach left")
       Test.assert_true(Myc.count_species(f1, n, 3) > 100, "a real patch")
     end
 

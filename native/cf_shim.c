@@ -933,6 +933,50 @@ void cf_biome_map_upload(void *biomes, int64_t n) {
     glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(cells * 6 * CF_VERT_FLOATS * (int64_t)sizeof(float)), g_biome_vtx, GL_STATIC_DRAW);
 }
 
+/* ── Mycelium map overlay ──────────────────────────────────────────────────
+ * Same shape as the biome map, one layer above it. Species colours mirror
+ * CubeForge.Species.colour_*; brightness is vigour. A column with no species
+ * gets a degenerate quad so the draw count stays n*n*6. */
+#define CF_MYC_SLOT 246
+static const float CF_MYC_RGB[7][3] = {
+    {0.0f, 0.0f, 0.0f},
+    {200/255.0f, 230/255.0f, 255/255.0f}, {120/255.0f, 90/255.0f, 60/255.0f}, {230/255.0f, 200/255.0f, 90/255.0f},
+    {255/255.0f, 200/255.0f, 80/255.0f},  {80/255.0f, 220/255.0f, 200/255.0f}, {240/255.0f, 140/255.0f, 60/255.0f},
+};
+static float  *g_myc_vtx = NULL;
+static int64_t g_myc_cap = 0;
+
+void cf_myc_map_upload(void *species, void *vigour, int64_t n) {
+    int64_t cells = n * n;
+    if (cells > g_myc_cap) {
+        free(g_myc_vtx);
+        g_myc_vtx = (float *)malloc((size_t)cells * 6 * CF_VERT_FLOATS * sizeof(float));
+        g_myc_cap = cells;
+    }
+    const unsigned char *sp = (const unsigned char *)narr_data(species);
+    const unsigned char *vg = (const unsigned char *)narr_data(vigour);
+    const float y = CF_BIOME_Y + 0.5f;
+    for (int64_t i = 0; i < cells; i++) {
+        float *v = g_myc_vtx + i * 6 * CF_VERT_FLOATS;
+        int s = sp[i];
+        if (s == 0 || s > 6) {
+            for (int k = 0; k < 6; k++) pcl_vert(v + k * CF_VERT_FLOATS, 0.0f, y, 0.0f, 0.0f, 0.0f, 0.0f, 255.0f);
+            continue;
+        }
+        float b = 0.3f + 0.7f * (float)vg[i] / 255.0f;
+        float r = CF_MYC_RGB[s][0] * b, g = CF_MYC_RGB[s][1] * b, bl = CF_MYC_RGB[s][2] * b;
+        float x0 = (float)(i % n), z0 = (float)(i / n), x1 = x0 + 1.0f, z1 = z0 + 1.0f;
+        pcl_vert(v + 0 * CF_VERT_FLOATS, x0, y, z0, r, g, bl, 255.0f);
+        pcl_vert(v + 1 * CF_VERT_FLOATS, x0, y, z1, r, g, bl, 255.0f);
+        pcl_vert(v + 2 * CF_VERT_FLOATS, x1, y, z1, r, g, bl, 255.0f);
+        pcl_vert(v + 3 * CF_VERT_FLOATS, x0, y, z0, r, g, bl, 255.0f);
+        pcl_vert(v + 4 * CF_VERT_FLOATS, x1, y, z1, r, g, bl, 255.0f);
+        pcl_vert(v + 5 * CF_VERT_FLOATS, x1, y, z0, r, g, bl, 255.0f);
+    }
+    glBindBuffer(GL_ARRAY_BUFFER, g_vbo[CF_MYC_SLOT]);
+    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(cells * 6 * CF_VERT_FLOATS * (int64_t)sizeof(float)), g_myc_vtx, GL_STATIC_DRAW);
+}
+
 /* ── Springs ────────────────────────────────────────────────────────────────
  * Every source block above sea level, kept here beside the particle pool that
  * will bubble at them. March scans once at startup and reports edits. */

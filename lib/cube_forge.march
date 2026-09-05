@@ -1524,6 +1524,11 @@ mod CubeForge do
               if frame % tick_period() == 0 do Win.biome_map_upload(Biome.field_biomes(scene_biome(sc1)), bn) else () end
               CubeForge.Ffi.Window.gfx_draw_marker(248, bn * bn * 6)
             else () end
+            if myc_map do
+              let mn = World.side(scene_world(sc1)) * 16
+              if frame % tick_period() == 0 do Win.myc_map_upload(Myc.field_species(scene_myc(sc1)), Myc.vigour_u8(scene_myc(sc1), mn), mn) else () end
+              CubeForge.Ffi.Window.gfx_draw_marker(246, mn * mn * 6)
+            else () end
           else () end
           let fps1 = tick_fps(fps, now)
           Win.gfx_draw_hud(255, fps_hud_verts(fps1), false)

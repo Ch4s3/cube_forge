@@ -71,6 +71,18 @@ this version, so the biome spec's no-oscillation argument holds unchanged.
 Cost: 16k columns × 8 neighbour reads, an order of magnitude below the
 biome distance BFS.
 
+*As built (phase 2, 2026-09-05):* the tick is pull-based (each column reads
+its eight neighbours from the previous state and writes only its own entry
+into fresh arrays), for the reasons GAPS G21/G63/G68 give. Vigour is a float
+0..1 rather than 0..255. The hold counter gates **claims**: a claimant must
+persist `hold_ticks()` consecutive ticks before the column flips, which is
+the anti-flap this section asks for. A contest drains the incumbent's vigour
+at `contest_factor()` times the ease rate and the challenger takes the column
+when it reaches zero. Reach is in half-hops (straight 2, diagonal 3) so a
+patch grows as an octagon of radius `plant_radius()` = 8. Species live in
+`species.march` as a table; Frostcap's moisture band is 0-0.6 rather than
+"any" so taiga is Pinewart's alone. Measurements in `RESULTS.md`.
+
 ## 3. Species
 
 A species is a **row in a table**: name, temperature band, moisture band,

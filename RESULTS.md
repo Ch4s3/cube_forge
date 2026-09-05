@@ -1221,3 +1221,50 @@ An `env $E` with an unquoted variable in zsh does NOT word-split: all the
 knobs became one `CF_NOMOUSE` value, the run had no seed, no sun pin and no
 frame cap, and the "off" dump was a daytime frame of a different world. Write
 the knobs out, or quote-split with `${=E}`.
+
+## Mycelium field (fungus phase 2, 2026-09-05)
+
+A per-column field beside the biome field: species, vigour (float 0..1),
+reach, hold, claimant. Design `docs/superpowers/specs/2026-09-04-fungus-design.md`
+§2-3, plan `docs/superpowers/plans/2026-09-05-fungus-phase2-field.md`.
+
+| | cost |
+|---|---|
+| `myc tick`, empty field (debug) | 2.3 ms with a 3x3 test per column; **0.21 ms** after a per-row pre-pass |
+| `myc tick`, one growing patch of ~120 columns (debug) | **0.8-0.95 ms** |
+| `biome tick` beside it, for scale (debug) | 6.3 ms |
+| `scratch/frame_budget.sh`, 12 ms budget, release | **8.85 ms** best of 3, drained mesh equals full rebuild |
+
+The tick is **pull-based**: every column reads its eight neighbours from the
+previous tick's arrays and writes only its own entry into five fresh arrays.
+That is the light-field idiom (GAPS G21/G63) applied to a 2D field: no array is
+read and then written in one pass, and the Scene's shared reference never
+forces a copy (G68). The five fresh arrays are ~200 KB a tick, the same order
+the biome tick already allocates.
+
+The per-row pre-pass is the whole of the empty-field cost story. One byte per
+row from one pass over the species array, and a row with nothing in it or
+beside it skips all n of its columns at once. Ten times cheaper than testing
+each column's 3x3 neighbourhood, and most of the world is empty most of the time.
+
+Reach is in **half-hops**: a straight hop costs 2, a diagonal 3, so a planting
+of radius 8 grows as an octagon. The first cut charged every hop 1 and grew
+squares (Chebyshev), the second charged diagonals 2 and grew diamonds
+(Manhattan); both looked drawn rather than grown. `docs/fungus-myc-map.png` is
+the octagon, seed 7, `CF_AUTOPLANT=100 CF_MYC_RATE=5000`, dumped at frame 3000
+with `CF_AUTOMAP CF_BIOME_MAP=1 CF_MYC_MAP=1`: a Meadowbell patch of 118 columns
+on grassland beside the marker, darker along the forest edge where its fitness
+falls off.
+
+Two test findings worth keeping:
+
+- **Test-module aliases leak across the combined test binary.** `alias
+  CubeForge.Myc as M` in `myc_test.march` resolved to `Mat4` at link time
+  (`_CubeForge.Math.Mat4.vigour_u8` undefined), because `mapview_test.march`
+  already aliases `Mat4` as `M` and every test module compiles into one unit.
+  Test aliases must be unique across `test/`. Recorded as GAPS G69.
+- Two contest tests were wrong before the tick was: one placed the challenger
+  ten columns from the incumbent with a reach of eight, the other expected a
+  species with fitness 0.33 to spread past the 0.6 spread threshold. Both
+  "failures" were the rules doing what the spec says; the tests were corrected
+  to assert what reach and the threshold actually predict.

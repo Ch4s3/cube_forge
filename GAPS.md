@@ -1389,3 +1389,14 @@ for `Noise` survives only because nothing else claims it.
 `CubeForge.Audio` aliases `CubeForge.Biome`. `test/biome_test.march` aliases
 `Biome` directly and needs only `IO.Spawn`, so the ceiling is not simply the
 transitive closure of the alias graph either.
+
+### G69. Test-module aliases are global across the combined test binary
+- `alias CubeForge.Myc as M` in `test/myc_test.march` compiled, then failed at
+  link time with `_CubeForge.Math.Mat4.vigour_u8` undefined: `test/mapview_test.march`
+  aliases `CubeForge.Math.Mat4` as `M`, and `forge test` compiles every test
+  module into one unit, so the later alias won for the whole binary.
+- No error names the collision; the symptom is a linker error for a function
+  that exists, on the wrong module.
+- **Done instead:** unique aliases per test module (`Myc`, `Sp`).
+- **Would need:** module-scoped aliases in the test build, or a duplicate-alias
+  error at compile time.
