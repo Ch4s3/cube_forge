@@ -193,7 +193,9 @@ static const char *VS =
     "  if (fe >= 2) p.y += 0.03 * sin(u_time * 1.7 + a_pos.x * 1.3 + a_pos.z * 0.9);\n"
     "  gl_Position = u_vp * vec4(p,1.0);\n"
     "  v_uv=a_uv; v_layer=a_layer;\n"
-    /* v_shade is now skylight x AO only. The per-face directional constant that
+    /* v_shade is the packed shade word (see Vertex.pack_shade): sky x AO in
+     * [0, 1], block light x AO in even integers above it. Passed through as is;
+     * the fragment shader unpacks it. The per-face directional constant that
      * used to be folded in here is replaced by a real N.L against a sun that
      * moves, computed per fragment. */
     "  v_shade = a_shade;\n"
@@ -233,6 +235,9 @@ static const char *FS =
      * sky-exposed surfaces — a sealed cave stays black at night and still needs
      * the flashlight. MOON_LEVEL is the fraction of full daylight. */
     "const vec3  MOON_TINT  = vec3(0.60, 0.72, 1.00);\n"
+    /* Block light (glowing fungus, later any emissive block): warm, and its own
+     * source rather than a sun term. */
+    "const vec3  GLOW = vec3(1.00, 0.90, 0.70);\n"
     "const float MOON_LEVEL = 0.13;\n"
     "const float MOON_UNTIL = 0.25;\n"
     /* Sunlight reddens as it nears the horizon. SUN_WARM is dawn/dusk, SUN_WHITE
@@ -372,6 +377,11 @@ static const char *FS =
     "void main(){\n"
     "  int  fxw = int(v_fx + 0.5);\n"
     "  int  fe  = fxw >> 8;\n"
+    /* The shade float packs two channels (see Vertex.pack_shade): sky shade in
+     * [0, 1], and block-light shade in even integers above it. Overlays push a
+     * plain shade in [0, 1], which decodes as sky-only and leaves them alone. */
+    "  float sk = v_shade - 2.0 * floor(v_shade * 0.5);\n"
+    "  float bl = floor(v_shade * 0.5) / 255.0;\n"
     "  float spd = float(fxw & 255) / 255.0 * 7.0;\n"
     /* Flowing water scrolls its ripple along the flow; still water drifts;
      * fast or falling water blends toward the foam layer. */
@@ -411,7 +421,7 @@ static const char *FS =
     "  float fogd = (u_unlit == 1) ? 0.0 : length(v_world - u_eye) * u_fog_density;\n"
     "  float fogf = 1.0 - exp(-fogd);\n"
     "  bool  lit_matters = u_overcast < 0.98 && fogf < 0.98;\n"
-    "  if (v_shade > 0.001 && lit_matters) {\n"
+    "  if (sk > 0.001 && lit_matters) {\n"
     "    if (inten > 0.0 && ndls > 0.0)      shad = shadow(origin, u_sundir,  u_shadow);\n"
     "    else if (moon > 0.0 && ndlm > 0.0)  shad = shadow(origin, u_moondir, u_shadow);\n"
     "  }\n"
@@ -423,7 +433,7 @@ static const char *FS =
     "  float direct = DIRECT * (1.0 - 0.85 * u_overcast);\n"
     "  vec3  sky  = sunc * (inten * (amb + direct * ndls * shad))\n"
     "             + MOON_TINT * (MOON_LEVEL * moon * (amb + direct * ndlm * shad));\n"
-    "  vec3  baked = v_shade * sky;\n"
+    "  vec3  baked = sk * sky;\n"
     "  vec3  L  = u_eye - v_world;\n"
     "  float d2 = dot(L, L);\n"
     "  vec3  Ln = L * inversesqrt(max(d2, 1e-6));\n"
@@ -432,10 +442,13 @@ static const char *FS =
     /* The flashlight gets its own trace, toward the eye, and only when it would
      * contribute anything at all. */
     "  if (flash > 0.001) flash *= shadow(origin, Ln, min(sqrt(d2), u_shadow));\n"
-    "  vec3  world = baked + vec3(flash);\n"
+    /* Block light is its own source: independent of the sun, so it is what
+     * you see at midnight. max, not +, so a glowing patch at noon is not
+     * brighter than the noon around it. */
+    "  vec3  world = max(baked, bl * GLOW) + vec3(flash);\n"
     /* Overlays (HUD, outline, map marker) share this program but are not part of
      * the world: they keep their own vertex shade and skip lighting entirely. */
-    "  vec3 lit = t.rgb * ((u_unlit == 1) ? vec3(v_shade) : world);\n"
+    "  vec3 lit = t.rgb * ((u_unlit == 1) ? vec3(sk) : world);\n"
     "  int  fx  = fxw;\n"
     /* Water effects carry speed in the alpha byte, not alpha. */
     "  float a  = (fe >= 2) ? 1.0 : float(fx & 255) / 255.0;\n"
