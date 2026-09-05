@@ -41,9 +41,9 @@ mod CubeForge.ChunkMesh do
       let ox = int_to_float(16 * cx)
       let oz = int_to_float(16 * cz)
       build_sections(world, cx, cz, empty, sy - 1,
-                     Cons(Mesher.mesh_section_opaque(c, n, s, e, w, World.light(world), World.block_light(world), World.occupancy(world), sy, ox, oz), os),
+                     Cons(Mesher.mesh_section_opaque(c, n, s, e, w, World.light(world), World.block_light(world), World.shown(world), World.occupancy(world), sy, ox, oz), os),
                      Cons(Mesher.mesh_section_water(c, n, s, e, w, sy, ox, oz), ws),
-                     Cons(Mesher.mesh_section_foliage(c, n, s, e, w, World.light(world), World.block_light(world), World.occupancy(world), sy, ox, oz), fs))
+                     Cons(Mesher.mesh_section_foliage(c, n, s, e, w, World.light(world), World.block_light(world), World.shown(world), World.occupancy(world), sy, ox, oz), fs))
     end
   end
 
@@ -81,9 +81,9 @@ mod CubeForge.ChunkMesh do
       let oz = int_to_float(16 * cz)
       match m do
         ChunkMesh(os, ws, fs) ->
-          ChunkMesh(if do_opaque do Array.set(os, sy, Mesher.mesh_section_opaque(c, n, s, e, w, World.light(world), World.block_light(world), World.occupancy(world), sy, ox, oz)) else os end,
+          ChunkMesh(if do_opaque do Array.set(os, sy, Mesher.mesh_section_opaque(c, n, s, e, w, World.light(world), World.block_light(world), World.shown(world), World.occupancy(world), sy, ox, oz)) else os end,
                     if do_water do Array.set(ws, sy, Mesher.mesh_section_water(c, n, s, e, w, sy, ox, oz)) else ws end,
-                    if do_foliage do Array.set(fs, sy, Mesher.mesh_section_foliage(c, n, s, e, w, World.light(world), World.block_light(world), World.occupancy(world), sy, ox, oz)) else fs end)
+                    if do_foliage do Array.set(fs, sy, Mesher.mesh_section_foliage(c, n, s, e, w, World.light(world), World.block_light(world), World.shown(world), World.occupancy(world), sy, ox, oz)) else fs end)
       end
     end
   end

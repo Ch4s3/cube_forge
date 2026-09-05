@@ -15,6 +15,23 @@ mod CubeForge.Test.Greedy do
   pfn slab_go(c : CubeForge.Chunk.Chunk, i : Int) : CubeForge.Chunk.Chunk do
     if i >= 256 do c else slab_go(C.set(c, i % 16, 9, i / 16, 3), i + 1) end
   end
+  -- flat mycelium-over-stone slab at y = 9
+  pfn myc_slab_go(c : CubeForge.Chunk.Chunk, i : Int) : CubeForge.Chunk.Chunk do
+    if i >= 256 do c else myc_slab_go(C.set(c, i % 16, 9, i / 16, C.myc_id(3, 0)), i + 1) end
+  end
+  -- species 1 on the west half of the chunk's columns, 2 on the east
+  pfn half_go(s : NativeU8Arr, i : Int) : NativeU8Arr do
+    if i >= 256 do s else half_go(NativeArray.set_u8(s, i % 16 + 128 * (i / 16), if i % 16 < 8 do 1 else 2 end), i + 1) end
+  end
+  -- layer of the first vertex whose face is the top
+  pfn top_layer_go(b : CubeForge.F32Buf.F32Buf, v : Int, nv : Int) : Float do
+    if v >= nv do -1.0
+    else
+      let face = Test.assert_some(B.get(b, v * CubeForge.Vertex.floats() + 7), "face")
+      if Math.abs(face -. Mesher.face_top()) < 0.01 do Test.assert_some(B.get(b, v * CubeForge.Vertex.floats() + 5), "layer")
+      else top_layer_go(b, v + 1, nv) end
+    end
+  end
   -- checkerboard of stone / dirt at y = 9
   pfn checker_go(c : CubeForge.Chunk.Chunk, i : Int) : CubeForge.Chunk.Chunk do
     if i >= 256 do c else checker_go(C.set(c, i % 16, 9, i / 16, if (i % 16 + i / 16) % 2 == 0 do 3 else 2 end), i + 1) end
@@ -35,21 +52,21 @@ mod CubeForge.Test.Greedy do
   describe "greedy sections" do
     test "a flat slab is one quad per face direction it exposes" do
       let e = C.new()
-      let b = Mesher.mesh_section_opaque(slab_go(C.new(), 0), e, e, e, e, CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), 0, 0.0, 0.0)
+      let b = Mesher.mesh_section_opaque(slab_go(C.new(), 0), e, e, e, e, CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.World.shown_new(), CubeForge.Light.new(), 0, 0.0, 0.0)
       -- top: 1 quad, bottom: 1 quad, four sides: 1 quad each (neighbours are empty chunks) = 6 quads
       Test.assert_eq_int(B.len(b) / (6 * CubeForge.Vertex.floats()), 6, "6 merged quads")
       Test.assert_true(near(total_area(b), 256.0 *. 2.0 +. 16.0 *. 4.0), "area matches the naive face count")
     end
     test "a checkerboard slab cannot merge its top" do
       let e = C.new()
-      let b = Mesher.mesh_section_opaque(checker_go(C.new(), 0), e, e, e, e, CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), 0, 0.0, 0.0)
+      let b = Mesher.mesh_section_opaque(checker_go(C.new(), 0), e, e, e, e, CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.World.shown_new(), CubeForge.Light.new(), 0, 0.0, 0.0)
       -- 256 top + 256 bottom + 4 sides of 16 cells each that alternate (16 quads per side)
       Test.assert_eq_int(B.len(b) / (6 * CubeForge.Vertex.floats()), 256 + 256 + 64, "no merging across different ids")
     end
     test "greedy covers the same face area as the naive mesher" do
       let c = C.test_terrain()
       let e = C.new()
-      let greedy = Mesher.mesh_section_opaque(c, e, e, e, e, CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), 4, 0.0, 0.0)
+      let greedy = Mesher.mesh_section_opaque(c, e, e, e, e, CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.World.shown_new(), CubeForge.Light.new(), 4, 0.0, 0.0)
       let naive = Mesher.mesh_with_neighbors(c, e, e, e, e, 0.0, 0.0)
       -- naive: count faces of section 4 only (y in 64..79) by scanning vertex y
       Test.assert_true(total_area(greedy) > 0.0, "section 4 has faces")
@@ -85,10 +102,28 @@ mod CubeForge.Test.Greedy do
     test "a glow beside a slab splits the merged top face" do
       let c = slab_go(C.new(), 0)
       let e = C.new()
-      let dark = Mesher.mesh_section_opaque(c, e, e, e, e, CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), 0, 0.0, 0.0)
+      let dark = Mesher.mesh_section_opaque(c, e, e, e, e, CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.World.shown_new(), CubeForge.Light.new(), 0, 0.0, 0.0)
       let lb = NativeArray.set_u8(CubeForge.Light.new(), CubeForge.Light.index(5, 10, 5), 9)
-      let lit = Mesher.mesh_section_opaque(c, e, e, e, e, CubeForge.Light.new(), lb, CubeForge.Light.new(), 0, 0.0, 0.0)
+      let lit = Mesher.mesh_section_opaque(c, e, e, e, e, CubeForge.Light.new(), lb, CubeForge.World.shown_new(), CubeForge.Light.new(), 0, 0.0, 0.0)
       Test.assert_true(Mesher.vertex_count(lit) > Mesher.vertex_count(dark), "a lit corner cannot merge with dark ones")
+    end
+  end
+
+
+  describe "mycelium species split merges" do
+    test "a slab of mycelium under two species is two top quads, not one" do
+      let e = C.new()
+      let c = myc_slab_go(C.new(), 0)
+      let one = Mesher.mesh_section_opaque(c, e, e, e, e, CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.World.shown_new(), CubeForge.Light.new(), 0, 0.0, 0.0)
+      let sps = half_go(CubeForge.World.shown_new(), 0)
+      let two = Mesher.mesh_section_opaque(c, e, e, e, e, CubeForge.Light.new(), CubeForge.Light.new(), sps, CubeForge.Light.new(), 0, 0.0, 0.0)
+      Test.assert_eq_int(B.len(one) / (6 * CubeForge.Vertex.floats()), 6, "one species: six quads")
+      -- the species is part of every face: top, bottom and the two sides that run
+      -- along x each split in two; the east and west ends do not
+      Test.assert_eq_int(B.len(two) / (6 * CubeForge.Vertex.floats()), 10, "two species: four faces split in two")
+      let layer = top_layer_go(two, 0, B.len(two) / CubeForge.Vertex.floats())
+      Test.assert_true(layer >= 18.0 && layer < 60.0, "a species layer on top")
+      Test.assert_true(Math.abs(top_layer_go(one, 0, B.len(one) / CubeForge.Vertex.floats()) -. 3.0) < 0.01, "no species: the stone layer")
     end
   end
 
