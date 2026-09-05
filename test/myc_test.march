@@ -1,0 +1,294 @@
+-- The mycelium field: build, plant, spread, contest, wither.
+mod CubeForge.Test.Myc do
+
+  import Test
+  alias CubeForge.Myc as Myc
+  alias CubeForge.Species as Sp
+
+  pfn near(a : Float, b : Float) : Bool do Math.abs(a -. b) < 0.0001 end
+
+  -- A uniform synthetic climate over an n x n field.
+  pfn uniform(n : Int, v : Float) : NativeFloatArr do NativeArray.make_float(n * n, v) end
+
+  describe "Myc.build and plant" do
+    test "a fresh field is empty and hashes stably" do
+      let f = Myc.build(32)
+      Test.assert_eq_int(Myc.species_of(f, 32, 5, 5), 0, "empty")
+      Test.assert_eq_int(Myc.count_species(f, 32, 3), 0, "none of species 3")
+      Test.assert_eq_int(Myc.state_hash(f, 32), Myc.state_hash(Myc.build(32), 32), "same hash twice")
+    end
+    test "planting seeds one column at seed vigour and full reach" do
+      let f = Myc.plant(Myc.build(32), 32, 10, 12, 3)
+      Test.assert_eq_int(Myc.species_of(f, 32, 10, 12), 3, "species")
+      Test.assert_true(near(Myc.vigour_of(f, 32, 10, 12), Myc.seed_vigour()), "seed vigour")
+      Test.assert_eq_int(Myc.reach_of(f, 32, 10, 12), Myc.plant_reach(), "full reach")
+      Test.assert_eq_int(Myc.species_of(f, 32, 11, 12), 0, "the neighbour is untouched")
+      Test.assert_eq_int(Myc.count_species(f, 32, 3), 1, "one column")
+      Test.assert_true(Myc.state_hash(f, 32) != Myc.state_hash(Myc.build(32), 32), "hash moved")
+    end
+    test "planting outside the field is a no-op" do
+      let f = Myc.plant(Myc.build(32), 32, -1, 40, 3)
+      Test.assert_eq_int(Myc.count_species(f, 32, 3), 0, "nothing planted")
+    end
+    test "vigour_u8 scales 0..1 to 0..255" do
+      let f = Myc.plant(Myc.build(32), 32, 10, 12, 3)
+      let v = Myc.vigour_u8(f, 32)
+      Test.assert_eq_int(NativeArray.get_u8(v, 10 + 32 * 12), float_to_int(Myc.seed_vigour() *. 255.0 +. 0.5), "scaled")
+      Test.assert_eq_int(NativeArray.get_u8(v, 0), 0, "empty is 0")
+    end
+  end
+
+
+  pfn tick_n(f : CubeForge.Myc.Field, n : Int, ta : NativeFloatArr, ma : NativeFloatArr, rate : Float, k : Int) : CubeForge.Myc.Field do
+    if k <= 0 do f else tick_n(Myc.tick(f, n, ta, ma, rate), n, ta, ma, rate, k - 1) end
+  end
+
+  -- Chebyshev radius of species [sp] around (cx, cz): the farthest held column.
+  pfn radius_go(f : CubeForge.Myc.Field, n : Int, sp : Int, cx : Int, cz : Int, i : Int, best : Int) : Int do
+    if i >= n * n do best
+    else
+      let x = i % n
+      let z = i / n
+      let dx = if x > cx do x - cx else cx - x end
+      let dz = if z > cz do z - cz else cz - z end
+      let d = if dx > dz do dx else dz end
+      if Myc.species_of(f, n, x, z) == sp do radius_go(f, n, sp, cx, cz, i + 1, if d > best do d else best end)
+      else radius_go(f, n, sp, cx, cz, i + 1, best) end
+    end
+  end
+
+
+  pfn dig_count(i : Int, acc : Int) : Int do
+    if i >= 1000 do acc else dig_count(i + 1, if Myc.dig_spore(i % 37, 60 + i % 5, i / 37, 7) do acc + 1 else acc end) end
+  end
+
+
+  -- Tick [f] both ways for [k] ticks, asserting they agree after every tick.
+  pfn agree_go(a : CubeForge.Myc.Field, b : CubeForge.Myc.Field, n : Int, ta : NativeFloatArr, ma : NativeFloatArr, rate : Float, k : Int, t : Int) : Bool do
+    if k <= 0 do true
+    else
+      let a1 = Myc.tick(a, n, ta, ma, rate)
+      let b1 = Myc.tick_all(b, n, ta, ma, rate)
+      if Myc.state_hash(a1, n) != Myc.state_hash(b1, n) do false
+      else if !same_vigour(a1, b1, n, 0) do false
+      else agree_go(a1, b1, n, ta, ma, rate, k - 1, t + 1) end end
+    end
+  end
+  pfn same_vigour(a : CubeForge.Myc.Field, b : CubeForge.Myc.Field, n : Int, i : Int) : Bool do
+    if i >= n * n do true
+    else if Myc.vigour_of(a, n, i % n, i / n) != Myc.vigour_of(b, n, i % n, i / n) do false
+    else same_vigour(a, b, n, i + 1) end end
+  end
+
+  describe "Myc.tick" do
+    test "vigour eases toward fitness and a planting in the wrong climate withers" do
+      let n = 32
+      -- Meadowbell (3) planted in a hot, wet climate: fitness 0
+      let f0 = Myc.plant(Myc.build(n), n, 16, 16, 3)
+      let f1 = tick_n(f0, n, uniform(n, 0.9), uniform(n, 0.9), Myc.default_rate(), 200)
+      Test.assert_eq_int(Myc.species_of(f1, n, 16, 16), 0, "withered")
+      Test.assert_eq_int(Myc.count_species(f1, n, 3), 0, "and spread nowhere")
+    end
+
+    test "on ideal ground a planting grows to full vigour" do
+      let n = 32
+      let f0 = Myc.plant(Myc.build(n), n, 16, 16, 3)
+      let f1 = tick_n(f0, n, uniform(n, 0.5), uniform(n, 0.3), Myc.default_rate(), 600)
+      Test.assert_true(near(Myc.vigour_of(f1, n, 16, 16), 1.0), "full vigour")
+    end
+
+    test "a planting spreads, and no further than its reach" do
+      let n = 40
+      let f0 = Myc.plant(Myc.build(n), n, 20, 20, 3)
+      -- fast rate so vigour is not the limit; enough ticks for every hop's hold to mature
+      let f1 = tick_n(f0, n, uniform(n, 0.5), uniform(n, 0.3), 0.1, (Myc.plant_radius() + 2) * (Myc.hold_ticks() + 12))
+      Test.assert_eq_int(radius_go(f1, n, 3, 20, 20, 0, 0), Myc.plant_radius(), "exactly the radius")
+      Test.assert_eq_int(Myc.reach_of(f1, n, 20 + Myc.plant_radius(), 20), 0, "the rim has no reach left")
+      Test.assert_true(Myc.count_species(f1, n, 3) > 100, "a real patch")
+    end
+
+    test "nothing spreads where the species is unfit" do
+      let n = 32
+      let f0 = Myc.plant(Myc.build(n), n, 16, 16, 3)
+      let f1 = tick_n(f0, n, uniform(n, 0.5), uniform(n, 0.9), 0.1, 100)
+      Test.assert_eq_int(Myc.count_species(f1, n, 3), 0, "withered without claiming a neighbour")
+    end
+
+    test "two species: the fitter one takes the contested ground, but only within its reach" do
+      let n = 40
+      -- warm forest edge, 0.68 / 0.7: Lanterncap (4) is fading out, Marshlight (5) is in its core
+      let ta = uniform(n, 0.68)
+      let ma = uniform(n, 0.7)
+      Test.assert_true(Sp.fitness(5, 0.68, 0.7) > Sp.fitness(4, 0.68, 0.7) +. Myc.contest_margin(), "the margin holds at this climate")
+      Test.assert_true(Sp.fitness(4, 0.68, 0.7) >= Sp.viable(), "but Lanterncap can still hold ground here")
+      -- six columns apart: inside Marshlight's reach of eight
+      let f0 = Myc.plant(Myc.plant(Myc.build(n), n, 20, 20, 4), n, 26, 20, 5)
+      let f1 = tick_n(f0, n, ta, ma, 0.05, 1200)
+      Test.assert_eq_int(Myc.species_of(f1, n, 23, 20), 5, "the column between them ended Marshlight")
+      Test.assert_eq_int(Myc.species_of(f1, n, 20, 20), 5, "so did the Lanterncap planting itself")
+      Test.assert_eq_int(Myc.species_of(f1, n, 14, 20), 0, "beyond Marshlight's reach nothing grows: Lanterncap is too weak here to spread")
+      Test.assert_true(Myc.count_species(f1, n, 5) > Myc.count_species(f1, n, 4), "Marshlight holds more ground")
+    end
+
+    test "a settled field is stable" do
+      let n = 32
+      let f0 = Myc.plant(Myc.build(n), n, 16, 16, 3)
+      let f1 = tick_n(f0, n, uniform(n, 0.5), uniform(n, 0.3), 0.1, 600)
+      let f2 = Myc.tick(f1, n, uniform(n, 0.5), uniform(n, 0.3), 0.1)
+      Test.assert_eq_int(Myc.state_hash(f2, n), Myc.state_hash(f1, n), "one more tick changes nothing")
+    end
+  end
+
+
+  describe "Myc.migrations" do
+    test "lists columns whose wanted species differs from what is shown, within the budget" do
+      let n = 128
+      let f0 = Myc.plant(Myc.plant(Myc.build(n), n, 10, 10, 3), n, 50, 50, 4)
+      let shown = CubeForge.World.shown_new()
+      let picks = Myc.migrations(f0, n, shown, 0, n * n, 10)
+      Test.assert_eq_int(List.length(picks), 2, "two plantings, two migrations")
+      Test.assert_eq_int(Myc.wanted(f0, n, 10 + n * 10), 3, "column 10,10 wants Meadowbell")
+      let shown1 = NativeArray.set_u8(NativeArray.set_u8(shown, 10 + n * 10, 3), 50 + n * 50, 4)
+      Test.assert_eq_int(List.length(Myc.migrations(f0, n, shown1, 0, n * n, 10)), 0, "shown, nothing to do")
+      let picks2 = Myc.migrations(f0, n, shown, 0, n * n, 1)
+      Test.assert_eq_int(List.length(picks2), 1, "the budget caps it")
+    end
+    test "a withered column wants nothing, so a shown one migrates back" do
+      let n = 128
+      let f0 = Myc.plant(Myc.build(n), n, 10, 10, 3)
+      let shown = NativeArray.set_u8(CubeForge.World.shown_new(), 10 + n * 10, 3)
+      let f1 = tick_n(f0, n, uniform(n, 0.9), uniform(n, 0.9), 0.1, 50)
+      Test.assert_eq_int(Myc.wanted(f1, n, 10 + n * 10), 0, "nothing wanted")
+      Test.assert_eq_int(List.length(Myc.migrations(f1, n, shown, 0, n * n, 10)), 1, "one migration back")
+    end
+  end
+
+
+  describe "Myc.plant_patch and wild" do
+    test "a mature patch is the octagon a planting would have grown into" do
+      let n = 40
+      let f = Myc.plant_patch(Myc.build(n), n, 20, 20, 3)
+      Test.assert_eq_int(radius_go(f, n, 3, 20, 20, 0, 0), Myc.plant_radius(), "radius")
+      Test.assert_true(near(Myc.vigour_of(f, n, 20, 20), 1.0), "full vigour at the centre")
+      Test.assert_true(near(Myc.vigour_of(f, n, 27, 20), 1.0), "full vigour at the rim")
+      Test.assert_eq_int(Myc.reach_of(f, n, 20, 20), Myc.plant_reach(), "full reach at the centre")
+      Test.assert_eq_int(Myc.reach_of(f, n, 28, 20), 0, "no reach at the rim")
+      Test.assert_eq_int(Myc.species_of(f, n, 28, 28), 0, "the diagonal corner is outside the octagon")
+      Test.assert_true(Myc.count_species(f, n, 3) > 100, "a real patch")
+      let f1 = Myc.tick(f, n, uniform(n, 0.5), uniform(n, 0.3), 0.1)
+      Test.assert_eq_int(Myc.state_hash(f1, n), Myc.state_hash(f, n), "already settled")
+    end
+    test "wild seeds patches by the cell hash, fittest species, seeded" do
+      let n = 128
+      let f = Myc.wild(Myc.build(n), n, uniform(n, 0.5), uniform(n, 0.3), 7)
+      let held = Myc.count_species(f, n, 3)
+      Test.assert_true(held > 0, "some Meadowbell on grassland")
+      Test.assert_eq_int(Myc.count_species(f, n, 4), 0, "no Lanterncap on dry ground")
+      Test.assert_eq_int(Myc.state_hash(Myc.wild(Myc.build(n), n, uniform(n, 0.5), uniform(n, 0.3), 7), n), Myc.state_hash(f, n), "same seed, same world")
+      Test.assert_true(Myc.state_hash(Myc.wild(Myc.build(n), n, uniform(n, 0.5), uniform(n, 0.3), 8), n) != Myc.state_hash(f, n), "a different seed differs")
+      Test.assert_true(held < n * n / 2, "low density: well under half the world")
+    end
+    test "a dig yields a spore about a quarter of the time" do
+      Test.assert_true(dig_count(0, 0) > 150 && dig_count(0, 0) < 350, "roughly 250 of 1000")
+    end
+    test "the readout names what is there or what would grow" do
+      let n = 32
+      let f = Myc.plant(Myc.build(n), n, 5, 5, 4)
+      Test.assert_true(Myc.readout(f, n, 5, 5, 0.5, 0.7) == "Lanterncap 25%", "held column")
+      Test.assert_true(Myc.readout(f, n, 6, 5, 0.5, 0.7) == "bare: Lanterncap 100% would grow", "bare forest ground")
+      -- every climate has a species in band with the current table, so the
+      -- "nothing grows" branch is reserved for a future roster; cold and wet is Pinewart's
+      Test.assert_true(Myc.readout(f, n, 6, 5, 0.01, 0.99) == "bare: Pinewart 100% would grow", "cold wet ground")
+    end
+  end
+
+  describe "the canal" do
+    test "wetting the desert lets Marshlight in and pushes Sunshelf out" do
+      let n = 32
+      let dry_t = uniform(n, 0.85)
+      let dry_m = uniform(n, 0.1)
+      let wet_m = uniform(n, 0.7)
+      let f0 = Myc.plant(Myc.build(n), n, 16, 16, 6)
+      let f1 = tick_n(f0, n, dry_t, dry_m, 0.1, 300)
+      Test.assert_true(Myc.count_species(f1, n, 6) > 50, "Sunshelf thrives in the desert")
+      Test.assert_eq_int(Myc.count_species(tick_n(Myc.plant(Myc.build(n), n, 16, 16, 5), n, dry_t, dry_m, 0.1, 100), n, 5), 0, "Marshlight cannot live there dry")
+      let f2 = tick_n(Myc.plant(f1, n, 10, 16, 5), n, dry_t, wet_m, 0.1, 900)
+      Test.assert_true(Myc.count_species(f2, n, 5) > 50, "Marshlight lives there wet")
+      Test.assert_true(Myc.count_species(f2, n, 6) < Myc.count_species(f1, n, 6), "and Sunshelf has lost ground")
+    end
+  end
+
+
+  describe "Myc dirty set" do
+    test "a fresh field is all dirty, a planting dirties one column, a patch its octagon" do
+      let n = 32
+      Test.assert_eq_int(Myc.dirty_count(Myc.build(n), n), n * n, "fresh: everything must be looked at once")
+      let f = Myc.plant(Myc.clean(Myc.build(n), n), n, 10, 10, 3)
+      Test.assert_eq_int(Myc.dirty_count(f, n), 1, "one column")
+      Test.assert_true(Myc.is_dirty(f, n, 10, 10), "the planted one")
+      Test.assert_false(Myc.is_dirty(f, n, 11, 10), "not its neighbour")
+      let g = Myc.plant_patch(Myc.clean(Myc.build(n), n), n, 16, 16, 3)
+      Test.assert_eq_int(Myc.dirty_count(g, n), Myc.count_species(g, n, 3), "every column the patch wrote")
+      let r = Myc.reseed(Myc.clean(g, n), n, 20, 16)
+      Test.assert_eq_int(Myc.dirty_count(r, n), 1, "reseed dirties its column")
+    end
+  end
+
+
+  describe "Myc active set" do
+    test "the dirty-set tick agrees with the look-at-everything tick, every tick of a contest" do
+      let n = 40
+      let ta = uniform(n, 0.68)
+      let ma = uniform(n, 0.7)
+      let f0 = Myc.plant(Myc.plant(Myc.build(n), n, 20, 20, 4), n, 26, 20, 5)
+      Test.assert_true(agree_go(f0, f0, n, ta, ma, 0.05, 300, 0), "identical hashes and vigour for 300 ticks")
+    end
+    test "a settled patch has nothing to look at" do
+      let n = 32
+      let f = tick_n(Myc.plant(Myc.build(n), n, 16, 16, 3), n, uniform(n, 0.5), uniform(n, 0.3), 0.1, 600)
+      Test.assert_eq_int(Myc.active_count(f, n, uniform(n, 0.5), uniform(n, 0.3)), 0, "nothing dirty, nothing near dirty, climate as before")
+      Test.assert_eq_int(Myc.dirty_count(f, n), 0, "no column marked")
+    end
+    test "a settled patch wakes by itself when the climate moves under it" do
+      let n = 32
+      let dry = uniform(n, 0.1)
+      let wet = uniform(n, 0.7)
+      let hot = uniform(n, 0.85)
+      let f = tick_n(Myc.plant(Myc.build(n), n, 16, 16, 6), n, hot, dry, 0.1, 600)
+      Test.assert_true(Myc.count_species(f, n, 6) > 50, "Sunshelf settled in the desert")
+      Test.assert_eq_int(Myc.active_count(f, n, hot, dry), 0, "and settled under the same climate")
+      Test.assert_true(Myc.active_count(f, n, hot, wet) > 0, "a wetter climate wakes it")
+      let woken = tick_n(f, n, hot, wet, 0.1, 200)
+      Test.assert_eq_int(Myc.count_species(woken, n, 6), 0, "and the whole patch withers")
+    end
+  end
+
+
+  describe "Myc.bonuses" do
+    test "an empty field pulls nothing" do
+      let n = 32
+      let b = Myc.bonuses(Myc.build(n), n, 1.0)
+      Test.assert_true(near(NativeArray.get_f32(b, 2 * (10 + n * 10)), 0.0) && near(NativeArray.get_f32(b, 2 * (10 + n * 10) + 1), 0.0), "zero")
+    end
+    test "a lone column pulls its 3x3 and nothing two away" do
+      let n = 32
+      let b = Myc.bonuses(Myc.plant(Myc.build(n), n, 10, 10, 4), n, 1.0)
+      Test.assert_true(near(NativeArray.get_f32(b, 2 * (10 + n * 10) + 1), Sp.pull_m(4)), "itself")
+      Test.assert_true(near(NativeArray.get_f32(b, 2 * (11 + n * 11) + 1), Sp.pull_m(4)), "a diagonal neighbour")
+      Test.assert_true(near(NativeArray.get_f32(b, 2 * (12 + n * 10) + 1), 0.0), "two away")
+      Test.assert_true(near(NativeArray.get_f32(b, 2 * (10 + n * 10)), 0.0), "Lanterncap has no temperature pull")
+    end
+    test "distinct species stack, the same species counts once, and the cap holds" do
+      let n = 32
+      let f = Myc.plant(Myc.plant(Myc.plant(Myc.plant(Myc.build(n), n, 10, 10, 2), n, 11, 10, 4), n, 12, 10, 5), n, 11, 11, 4)
+      let b = Myc.bonuses(f, n, 1.0)
+      -- (11, 10) touches all three: Pinewart + Lanterncap + Marshlight, Lanterncap once
+      Test.assert_true(near(NativeArray.get_f32(b, 2 * (11 + n * 10) + 1), Sp.pull_m(2) +. Sp.pull_m(4) +. Sp.pull_m(5)), "three-way sum")
+      Test.assert_true(near(NativeArray.get_f32(b, 2 * (11 + n * 10)), Sp.pull_t(2) +. Sp.pull_t(4) +. Sp.pull_t(5)), "on both axes")
+      let big = Myc.bonuses(f, n, 3.0)
+      Test.assert_true(near(NativeArray.get_f32(big, 2 * (11 + n * 10) + 1), Myc.cap()), "clamped to the cap")
+      Test.assert_true(near(NativeArray.get_f32(Myc.bonuses(f, n, 0.0), 2 * (11 + n * 10) + 1), 0.0), "scale 0 disables")
+    end
+  end
+
+end

@@ -84,6 +84,30 @@ mod CubeForge.Test.Terrain do
     end
   end
 
+  describe "deep stone band" do
+    test "test_terrain uses basalt below deep_stone_depth, stone above it" do
+      let c = C.test_terrain()
+      Test.assert_eq_int(C.get(c, 0, 10, 0), C.basalt(), "below the deep stone depth is basalt")
+      Test.assert_eq_int(C.get(c, 0, C.deep_stone_depth(), 0), 3, "at the depth boundary is plain stone")
+      Test.assert_eq_int(C.get(c, 0, 40, 0), 3, "well above the boundary is plain stone")
+      Test.assert_eq_int(C.get(c, 0, 1, 0), C.bedrock(), "still bedrock at the floor")
+    end
+  end
+
+  describe "new terrain block ids" do
+    test "basalt, ice and mud have distinct ids above clay" do
+      Test.assert_eq_int(C.basalt(), 22, "basalt id")
+      Test.assert_eq_int(C.ice(), 23, "ice id")
+      Test.assert_eq_int(C.mud(), 24, "mud id")
+    end
+    test "each has its own texture layer" do
+      Test.assert_true(CubeForge.Texture.layer_for(C.basalt()) == 17.0, "basalt layer")
+      Test.assert_true(CubeForge.Texture.layer_for(C.ice()) == 18.0, "ice layer")
+      Test.assert_true(CubeForge.Texture.layer_for(C.mud()) == 19.0, "mud layer")
+      Test.assert_true(CubeForge.Texture.layer_for(C.basalt()) != CubeForge.Texture.layer_for(C.mud()), "basalt and mud are visually distinct")
+    end
+  end
+
 
   describe "Trees.spring_at_cell" do
     test "a spring column has slope and height, and a generated chunk holds it" do
@@ -105,8 +129,56 @@ mod CubeForge.Test.Terrain do
         let wz = col / 4096
         let h = CubeForge.Noise.height(wx, wz, seed)
         let ch = CubeForge.Chunk.generate(wx - wx % 16, wz - wz % 16, seed)
-        if CubeForge.Noise.slope(wx, wz, seed) >= 2 && h >= 72 && CubeForge.Chunk.is_source(CubeForge.Chunk.get(ch, wx % 16, h, wz % 16)) do all_springs_ok(i + 1, seed) else false end
+        let block = CubeForge.Chunk.get(ch, wx % 16, h, wz % 16)
+        let is_valid_spring = if h >= CubeForge.Noise.snow_line() do block == CubeForge.Chunk.ice() else CubeForge.Chunk.is_source(block) end
+        if CubeForge.Noise.slope(wx, wz, seed) >= 2 && h >= 72 && is_valid_spring do all_springs_ok(i + 1, seed) else false end
       end
+    end
+  end
+
+  describe "spring freezing" do
+    test "springs at or above the snow line freeze to ice; below it, they're water" do
+      Test.assert_true(all_springs_frozen_correctly(0, 0), "every sampled spring, across seeds, matches the altitude rule")
+      Test.assert_true(any_spring_at_or_above_snowline(0, 0), "at least one sampled spring is at/above the snow line, so the ice branch is actually exercised")
+    end
+  end
+  pfn all_springs_frozen_correctly(seed : Int, i : Int) : Bool do
+    if seed >= 20 do true
+    else if i >= 256 do all_springs_frozen_correctly(seed + 1, 0)
+    else
+      let col = CubeForge.Trees.spring_at_cell(i % 16, i / 16, seed)
+      if col < 0 do all_springs_frozen_correctly(seed, i + 1)
+      else
+        let wx = col % 4096
+        let wz = col / 4096
+        let h = CubeForge.Noise.height(wx, wz, seed)
+        let ch = CubeForge.Chunk.generate(wx - wx % 16, wz - wz % 16, seed)
+        let block = CubeForge.Chunk.get(ch, wx % 16, h, wz % 16)
+        let want = if h >= CubeForge.Noise.snow_line() do CubeForge.Chunk.ice() else CubeForge.Chunk.water() end
+        if block == want do all_springs_frozen_correctly(seed, i + 1) else false end
+      end
+    end end
+  end
+  pfn any_spring_at_or_above_snowline(seed : Int, i : Int) : Bool do
+    if seed >= 20 do false
+    else if i >= 256 do any_spring_at_or_above_snowline(seed + 1, 0)
+    else
+      let col = CubeForge.Trees.spring_at_cell(i % 16, i / 16, seed)
+      if col < 0 do any_spring_at_or_above_snowline(seed, i + 1)
+      else
+        let wx = col % 4096
+        let wz = col / 4096
+        if CubeForge.Noise.height(wx, wz, seed) >= CubeForge.Noise.snow_line() do true
+        else any_spring_at_or_above_snowline(seed, i + 1) end
+      end
+    end end
+  end
+  describe "World.from_chunks" do
+    test "a world rebuilt from its own chunks hashes the same" do
+      let w = CubeForge.World.generate(1, 7, 1)
+      let w2 = CubeForge.World.from_chunks(CubeForge.World.chunks(w), 1)
+      Test.assert_eq_int(CubeForge.World.state_hash(w2), CubeForge.World.state_hash(w), "same blocks")
+      Test.assert_eq_int(CubeForge.World.side(w2), 1, "side")
     end
   end
 

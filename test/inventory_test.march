@@ -266,4 +266,16 @@ mod CubeForge.Test.Inventory do
     end
   end
 
+
+  describe "Inventory.give" do
+    test "adds n of an item, stacking with the same item" do
+      let i0 = Inv.give(Inv.new(), 204, 3)
+      Test.assert_eq_int(total_of(i0, 204, 0, 0), 3, "three spores")
+      let i1 = Inv.give(i0, 204, 2)
+      Test.assert_eq_int(total_of(i1, 204, 0, 0), 5, "five, one stack")
+      Test.assert_eq_int(Inv.item_at(i1, 0), 204, "in the first hotbar slot")
+      Test.assert_eq_int(Inv.count_at(i1, 1), 0, "not a second stack")
+    end
+  end
+
 end

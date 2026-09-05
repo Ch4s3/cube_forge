@@ -27,10 +27,17 @@ mod CubeForge.Raycast do
     else 1000000000.0 end end
   end
 
-  -- [ignore_water]: pass through water cells (used while the eye is submerged).
+  -- [ignore_water]: pass through water cells (used while the eye is submerged,
+  -- and whenever no water item is held, so the bed can be worked from the
+  -- surface). A spring -- a source above sea level -- always stops the ray: it
+  -- is a block to be mined, and the ray passing through it was why springs
+  -- could never be picked up.
   pfn blocks_ray(w : CubeForge.World.World, x : Int, y : Int, z : Int, ignore_water : Bool) : Bool do
     let id = W.block_at(w, x, y, z)
-    if id == 0 do false else if ignore_water do !CubeForge.Chunk.is_water(id) else true end end
+    if id == 0 do false
+    else if !ignore_water do true
+    else if !CubeForge.Chunk.is_water(id) do true
+    else CubeForge.Chunk.is_source(id) && y > CubeForge.Chunk.sea_level() end end end
   end
 
   pfn step(w : CubeForge.World.World, x : Int, y : Int, z : Int,

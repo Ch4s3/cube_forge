@@ -1,0 +1,152 @@
+-- Mycelium blocks: ids that encode base and glow, their emission, and their layers.
+mod CubeForge.Test.MycBlock do
+
+  import Test
+  alias CubeForge.Chunk as Ch
+  alias CubeForge.Light as Lt
+  alias CubeForge.Texture as Tx
+
+  pfn near(a : Float, b : Float) : Bool do Math.abs(a -. b) < 0.0001 end
+
+  describe "Chunk mycelium ids" do
+    test "encode seven bases and three glow levels in 26..46" do
+      Test.assert_eq_int(Ch.myc_id(1, 0), 26, "grass, no glow, is the first")
+      Test.assert_eq_int(Ch.myc_id(3, 2), 46, "stone, bright, is the last")
+      Test.assert_eq_int(Ch.myc_first(), 26, "first")
+      Test.assert_eq_int(Ch.myc_last(), 46, "last")
+      Test.assert_true(Ch.is_myc(30), "30 is mycelium")
+      Test.assert_false(Ch.is_myc(25), "the glow cap is not")
+      Test.assert_false(Ch.is_myc(47), "47 is not")
+      Test.assert_eq_int(Ch.myc_id(16, 0), 0, "a log is not a base")
+    end
+    test "round-trip base and glow" do
+      Test.assert_eq_int(Ch.myc_base(Ch.myc_id(Ch.snow(), 1)), Ch.snow(), "snow")
+      Test.assert_eq_int(Ch.myc_glow(Ch.myc_id(Ch.snow(), 1)), 1, "dim")
+      Test.assert_eq_int(Ch.myc_base(Ch.myc_id(Ch.clay(), 2)), Ch.clay(), "clay")
+      Test.assert_eq_int(Ch.myc_glow(Ch.myc_id(Ch.clay(), 2)), 2, "bright")
+      Test.assert_eq_int(Ch.myc_base_index(Ch.myc_id(Ch.gravel(), 0)), 4, "gravel is base 4")
+      Test.assert_eq_int(Ch.myc_base_of_index(4), Ch.gravel(), "and back")
+      Test.assert_eq_int(Ch.myc_base(1), 1, "a non-mycelium id is its own base")
+    end
+    test "mycelium is solid, opaque and not a palette block" do
+      Test.assert_true(Ch.is_collidable(Ch.myc_id(1, 0)), "collidable")
+      Test.assert_true(Lt.is_opaque(Ch.myc_id(1, 0)), "opaque")
+      Test.assert_false(CubeForge.Biome.is_palette_block(Ch.myc_id(1, 0)), "not migrated by the biome")
+    end
+  end
+
+  describe "Light.emission for mycelium" do
+    test "dim glows at 3, bright at 6, none at 0" do
+      Test.assert_eq_int(Lt.emission(Ch.myc_id(2, 0)), 0, "none")
+      Test.assert_eq_int(Lt.emission(Ch.myc_id(2, 1)), 3, "dim")
+      Test.assert_eq_int(Lt.emission(Ch.myc_id(2, 2)), 6, "bright")
+    end
+  end
+
+  describe "Texture mycelium layers" do
+    test "one layer per (base, species), after the existing seventeen" do
+      Test.assert_eq_int(Tx.layers(), 87, "20 base + 1 glow cap + 42 mycelium + 6 spore icons + 18 fruit")
+      Test.assert_true(near(Tx.myc_layer(0, 1), 21.0), "grass x Frostcap")
+      Test.assert_true(near(Tx.myc_layer(0, 6), 26.0), "grass x Sunshelf")
+      Test.assert_true(near(Tx.myc_layer(6, 6), 62.0), "stone x Sunshelf is the last")
+      Test.assert_true(near(Tx.layer_for(Ch.myc_id(Ch.sand(), 0)), 4.0), "without a species, the base layer")
+    end
+    test "a mycelium layer differs from its base and carries the species colour" do
+      let a = Tx.checkerboard()
+      -- texel (3, 3) of grass x Lanterncap against plain grass
+      let off = float_to_int(Tx.myc_layer(0, 4)) * 1024 + (3 + 16 * 3) * 4
+      let base = (3 + 16 * 3) * 4
+      let differs = NativeArray.get_u8(a, off) != NativeArray.get_u8(a, base) || NativeArray.get_u8(a, off + 1) != NativeArray.get_u8(a, base + 1)
+      Test.assert_true(differs, "not the plain base")
+      Test.assert_eq_int(NativeArray.get_u8(a, off + 3), 255, "opaque")
+    end
+  end
+
+
+  describe "World.shown" do
+    test "starts empty, reads back a write, and is out of range safe" do
+      let w0 = CubeForge.World.generate(1, 1, 1)
+      Test.assert_eq_int(CubeForge.World.shown_at(w0, 5, 5), 0, "empty")
+      let w1 = CubeForge.World.set_shown(w0, 5, 5, 4)
+      Test.assert_eq_int(CubeForge.World.shown_at(w1, 5, 5), 4, "written")
+      Test.assert_eq_int(CubeForge.World.shown_at(w1, 6, 5), 0, "neighbour untouched")
+      Test.assert_eq_int(CubeForge.World.shown_at(w1, -1, 5), 0, "outside reads 0")
+      Test.assert_eq_int(CubeForge.World.shown_at(CubeForge.World.set_shown(w1, 200, 5, 3), 5, 5), 4, "outside write is a no-op")
+    end
+  end
+
+
+  describe "Inventory yield for mycelium" do
+    test "digging mycelium yields the base block" do
+      Test.assert_eq_int(CubeForge.Inventory.yield_of(Ch.myc_id(Ch.sand(), 2)), Ch.sand(), "sand")
+      Test.assert_eq_int(CubeForge.Inventory.yield_of(Ch.myc_id(1, 0)), 1, "grass")
+    end
+  end
+
+
+  describe "Texture spore icons" do
+    test "one icon layer per species after the mycelium layers" do
+      Test.assert_eq_int(Tx.layers(), 87, "63 + 6 + 18")
+      Test.assert_true(near(Tx.spore_layer(1), 63.0), "Frostcap")
+      Test.assert_true(near(Tx.icon_layer(CubeForge.Species.spore_item(6)), 68.0), "Sunshelf spores in the HUD")
+      Test.assert_true(near(Tx.icon_layer(1), 0.0), "grass icon unchanged")
+    end
+  end
+
+
+  describe "Fruit blocks" do
+    test "ids encode kind and species in 47..64" do
+      Test.assert_eq_int(Ch.fruit_small(1), 47, "small Frostcap")
+      Test.assert_eq_int(Ch.fruit_stem(1), 53, "stem Frostcap")
+      Test.assert_eq_int(Ch.fruit_cap(6), 64, "cap Sunshelf is the last")
+      Test.assert_true(Ch.is_fruit_small(50), "50 is small")
+      Test.assert_true(Ch.is_fruit_stem(56), "56 is a stem")
+      Test.assert_true(Ch.is_fruit_cap(62), "62 is a cap")
+      Test.assert_true(Ch.is_fruit(62), "and fruit")
+      Test.assert_false(Ch.is_fruit(46), "46 is not")
+      Test.assert_false(Ch.is_fruit(65), "65 is not")
+      Test.assert_eq_int(Ch.fruit_species(Ch.fruit_cap(4)), 4, "species of a cap")
+      Test.assert_eq_int(Ch.fruit_species(3), 0, "stone has none")
+    end
+    test "small fruit is a cutout you walk through; stems and caps are solid" do
+      Test.assert_true(Ch.is_cutout(Ch.fruit_small(3)), "small is cutout")
+      Test.assert_true(Ch.is_cutout(Ch.oak_leaves()), "leaves still are")
+      Test.assert_false(Ch.is_cutout(Ch.fruit_cap(3)), "a cap is not")
+      Test.assert_false(Ch.is_collidable(Ch.fruit_small(3)), "walk through a small mushroom")
+      Test.assert_true(Ch.is_collidable(Ch.fruit_cap(3)), "stand on a cap")
+      Test.assert_false(Ch.is_foliage(Ch.fruit_small(3)), "not a leaf: leaf decay leaves it alone")
+      Test.assert_eq_int(Lt.opacity(Ch.fruit_small(3)), 6, "dappled like leaves")
+      Test.assert_true(Lt.is_opaque(Ch.fruit_cap(3)), "a cap blocks light")
+    end
+    test "emission follows the species glow and the kind" do
+      Test.assert_eq_int(Lt.emission(Ch.fruit_small(4)), 6, "bright small")
+      Test.assert_eq_int(Lt.emission(Ch.fruit_cap(4)), 10, "bright cap")
+      Test.assert_eq_int(Lt.emission(Ch.fruit_stem(4)), 0, "stems never glow")
+      Test.assert_eq_int(Lt.emission(Ch.fruit_small(1)), 3, "dim small")
+      Test.assert_eq_int(Lt.emission(Ch.fruit_cap(1)), 5, "dim cap")
+      Test.assert_eq_int(Lt.emission(Ch.fruit_cap(3)), 0, "no glow")
+    end
+    test "one texture layer per kind and species, and small fruit yields nothing" do
+      Test.assert_eq_int(Tx.layers(), 87, "69 + 18")
+      Test.assert_true(near(Tx.fruit_layer(0, 1), 69.0), "small Frostcap")
+      Test.assert_true(near(Tx.fruit_layer(2, 6), 86.0), "cap Sunshelf is the last")
+      Test.assert_true(near(Tx.layer_for(Ch.fruit_stem(2)), 76.0), "stem Pinewart")
+      Test.assert_eq_int(CubeForge.Inventory.yield_of(Ch.fruit_small(2)), 0, "the fell gives the spores")
+      Test.assert_eq_int(CubeForge.Inventory.yield_of(Ch.fruit_cap(2)), Ch.fruit_cap(2), "a cap is a block")
+      let a = Tx.checkerboard()
+      Test.assert_eq_int(NativeArray.get_u8(a, float_to_int(Tx.fruit_layer(0, 3)) * 1024 + 3), 0, "a small mushroom's corner texel is transparent")
+      Test.assert_eq_int(NativeArray.get_u8(a, float_to_int(Tx.fruit_layer(0, 3)) * 1024 + (8 + 16 * 12) * 4 + 3), 255, "its stem texel is opaque")
+    end
+  end
+
+
+  describe "small mushroom faces" do
+    test "the top and bottom show the cap, the sides the silhouette" do
+      Test.assert_true(near(Tx.layer_for_face(Ch.fruit_small(3), 0), Tx.fruit_layer(2, 3)), "top is the cap")
+      Test.assert_true(near(Tx.layer_for_face(Ch.fruit_small(3), 1), Tx.fruit_layer(2, 3)), "bottom is the cap")
+      Test.assert_true(near(Tx.layer_for_face(Ch.fruit_small(3), 2), Tx.fruit_layer(0, 3)), "a side is the silhouette")
+      Test.assert_true(near(Tx.layer_for_face(Ch.fruit_cap(3), 0), Tx.fruit_layer(2, 3)), "a cap block is a cap all round")
+    end
+  end
+
+end

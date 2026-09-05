@@ -50,12 +50,27 @@ mod CubeForge.Light do
     else if C.is_water(id) do 2
     -- Leaves attenuate rather than block: a canopy casts dappled shade and thin
     -- foliage still lets light reach the ground beneath it.
-    else if C.is_foliage(id) do 6
+    else if C.is_cutout(id) do 6
     else max_level() end end end
   end
 
   @[no_alloc]
   fn is_opaque(id : Int) : Bool do opacity(id) >= max_level() end
+
+  @[no_alloc]
+  -- Block light a voxel of block [id] emits: 0 for everything but emissive blocks.
+  -- Levels are deliberately below max_level(): a cap at 10 lights a radius of
+  -- about nine, and keeps every relight box small.
+  fn emission(id : Int) : Int do
+    if id == C.glow_cap() do 10
+    -- dim 3, bright 6: measured at 2/4 a lone bright column lifted the ground
+    -- by about 25/255 at night, too faint to read as lit
+    else if C.is_myc(id) do 3 * C.myc_glow(id)
+    -- fruit: a small body 6 bright / 3 dim, a cap 10 / 5; stems never glow
+    else if C.is_fruit_small(id) do 3 * CubeForge.Species.glow(C.fruit_species(id))
+    else if C.is_fruit_cap(id) do 5 * CubeForge.Species.glow(C.fruit_species(id))
+    else 0 end end end end
+  end
 
   -- ── Seeding: sunlight down each column ────────────────────────────────────
   --
@@ -229,6 +244,40 @@ mod CubeForge.Light do
   doc "Compute the world's skylight from scratch: seed every column, then spread."
   fn flood(w : CubeForge.World.World) : NativeU8Arr do
     spread(seed_all(new(), w), w)
+  end
+
+  -- ── Block light: the same sweep, seeded from emissive blocks ─────────────
+  --
+  -- The sweep does not care where light came from: a voxel at level L gives
+  -- L - 1 - opacity to its neighbours whatever seeded it. So block light is
+  -- the skylight machinery with a different seed pass -- every voxel whose
+  -- block emits is written at its emission level, and spread() does the rest.
+  -- Emission is capped below max_level(), so the sweep's top levels are no-ops.
+
+  -- Seed one chunk's emitters. Write-only on [lb]; the chunk is fetched once (G64).
+  pfn seed_emit_chunk_go(lb : NativeU8Arr, c : CubeForge.Chunk.Chunk, cx : Int, cz : Int, i : Int, stop : Int) : NativeU8Arr do
+    if i >= stop do lb
+    else
+      let e = emission(C.get_idx(c, i))
+      if e <= 0 do seed_emit_chunk_go(lb, c, cx, cz, i + 1, stop)
+      else seed_emit_chunk_go(NativeArray.set_u8(lb, index(16 * cx + i % 16, i / 256, 16 * cz + (i / 16) % 16), e), c, cx, cz, i + 1, stop) end
+    end
+  end
+
+  pfn seed_emit_go(lb : NativeU8Arr, w : CubeForge.World.World, ci : Int, n : Int, stop : Int) : NativeU8Arr do
+    if ci >= n * n do lb
+    else seed_emit_go(seed_emit_chunk_go(lb, CubeForge.World.chunk_at(w, ci % n, ci / n), ci % n, ci / n, 0, stop), w, ci + 1, n, stop) end
+  end
+
+  doc "Write every emissive block's emission level into [lb]. Scans only up to the highest non-air layer."
+  fn seed_emitters(lb : NativeU8Arr, w : CubeForge.World.World) : NativeU8Arr do
+    seed_emit_go(lb, w, 0, CubeForge.World.side(w), (sky_floor(w) + 1) * 256)
+  end
+
+  doc "Compute the world's block light from scratch: seed every emitter, then spread. The sweep scans max_level() layers above the sky floor: skylight has nothing to do up there, but block light climbs into the open air."
+  fn flood_block(w : CubeForge.World.World) : NativeU8Arr do
+    let top = clampi(sky_floor(w) + 1 + max_level(), 0, 256)
+    sweep_go(seed_emitters(new(), w), w, max_level(), top * 16384)
   end
 
   -- ── Incremental relight ───────────────────────────────────────────────────
@@ -426,6 +475,75 @@ mod CubeForge.Light do
   fn relight_at(la : NativeU8Arr, w : CubeForge.World.World, ex : Int, ey : Int, ez : Int) : NativeU8Arr do
     relit_field(relight_marked(la, w, ex, ey, ez))
   end
+
+  -- ── Incremental block-light relight ──────────────────────────────────────
+  --
+  -- The skylight relight, minus the sky column: block light has no source
+  -- above the box, so the box is simply the relight radius in every direction.
+  -- Clear it, re-seed the emitters inside it, and sweep the box one voxel wider
+  -- so the unchanged ring around it feeds inward. Emission is at most 12 < 15,
+  -- so an emitter outside the box cannot reach past the ring into the box's
+  -- interior except through the ring, which is exactly what the sweep reads.
+
+  -- Re-seed emitters in one column of the box. Write-only on [lb].
+  pfn seed_emit_col_go(lb : NativeU8Arr, c : CubeForge.Chunk.Chunk, lx : Int, lz : Int, x : Int, z : Int, y : Int, y1 : Int) : NativeU8Arr do
+    if y > y1 do lb
+    else
+      let e = emission(C.get_or_air(c, lx, y, lz))
+      if e <= 0 do seed_emit_col_go(lb, c, lx, lz, x, z, y + 1, y1)
+      else seed_emit_col_go(NativeArray.set_u8(lb, index(x, y, z), e), c, lx, lz, x, z, y + 1, y1) end
+    end
+  end
+
+  pfn seed_emit_box_go(lb : NativeU8Arr, w : CubeForge.World.World, x0 : Int, bw : Int, z0 : Int, y0 : Int, y1 : Int, i : Int, n : Int) : NativeU8Arr do
+    if i >= n do lb
+    else
+      let x = x0 + i % bw
+      let z = z0 + i / bw
+      let c = CubeForge.World.chunk_at(w, CubeForge.World.floor_div16(x), CubeForge.World.floor_div16(z))
+      seed_emit_box_go(seed_emit_col_go(lb, c, CubeForge.World.mod16(x), CubeForge.World.mod16(z), x, z, y0, y1), w, x0, bw, z0, y0, y1, i + 1, n)
+    end
+  end
+
+  doc "Repair the block-light field after the block at (ex, ey, ez) changed, reporting which sections moved. [w] is the world after the edit."
+  fn relight_block_marked(lb : NativeU8Arr, w : CubeForge.World.World, ex : Int, ey : Int, ez : Int) : Relit do
+    let r = relight_radius()
+    let cx0 = clampi(ex - r, 0, 127)
+    let cx1 = clampi(ex + r, 0, 127)
+    let cz0 = clampi(ez - r, 0, 127)
+    let cz1 = clampi(ez + r, 0, 127)
+    let cy0 = clampi(ey - r, 0, 255)
+    let cy1 = clampi(ey + r, 0, 255)
+    let sy1 = clampi(ey + r + 1, 0, 255)
+    -- Only y layers up to the scan box top are read or written, and a y range
+    -- is a contiguous prefix of the flat index, so every copy is that prefix.
+    let plen = if sy1 >= 254 do volume() else (sy1 + 2) * 16384 end
+    let before = copy_prefix(lb, plen)
+    let lb1 = zero_box_go(lb, cx0, cx1, cy0, cy1, cz0, cz1)
+    let lb2 = seed_emit_box_go(lb1, w, cx0, cx1 - cx0 + 1, cz0, cy0, cy1, 0, (cx1 - cx0 + 1) * (cz1 - cz0 + 1))
+    -- scan box: one wider, so the unchanged voxels around the edit feed inward
+    let sx0 = clampi(ex - r - 1, 0, 127)
+    let sx1 = clampi(ex + r + 1, 0, 127)
+    let sz0 = clampi(ez - r - 1, 0, 127)
+    let sz1 = clampi(ez + r + 1, 0, 127)
+    let sy0 = if cy0 <= 0 do 0 else clampi(cy0 - 1, 0, 255) end
+    let slo = sy0 * 16384
+    let swept = box_sweep_go2(copy_prefix(lb2, plen), copy_prefix(lb2, plen), w, max_level(),
+                              sx0, sx1, sy0, sy1, sz0, sz1, slo, plen - slo)
+    let out = CubeForge.Ffi.Window.u8_blit(lb2, slo, swept, slo, plen - slo)
+    Relit(out, mark_box(marks_new(), before, out, sx0, sx1, sy0, sy1, sz0, sz1))
+  end
+
+  -- The union of two marks arrays, as a fresh array: reads [a] and [b], writes
+  -- only the new one, so neither input is copied (GAPS.md G21).
+  pfn or_go(a : NativeIntArr, b : NativeIntArr, m : NativeIntArr, i : Int) : NativeIntArr do
+    if i >= 1024 do m
+    else if NativeArray.get_int(a, i) != 0 do or_go(a, b, NativeArray.set_int(m, i, 1), i + 1)
+    else if NativeArray.get_int(b, i) != 0 do or_go(a, b, NativeArray.set_int(m, i, 1), i + 1)
+    else or_go(a, b, m, i + 1) end end end
+  end
+  doc "Sections marked in either marks array."
+  fn or_marks(a : NativeIntArr, b : NativeIntArr) : NativeIntArr do or_go(a, b, marks_new(), 0) end
 
   -- ── Occupancy: the shadow ray-marcher's view of the world ─────────────────
   --

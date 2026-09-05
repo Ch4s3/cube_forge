@@ -335,15 +335,23 @@ mod CubeForge.Biome do
   -- rest land in place, so a tick that changes nothing copies nothing. Reads come
   -- from the same arrays being written, which is the same answer -- each column
   -- is read at its own index before it is written.
-  pfn tick_go(hs : NativeU8Arr, tb : NativeFloatArr, rate : Float, d : NativeU8Arr, n : Int, i : Int,
+  pfn clampb(v : Float, cap : Float) : Float do if v < 0.0 -. cap do 0.0 -. cap else if v > cap do cap else v end end end
+
+  pfn tick_go(hs : NativeU8Arr, tb : NativeFloatArr, rate : Float, d : NativeU8Arr, pulls : NativeF32Arr, prow : NativeU8Arr, scale : Float, n : Int, i : Int,
               ta : NativeFloatArr, ma : NativeFloatArr, bs : NativeU8Arr, hold : NativeU8Arr, act : NativeU8Arr) : Field do
     if i >= n * n do Field(hs, NativeArray.make_u8(0, 0), ta, ma, bs, hold, tb, NativeArray.make_u8(0, 0), act)
-    else if NativeArray.get_u8(act, i) == 0 do tick_go(hs, tb, rate, d, n, i + 1, ta, ma, bs, hold, act)
+    -- a row whose network pulls moved this tick is looked at whole; the
+    -- offsets are constant otherwise, so a settled column stays settled
+    else if NativeArray.get_u8(act, i) == 0 && NativeArray.get_u8(prow, i / n) == 0 do tick_go(hs, tb, rate, d, pulls, prow, scale, n, i + 1, ta, ma, bs, hold, act)
     else
       let h = NativeArray.get_u8(hs, i)
       let dist = NativeArray.get_u8(d, i)
-      let tt = temp_from_base(NativeArray.get_float(tb, i), h)
-      let mt = moisture_target(dist)
+      -- the network's offset: its raw pull scaled by CF_MYC_FEEDBACK and capped
+      let cap = CubeForge.Myc.cap()
+      let bt = clampb(NativeArray.get_f32(pulls, 2 * i) *. scale, cap)
+      let bm = clampb(NativeArray.get_f32(pulls, 2 * i + 1) *. scale, cap)
+      let tt = clamp01(temp_from_base(NativeArray.get_float(tb, i), h) +. bt)
+      let mt = clamp01(moisture_target(dist) +. bm)
       let t = ease(NativeArray.get_float(ta, i), tt, rate)
       let m = ease(NativeArray.get_float(ma, i), mt, rate)
       let raw = classify(t, m, h, dist)
@@ -356,10 +364,11 @@ mod CubeForge.Biome do
       -- Settled: both axes sit exactly on their targets (ease assigns the target
       -- itself once it is within a step, so this is exact) and the hold counter
       -- is clear, which means the stored biome IS the classification of these
-      -- axes. Nothing here can move again until an edit or a distance change.
+      -- axes. Nothing here can move again until an edit, a distance change, or
+      -- the network's pull on this row moving.
       let settled = if t == tt do (if m == mt do hc1 == 0 else false end) else false end
-      let act1 = if settled do NativeArray.set_u8(act, i, 0) else act end
-      tick_go(hs, tb, rate, d, n, i + 1,
+      let act1 = NativeArray.set_u8(act, i, if settled do 0 else 1 end)
+      tick_go(hs, tb, rate, d, pulls, prow, scale, n, i + 1,
               NativeArray.set_float(ta, i, t), NativeArray.set_float(ma, i, m),
               NativeArray.set_u8(bs, i, b1), NativeArray.set_u8(hold, i, hc1), act1)
     end end
@@ -431,7 +440,9 @@ mod CubeForge.Biome do
 
   doc """
   One tick: rescan water, recompute distances, ease both axes toward their
-  targets by [rate], reclassify behind the hold counter.
+  targets by [rate] -- targets that carry the network's raw [pulls] (two f32
+  per column, see Myc.pulls) scaled by [scale] and capped, with [prow] naming
+  the rows whose pulls moved -- and reclassify behind the hold counter.
 
   Only ACTIVE columns are eased and reclassified. A settled column -- both axes
   on target, hold counter clear -- cannot change until something wakes it, and
@@ -441,17 +452,22 @@ mod CubeForge.Biome do
   tick kept. Before this, every tick eased and reclassified all 16,384 columns
   to discover that almost none of them had moved.
   """
-  fn tick(f : Field, w : CubeForge.World.World, seed : Int, rate : Float) : Field do
+  fn tick(f : Field, w : CubeForge.World.World, seed : Int, rate : Float, pulls : NativeF32Arr, prow : NativeU8Arr, scale : Float) : Field do
     let n = cols(w)
     let f1 = match f do Field(hs, _, ta, ma, bs, hold, tb, ds, act) -> Field(hs, water_go(w, hs, n, 0, NativeArray.make_u8(n * n, 0)), ta, ma, bs, hold, tb, ds, act) end
     let d = distances(f1, w)
     match f1 do
       Field(hs, ws, ta0, ma0, bs0, hold0, tb, ds0, act0) ->
-        match tick_go(hs, tb, rate, d, n, 0, ta0, ma0, bs0, hold0, mark_dist_go(d, ds0, n, 0, act0)) do
+        match tick_go(hs, tb, rate, d, pulls, prow, scale, n, 0, ta0, ma0, bs0, hold0, mark_dist_go(d, ds0, n, 0, act0)) do
           Field(hs1, _, ta, ma, bs, hold, tb1, _, act1) -> Field(hs1, ws, ta, ma, bs, hold, tb1, d, act1)
         end
     end
   end
+
+  doc "Pulls saying the network does nothing, for callers without one and for tests: zeros, with no row moved."
+  fn no_pulls(n : Int) : NativeF32Arr do NativeArray.make_f32(2 * n * n, 0.0) end
+  fn no_rows(n : Int) : NativeU8Arr do NativeArray.make_u8(n, 0) end
+  fn all_rows(n : Int) : NativeU8Arr do NativeArray.make_u8(n, 1) end
 
 
   doc "Eased temperature / moisture / water flag / distance-cap for one column, for diagnostics."
@@ -468,6 +484,16 @@ mod CubeForge.Biome do
   fn temp_of(f : Field, wx : Int, wz : Int) : Float do
     match f do Field(_, _, ta, _, _, _, _, _, _) -> NativeArray.get_float(ta, wx + stride() * wz) end
   end
+  doc "Eased moisture 0..1 of one column."
+  fn moist_of(f : Field, wx : Int, wz : Int) : Float do
+    match f do Field(_, _, _, ma, _, _, _, _, _) -> NativeArray.get_float(ma, wx + 128 * wz) end
+  end
+  doc "The eased temperature array, one entry per column: the climate the mycelium field reads."
+  fn temps(f : Field) : NativeFloatArr do match f do Field(_, _, ta, _, _, _, _, _, _) -> ta end end
+  doc "The eased moisture array, one entry per column."
+  fn moists(f : Field) : NativeFloatArr do match f do Field(_, _, _, ma, _, _, _, _, _) -> ma end end
+  doc "The active flags, one entry per column: 1 where the last tick eased the climate or an edit woke the column. What the mycelium tick must look at whatever its own dirty set says."
+  fn active(f : Field) : NativeU8Arr do match f do Field(_, _, _, _, _, _, _, _, act) -> act end end
 
   doc "How much of a storm actually falls here, as a multiplier on the particle count. Deserts stay dry under the same storm that soaks a wetland; the sea and the mountains sit in between."
   fn precip_scale(id : Int) : Float do
@@ -482,19 +508,29 @@ mod CubeForge.Biome do
 
 
   -- ── Surface palette and migration ─────────────────────────────────────────
+  doc "Fraction of wetland columns that pick mud over clay."
+  pfn mud_fraction() : Float do 0.4 end
+  doc "Arbitrary fixed seed for the clay/mud split: decorative, not tied to the world seed."
+  pfn wetland_mix_seed() : Int do 91537 end
+
+  doc "Clay or mud for one wetland column, mixed by a fixed per-column hash."
+  pfn wetland_surface(x : Int, z : Int) : Int do
+    if N.hash2(x, z, wetland_mix_seed()) < mud_fraction() do C.mud() else C.clay() end
+  end
+
   doc "The surface block a biome wants. Granite is absent on purpose: cliff faces stay on the slope rule in every biome."
-  fn palette(id : Int) : Int do
+  fn palette(id : Int, x : Int, z : Int) : Int do
     if id == b_tundra() do C.snow()
     else if id == b_taiga() do 2                       -- dirt
     else if id == b_desert() || id == b_beach() do C.sand()
-    else if id == b_wetland() do C.clay()
+    else if id == b_wetland() do wetland_surface(x, z)
     else if id == b_alpine() do C.gravel()
     else 1 end end end end end                         -- grass: grassland, forest
   end
 
   doc "Only these ever migrate: the natural surface blocks. Granite, stone, water, logs, leaves and bedrock are never rewritten."
   fn is_palette_block(id : Int) : Bool do
-    id == 1 || id == 2 || id == C.sand() || id == C.snow() || id == C.gravel() || id == C.clay()
+    id == 1 || id == 2 || id == C.sand() || id == C.snow() || id == C.gravel() || id == C.clay() || id == C.mud()
   end
 
   pfn migrations_go(f : Field, w : CubeForge.World.World, n : Int, i : Int, left : Int, budget : Int, acc : List(Int)) : List(Int) do
@@ -506,7 +542,7 @@ mod CubeForge.Biome do
       let h = height_of(f, x, z)
       let wet = match f do Field(_, ws, _, _, _, _, _, _, _) -> NativeArray.get_u8(ws, ci) == 1 end
       let sfc = W.block_at(w, x, h, z)
-      let want = palette(biome_of(f, x, z))
+      let want = palette(biome_of(f, x, z), x, z)
       if h > 0 && !wet && is_palette_block(sfc) && sfc != want do migrations_go(f, w, n, i + 1, left - 1, budget - 1, Cons(ci, acc))
       else migrations_go(f, w, n, i + 1, left - 1, budget, acc) end
     end

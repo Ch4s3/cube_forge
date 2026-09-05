@@ -44,4 +44,30 @@ mod CubeForge.Vertex do
   doc "The fx value every non-precipitation vertex carries: effect 0, alpha 1."
   fn plain() : Float do 255.0 end
 
+
+  -- ── The shade float: sky shade and block-light shade in one number ───────
+  --
+  --   packed = 2 * round(blk * 255) + clamp01(sky)
+  --
+  -- Sky lives in [0, 1]; block light sits above it in even integers, so any
+  -- vertex that pushes a plain shade in [0, 1] (HUD, outline, marker, rain)
+  -- still decodes as sky-only. Linear in both parts, so interpolation across
+  -- a triangle is exact. The fragment shader unpacks with floor(v / 2).
+
+  pfn clamp01(v : Float) : Float do if v < 0.0 do 0.0 else if v > 1.0 do 1.0 else v end end end
+
+  doc "Pack a sky shade and a block-light shade, both 0..1, into the shade float."
+  fn pack_shade(sky : Float, blk : Float) : Float do
+    2.0 *. int_to_float(float_to_int(clamp01(blk) *. 255.0 +. 0.5)) +. clamp01(sky)
+  end
+
+  doc "The block-light shade 0..1 in a packed shade float."
+  fn blk_of(p : Float) : Float do Math.floor(p /. 2.0) /. 255.0 end
+
+  doc "The sky shade 0..1 in a packed shade float."
+  fn sky_of(p : Float) : Float do p -. 2.0 *. Math.floor(p /. 2.0) end
+
+  doc "Sky plus block shade: the brightness the quad-flip heuristic compares."
+  fn brightness_of(p : Float) : Float do sky_of(p) +. blk_of(p) end
+
 end

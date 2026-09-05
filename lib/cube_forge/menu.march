@@ -1,4 +1,9 @@
--- The escape menu: NEW GAME, an editable seed, and QUIT.
+-- The menu: a start screen and an escape menu over one state machine.
+--
+-- Two modes and two pages. Start mode (opened at launch) offers NEW GAME,
+-- LOAD GAME and QUIT; escape mode offers NEW GAME, SAVE GAME and QUIT. Both
+-- have the seed field on the main page, and both open the same slots page:
+-- five rows and BACK, where a click saves (escape) or loads (start).
 --
 -- State and geometry only — no I/O and no world access, so the whole thing is
 -- unit-testable. The frame loop reads the state, `Hud` draws it, and both take
@@ -6,25 +11,75 @@
 -- hit-tested boxes cannot drift apart.
 mod CubeForge.Menu do
 
-  -- Menu(open?, seed under edit, item the cursor is over)
-  type Menu = Menu(Bool, Int, Int)
+  alias CubeForge.Save as Save
+
+  -- Menu(open?, seed under edit, item the cursor is over, mode, page,
+  --      status slot, status kind, frame the status was set, slot listing)
+  type Menu = Menu(Bool, Int, Int, Int, Int, Int, Int, Int, List(CubeForge.Save.SlotInfo))
 
   doc "The world generator masks its seed to 30 bits; the field will not exceed that."
   fn max_seed() : Int do 1073741823 end
 
+  fn mode_start() : Int do 0 end
+  fn mode_escape() : Int do 1 end
+  fn page_main() : Int do 0 end
+  fn page_slots() : Int do 1 end
+
+  -- Main page items.
   fn item_new_game() : Int do 0 end
-  fn item_quit() : Int do 1 end
-  fn items() : Int do 2 end
+  doc "SAVE GAME in escape mode, LOAD GAME in start mode."
+  fn item_second() : Int do 1 end
+  fn item_quit() : Int do 2 end
+  -- Slots page items: 0..4 are slots 1..5, then BACK.
+  fn item_back() : Int do Save.slots() end
+  fn slot_of_item(i : Int) : Int do i + 1 end
+  fn items(m : Menu) : Int do if page(m) == page_slots() do Save.slots() + 1 else 3 end end
 
-  fn new(seed : Int) : Menu do Menu(false, seed, -1) end
+  fn status_none() : Int do 0 end
+  fn status_saved() : Int do 1 end
+  fn status_failed() : Int do 2 end
+  doc "Frames a SAVED or FAILED row stays lit."
+  fn status_frames() : Int do 60 end
 
-  fn is_open(m : Menu) : Bool do match m do Menu(o, _, _) -> o end end
-  fn seed(m : Menu) : Int do match m do Menu(_, s, _) -> s end end
-  fn focused(m : Menu) : Int do match m do Menu(_, _, f) -> f end end
+  doc "An escape menu, closed."
+  fn new(seed : Int) : Menu do Menu(false, seed, -1, mode_escape(), page_main(), 0, status_none(), 0, Nil) end
+  doc "The start screen, open."
+  fn new_start(seed : Int) : Menu do Menu(true, seed, -1, mode_start(), page_main(), 0, status_none(), 0, Nil) end
 
-  fn set_open(m : Menu, o : Bool) : Menu do match m do Menu(_, s, f) -> Menu(o, s, f) end end
-  fn set_focus(m : Menu, f : Int) : Menu do match m do Menu(o, s, _) -> Menu(o, s, f) end end
-  fn set_seed(m : Menu, s : Int) : Menu do match m do Menu(o, _, f) -> Menu(o, s, f) end end
+  fn is_open(m : Menu) : Bool do match m do Menu(o, _, _, _, _, _, _, _, _) -> o end end
+  fn seed(m : Menu) : Int do match m do Menu(_, s, _, _, _, _, _, _, _) -> s end end
+  fn focused(m : Menu) : Int do match m do Menu(_, _, f, _, _, _, _, _, _) -> f end end
+  fn mode(m : Menu) : Int do match m do Menu(_, _, _, md, _, _, _, _, _) -> md end end
+  fn page(m : Menu) : Int do match m do Menu(_, _, _, _, p, _, _, _, _) -> p end end
+  fn status_slot(m : Menu) : Int do match m do Menu(_, _, _, _, _, s, _, _, _) -> s end end
+  fn status_kind(m : Menu) : Int do match m do Menu(_, _, _, _, _, _, k, _, _) -> k end end
+  fn status_frame(m : Menu) : Int do match m do Menu(_, _, _, _, _, _, _, f, _) -> f end end
+  fn slot_infos(m : Menu) : List(CubeForge.Save.SlotInfo) do match m do Menu(_, _, _, _, _, _, _, _, l) -> l end end
+  fn is_start(m : Menu) : Bool do mode(m) == mode_start() end
+
+  fn set_open(m : Menu, o : Bool) : Menu do match m do Menu(_, s, f, md, p, ss, sk, sf, l) -> Menu(o, s, f, md, p, ss, sk, sf, l) end end
+  fn set_focus(m : Menu, f : Int) : Menu do match m do Menu(o, s, _, md, p, ss, sk, sf, l) -> Menu(o, s, f, md, p, ss, sk, sf, l) end end
+  fn set_seed(m : Menu, s : Int) : Menu do match m do Menu(o, _, f, md, p, ss, sk, sf, l) -> Menu(o, s, f, md, p, ss, sk, sf, l) end end
+  fn set_mode(m : Menu, md : Int) : Menu do match m do Menu(o, s, f, _, p, ss, sk, sf, l) -> Menu(o, s, f, md, p, ss, sk, sf, l) end end
+  fn set_page(m : Menu, p : Int) : Menu do match m do Menu(o, s, f, md, _, ss, sk, sf, l) -> Menu(o, s, f, md, p, ss, sk, sf, l) end end
+  fn set_slots(m : Menu, l : List(CubeForge.Save.SlotInfo)) : Menu do match m do Menu(o, s, f, md, p, ss, sk, sf, _) -> Menu(o, s, f, md, p, ss, sk, sf, l) end end
+  fn set_status(m : Menu, slot : Int, kind : Int, frame : Int) : Menu do
+    match m do Menu(o, s, f, md, p, _, _, _, l) -> Menu(o, s, f, md, p, slot, kind, frame, l) end
+  end
+  fn clear_status(m : Menu) : Menu do set_status(m, 0, status_none(), 0) end
+  doc "Drop a status once it has been shown for [status_frames]."
+  fn expire_status(m : Menu, frame : Int) : Menu do
+    if status_kind(m) != status_none() && frame - status_frame(m) >= status_frames() do clear_status(m) else m end
+  end
+
+  doc "Esc: the slots page goes back to main; the escape menu closes; the start screen stays."
+  fn escape(m : Menu) : Menu do
+    if page(m) == page_slots() do set_page(m, page_main())
+    else if mode(m) == mode_escape() do set_open(m, false)
+    else m end end
+  end
+
+  -- ── Seed editing ──────────────────────────────────────────────────────────
 
   doc """
   Append a decimal digit to the seed. A digit that would push the value past
@@ -48,35 +103,80 @@ mod CubeForge.Menu do
   end
 
   -- ── Geometry (NDC) ────────────────────────────────────────────────────────
-  -- One source for both drawing and hit-testing.
+  -- One source for both drawing and hit-testing. The slots page is taller and
+  -- tighter than the main page; everything below is a function of the page.
 
-  fn panel_x0() : Float do -0.36 end
-  fn panel_x1() : Float do 0.36 end
-  fn panel_y0() : Float do -0.34 end
-  fn panel_y1() : Float do 0.36 end
+  doc "The slots page is wider: a row must hold SLOT 5 SEED and a ten-digit seed."
+  fn panel_x0(m : Menu) : Float do if page(m) == page_slots() do -0.40 else -0.36 end end
+  fn panel_x1(m : Menu) : Float do 0.0 -. panel_x0(m) end
+  fn panel_y0(m : Menu) : Float do if page(m) == page_slots() do -0.50 else -0.56 end end
+  fn panel_y1(m : Menu) : Float do if page(m) == page_slots() do 0.50 else 0.36 end end
 
-  fn item_w() : Float do 0.44 end
-  fn item_h() : Float do 0.13 end
-  fn item_x0() : Float do -0.22 end
+  fn item_w(m : Menu) : Float do if page(m) == page_slots() do 0.66 else 0.44 end end
+  fn item_h(m : Menu) : Float do if page(m) == page_slots() do 0.115 else 0.13 end end
+  fn item_x0(m : Menu) : Float do 0.0 -. item_w(m) /. 2.0 end
   doc "Bottom edge of item [i]; items run downward from the top of the panel."
-  fn item_y0(i : Int) : Float do 0.08 -. int_to_float(i) *. 0.18 end
-
-  doc "The seed field sits below the last item."
-  fn seed_y0() : Float do item_y0(items() - 1) -. 0.19 end
-  fn seed_x0() : Float do item_x0() end
-
-  doc "Which item (x, y) is over, or -1. Coordinates are NDC, y up."
-  fn item_at(x : Float, y : Float) : Int do item_at_go(x, y, 0) end
-  pfn item_at_go(x : Float, y : Float, i : Int) : Int do
-    if i >= items() do -1
-    else if x >= item_x0() && x <= item_x0() +. item_w()
-            && y >= item_y0(i) && y <= item_y0(i) +. item_h() do i
-    else item_at_go(x, y, i + 1) end end
+  fn item_y0(m : Menu, i : Int) : Float do
+    if page(m) == page_slots() do 0.32 -. int_to_float(i) *. 0.14
+    else 0.08 -. int_to_float(i) *. 0.18 end
   end
 
-  doc "The label drawn on item [i]."
-  fn label(i : Int) : String do
-    if i == item_new_game() do "NEW GAME" else "QUIT" end
+  doc "The main page has the seed field; the slots page does not."
+  fn has_seed_field(m : Menu) : Bool do page(m) == page_main() end
+  doc "The seed field sits below the last item."
+  fn seed_y0(m : Menu) : Float do item_y0(m, 2) -. 0.19 end
+  fn seed_x0(m : Menu) : Float do item_x0(m) end
+
+  doc "The title drawn above the panel: the game's name on the start screen, nothing otherwise."
+  fn title(m : Menu) : String do if is_start(m) do "CUBE FORGE" else "" end end
+  fn title_y() : Float do 0.44 end
+
+  doc "Which item (x, y) is over, or -1. Coordinates are NDC, y up."
+  fn item_at(m : Menu, x : Float, y : Float) : Int do item_at_go(m, x, y, 0) end
+  pfn item_at_go(m : Menu, x : Float, y : Float, i : Int) : Int do
+    if i >= items(m) do -1
+    else if x >= item_x0(m) && x <= item_x0(m) +. item_w(m)
+            && y >= item_y0(m, i) && y <= item_y0(m, i) +. item_h(m) do i
+    else item_at_go(m, x, y, i + 1) end end
+  end
+
+  -- ── Labels ────────────────────────────────────────────────────────────────
+
+  pfn two(n : Int) : String do (if n < 10 do "0" else "" end) ++ int_to_string(n) end
+
+  doc "The label drawn on item [i] of the current page."
+  fn label(m : Menu, i : Int) : String do
+    if page(m) == page_main() do
+      if i == item_new_game() do "NEW GAME"
+      else if i == item_second() do (if is_start(m) do "LOAD GAME" else "SAVE GAME" end)
+      else "QUIT" end end
+    else if i == item_back() do "BACK"
+    else
+      let slot = slot_of_item(i)
+      if status_kind(m) != status_none() && status_slot(m) == slot do
+        (if status_kind(m) == status_saved() do "SAVED" else "FAILED" end)
+      else
+        let info = Save.info_for(slot_infos(m), slot)
+        "SLOT " ++ int_to_string(slot) ++ (if Save.info_is_empty(info) do " EMPTY" else " SEED " ++ int_to_string(Save.info_seed(info)) end)
+      end
+    end end
+  end
+
+  doc "The second line of a used slot row: the save time as YYYY MM DD HH MM. Empty otherwise."
+  fn sublabel(m : Menu, i : Int) : String do
+    if page(m) != page_slots() || i >= Save.slots() do ""
+    else
+      let info = Save.info_for(slot_infos(m), slot_of_item(i))
+      if Save.info_is_empty(info) do "" else stamp(Save.info_saved_at(info)) end
+    end
+  end
+
+  doc "A unix time as YYYY MM DD HH MM (UTC)."
+  fn stamp(t : Int) : String do
+    match DateTime.from_timestamp(t) do
+      DateTime(Date(y, mo, d), Time(h, mi, _)) ->
+        int_to_string(y) ++ " " ++ two(mo) ++ " " ++ two(d) ++ " " ++ two(h) ++ " " ++ two(mi)
+    end
   end
 
 end

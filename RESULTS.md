@@ -1174,3 +1174,449 @@ read off the `state:` line specifically, since plain `grep mesh` also matches
 the startup line `mesh all (greedy sections)` and both sides came back empty and
 equal; and best-of-N across runs, worst-frame within a run, so a busy machine
 does not fail it while a real regression -- which fails every run -- still does.
+
+## Depressions fill, springs can be mined (2026-09-05)
+
+Two reports: flowing water did not fill a hollow, and springs could not be
+picked up. Design notes in `2026-09-04-springs-and-flow-design.md` (§1-3, "as
+built").
+
+**The hollow.** A probe with a rim spring over a 6x6 bowl filled it in ~900
+ticks with ~80% of the trickle evaporating on the way; a 10x10 bowl never
+filled, its volume oscillating between 5 and 56 units over 2500 ticks. Two
+causes. Spreading only across a difference of two built a pyramid -- seven at
+the inlet, one level less per cell outward -- so the pool's rim was thin water
+and evaporated; and evaporation was a flat per-cell rate on every thin cell,
+so any film wider than `evap` cells lost more than the trickle brought. Fixed
+by a levelling pass (one unit to a neighbour one below that has somewhere
+lower to send it -- no churn, the queue drains) and by weighting the
+evaporation draw by exposure (open sides over four). The 10x10 bowl now
+covers its floor by ~750 ticks and holds 890 units at 1500. Terraces two
+cells wide remain in a settled pool: the lookahead is one cell.
+
+**The spring.** The break ray ignored water unless hotbar slot 4 was
+selected, from before slots held items. Springs now stop the ray always; other
+water only while a water item is held.
+
+Cost, release, seed 7, `CF_WORKERS=1`, frames 800-900: 8 chunks ticking, ~120
+active cells, actors ~2.0 ms, 16-23 sections owed -- against 87 cells and 1.4
+ms before. Brooks are about twice as long: a brook cell has two open sides and
+now loses at half the old rate. Within the 2 ms target; `CF_EVAP` is the knob
+if it is not.
+
+## Block light (fungus phase 1, 2026-09-05)
+
+A second per-voxel light channel, seeded from `Light.emission(id)` instead of
+the sky and propagated by the same level-synchronous sweep (GAPS G63). Design
+`docs/superpowers/specs/2026-09-04-fungus-design.md` §6, plan
+`docs/superpowers/plans/2026-09-05-fungus-phase1-block-light.md`.
+
+| | before | after |
+|---|---|---|
+| startup light flood (debug, 8x8 chunks) | 521 ms (skylight only, §Lighting) | **642-708 ms** (skylight + block light, three runs) |
+| placing a glow cap: edit + relight both fields + section remesh (debug) | — | **52-61 ms** |
+| `scratch/frame_budget.sh`, 12 ms budget, release | 8.84-10.8 ms | **8.84 ms** best of 3, drained mesh equals full rebuild |
+
+The block flood costs roughly what the skylight flood does, because the sweep
+is the same fourteen passes over the same prefix of the field; a world with no
+emitters still pays it. The scan bound is `sky_floor + max_level()` rather than
+`sky_floor`, since block light climbs into the open air above the terrain where
+skylight has nothing to do -- the first flood test caught exactly that: a cap
+in the open lit five blocks up as 0.
+
+Verification: eleven new tests. Every incremental block relight (place, remove,
+wall off, world edge, a second emitter just outside the box) equals a full
+re-flood, `World.relight_marked` repairs both fields and unions the section
+marks, and a lit corner refuses to greedy-merge with dark ones. End to end:
+`CF_AUTOGLOW=100` places a glow cap three columns east of the player through
+`edit_block`; against the same pinned night scene without it (`CF_SEED=7
+CF_SUN=180 CF_TIME=0 CF_WEATHER=0 CF_AUTOSPIN=8 CF_NOMOUSE=1`, dump at frame
+200) the frames differ in **396 895 pixels**, all of them the lit ground and
+slope beside the cap. `docs/lighting-glow.png` is that frame.
+
+Two things worth knowing for the next emissive block:
+
+- The vertex layout did not grow. The shade float carries both channels as
+  `2 * round(blk * 255) + sky`, so every overlay that already pushed a plain
+  shade in [0, 1] decodes as sky-only with no change. The shader unpacks with
+  `floor(v * 0.5)`; interpolation across a triangle is exact because the
+  encoding is linear in both parts and the sky part never leaves [0, 1].
+- Greedy keys went from 6-bit to 10-bit corners (48 bits with the id). Block
+  light varies per vertex like skylight does, so it limits merge runs the
+  same way; the budget above says that is affordable at one emitter, and the
+  fungus phases that add thousands will have to measure it again.
+
+An `env $E` with an unquoted variable in zsh does NOT word-split: all the
+knobs became one `CF_NOMOUSE` value, the run had no seed, no sun pin and no
+frame cap, and the "off" dump was a daytime frame of a different world. Write
+the knobs out, or quote-split with `${=E}`.
+
+## Mycelium field (fungus phase 2, 2026-09-05)
+
+A per-column field beside the biome field: species, vigour (float 0..1),
+reach, hold, claimant. Design `docs/superpowers/specs/2026-09-04-fungus-design.md`
+§2-3, plan `docs/superpowers/plans/2026-09-05-fungus-phase2-field.md`.
+
+| | cost |
+|---|---|
+| `myc tick`, empty field (debug) | 2.3 ms with a 3x3 test per column; **0.21 ms** after a per-row pre-pass |
+| `myc tick`, one growing patch of ~120 columns (debug) | **0.8-0.95 ms** |
+| `biome tick` beside it, for scale (debug) | 6.3 ms |
+| `scratch/frame_budget.sh`, 12 ms budget, release | **8.85 ms** best of 3, drained mesh equals full rebuild |
+
+The tick is **pull-based**: every column reads its eight neighbours from the
+previous tick's arrays and writes only its own entry into five fresh arrays.
+That is the light-field idiom (GAPS G21/G63) applied to a 2D field: no array is
+read and then written in one pass, and the Scene's shared reference never
+forces a copy (G68). The five fresh arrays are ~200 KB a tick, the same order
+the biome tick already allocates.
+
+The per-row pre-pass is the whole of the empty-field cost story. One byte per
+row from one pass over the species array, and a row with nothing in it or
+beside it skips all n of its columns at once. Ten times cheaper than testing
+each column's 3x3 neighbourhood, and most of the world is empty most of the time.
+
+Reach is in **half-hops**: a straight hop costs 2, a diagonal 3, so a planting
+of radius 8 grows as an octagon. The first cut charged every hop 1 and grew
+squares (Chebyshev), the second charged diagonals 2 and grew diamonds
+(Manhattan); both looked drawn rather than grown. `docs/fungus-myc-map.png` is
+the octagon, seed 7, `CF_AUTOPLANT=100 CF_MYC_RATE=5000`, dumped at frame 3000
+with `CF_AUTOMAP CF_BIOME_MAP=1 CF_MYC_MAP=1`: a Meadowbell patch of 118 columns
+on grassland beside the marker, darker along the forest edge where its fitness
+falls off.
+
+Two test findings worth keeping:
+
+- **Test-module aliases leak across the combined test binary.** `alias
+  CubeForge.Myc as M` in `myc_test.march` resolved to `Mat4` at link time
+  (`_CubeForge.Math.Mat4.vigour_u8` undefined), because `mapview_test.march`
+  already aliases `Mat4` as `M` and every test module compiles into one unit.
+  Test aliases must be unique across `test/`. Recorded as GAPS G69.
+- Two contest tests were wrong before the tick was: one placed the challenger
+  ten columns from the incumbent with a reach of eight, the other expected a
+  species with fitness 0.33 to spread past the 0.6 spread threshold. Both
+  "failures" were the rules doing what the spec says; the tests were corrected
+  to assert what reach and the threshold actually predict.
+
+## Mycelium blocks (fungus phase 3, 2026-09-05)
+
+The field reaches the world: a held column's surface becomes "mycelium over
+<base>" and a lost column's surface goes back, through a budgeted queue on the
+retexture slots. Plan `docs/superpowers/plans/2026-09-05-fungus-phase3-blocks.md`.
+
+| | cost (debug) |
+|---|---|
+| `myc migrate`, no glow change: set_block + shown + geometry marks | **0.013 ms per column** (12 columns in 0.16 ms) |
+| `myc migrate`, a glow change: the above plus a block-light relight | **10.4 ms per column** |
+| `scratch/frame_budget.sh`, 12 ms budget, release, no fungus in the scenario | **8.81 ms** best of 3, drained mesh equals full rebuild |
+
+So two budgets. `CF_MYC_BUDGET` (32 per period, split over the two slots) bounds
+the cheap kind, and `CF_MYC_GLOW_BUDGET` (default **1** per slot, measured at 2
+and lowered) bounds the relights; a glow column skipped for budget stays a
+candidate and lands on a later slot. A 120-column glowing patch therefore takes
+about ten seconds to light up fully, which reads as the glow "coming on".
+
+**Species is not in the block id.** Ids 23..43 encode base x glow (seven bases,
+three glow levels), so `Light.emission` stays a pure function of the id and the
+base can be restored when the network leaves. The species the surface shows
+lives in `World.shown`, one byte per column, written in the same migration step
+as the block; the mesher reads it into the greedy key (bits 48..55) and picks
+one of 42 per-(base, species) texture layers. A species change with no glow
+change is therefore no block edit at all -- `shown` moves and the section is
+marked, the migration list keys on `wanted != shown` -- which is what keeps a
+contest border cheap. The rejected alternative, species in the id, was 42 ids
+now and seven more per future species.
+
+Texture generators never read the texture array: each mycelium layer
+reproduces its base from the base's formula and overlays threads, because a
+read before a write copies all 60 KB per texel (GAPS G21).
+
+Mycelium emission is **dim 3, bright 6**, not the spec's 4: at 4 a lone bright
+column lifted the ground by about 25/255 at night, which did not read as lit.
+`docs/fungus-myc-ground.png` is a Meadowbell patch by day (seed 7,
+`CF_AUTOPLANT=100 CF_MYC_RATE=5000`, frame 2000); `docs/fungus-myc-glow.png`
+is a forced Lanterncap column at night (`CF_AUTOPLANT_SPECIES=4`, frame 400,
+before it withers: it is unfit on grassland and is shown from roughly frame
+120 to 640).
+
+Finding: a dump at frame 1200 of that run showed no glow and a world hash equal
+to the run without the planting. The column had been shown and then migrated
+back, so the blocks matched again -- the hash cannot see a change that undoes
+itself. The `mycelium at <column>` line in the dump summary (species, vigour,
+wanted, shown, surface id, block light) is what settled it; it stays.
+
+## Spores and planting (fungus phase 4, 2026-09-05)
+
+The loop closes. Plan `docs/superpowers/plans/2026-09-05-fungus-phase4-spores.md`.
+
+| | cost |
+|---|---|
+| startup, seed 7, debug: `Biome.build` | 675 ms (unchanged; it now runs before the light flood instead of after meshing) |
+| startup: `Myc.wild` — 14 patches, 2,527 columns across six species | **8 ms** |
+| startup: applying those as blocks and `shown`, one batched write per chunk | **5 ms** (700 ms through `World.set_block`, one 64 KB chunk copy per column) |
+| `scratch/frame_budget.sh`, 12 ms budget, release, wild fungus live at seed 7 | **9.24 ms** best of 3 (9.37 and 12.09 seen), drained mesh equals full rebuild |
+
+Wild patches are written before the light flood on purpose: glowing wild
+mycelium is lit by the flood for free, where relighting it column by column at
+the glow budget would take a ten-second sunrise on every new world.
+
+The budget's worst run moved from 8.8 to 12.1 ms with fungus live. The pinned
+scenario now migrates real patches on its retexture slots, one glow relight per
+slot among them, and a phase frame that already carried the biome retexture
+can now carry that too. Best-of-3 still clears, which is what the script
+asserts, but the headroom the budget was built on is spent; the fruit phase
+measures before it adds anything to a phase frame.
+
+`docs/fungus-wild-map.png`: the wild patches on the map at seed 7 -- Meadowbell
+on the grassland, Frostcap on the snow, Marshlight on the wetland, Lanterncap
+in the forest, Sunshelf on the sand. `docs/fungus-spores.png`: the item path end
+to end (`CF_WILD=0 CF_AUTOSPORE=100 CF_MYC_RATE=5000`, frame 2000): three
+Meadowbell spores given, one used on the column three east through the same
+function a hotbar spore takes, the hotbar showing the spore icon with a count
+of 2, the patch grown, and the ground readout `MEADOWBELL 100` at the top left.
+
+The readout is uppercase because the HUD glyph set is; punctuation renders
+blank, so `Lanterncap 25%` reads `LANTERNCAP 25`. Its buffer rebuilds only when
+the string changes, in `refresh_hud` beside the hotbar, which already had the
+right shape for "rebuild on change and upload".
+
+The "nothing grows here" readout is unreachable with six species: every
+climate has at least one band over it. It stays for a roster that leaves gaps.
+
+## Fruit (fungus phases 5-6, 2026-09-05)
+
+Mushroom bodies of three tiers on mature mycelium. Plan
+`docs/superpowers/plans/2026-09-05-fungus-phase5-fruit.md`.
+
+| | debug | release |
+|---|---|---|
+| one body grown or felled (stamp/fell + both-field relight + occupancy sync + marks), any tier | 32-44 ms | **6-7 ms** (a tree: 7-8 ms) |
+| the candidate scan, 2,048 columns per fruit slot | 2-3 ms | **0.3-0.6 ms** |
+| `myc tick` on the field slot with fourteen wild patches live | -- | 3.2 ms (beside the 1.7 ms biome tick) |
+| `scratch/frame_budget.sh`, 12 ms budget, release, wild fungus and fruit live | -- | **11.09 ms** best of 3 (12.21 and a 55 ms outlier seen; the pinned run's own worst frame was 10.0 ms when re-run with timings) |
+
+The fruit phase runs on the vegetation slot on the periods vegetation skips, so
+no frame carries a tree and a mushroom at once; a body is a tree-sized edit and
+the budget is one per slot.
+
+**A cursor bug, found here, pre-dates the fungus.** Both every-other-period
+phases keyed their rolling scan window on the tick count: `(tick * 2048) %
+16384` over eight windows, visited on even ticks only, reaches the even four.
+Vegetation had been growing and felling in half the world since it landed
+(RESULTS 2026-09-04 measured it without noticing); fruit inherited the bug on
+the odd ticks and it showed at once, as a mature patch whose centre never
+fruited. Both now key on the period count. Trees grow everywhere from this
+commit, which moves the pinned scenario's mesh hash.
+
+**Glow migrations batch under one relight.** A planted glowing patch changes
+the emission of every column it covers, and phase 3's rule -- one relight per
+retexture slot -- would have taken fifteen seconds to show a 181-column
+Marshlight patch. Now the first glow column in a slot anchors, further glow
+columns within 4 of it are taken too, and the slot ends with a single
+`relight_block_marked` at the anchor: every emitter in that 9x9 is within 4
+of the anchor and shines at most 6, so the radius-15 relight box covers them
+all. `CF_MYC_GLOW_BUDGET` is gone; `CF_MYC_BUDGET` defaults to 64 per period.
+Migration of 16 glowing columns: 12 ms debug in one slot.
+
+`docs/fungus-fruit.png`: small Meadowbell bodies on a planted patch by day
+(`CF_WILD=0 CF_AUTOPLANT=100 CF_MYC_RATE=5000 CF_FRUIT_RATE=2000`, frame 2000).
+They are cutout cubes, the choice the vegetation design made for leaves; the
+silhouette reads as a mushroom from the side and as a splayed shape from above,
+which a top-face cap texture would fix. `docs/fungus-giant.png`: a mature
+Marshlight patch at night (`CF_AUTOPLANT_SPECIES=5 CF_AUTOPLANT_MATURE=1
+CF_MYC_RATE=0 CF_FRUIT_RATE=5000`, frame 1200): the mycelium carpet-glows at
+emission 6, a giant stands on the crosshair column (`surface 61 at y 90, block
+light above 9` in the dump), its cap above the horizontal view. On the wild
+world at seed 7 a 2,100-frame run at `CF_FRUIT_RATE=2000` grew 45 bodies: 39
+small, 5 medium, 1 giant.
+
+`CF_AUTOPLANT_MATURE=1` plants a full-vigour patch at once, which with
+`CF_MYC_RATE=0` stays whatever the climate says: the way to put a chosen
+species' fruit in front of the camera without waiting.
+
+
+## Mycelium tick: the active set (2026-09-05)
+
+Plan `docs/superpowers/plans/2026-09-05-myc-tick-active-set.md`. Release,
+pinned wild world at seed 7 (fourteen patches, 2,527 columns), the `myc tick`
+print on the field slot:
+
+| | before | after |
+|---|---|---|
+| first ninety seconds, wild-patch rims easing from full vigour to their fractional fitness | 3.2 ms | **1.1-1.3 ms** |
+| settled (dirty 3-5 columns) | 3.2 ms | **0.30-0.35 ms** |
+| during a fast planted growth (`CF_MYC_RATE=5000`) | -- | 0.17-0.37 ms median, 4.6 ms on the tick the patch is planted |
+| `scratch/frame_budget.sh`, 12 ms budget | 8.74 ms | **8.85-9.09 ms** |
+
+Four things had to be true before a settled world ticked cheaply, and each
+one was found by the counts in the print (`biome active`, `myc dirty`):
+
+- **A dirty flag per column**, set when the column changed or is unsettled,
+  and a column is looked at when it or a neighbour is dirty. The fresh arrays
+  start as memcpys of the old ones (`u8_blit` / `f32_blit`; vigour moved to
+  f32 to be blittable), so a column not looked at costs nothing. This alone
+  went 3.2 -> 2.1 ms: not enough, because
+- **the biome flags ~3,500 columns active** for the first half hour of a
+  session (its easing toward moisture targets that the water actors keep
+  moving), and waking on those flags re-evaluated every patch column under
+  them every tick. The tick now remembers the climate each column was last
+  evaluated at and wakes only when it has moved by `climate_eps()` = 0.004
+  -- about 0.07 of fitness on a band edge, every fifty ticks under the
+  biome's day-long easing instead of every tick. No reporting contract with
+  the biome: a climate that moves under a column wakes it by itself.
+- **f32 storage against f64 targets**: a column whose fitness is not
+  f32-representable could never sit exactly on it and never settled. Settled
+  is now within `settle_eps()` = 0.002 of the target, below what the map or
+  the readout can show.
+- **Neighbours read only species, reach, and whether vigour clears the spread
+  threshold**, so a column easing toward its target re-evaluates itself
+  (dirty 1) without waking its 3x3 (dirty 2).
+
+The remaining 0.3 ms is the per-column scan for dirty flags and climate
+movement (16k columns, six reads each) plus the memcpys; the 1.2 ms of the
+first ninety seconds is ~600 rim columns legitimately easing at 1/540 per
+tick. `tick_all` looks at every column and is the oracle: under a static
+climate the two agree bit for bit over 300 ticks of a contest (tested); under
+a drifting climate the active tick lags by at most `climate_eps` of climate,
+by design.
+
+## Save and load: a start screen and five slots (2026-09-05)
+
+Design in `docs/superpowers/specs/2026-09-05-save-load-design.md`, plan in
+`docs/superpowers/plans/2026-09-05-save-load.md`.
+
+**What shipped.** A start screen (CUBE FORGE, NEW GAME, LOAD GAME, QUIT, the
+seed field) over the freshly generated world; SAVE GAME in the escape menu;
+one slots page for both, five rows and BACK, each used row naming its seed and
+save time. A slot is a directory of 64 raw chunk files plus a text header
+written last, 4 MiB. A save restores the blocks, the player, the inventory,
+the seconds into the day and the weather phase. `CubeForge.Save` owns the
+format; `Menu` grew a mode and a page; `run_session` takes a seed or a slot.
+
+**Round trip** (`scratch/saveload.sh`, seed 7, save at frame 201, load at
+frame 30 of a fresh process):
+
+| | |
+|---|---|
+| save, 64 chunk files + header | 8.7-12.7 ms |
+| read + validate a slot | 4-5 ms |
+| session rebuild after the read (light, occupancy, mesh, upload) | as a new game, ~0.6 s |
+| world hash at save vs at load | 196060934 = 196060934 |
+| player position at exit, both runs | (48.5, 82, 78.5) |
+
+The frame dumps differ by ~15k pixels because the loaded session's first
+water tick and its spray differ, not the terrain; the world hash is the
+oracle.
+
+**Water actors read their own chunk file.** Messages cannot carry byte
+arrays (GAPS G44), so `WLoadSlot` has each actor read its chunk and its four
+neighbours' edge columns from the slot: 64 x 5 reads of 64 KiB. Marked in the
+code as a stopgap until a message can carry the chunk the frame loop already
+read.
+
+**Two findings on the way.**
+
+- *The escape menu had been invisible.* The menu uploaded to VBO slot 247,
+  and the spray pool added later took `CF_SPRAY_SLOT 247` in the shim, so
+  spray's per-frame upload replaced the menu's vertices. The CF_AUTOMENU
+  restart test checks hashes, not pixels, so nothing caught it. Found here
+  from a frame dump of the start screen; fixed on main in the same hour by
+  05c9637, which moved spray to 246, so the menu stays on 247.
+- *Frame dumps of a menu are possible headlessly*: `CF_AUTOSLOTS=<frame>`
+  opens the slots page at that frame, the way CF_AUTOMENU opens the menu, so
+  a layout change can be looked at from a script.
+
+**Cost.** Nothing on the frame path: the slot listing is read once when the
+page opens, and the save is synchronous on the click (one ~10 ms frame).
+
+## Fungus follow-ups: cap faces, bodies fall with the network, the scan pre-pass (2026-09-05)
+
+| | before | after |
+|---|---|---|
+| fruit candidate scan, 2,048 columns per fruit slot, release, wild world | 0.3-0.6 ms | **0.03-0.05 ms** |
+| `scratch/frame_budget.sh` | 8.85-9.3 ms | 9.35 ms best of 3 (two runs at 11.3, the phase costs unchanged) |
+
+**Small mushrooms** show their cap layer on the top and bottom faces and the
+silhouette on the sides; from the air they read as a cap now, not a splayed
+shape. No new layers: the cap block's texture already existed.
+
+**Bodies fall with the network.** The fruit scan used to read two blocks per
+column to find bodies whose ground had lost their species and list them for
+felling. Now the migration that clears a column's ground fells the body
+standing on it in the same step (its cap glow joins the slot's relight
+anchor), and the scan only grows. That let the scan take a per-row species
+pre-pass like the tick's: an empty row costs one byte, and a column is read
+from the world only after its species, vigour, shown, canonical and roll
+checks all pass. Verified with a mature Lanterncap patch on grassland at
+`CF_MYC_RATE=300 CF_FRUIT_RATE=100000`: three bodies at frame 900 with zero
+orphans; by frame 5000 the patch had withered to the 24 lakeside columns
+still damp enough, one body stood on them, and zero orphans -- the two whose
+ground went were felled with it. `orphans` is now in the dump summary.
+
+**A bug found on the way.** The migration read the surface at the heightmap's
+top, and a body standing on a column IS the heightmap's top there. The cap
+could not carry mycelium, so the column's `shown` was cleared, and the next
+scan saw a body on ground that showed nothing and felled it. Every body
+decayed within a scan window of growing. The migration, `can_plant` and the
+dump diagnostic now read the ground through `Fruit.base_of`.
+
+
+## Fungus climate feedback (2026-09-05)
+
+The network changes the ground it holds. Plan
+`docs/superpowers/plans/2026-09-05-fungus-climate-feedback.md`.
+
+| species | temperature pull | moisture pull |
+|---|---|---|
+| Frostcap | -0.09 | 0 |
+| Pinewart | -0.04 | +0.07 |
+| Meadowbell | 0 | -0.09 |
+| Lanterncap | 0 | +0.09 |
+| Marshlight | +0.03 | +0.12 |
+| Sunshelf | +0.09 | -0.09 |
+
+Distinct species in a column's 3x3 sum, capped at 0.3 per axis; `CF_MYC_FEEDBACK`
+scales. Every pull points at the species' own core, which is the stability
+argument the original spec asked for: a species never weakens its own footing,
+so the loop only reinforces and cannot cycle; where two species pull against
+each other the sum favours one, which then strengthens itself through the
+contest that already resolves mixed ground.
+
+Seed 7, spawn, ground moisture 0.25 (grassland), `CF_BIOME_RATE=100000` so the
+climate eases within the run:
+
+| planting | offset (moisture) | eased moisture | biome |
+|---|---|---|---|
+| a mature Marshlight patch alone | +0.08 (at the first tuning) | 0.33 | grassland |
+| Marshlight + Lanterncap + Pinewart, one interleaved patch (`CF_AUTOPLANT_SPECIES2/3` with `CF_AUTOPLANT_MATURE`) | +0.28 | **0.53** | **forest** |
+
+The first tuning (pulls 0.05-0.08, cap 0.2) reached +0.19 with the three and
+left the ground at 0.44: nothing could cross from a band's middle. The pulls
+went up so that the largest single pull (0.12) is under the 0.25 from
+grassland's centre to the damp threshold and the three damp species together
+(0.28) are over it. Three patches planted three columns apart did NOT mix:
+`plant_patch` overwrites, so the collection only met along thin rings. The
+interleaved patch is what a player would plant on purpose, alternating
+species; it is `Myc.plant_mix`. `docs/fungus-feedback-map.png` is the map at
+frame 1200: the patch, and the forest colour under it where grassland was.
+
+**Cost.** The first version scaled and copied the whole 32k-entry offset array
+every tick and had the biome compare four floats per column: the field slot
+went from 1.7 to 8.7 ms in release and the budget failed at 12.9. Neither pass
+was needed. The field keeps its raw pulls up to date where species change
+(nine columns per change), reports which rows moved, and the biome scales and
+clamps only the columns it evaluates, looking at a whole row when its pulls
+moved. Field slot now: biome tick 2.7 ms (1.7 before feedback; the extra is
+the patch rows it evaluates while their offsets settle), mycelium tick 1.2-1.4
+ms; budget **9.84 ms**.
+
+Two lessons for the next per-column array: a plain 32k `set_f32` pass in March
+costs 1.8 ms in release, so anything per tick must be proportional to change,
+not to the world; and a merge of three scripted plantings is not a mix.
+
+**Save/load, merged in from main during this work.** A load rebuilds the
+mycelium field from the seed (`Myc.wild`), so wild patches return but any
+planted or spread network is lost, and its surface blocks migrate back to
+bare ground; the biome's eased axes are rebuilt at target the same way. Both
+are the "cannot be rebuilt from the voxels" risk the two specs carry. Listed
+in `todos.md`.
