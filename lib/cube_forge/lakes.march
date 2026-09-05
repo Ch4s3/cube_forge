@@ -1,0 +1,135 @@
+-- Lakes — every closed basin of the heightmap filled to its rim.
+--
+-- Water at generation reached exactly sea level: a bowl on a plateau, a
+-- cirque under a ridge, a valley dammed by a terrace rim were dry. The pour
+-- finds each basin's spill level -- the lowest rim water could leave over --
+-- and the generator fills the basin to it with source blocks, the same block
+-- the sea is made of.
+--
+-- The pour is the priority flood, done the level-sweep way this codebase
+-- uses for light and for distance-to-water (one array threaded through every
+-- write, never wrapped -- GAPS G68): the map's border drains off-world, so
+-- every border column is pending at its own height; then for each level from
+-- 0 up, every pending column at that level is settled and offers its four
+-- neighbours max(their height, the level). A column settled above its own
+-- height is under a lake whose surface is that level, and every column of one
+-- basin gets the same level by construction.
+--
+-- The table is a pure function of the seed and the world's size, so the water
+-- actors (which rebuild their chunks from the seed, and cannot be sent an
+-- array -- GAPS G44) compute it themselves.
+mod CubeForge.Lakes do
+
+  alias CubeForge.Noise as N
+
+  -- The array holds, per column, a pending spill level (< done_mark()) or a
+  -- settled one (+ done_mark()); the slot past the end is the pass's changed flag.
+  fn done_mark() : Int do 1000 end
+  fn unset() : Int do 999 end
+
+  pfn at(a : NativeIntArr, i : Int) : Int do NativeArray.get_int(a, i) end
+
+  -- Relax neighbour [j] the level [lv]: it takes max(its height, lv) if that is
+  -- lower than what it has. A neighbour brought to exactly lv is pending at
+  -- this level, and if its index is behind the scan the pass must run again.
+  pfn relax(sp : NativeIntArr, hs : NativeIntArr, side : Int, j : Int, lv : Int) : NativeIntArr do
+    let v = at(sp, j)
+    if v >= done_mark() do sp
+    else
+      let cand = Math.max_int(at(hs, j), lv)
+      if cand >= v do sp
+      else
+        let sp1 = NativeArray.set_int(sp, j, cand)
+        if cand == lv do NativeArray.set_int(sp1, side * side, 1) else sp1 end
+      end
+    end
+  end
+
+  pfn pass_go(sp : NativeIntArr, hs : NativeIntArr, side : Int, lv : Int, i : Int) : NativeIntArr do
+    if i >= side * side do sp
+    else if at(sp, i) != lv do pass_go(sp, hs, side, lv, i + 1)
+    else
+      let x = i % side
+      let z = i / side
+      let sp1 = NativeArray.set_int(sp, i, lv + done_mark())
+      let sp2 = if x > 0 do relax(sp1, hs, side, i - 1, lv) else sp1 end
+      let sp3 = if x < side - 1 do relax(sp2, hs, side, i + 1, lv) else sp2 end
+      let sp4 = if z > 0 do relax(sp3, hs, side, i - side, lv) else sp3 end
+      let sp5 = if z < side - 1 do relax(sp4, hs, side, i + side, lv) else sp4 end
+      pass_go(sp5, hs, side, lv, i + 1)
+    end end
+  end
+
+  pfn level_go(sp : NativeIntArr, hs : NativeIntArr, side : Int, lv : Int) : NativeIntArr do
+    if lv > 255 do sp
+    else
+      let sp1 = pass_go(NativeArray.set_int(sp, side * side, 0), hs, side, lv, 0)
+      if at(sp1, side * side) == 1 do level_go(sp1, hs, side, lv) else level_go(sp1, hs, side, lv + 1) end
+    end
+  end
+
+  -- Border columns pending at their own height; the interior unset.
+  pfn seed_go(sp : NativeIntArr, hs : NativeIntArr, side : Int, i : Int) : NativeIntArr do
+    if i >= side * side do sp
+    else
+      let x = i % side
+      let z = i / side
+      let border = x == 0 || z == 0 || x == side - 1 || z == side - 1
+      seed_go(NativeArray.set_int(sp, i, if border do at(hs, i) else unset() end), hs, side, i + 1)
+    end
+  end
+
+  pfn finish_go(sp : NativeIntArr, hs : NativeIntArr, side : Int, i : Int, out : NativeIntArr) : NativeIntArr do
+    if i >= side * side do out
+    else
+      let lv = at(sp, i) - done_mark()
+      finish_go(sp, hs, side, i + 1, NativeArray.set_int(out, i, if lv > at(hs, i) do lv else 0 end))
+    end
+  end
+
+  doc """
+  The pour over a square heightmap of [side]: per column, the lake surface
+  height, or 0 where the column is not under a lake. The border drains.
+  """
+  fn pour(hs : NativeIntArr, side : Int) : NativeIntArr do
+    let sp = level_go(seed_go(NativeArray.make_int(side * side + 1, 0), hs, side, 0), hs, side, 0)
+    finish_go(sp, hs, side, 0, NativeArray.make_int(side * side, 0))
+  end
+
+  pfn heights_go(hs : NativeIntArr, side : Int, seed : Int, i : Int) : NativeIntArr do
+    if i >= side * side do hs
+    else heights_go(NativeArray.set_int(hs, i, N.height(i % side, i / side, seed)), side, seed, i + 1) end
+  end
+  pfn to_u8_go(lv : NativeIntArr, out : NativeU8Arr, i : Int, count : Int) : NativeU8Arr do
+    if i >= count do out
+    else to_u8_go(lv, NativeArray.set_u8(out, i, Math.min_int(at(lv, i), 255)), i + 1, count) end
+  end
+
+  doc "Lake surface levels for a world of [n] chunks a side at [seed]: one byte per column, 0 where there is no lake. The table every chunk and every water actor generates against."
+  fn levels(seed : Int, n : Int) : NativeU8Arr do
+    let side = 16 * n
+    let lv = pour(heights_go(NativeArray.make_int(side * side, 0), side, seed, 0), side)
+    to_u8_go(lv, NativeArray.make_u8(side * side, 0), 0, side * side)
+  end
+
+  doc "No lakes: the empty table, which level_at reads as 0 everywhere."
+  fn none() : NativeU8Arr do NativeArray.make_u8(0, 0) end
+
+  doc "The lake level at world column (wx, wz), 0 outside the world, off the table, or where there is none."
+  fn level_at(lk : NativeU8Arr, n : Int, wx : Int, wz : Int) : Int do
+    let side = 16 * n
+    if NativeArray.length_u8(lk) == 0 || wx < 0 || wz < 0 || wx >= side || wz >= side do 0
+    else NativeArray.get_u8(lk, wx + side * wz) end
+  end
+
+  pfn count_go(lk : NativeU8Arr, i : Int, count : Int, cols : Int, top : Int) : Int do
+    if i >= count do cols * 1000 + top
+    else
+      let v = NativeArray.get_u8(lk, i)
+      count_go(lk, i + 1, count, if v > 0 do cols + 1 else cols end, if v > top do v else top end)
+    end
+  end
+  doc "Lake columns * 1000 + the highest lake surface, for the stats line."
+  fn summary(lk : NativeU8Arr) : Int do count_go(lk, 0, NativeArray.length_u8(lk), 0, 0) end
+
+end

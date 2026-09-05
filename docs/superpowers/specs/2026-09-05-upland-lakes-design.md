@@ -77,15 +77,35 @@ Measure it (§6) rather than adding a knob.
 
 ## 6. Measured
 
-- Lakes per world, columns under lakes, and the largest, for five seeds at
-  ages 0/50/100 (`CF_TERRAIN_STATS` gains a lakes line; `CF_TERRAIN_MAP`
-  draws them as `~` like the sea).
-- `Lakes.levels` time, once and per actor.
-- Water tick cost with lakes: the spring list length per chunk and
-  `kind_pending` after warm-up.
-- Underwater rendering: the camera-under-water test and the underwater quad
-  key on the block at the camera, not on `sea_level()` — verify, since a
-  lake at 80 is the first water above 62.
+*As built, 2026-09-05.* Three things moved from the design above:
+
+- **No caps.** Neither the depth cap nor the minimum size was built: both
+  need basins labelled, and the measurement did not ask for them. The
+  deepest lakes are mountain cirques (a surface at 100-125 on seeds 7, 99
+  and 2024); a one-column dip is a single inert source.
+- **The actors compute the table themselves**, `Lakes.levels(seed, n)`, 30
+  ms each on this machine (16,384 scalar heights plus the sweep), once at
+  load; the frame loop computes it once for `World.generate`.
+- **The spring list** (`Water.is_spring_at`) reads its neighbours through the
+  edge mirrors, so a lake crossing a chunk edge is all interior; and the
+  list is refreshed for a cell and its six neighbours only when a source
+  came or went or a cell's openness flipped (`springs_after`), so the sim's
+  hot path does not pay for it. The render side (`is_world_spring`) applies
+  the same rule for spray, so a lake is not a thousand emitters.
+
+Lake columns by seed and age, `CF_TERRAIN_STATS` (of 16,384):
+
+| seed | age 0 | age 50 | age 100 |
+|---|---|---|---|
+| 7 | 729 | 420 | 206 |
+| 1234 | 865 | 1041 | 964 |
+| 99 | 1937 | 2321 | 2288 |
+| 2024 | 2283 | 2097 | 1749 |
+
+Seed 99 at age 50, windowed, 900 frames: 4 spray springs for 2,321 lake
+columns, worst frame 14.6 ms, flowing water 85 cells at frame 800 (the
+outlets' brooks). The map draws lakes as `~`: a cirque under the snowfields,
+a plateau lake, lowland ponds strung along the valleys.
 
 ## 7. Tests
 

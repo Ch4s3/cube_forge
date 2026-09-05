@@ -690,8 +690,8 @@ mod CubeForge do
         let t0 = Win.time()
         let w0 = World.set_occupied(World.set_block(world, x, y, z, id), x, y, z, CubeForge.Light.occludes(id))
         let bio1 = Biome.note_edit(bio, w0, x, y, z, id)
-        let was_spring = y > Chunk.sea_level() && Chunk.is_source(World.block_at(world, x, y, z))
-        let is_spring = y > Chunk.sea_level() && Chunk.is_source(id)
+        let was_spring = is_world_spring(world, x, y, z)
+        let is_spring = is_world_spring(w0, x, y, z)
         if was_spring != is_spring do Win.spring_set(x, y, z, is_spring) else () end
         if is_spring && !was_spring do Win.spray_at(x, y, z, 40) else () end
         Win.gfx_set_voxel(x, y, z, CubeForge.Light.occludes(id))
@@ -1036,6 +1036,14 @@ mod CubeForge do
   -- Water on the surface at (px+3, pz+dz) for dz in [k, 4]: nine columns east of the player.
   -- Every source above sea level: told to the shim, and its chunk flagged so the
   -- water actor ticks from the first frame (a chunk with a spring is always live).
+  -- A source above sea level with somewhere to give (Water.is_spring_at, over
+  -- the world): the interior of an upland lake is not one, its outlet is.
+  pfn is_world_spring(w : CubeForge.World.World, x : Int, y : Int, z : Int) : Bool do
+    y > Chunk.sea_level() && Chunk.is_source(World.block_at(w, x, y, z))
+      && (Chunk.open_for_spring(World.block_at(w, x + 1, y, z)) || Chunk.open_for_spring(World.block_at(w, x - 1, y, z))
+          || Chunk.open_for_spring(World.block_at(w, x, y, z + 1)) || Chunk.open_for_spring(World.block_at(w, x, y, z - 1))
+          || Chunk.open_for_spring(World.block_at(w, x, y - 1, z)))
+  end
   pfn spring_flags(w : CubeForge.World.World, f : CubeForge.Biome.Field, i : Int, n : Int, flags : NativeIntArr) : NativeIntArr do
     if i >= n * n * 256 do
       println("springs: " ++ int_to_string(Win.spring_count()))
@@ -1044,7 +1052,7 @@ mod CubeForge do
       let x = i % (n * 16)
       let z = i / (n * 16)
       let h = Biome.height_of(f, x, z)
-      if h > Chunk.sea_level() && Chunk.is_source(World.block_at(w, x, h, z)) do
+      if is_world_spring(w, x, h, z) do
         Win.spring_set(x, h, z, true)
         println("  spring at " ++ int_to_string(x) ++ "," ++ int_to_string(h) ++ "," ++ int_to_string(z))
         spring_flags(w, f, i + 1, n, NativeArray.set_int(flags, World.floor_div16(x) + n * World.floor_div16(z), 1))
@@ -2345,8 +2353,8 @@ mod CubeForge do
       else spring_in_2x2(x, z, seed, k + 1) end
     end
   end
-  pfn map_char(h : Int, sfc : Int) : String do
-    if h < Chunk.sea_level() do "~"
+  pfn map_char(h : Int, sfc : Int, lake : Int) : String do
+    if h < Chunk.sea_level() || lake > 0 do "~"
     else if sfc == Chunk.sand() do "."
     else if sfc == Chunk.granite() do "#"
     else if sfc == Chunk.snow() do "*"
@@ -2355,19 +2363,19 @@ mod CubeForge do
     else if h < 86 do "="
     else "+" end end end end end end end
   end
-  pfn map_row_go(n : Int, z : Int, x : Int, seed : Int, acc : String) : String do
+  pfn map_row_go(n : Int, z : Int, x : Int, seed : Int, lk : NativeU8Arr, acc : String) : String do
     if x >= 16 * n do acc
     else
       let h = CubeForge.Noise.height(x, z, seed)
-      let ch = if spring_in_2x2(x, z, seed, 0) do "s" else map_char(h, Chunk.surface_id(h, CubeForge.Noise.slope(x, z, seed))) end
-      map_row_go(n, z, x + 2, seed, acc ++ ch)
+      let ch = if spring_in_2x2(x, z, seed, 0) do "s" else map_char(h, Chunk.surface_id(h, CubeForge.Noise.slope(x, z, seed)), CubeForge.Lakes.level_at(lk, n, x, z)) end
+      map_row_go(n, z, x + 2, seed, lk, acc ++ ch)
     end
   end
-  pfn map_go(n : Int, z : Int, seed : Int) : Unit do
+  pfn map_go(n : Int, z : Int, seed : Int, lk : NativeU8Arr) : Unit do
     if z >= 16 * n do ()
     else
-      println("  " ++ map_row_go(n, z, 0, seed, ""))
-      map_go(n, z + 2, seed)
+      println("  " ++ map_row_go(n, z, 0, seed, lk, ""))
+      map_go(n, z + 2, seed, lk)
     end
   end
 
@@ -2578,8 +2586,12 @@ mod CubeForge do
     if Env.get_int("CF_TERRAIN_STATS", 0) == 1 do
       stats_go(n, 0, seed, 999, 0, 0, 0, 0, 0, 0, 0, 0, 0)
       springs_go(n, 0, seed, 0, 0)
+      let tl0 = System.monotonic_time()
+      let lk = CubeForge.Lakes.levels(seed, n)
+      let lsum = CubeForge.Lakes.summary(lk)
+      println("  lakes: " ++ int_to_string(lsum / 1000) ++ " columns, highest surface " ++ int_to_string(lsum % 1000) ++ ", table in " ++ int_to_string(System.monotonic_time() - tl0) ++ " ms")
       println("  SIMD/scalar height mismatches: " ++ int_to_string(mismatch_go(n, 0, seed, 0)) ++ " of " ++ int_to_string(16 * n * 16 * n) ++ " columns")
-      if Env.get_int("CF_TERRAIN_MAP", 0) == 1 do map_go(n, 0, seed) else () end
+      if Env.get_int("CF_TERRAIN_MAP", 0) == 1 do map_go(n, 0, seed, lk) else () end
     else () end
     if headless do
       let tn0 = System.monotonic_time()

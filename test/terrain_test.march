@@ -216,11 +216,12 @@ mod CubeForge.Test.Terrain do
     end
     test "sediment lies under a floodplain and nowhere else" do
       let s = N.with_age(5, 50)
-      Test.assert_eq_int(C.sediment_id(1, 0.9, C.sea_level(), s), C.mud(), "wet floor is mud")
-      Test.assert_eq_int(C.sediment_id(1, 0.9, C.sea_level() + 6, s), C.clay(), "dry floor is clay")
-      Test.assert_eq_int(C.sediment_id(1, 0.1, C.sea_level() + 6, s), 2, "outside the valley is dirt")
-      Test.assert_eq_int(C.sediment_id(C.sand(), 0.9, C.sea_level(), s), C.sand(), "a sand shore stays sand")
-      Test.assert_eq_int(C.sediment_id(C.granite(), 0.9, 80, s), C.granite(), "a cliff stays granite")
+      Test.assert_eq_int(C.sediment_id(1, 0.9, C.sea_level(), C.sea_level(), s), C.mud(), "wet floor is mud")
+      Test.assert_eq_int(C.sediment_id(1, 0.9, C.sea_level() + 6, C.sea_level(), s), C.clay(), "dry floor is clay")
+      Test.assert_eq_int(C.sediment_id(1, 0.1, C.sea_level() + 6, C.sea_level(), s), 2, "outside the valley is dirt")
+      Test.assert_eq_int(C.sediment_id(C.sand(), 0.9, C.sea_level(), C.sea_level(), s), C.sand(), "a sand shore stays sand")
+      Test.assert_eq_int(C.sediment_id(C.granite(), 0.9, 80, C.sea_level(), s), C.granite(), "a cliff stays granite")
+      Test.assert_eq_int(C.sediment_id(1, 0.9, 81, 80, s), C.mud(), "a lake's floor is wet against the lake's level")
     end
   end
 

@@ -1,0 +1,85 @@
+-- The pour: closed basins fill to their rim, open ground stays dry.
+mod CubeForge.Test.Lakes do
+
+  import Test
+  alias CubeForge.Lakes as Lk
+
+  -- An 8x8 map at 70 with a 2x2 bowl at 60 in the middle, a 66-high notch in
+  -- its rim leading along z = 3 to the edge (the pour point), and a 1-wide
+  -- trench from the top edge at 65 that does not reach the bowl.
+  pfn bowl_go(hs : NativeIntArr, i : Int) : NativeIntArr do
+    if i >= 64 do hs
+    else
+      let x = i % 8
+      let z = i / 8
+      let h = if (x == 3 || x == 4) && (z == 3 || z == 4) do 60
+              else if x >= 5 && z == 3 do 66
+              else if z == 0 && x == 1 do 65
+              else 70 end end end
+      bowl_go(NativeArray.set_int(hs, i, h), i + 1)
+    end
+  end
+  pfn bowl() : NativeIntArr do bowl_go(NativeArray.make_int(64, 0), 0) end
+
+  -- The first lake column of a world, packed x + 4096 * z, or -1.
+  pfn first_lake(lk : NativeU8Arr, i : Int) : Int do
+    if i >= 16384 do -1
+    else if NativeArray.get_u8(lk, i) > 0 do i % 128 + 4096 * (i / 128)
+    else first_lake(lk, i + 1) end end
+  end
+  pfn sources_above_sea(c : CubeForge.Chunk.Chunk, i : Int, acc : Int) : Int do
+    if i >= 65536 do acc
+    else sources_above_sea(c, i + 1, if CubeForge.Chunk.is_source(CubeForge.Chunk.get_idx(c, i)) && i / 256 > CubeForge.Chunk.sea_level() do acc + 1 else acc end) end
+  end
+
+  describe "a generated lake" do
+    test "a lake column holds sources from its floor to its surface and air above, and its shore is sand" do
+      let seed = CubeForge.Noise.with_age(99, 50)
+      let lk = Lk.levels(seed, 8)
+      let col = first_lake(lk, 0)
+      Test.assert_true(col >= 0, "seed 99 at age 50 has a lake")
+      let wx = col % 4096
+      let wz = col / 4096
+      let level = Lk.level_at(lk, 8, wx, wz)
+      let c = CubeForge.Chunk.generate_lakes(wx / 16 * 16, wz / 16 * 16, seed, lk, 8)
+      Test.assert_true(level > CubeForge.Chunk.sea_level(), "an upland lake")
+      Test.assert_true(CubeForge.Chunk.is_source(CubeForge.Chunk.get(c, wx % 16, level, wz % 16)), "source at the surface")
+      Test.assert_eq_int(CubeForge.Chunk.get(c, wx % 16, level + 1, wz % 16), 0, "air above it")
+      Test.assert_true(!CubeForge.Chunk.is_water(CubeForge.Chunk.get(c, wx % 16, level, wz % 16)) || level > CubeForge.Chunk.sea_level(), "not the sea")
+    end
+    test "a lake's interior is not a spring: the sim lists at most a handful of outlets" do
+      let seed = CubeForge.Noise.with_age(99, 50)
+      let lk = Lk.levels(seed, 8)
+      let col = first_lake(lk, 0)
+      let c = CubeForge.Chunk.generate_lakes(col % 4096 / 16 * 16, col / 4096 / 16 * 16, seed, lk, 8)
+      let s = CubeForge.Water.new_sim(c, CubeForge.Water.empty_edges())
+      let lake_cells = sources_above_sea(c, 0, 0)
+      Test.assert_true(lake_cells >= 8, "the chunk holds a lake of some size")
+      Test.assert_true(CubeForge.Water.spring_count(s) * 4 <= lake_cells, "springs are a small fraction of the lake's cells")
+    end
+  end
+
+  describe "pour" do
+    test "a bowl fills to its lowest rim and nothing else is wet" do
+      let lv = Lk.pour(bowl(), 8)
+      Test.assert_eq_int(NativeArray.get_int(lv, 3 + 8 * 3), 66, "bowl column at the rim's level")
+      Test.assert_eq_int(NativeArray.get_int(lv, 4 + 8 * 4), 66, "every bowl column the same level")
+      Test.assert_eq_int(NativeArray.get_int(lv, 5 + 8 * 3), 0, "the notch itself is dry")
+      Test.assert_eq_int(NativeArray.get_int(lv, 1), 0, "a trench open to the edge drains")
+      Test.assert_eq_int(NativeArray.get_int(lv, 0), 0, "the border is dry")
+    end
+    test "a flat map has no lakes" do
+      let lv = Lk.pour(NativeArray.make_int(64, 70), 8)
+      Test.assert_eq_int(Lk.summary(NativeArray.make_u8(0, 0)), 0, "no table, no lakes")
+      Test.assert_eq_int(NativeArray.get_int(lv, 27), 0, "flat is dry")
+    end
+    test "level_at reads the table and is 0 off it" do
+      let lk = NativeArray.set_u8(NativeArray.make_u8(16 * 16, 0), 5 + 16 * 7, 80)
+      Test.assert_eq_int(Lk.level_at(lk, 1, 5, 7), 80, "a lake column")
+      Test.assert_eq_int(Lk.level_at(lk, 1, 6, 7), 0, "a dry column")
+      Test.assert_eq_int(Lk.level_at(lk, 1, -1, 7), 0, "outside the world")
+      Test.assert_eq_int(Lk.level_at(Lk.none(), 1, 5, 7), 0, "the empty table")
+    end
+  end
+
+end
