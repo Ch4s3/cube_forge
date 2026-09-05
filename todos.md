@@ -20,18 +20,18 @@ Planned, not started. One entry per feature; each gets its own design doc under
 
 ## World generation
 
-Designed 2026-09-05, not started. The heightmap apron lands first; the rest
-in any order, each its own plan when picked up.
+Designed and built 2026-09-05, in this order; each spec carries its as-built
+measurements.
 
 - [x] **Terrain: plateaus, hills, river valleys, erosion, world age** — done 2026-09-05 (`docs/superpowers/specs/2026-09-05-terrain-erosion-design.md`).
-- [ ] **Heightmap apron** (`docs/superpowers/specs/2026-09-05-heightmap-apron-design.md`) — one heightmap per chunk with an apron, so slope and every neighbour rule read an array instead of calling `Noise.height` five times a column. Prerequisite for talus, sediment, climate ground.
-- [ ] **Springs at valley heads** (`docs/superpowers/specs/2026-09-05-valley-springs-design.md`) — springs on the river centreline in the uplands, so the valleys carry brooks; the biome's small-body rule greens the banks unasked.
-- [ ] **Rock strata** (`docs/superpowers/specs/2026-09-05-rock-strata-design.md`) — tilted, warped bands of stone, basalt, granite, sandstone and shale under the subsurface; two new blocks harvesting as stone.
-- [ ] **Sediment and floodplains** (`docs/superpowers/specs/2026-09-05-sediment-and-floodplains-design.md`) — valley floors flattened toward the channel with age; mud and clay as the floodplain's subsurface, the surface left to the biome.
-- [ ] **Talus** (`docs/superpowers/specs/2026-09-05-talus-design.md`) — gravel piles at the foot of cliffs, deeper with age, read from the apron.
-- [ ] **Lakes above sea level** (`docs/superpowers/specs/2026-09-05-upland-lakes-design.md`) — priority-flood pour of every closed basin to its rim; only the outlet is a spring, so a lake overflows as a brook.
-- [ ] **Climate-shaped ground** (`docs/superpowers/specs/2026-09-05-climate-shaped-ground-design.md`) — dunes where hot and dry, glacier tongues in cold valleys above the snow line with moraines and U-troughs, bog pools on wet flats; temperature moves into `Noise`.
-- [ ] **Caves and karst** (`docs/superpowers/specs/2026-09-05-caves-and-karst-design.md`) — worms carved per 32-block cell above the water table, joined into networks and pitted with sinkholes as the world ages; age 0 has none.
+- [x] **Heightmap apron** — done 2026-09-05 (`docs/superpowers/specs/2026-09-05-heightmap-apron-design.md`) — one heightmap per chunk with an apron, so slope and every neighbour rule read an array instead of calling `Noise.height` five times a column. Prerequisite for talus, sediment, climate ground.
+- [x] **Springs at valley heads** — done 2026-09-05 (`docs/superpowers/specs/2026-09-05-valley-springs-design.md`) — springs on the river centreline in the uplands, so the valleys carry brooks; the biome's small-body rule greens the banks unasked.
+- [x] **Rock strata** — done 2026-09-05 (`docs/superpowers/specs/2026-09-05-rock-strata-design.md`) — tilted, warped bands of stone, basalt, granite, sandstone and shale under the subsurface; two new blocks harvesting as stone.
+- [x] **Sediment and floodplains** — done 2026-09-05 (`docs/superpowers/specs/2026-09-05-sediment-and-floodplains-design.md`) — valley floors flattened toward the channel with age; mud and clay as the floodplain's subsurface, the surface left to the biome.
+- [x] **Talus** — done 2026-09-05 (`docs/superpowers/specs/2026-09-05-talus-design.md`) — gravel piles at the foot of cliffs, deeper with age, read from the apron.
+- [x] **Lakes above sea level** — done 2026-09-05 (`docs/superpowers/specs/2026-09-05-upland-lakes-design.md`) — priority-flood pour of every closed basin to its rim; only the outlet is a spring, so a lake overflows as a brook.
+- [x] **Climate-shaped ground** — done 2026-09-05 (`docs/superpowers/specs/2026-09-05-climate-shaped-ground-design.md`) — dunes where hot and dry, glacier tongues in cold valleys above the snow line with moraines and U-troughs, bog pools on wet flats; temperature moves into `Noise`.
+- [x] **Caves and karst** — done 2026-09-05 (`docs/superpowers/specs/2026-09-05-caves-and-karst-design.md`) — worms carved per 32-block cell above the water table, joined into networks and pitted with sinkholes as the world ages; age 0 has none.
 
 ## Engine
 

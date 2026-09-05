@@ -89,11 +89,38 @@ may mesh 20-40% more vertices. Measured; `CF_MESH_REPS` exists for it.
 
 ## 6. Measured
 
-- Air voxels below the surface per world at ages 0/30/60/100 (a new stats
-  line), and worms placed.
-- Mesh vertex count and `mesh all` time at the same ages.
-- Water: no chunk's sim queue grows after load on an ancient seed (nothing
-  was opened under the table).
+*As built, 2026-09-05.* What moved from the design:
+
+- **No joins.** Worms are not joined end to end; on a 128-block world the
+  4x4 grid of 32-block cells holds at most sixteen, and at density 0.6 a
+  few of them cross by chance. Chambers are in (one worm in four).
+- **A worm is boxed** to its cell plus one cell either way by reflecting
+  its heading, so a chunk's 3x3 cell apron is exact.
+- **The floor** is `sea_level() + 3 + r`, not + 2: the centre is floored
+  and the radius wobbles, and the lowest carved voxel must still sit at
+  + 2 or above (tested).
+- **Lowland worms carve nothing.** Between the water table and `roof()`
+  under a surface below ~74 there is no room; a worm placed there is a
+  no-op. Caves are an upland thing, which is where karst is.
+- **Sinkholes** clear the columns within two of a head that comes within
+  `sinkhole_reach()` of the surface, from the head to the surface, unless
+  water stands in the column. `find_spawn` reads the world's surface now,
+  and its flatness from the world too, so it does not pick a rim.
+- **The stat** counts air at or below the *piled terrain height*, not
+  below the top block: a canopy has air under it and is not a cave.
+
+`CF_TERRAIN_STATS`, air voxels at or below the terrain surface, and worm
+cells of sixteen:
+
+| seed | age 0 | age 60 | age 100 |
+|---|---|---|---|
+| 7 | 0 / 0 | 2,199 / 3 | 7,210 / 7 |
+| 1234 | 6 / 0 | 4,961 / 7 | 12,734 / 11 |
+
+(the six at age 0 are bog pools' air over their water). Mesh vertices on
+seed 7: 225,408 at age 0, 246,870 at 60, 277,824 at 100 (+23%), with lakes
+and talus also moving with age; `mesh all` time unchanged within noise;
+world build unchanged within noise.
 
 ## 7. Tests
 

@@ -2393,6 +2393,16 @@ mod CubeForge do
     end
   end
 
+  -- Caves over the world: air under the surface, and how many cells hold a worm.
+  pfn cave_air_go(w : CubeForge.World.World, n : Int, i : Int, acc : Int, seed : Int) : Int do
+    if i >= n * n do acc else cave_air_go(w, n, i + 1, acc + CubeForge.Caves.air_below_surface(World.chunk_at(w, i % n, i / n), 16 * (i % n), 16 * (i / n), seed), seed) end
+  end
+  pfn worm_cells_go(n : Int, seed : Int, i : Int, acc : Int) : Int do
+    let cells = 16 * n / CubeForge.Caves.cell_size()
+    if i >= cells * cells do acc
+    else worm_cells_go(n, seed, i + 1, if CubeForge.Caves.worm_at_cell(i % cells, i / cells, seed) do acc + 1 else acc end) end
+  end
+
   -- Springs over the world by kind, so a density is measured, not guessed.
   pfn springs_go(n : Int, i : Int, seed : Int, mountain : Int, valley : Int) : Unit do
     let cells = 16 * n / CubeForge.Trees.cell_size()
@@ -2426,16 +2436,21 @@ mod CubeForge do
   -- Pick a spawn column near the world centre: the HIGHEST flat, above-water column in a
   -- 32x32 box. Flat alone is not enough — the floor of a pit is flat, and spawning there
   -- boxes the camera in; the highest such column is open ground. Returns x + 4096 * z.
-  pfn find_spawn_go(n : Int, i : Int, seed : Int, best : Int, best_h : Int) : Int do
+  -- The world's own surface, not the generator's: a sinkhole or a lake is
+  -- where the blocks say it is.
+  pfn abs_i(v : Int) : Int do if v < 0 do 0 - v else v end end
+  pfn find_spawn_go(w : CubeForge.World.World, n : Int, i : Int, best : Int, best_h : Int) : Int do
     let centre = 8 * n
     if i >= 1024 do if best_h > 0 do best else centre + 4096 * centre end
     else
       let cx = centre - 16 + i % 32
       let cz = centre - 16 + i / 32
-      let h = CubeForge.Noise.height(cx, cz, seed)
-      let ok = h > Chunk.sea_level() + 1 && CubeForge.Noise.slope(cx, cz, seed) <= 1 && h > best_h
-      if ok do find_spawn_go(n, i + 1, seed, cx + 4096 * cz, h)
-      else find_spawn_go(n, i + 1, seed, best, best_h) end
+      let h = World.surface_y(w, cx, cz)
+      let slope = Math.max_int(Math.max_int(abs_i(World.surface_y(w, cx + 1, cz) - h), abs_i(World.surface_y(w, cx - 1, cz) - h)),
+                               Math.max_int(abs_i(World.surface_y(w, cx, cz + 1) - h), abs_i(World.surface_y(w, cx, cz - 1) - h)))
+      let ok = h > Chunk.sea_level() + 1 && slope <= 1 && h > best_h && !Chunk.is_water(World.block_at(w, cx, h, cz))
+      if ok do find_spawn_go(w, n, i + 1, cx + 4096 * cz, h)
+      else find_spawn_go(w, n, i + 1, best, best_h) end
     end
   end
 
@@ -2600,6 +2615,7 @@ mod CubeForge do
     if Env.get_int("CF_TERRAIN_STATS", 0) == 1 do
       stats_go(n, 0, seed, 999, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
       springs_go(n, 0, seed, 0, 0)
+      println("  caves: " ++ int_to_string(cave_air_go(world, n, 0, 0, seed)) ++ " air voxels below the surface, " ++ int_to_string(worm_cells_go(n, seed, 0, 0)) ++ " worm cells")
       let tl0 = System.monotonic_time()
       let lk = CubeForge.Lakes.levels(seed, n)
       let lsum = CubeForge.Lakes.summary(lk)
@@ -2622,7 +2638,7 @@ mod CubeForge do
     else
       let counts = upload_meshes(meshes, 0, NativeArray.make_int(3 * water_slot_base(), 0))
       let water_col = World.find_water(world)
-      let spawn_col = find_spawn_go(n, 0, seed, 0, 0)
+      let spawn_col = find_spawn_go(world, n, 0, 0, 0)
       let spawn_x = spawn_col % 4096
       let spawn_z = spawn_col / 4096
       let ground_y = int_to_float(World.surface_y(world, spawn_x, spawn_z) + 1)
