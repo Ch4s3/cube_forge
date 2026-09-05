@@ -681,12 +681,20 @@ mod CubeForge do
         let relit = World.relight_marked(w0, x, y, z)
         let world1 = World.relit_world(relit)
         let marks = mark_geometry(World.relit_marks(relit), x, y, z, n)
-        match remesh_marked(world1, marks, 0, n, counts, meshes, Chunk.new(), pass_all()) do
+        -- The edited section is rebuilt here and now, so the block appears or
+        -- vanishes under the cursor in the same frame the click landed. Its
+        -- neighbours -- the chunk over a boundary, the sections the relight
+        -- moved -- go through the queue like everything else: they are the
+        -- larger half of the work and nobody can see them lag by a frame.
+        let hot = CubeForge.Light.mark_slot(World.floor_div16(x), World.floor_div16(z), y / 16)
+        let just_here = NativeArray.set_int(CubeForge.Light.marks_new(), hot, 1)
+        let rest = NativeArray.set_int(marks, hot, 0)
+        match remesh_marked(world1, just_here, 0, n, counts, meshes, Chunk.new(), pass_all()) do
           Remeshed(c1, m1) ->
             let t1 = Win.time()
             println((if id == 0 do "broke" else "placed" end) ++ " block at " ++ int_to_string(x) ++ "," ++ int_to_string(y) ++ "," ++ int_to_string(z)
                     ++ " — edit + section remesh " ++ ms(t1 -. t0))
-            notify_edit(Scene(world1, c1, outline, hit, ui, pids, flags, m1, bio1, pend, myc), x, y, z, id)
+            notify_edit(Scene(world1, c1, outline, hit, ui, pids, flags, m1, bio1, stage_go(pend, rest, 0, pass_all()), myc), x, y, z, id)
         end
     end
   end

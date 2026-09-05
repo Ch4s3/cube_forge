@@ -506,6 +506,16 @@ mod CubeForge.Light do
   end
 
   doc "Repair the block-light field after the block at (ex, ey, ez) changed, reporting which sections moved. [w] is the world after the edit."
+  -- Is any voxel of the box lit? Reads through get(), which is bounds-checked,
+  -- and stops at the first hit.
+  pfn box_any_go(lb : NativeU8Arr, x0 : Int, x1 : Int, y0 : Int, y1 : Int, z0 : Int, z1 : Int, i : Int) : Bool do
+    let bw = x1 - x0 + 1
+    let bh = y1 - y0 + 1
+    if i >= bw * bh * (z1 - z0 + 1) do false
+    else if get(lb, x0 + i % bw, y0 + (i / bw) % bh, z0 + i / (bw * bh)) != 0 do true
+    else box_any_go(lb, x0, x1, y0, y1, z0, z1, i + 1) end end
+  end
+
   fn relight_block_marked(lb : NativeU8Arr, w : CubeForge.World.World, ex : Int, ey : Int, ez : Int) : Relit do
     let r = relight_radius()
     let cx0 = clampi(ex - r, 0, 127)
@@ -515,6 +525,27 @@ mod CubeForge.Light do
     let cy0 = clampi(ey - r, 0, 255)
     let cy1 = clampi(ey + r, 0, 255)
     let sy1 = clampi(ey + r + 1, 0, 255)
+    -- Most edits are nowhere near a light-emitting block, and for those this
+    -- whole pass is provably a no-op: with no block light anywhere in the scan
+    -- box, there is nothing to clear, nothing to seed (an emissive block inside
+    -- the box would have lit its own cell), and nothing outside can reach in
+    -- without lighting the ring, which the scan box contains. The edit's own
+    -- block is the one thing that can add light without appearing in the field
+    -- yet, so it is tested separately. Nested, not `&&`: `&&` evaluates both
+    -- sides (GAPS G33) and the box scan is the expensive half.
+    --
+    -- Worth it because this pass is half the cost of a block edit: relighting
+    -- both fields was 5.7-6.9 ms of a 10-14 ms break, and skylight is the half
+    -- that genuinely has work to do.
+    let sx0g = clampi(ex - r - 1, 0, 127)
+    let sx1g = clampi(ex + r + 1, 0, 127)
+    let sz0g = clampi(ez - r - 1, 0, 127)
+    let sz1g = clampi(ez + r + 1, 0, 127)
+    let sy0g = if cy0 <= 0 do 0 else clampi(cy0 - 1, 0, 255) end
+    let dark = if emission(CubeForge.World.block_at(w, ex, ey, ez)) != 0 do false
+               else !box_any_go(lb, sx0g, sx1g, sy0g, sy1, sz0g, sz1g, 0) end
+    if dark do Relit(lb, marks_new())
+    else
     -- Only y layers up to the scan box top are read or written, and a y range
     -- is a contiguous prefix of the flat index, so every copy is that prefix.
     let plen = if sy1 >= 254 do volume() else (sy1 + 2) * 16384 end
@@ -532,6 +563,7 @@ mod CubeForge.Light do
                               sx0, sx1, sy0, sy1, sz0, sz1, slo, plen - slo)
     let out = CubeForge.Ffi.Window.u8_blit(lb2, slo, swept, slo, plen - slo)
     Relit(out, mark_box(marks_new(), before, out, sx0, sx1, sy0, sy1, sz0, sz1))
+    end
   end
 
   -- The union of two marks arrays, as a fresh array: reads [a] and [b], writes
