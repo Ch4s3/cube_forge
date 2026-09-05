@@ -6,9 +6,30 @@
 -- as scalars and vectorizes the smoothstep + bilinear blend across 4 columns.
 mod CubeForge.Noise do
 
-  -- Integer hash of a lattice point to [0, 1). Deterministic, seedable.
+  -- ── The seed carries the world's age ────────────────────────────────────
+  -- A world is a seed and an age. The age rides in the seed's high bits, above
+  -- the 30-bit seed the menu and CF_SEED produce, so it travels everywhere the
+  -- seed already goes (saves, the startup print, every generator) without a
+  -- second parameter. Only erosion reads it: hash2 masks it off, so climate,
+  -- vegetation and every other consumer of the seed see the same world at any age.
+  doc "Ages run 0 (young: sharp ridges, blocky mesas, shallow valleys) to max_age() (ancient: worn, flowing, deeply cut)."
+  fn max_age() : Int do 100 end
+  doc "One unit of age in the packed seed: 2^32, clear of any 30-bit seed plus the offsets the layers add."
+  fn age_unit() : Int do 4294967296 end
+  fn clamp_age(age : Int) : Int do if age < 0 do 0 else if age > max_age() do max_age() else age end end end
+  doc "The 32-bit seed proper, with the age stripped."
+  fn base_seed(seed : Int) : Int do int_and(seed, 4294967295) end
+  doc "The age packed into a seed; 0 for a plain seed."
+  fn age_of(seed : Int) : Int do clamp_age(seed / age_unit()) end
+  doc "The packed seed for base seed [seed] at [age]. Any age already in [seed] is replaced."
+  fn with_age(seed : Int, age : Int) : Int do base_seed(seed) + clamp_age(age) * age_unit() end
+  doc "Age as a fraction of max_age, 0..1."
+  fn age_frac(seed : Int) : Float do int_to_float(age_of(seed)) /. int_to_float(max_age()) end
+
+  -- Integer hash of a lattice point to [0, 1). Deterministic, seedable. The age
+  -- bits are masked off, so every layer is the same at every age unless it asks.
   fn hash2(ix : Int, iz : Int, seed : Int) : Float do
-    let h0 = int_xor(ix * 374761393 + iz * 668265263 + seed * 1274126177, 0)
+    let h0 = int_xor(ix * 374761393 + iz * 668265263 + base_seed(seed) * 1274126177, 0)
     let h1 = int_and(h0, 2147483647)
     let h2 = int_xor(h1, h1 / 8192)
     let h3 = int_and(h2 * 1103515245 + 12345, 2147483647)
@@ -44,20 +65,36 @@ mod CubeForge.Noise do
   end
 
   -- ── Layered terrain ─────────────────────────────────────────────────────────
-  -- height = base (broad landmass) + hills (rolling detail) + mountains, where the
-  -- mountain term is ridged noise scaled by a separate low-frequency "ruggedness"
-  -- field, so sharp ridgelines appear only over mountain country and plains stay flat.
+  -- Every layer is sampled at a WARPED point: two low-frequency fields push the
+  -- sample coordinate around by up to warp_amp blocks, so the landmass, hills,
+  -- plateau rims, ridgelines and river valleys all bend along the same flow lines
+  -- instead of each being an independent blob. That shared distortion is most of
+  -- what reads as "eroded" from the air.
+  --
+  --   land      = base (broad landmass, warped) + rolling hills
+  --   land      = lerp(land, terrace(land), plateau mask)     -- mesas in plateau country
+  --   height    = land + mountains (ridged, gated by ruggedness) - river valleys
+  --
+  -- The frequencies are per BLOCK, not per map: a feature is a fixed number of
+  -- blocks across, so a larger world holds more plateaus, hills and valleys
+  -- rather than stretching the same few. They are chosen so the 128-block world
+  -- already shows several of each.
 
   doc "Ridged noise in [0, 1]: 1 - |2n - 1|, so peaks form creases rather than blobs."
   fn ridged(x : Float, z : Float, seed : Int) : Float do
     1.0 -. Math.abs(2.0 *. value2(x, z, seed) -. 1.0)
   end
 
-  doc "3-octave ridged noise in [0, 1]."
+  doc """
+  3-octave ridged noise in [0, 1]. Each octave is gated by the ones below it, so
+  valley floors (a low first octave) stay smooth and only the ridges carry the
+  fine creases -- rock that has been rained on, rather than noise everywhere.
+  """
   fn ridged_fbm(x : Float, z : Float, seed : Int) : Float do
-    ridged(x, z, seed) *. 0.45
-      +. ridged(x *. 2.0 +. 11.7, z *. 2.0 +. 5.3, seed + 3) *. 0.33
-      +. ridged(x *. 4.0 +. 23.1, z *. 4.0 +. 41.9, seed + 4) *. 0.22
+    let r0 = ridged(x, z, seed)
+    let r1 = ridged(x *. 2.0 +. 11.7, z *. 2.0 +. 5.3, seed + 3)
+    let r2 = ridged(x *. 4.0 +. 23.1, z *. 4.0 +. 41.9, seed + 4)
+    r0 *. (0.45 +. 0.33 *. r1 +. 0.22 *. r1 *. r2)
   end
 
   fn clamp01(v : Float) : Float do if v < 0.0 do 0.0 else if v > 1.0 do 1.0 else v end end end
@@ -79,21 +116,208 @@ mod CubeForge.Noise do
   doc "A column whose height differs from a neighbour by at least this is a cliff face."
   fn cliff_slope() : Int do 3 end
 
+  -- ── Tunables ────────────────────────────────────────────────────────────────
+  -- Those that erosion works on take the age fraction [a] (0 young .. 1 ancient);
+  -- a = 0.5 gives the values the layers were first tuned at.
+  doc "How far (in blocks) the domain warp can move a sample point. Age bends the land further."
+  fn warp_amp(a : Float) : Float do 6.0 +. 16.0 *. a end
+  doc "The fBm detail's share of the landmass. Age wears the roughness down."
+  fn detail_weight(a : Float) : Float do 0.24 -. 0.12 *. a end
+  doc "Vertical spacing of plateau terraces, in blocks. The rim between two is a cliff (>= cliff_slope), the top is flat."
+  fn plateau_step() : Float do 9.0 end
+  doc "How abruptly a terrace steps: the ramp is 1/sharpness of the step. Age slumps a rim into a slope."
+  fn terrace_sharpness(a : Float) : Float do 4.0 -. 3.0 *. a end
+  doc "Half the peak-to-trough span of the rolling hills, in blocks."
+  fn hill_amp() : Float do 20.0 end
+  doc "Height of mountain country above the land, in blocks. Age wears the peaks down."
+  fn mountain_amp(a : Float) : Float do 58.0 -. 26.0 *. a end
+  doc "How deep a river valley is cut below the land around it, in blocks, on the plains. Age cuts deeper: by mid-age a lowland valley floor dips under sea level and fills."
+  fn river_depth(a : Float) : Float do 4.0 +. 18.0 *. a end
+  doc "Where a river valley starts, on the 0..1 crease of its noise; lower is wider. Age widens the valley."
+  fn river_edge(a : Float) : Float do 0.86 -. 0.20 *. a end
+  doc "Where the floodplain starts, on the 0..1 river mask: the flat inner part of the valley. Age widens it."
+  fn plain_edge(a : Float) : Float do 0.55 -. 0.20 *. a end
+  doc "How far the land inside the plain is pulled to the channel's floor. A young valley is a V; an ancient one a flat floor with the slopes pushed to its edges."
+  fn plain_strength(a : Float) : Float do 0.5 +. 0.4 *. a end
+  doc "1 on the floodplain, 0 outside it, from the river mask."
+  fn plain_mask(river : Float, a : Float) : Float do
+    let e = plain_edge(a)
+    smooth(clamp01((river -. e) /. (1.0 -. e)))
+  end
+
+  doc """
+  Snap a height onto plateau_step()-spaced terraces: flat except for a ramp of
+  1/[sharp] of each step in its middle. At sharpness 2.5 the ramp is 40% of the
+  step and steep enough to be a granite rim; at 1 it is the whole step, a slope.
+  """
+  fn terrace(v : Float, sharp : Float) : Float do
+    let s = plateau_step()
+    let q = v /. s
+    let k = Math.floor(q)
+    let g = smooth(clamp01((q -. k -. 0.5) *. sharp +. 0.5))
+    (k +. g) *. s
+  end
+
+  doc "1 in plateau country, 0 elsewhere. A single low-frequency octave, like ruggedness."
+  fn plateau_mask(xw : Float, zw : Float, seed : Int) : Float do
+    smooth(clamp01((value2(xw *. 0.016 +. 4.2, zw *. 0.016 +. 6.8, seed + 800) -. 0.52) /. 0.18))
+  end
+
+  doc """
+  1 on the centreline of a river valley, 0 outside it. The valleys are the creases
+  of a single low-frequency ridged octave: the level set of a noise field, which
+  is a meandering line that never dead-ends -- what a channel looks like.
+  """
+  fn river_mask(xw : Float, zw : Float, seed : Int) : Float do
+    let edge = river_edge(age_frac(seed))
+    smooth(clamp01((ridged(xw *. 0.012 +. 2.3, zw *. 0.012 +. 9.9, seed + 950) -. edge) /. (1.0 -. edge)))
+  end
+
+  -- Domain warp: the point every layer is sampled at.
+  fn warp_x(x : Float, z : Float, seed : Int) : Float do
+    x +. (value2(x *. 0.011 +. 7.7, z *. 0.011 +. 3.1, seed + 700) -. 0.5) *. (2.0 *. warp_amp(age_frac(seed)))
+  end
+  fn warp_z(x : Float, z : Float, seed : Int) : Float do
+    z +. (value2(x *. 0.011 +. 1.9, z *. 0.011 +. 8.4, seed + 701) -. 0.5) *. (2.0 *. warp_amp(age_frac(seed)))
+  end
+
+  doc "The river mask (0..1, 1 on a valley's centreline) for a world column: what `height` carves with."
+  fn river_at(wx : Int, wz : Int, seed : Int) : Float do
+    let x = int_to_float(wx)
+    let z = int_to_float(wz)
+    river_mask(warp_x(x, z, seed), warp_z(x, z, seed), seed)
+  end
+  doc "River mask at and above which a column is on a valley's centreline, where a valley spring may sit."
+  fn spring_mask() : Float do 0.6 end
+  doc "Blocks above sea level a valley spring needs: the channel below that already holds water. Age lets springs run lower, so an old valley is wet almost to the sea."
+  fn spring_rise(a : Float) : Int do 12 - float_to_int(8.0 *. a) end
+
+  -- ── Climate at generation ───────────────────────────────────────────────
+  -- The biome field does not exist when a chunk is generated, but its
+  -- temperature is a pure function -- one seeded octave minus a lapse for
+  -- height -- so it lives here, where the height paths can read it, and
+  -- Biome.temp_target is this. Moisture is distance to water, which does not
+  -- exist yet; the ground rules below use height above sea level and the
+  -- river mask as its proxies.
+  doc "Temperature lost per block above sea level."
+  fn lapse() : Float do 0.012 end
+  doc "The seeded temperature octave at (wx, wz), before the lapse: regions, not noise (one octave, see ruggedness)."
+  fn temp_base(wx : Int, wz : Int, seed : Int) : Float do
+    value2(int_to_float(wx) *. 0.018, int_to_float(wz) *. 0.018, seed + 1700)
+  end
+  fn temp_from_base(base : Float, h : Float) : Float do
+    clamp01(base -. lapse() *. (h -. int_to_float(sea_level())))
+  end
+  doc "Temperature 0..1 at (wx, wz) for a surface at [h]."
+  fn temperature(wx : Int, wz : Int, seed : Int, h : Int) : Float do
+    temp_from_base(temp_base(wx, wz, seed), int_to_float(h))
+  end
+
+  -- ── Dunes: hot and dry ──────────────────────────────────────────────────
+  -- Where it is hot, well above the sea and out of any valley, a ridged field
+  -- elongated across a per-world wind adds crests at ~12-block spacing.
+  doc "Height of a dune crest, in blocks."
+  fn dune_amp() : Float do 6.0 end
+  doc "Blocks above sea level the ground must be before dunes form: a beach is not a dune field."
+  fn dune_rise() : Float do 3.0 end
+  doc "Temperature at and above which the ground is hot (the desert threshold in Biome.classify)."
+  fn dune_temp() : Float do 0.66 end
+  doc "The wind's direction for a world, radians, from the seed."
+  fn wind_angle(seed : Int) : Float do hash2(5, 9, base_seed(seed) + 1301) *. 6.2831853 end
+  doc "1 where a dune field lies: hot, dry (high enough above the sea) and outside a river valley; 0 elsewhere."
+  fn dune_mask_of(t : Float, h : Float, river : Float) : Float do
+    smooth(clamp01((t -. dune_temp()) /. 0.08))
+      *. smooth(clamp01((h -. int_to_float(sea_level()) -. dune_rise()) /. 3.0))
+      *. (1.0 -. smooth(clamp01(river /. 0.3)))
+  end
+  doc "The dune field's crest shape 0..1 at the warped point: ridged, stretched across the wind."
+  fn dune_of(xw : Float, zw : Float, seed : Int) : Float do
+    let wa = wind_angle(seed)
+    let along = xw *. Math.cos(wa) +. zw *. Math.sin(wa)
+    let across = zw *. Math.cos(wa) -. xw *. Math.sin(wa)
+    ridged(along *. 0.08 +. 3.3, across *. 0.025 +. 1.1, seed + 1300)
+  end
+
+  -- ── Glaciers: cold valleys above the snow line ───────────────────────────
+  doc "Temperature below which a high valley is a glacier. Age lets the ice retreat: 0.2 young, 0.08 ancient."
+  fn glacier_temp(a : Float) : Float do 0.2 -. 0.12 *. a end
+  doc "Width of the moraine at the tongue's warm end, in temperature."
+  fn moraine_band() : Float do 0.03 end
+
+  doc """
+  The height before the river carve, the plain and the dunes: land plus
+  mountains. What a glacier fills its valley back up to.
+  """
+  fn relief(wx : Int, wz : Int, seed : Int) : Int do
+    let x = int_to_float(wx)
+    let z = int_to_float(wz)
+    let a = age_frac(seed)
+    let xw = warp_x(x, z, seed)
+    let zw = warp_z(x, z, seed)
+    let cont = value2(xw *. 0.022, zw *. 0.022, seed)
+    let detail = fbm(xw *. 0.050 +. 5.1, zw *. 0.050 +. 2.6, seed + 2)
+    let dw = detail_weight(a)
+    let base = 37.0 +. (cont *. (1.0 -. dw) +. detail *. dw) *. 64.0
+    let rug = ruggedness(wx, wz, seed)
+    let roll = fbm(xw *. 0.030 +. 3.7, zw *. 0.030 +. 8.2, seed + 5)
+    let hills = (roll -. 0.5) *. hill_amp() *. (1.0 -. 0.6 *. rug)
+    let land = base +. hills
+    let land2 = lerp(land, terrace(land, terrace_sharpness(a)), plateau_mask(xw, zw, seed))
+    let h = float_to_int(land2 +. ridged_fbm(xw *. 0.028, zw *. 0.028, seed + 13) *. rug *. mountain_amp(a))
+    if h < 1 do 1 else if h > 200 do 200 else h end end
+  end
+
+  doc "1 where a dune field lies at world column (wx, wz), 0 elsewhere (see dune_mask_of): what the material rule reads."
+  fn dune_mask_at(wx : Int, wz : Int, seed : Int) : Float do
+    let h = height(wx, wz, seed)
+    -- read against the height WITHOUT the dune, so a crest does not cool itself off
+    dune_mask_of(temperature(wx, wz, seed, h), int_to_float(h) -. dune_amp() *. dune_mask_of(temperature(wx, wz, seed, h), int_to_float(h), river_at(wx, wz, seed)), river_at(wx, wz, seed))
+  end
+
+  doc "Is world column (wx, wz) under a glacier: cold below glacier_temp(a) at its surface, at or above the snow line, and in a river valley (river_at 0.5 or more)."
+  fn glacier_at(wx : Int, wz : Int, seed : Int) : Bool do
+    let h = height(wx, wz, seed)
+    h >= snow_line() && river_at(wx, wz, seed) >= 0.5 && temperature(wx, wz, seed, h) < glacier_temp(age_frac(seed))
+  end
+  doc "A glacier column at the warm end of its tongue: within moraine_band() of the glacier temperature. Gravel, not ice."
+  fn moraine_at(wx : Int, wz : Int, seed : Int) : Bool do
+    let h = height(wx, wz, seed)
+    glacier_at(wx, wz, seed) && temperature(wx, wz, seed, h) >= glacier_temp(age_frac(seed)) -. moraine_band()
+  end
+
   doc "Terrain height for a world column."
   fn height(wx : Int, wz : Int, seed : Int) : Int do
     let x = int_to_float(wx)
     let z = int_to_float(wz)
+    let a = age_frac(seed)
+    let xw = warp_x(x, z, seed)
+    let zw = warp_z(x, z, seed)
     -- Continental shape from a single broad octave (wide spread), with fBm detail on top.
-    -- Frequencies are set for a 128-block world (8x8 chunks): the continental octave
-    -- must span several lattice cells across the map, or every seed produces one flat
-    -- elevation for the whole world.
-    let cont = value2(x *. 0.022, z *. 0.022, seed)
-    let detail = fbm(x *. 0.050 +. 5.1, z *. 0.050 +. 2.6, seed + 2)
-    let base = 30.0 +. (cont *. 0.76 +. detail *. 0.24) *. 64.0
-    let hills = fbm(x *. 0.090 +. 3.7, z *. 0.090 +. 8.2, seed + 5) *. 7.0
+    -- The continental octave must span several lattice cells across the map, or every
+    -- seed produces one flat elevation for the whole world.
+    let cont = value2(xw *. 0.022, zw *. 0.022, seed)
+    let detail = fbm(xw *. 0.050 +. 5.1, zw *. 0.050 +. 2.6, seed + 2)
+    let dw = detail_weight(a)
+    let base = 37.0 +. (cont *. (1.0 -. dw) +. detail *. dw) *. 64.0
     let rug = ruggedness(wx, wz, seed)
-    let mountains = ridged_fbm(x *. 0.035, z *. 0.035, seed + 13) *. rug *. 50.0
-    let h = float_to_int(base +. hills +. mountains)
+    -- Rolling hills: a 33-block wavelength, gentler under mountain country, which
+    -- has its own relief.
+    let roll = fbm(xw *. 0.030 +. 3.7, zw *. 0.030 +. 8.2, seed + 5)
+    let hills = (roll -. 0.5) *. hill_amp() *. (1.0 -. 0.6 *. rug)
+    let land = base +. hills
+    let land2 = lerp(land, terrace(land, terrace_sharpness(a)), plateau_mask(xw, zw, seed))
+    let mountains = ridged_fbm(xw *. 0.028, zw *. 0.028, seed + 13) *. rug *. mountain_amp(a)
+    -- River valleys cut less through mountains: a canyon, not a plain.
+    let river = river_mask(xw, zw, seed)
+    let depth = river_depth(a) *. (1.0 -. 0.5 *. rug)
+    let raw = land2 +. mountains -. river *. depth
+    -- The floodplain: inside the valley the land is pulled toward the
+    -- channel's floor, so what the river moved lies flat beside it.
+    let floor = land2 +. mountains -. depth
+    let hf = lerp(raw, floor, plain_mask(river, a) *. plain_strength(a))
+    -- Dunes where it is hot and dry, read against the height without them.
+    let dune = dune_mask_of(temp_from_base(value2(x *. 0.018, z *. 0.018, seed + 1700), hf), hf, river) *. dune_of(xw, zw, seed) *. dune_amp()
+    let h = float_to_int(hf +. dune)
     if h < 1 do 1 else if h > 200 do 200 else h end end
   end
 
@@ -110,70 +334,83 @@ mod CubeForge.Noise do
     Math.max_int(Math.max_int(d0, d1), Math.max_int(d2, d3))
   end
 
-  -- ── 4-wide: columns wx .. wx+3 at one z, one octave, blended in F32x4 ──
-  pfn value2_x4(x0 : Float, z : Float, scale : Float, seed : Int) : F32x4 do
-    -- lattice (scalar): the four columns share iz; their ix may straddle a lattice line
-    let zs = z *. scale
-    let fz = Math.floor(zs)
-    let iz = float_to_int(fz)
-    let tz = smooth(zs -. fz)
-    let xs = Simd.make_f32x4(x0 *. scale, (x0 +. 1.0) *. scale, (x0 +. 2.0) *. scale, (x0 +. 3.0) *. scale)
-    -- per-lane floor is unavailable: pull lanes out, floor as scalars, push back
-    let f0 = Math.floor(Simd.extract_f32x4(xs, 0))
-    let f1 = Math.floor(Simd.extract_f32x4(xs, 1))
-    let f2 = Math.floor(Simd.extract_f32x4(xs, 2))
-    let f3 = Math.floor(Simd.extract_f32x4(xs, 3))
-    let fxs = Simd.make_f32x4(f0, f1, f2, f3)
-    let i0 = float_to_int(f0)
-    let i1 = float_to_int(f1)
-    let i2 = float_to_int(f2)
-    let i3 = float_to_int(f3)
-    -- corner hashes (scalar), packed per lane
-    let a = Simd.make_f32x4(hash2(i0, iz, seed), hash2(i1, iz, seed), hash2(i2, iz, seed), hash2(i3, iz, seed))
-    let b = Simd.make_f32x4(hash2(i0 + 1, iz, seed), hash2(i1 + 1, iz, seed), hash2(i2 + 1, iz, seed), hash2(i3 + 1, iz, seed))
-    let c = Simd.make_f32x4(hash2(i0, iz + 1, seed), hash2(i1, iz + 1, seed), hash2(i2, iz + 1, seed), hash2(i3, iz + 1, seed))
-    let d = Simd.make_f32x4(hash2(i0 + 1, iz + 1, seed), hash2(i1 + 1, iz + 1, seed), hash2(i2 + 1, iz + 1, seed), hash2(i3 + 1, iz + 1, seed))
-    -- vector part: t = smooth(x - floor x); blend
-    let t = Simd.sub_f32x4(xs, fxs)
-    let three = Simd.splat_f32x4(3.0)
-    let two = Simd.splat_f32x4(2.0)
-    let tx = Simd.mul_f32x4(Simd.mul_f32x4(t, t), Simd.sub_f32x4(three, Simd.mul_f32x4(two, t)))
-    let ab = Simd.add_f32x4(a, Simd.mul_f32x4(Simd.sub_f32x4(b, a), tx))
-    let cd = Simd.add_f32x4(c, Simd.mul_f32x4(Simd.sub_f32x4(d, c), tx))
-    Simd.add_f32x4(ab, Simd.mul_f32x4(Simd.sub_f32x4(cd, ab), Simd.splat_f32x4(tz)))
+  -- ── 4-wide: the same layers over F32x4 lanes ────────────────────────────────
+  -- Every vector helper takes ALREADY-SCALED coordinates, exactly like its scalar
+  -- twin, so the two read line for line. The domain warp moves each lane by a
+  -- different amount, so lanes no longer share a lattice row: both axes are
+  -- floored and hashed per lane.
+  pfn mul_k(v : F32x4, k : Float) : F32x4 do Simd.mul_f32x4(v, Simd.splat_f32x4(k)) end
+  pfn add_k(v : F32x4, k : Float) : F32x4 do Simd.add_f32x4(v, Simd.splat_f32x4(k)) end
+  pfn sub_k(v : F32x4, k : Float) : F32x4 do Simd.sub_f32x4(v, Simd.splat_f32x4(k)) end
+  pfn lerp_x4(a : F32x4, b : F32x4, t : F32x4) : F32x4 do
+    Simd.add_f32x4(a, Simd.mul_f32x4(Simd.sub_f32x4(b, a), t))
   end
 
-  -- Vector helpers mirroring the scalar smooth/clamp01/ridged.
+  -- per-lane floor is unavailable: pull lanes out, floor as scalars, push back
+  pfn floor_x4(v : F32x4) : F32x4 do
+    Simd.make_f32x4(Math.floor(Simd.extract_f32x4(v, 0)), Math.floor(Simd.extract_f32x4(v, 1)),
+                    Math.floor(Simd.extract_f32x4(v, 2)), Math.floor(Simd.extract_f32x4(v, 3)))
+  end
+
+  -- Vector helpers mirroring the scalar smooth/clamp01.
   pfn smooth_x4(t : F32x4) : F32x4 do
     Simd.mul_f32x4(Simd.mul_f32x4(t, t), Simd.sub_f32x4(Simd.splat_f32x4(3.0), Simd.mul_f32x4(Simd.splat_f32x4(2.0), t)))
   end
   pfn clamp01_x4(v : F32x4) : F32x4 do
     Simd.min_f32x4(Simd.max_f32x4(v, Simd.splat_f32x4(0.0)), Simd.splat_f32x4(1.0))
   end
+
+  doc "Value noise at four independent points (xs[i], zs[i]), in [0, 1): `value2` per lane."
+  fn value2_x4(xs : F32x4, zs : F32x4, seed : Int) : F32x4 do
+    let fxs = floor_x4(xs)
+    let fzs = floor_x4(zs)
+    let i0 = float_to_int(Simd.extract_f32x4(fxs, 0))
+    let i1 = float_to_int(Simd.extract_f32x4(fxs, 1))
+    let i2 = float_to_int(Simd.extract_f32x4(fxs, 2))
+    let i3 = float_to_int(Simd.extract_f32x4(fxs, 3))
+    let j0 = float_to_int(Simd.extract_f32x4(fzs, 0))
+    let j1 = float_to_int(Simd.extract_f32x4(fzs, 1))
+    let j2 = float_to_int(Simd.extract_f32x4(fzs, 2))
+    let j3 = float_to_int(Simd.extract_f32x4(fzs, 3))
+    -- corner hashes (scalar), packed per lane
+    let a = Simd.make_f32x4(hash2(i0, j0, seed), hash2(i1, j1, seed), hash2(i2, j2, seed), hash2(i3, j3, seed))
+    let b = Simd.make_f32x4(hash2(i0 + 1, j0, seed), hash2(i1 + 1, j1, seed), hash2(i2 + 1, j2, seed), hash2(i3 + 1, j3, seed))
+    let c = Simd.make_f32x4(hash2(i0, j0 + 1, seed), hash2(i1, j1 + 1, seed), hash2(i2, j2 + 1, seed), hash2(i3, j3 + 1, seed))
+    let d = Simd.make_f32x4(hash2(i0 + 1, j0 + 1, seed), hash2(i1 + 1, j1 + 1, seed), hash2(i2 + 1, j2 + 1, seed), hash2(i3 + 1, j3 + 1, seed))
+    -- vector part: t = smooth(x - floor x); blend
+    let tx = smooth_x4(Simd.sub_f32x4(xs, fxs))
+    let tz = smooth_x4(Simd.sub_f32x4(zs, fzs))
+    lerp_x4(lerp_x4(a, b, tx), lerp_x4(c, d, tx), tz)
+  end
+
+  pfn fbm_x4(xs : F32x4, zs : F32x4, seed : Int) : F32x4 do
+    let n0 = value2_x4(xs, zs, seed)
+    let n1 = value2_x4(add_k(mul_k(xs, 2.0), 17.3), add_k(mul_k(zs, 2.0), 9.1), seed + 1)
+    let n2 = value2_x4(add_k(mul_k(xs, 4.0), 31.7), add_k(mul_k(zs, 4.0), 3.3), seed + 2)
+    Simd.add_f32x4(Simd.add_f32x4(mul_k(n0, 0.6), mul_k(n1, 0.3)), mul_k(n2, 0.1))
+  end
+
   -- 1 - |2n - 1|, with the absolute value as max(2n-1, 1-2n): Simd has no per-lane abs.
-  pfn ridged_x4(x0 : Float, z : Float, scale : Float, seed : Int) : F32x4 do
-    let n = value2_x4(x0, z, scale, seed)
-    let two_n_minus_1 = Simd.sub_f32x4(Simd.mul_f32x4(Simd.splat_f32x4(2.0), n), Simd.splat_f32x4(1.0))
+  pfn ridged_x4(xs : F32x4, zs : F32x4, seed : Int) : F32x4 do
+    let two_n_minus_1 = sub_k(mul_k(value2_x4(xs, zs, seed), 2.0), 1.0)
     let neg = Simd.sub_f32x4(Simd.splat_f32x4(0.0), two_n_minus_1)
     Simd.sub_f32x4(Simd.splat_f32x4(1.0), Simd.max_f32x4(two_n_minus_1, neg))
   end
 
-  -- fbm/ridged_fbm offset their octaves in ALREADY-SCALED coordinates, so an offset of
-  -- `o` at octave scale `s` becomes `o / s` on the unscaled coordinate value2_x4 takes.
-  pfn fbm_x4(x0 : Float, z : Float, scale : Float, seed : Int) : F32x4 do
-    let n0 = value2_x4(x0, z, scale, seed)
-    let n1 = value2_x4(x0 +. 17.3 /. (2.0 *. scale), z +. 9.1 /. (2.0 *. scale), 2.0 *. scale, seed + 1)
-    let n2 = value2_x4(x0 +. 31.7 /. (4.0 *. scale), z +. 3.3 /. (4.0 *. scale), 4.0 *. scale, seed + 2)
-    Simd.add_f32x4(Simd.add_f32x4(Simd.mul_f32x4(n0, Simd.splat_f32x4(0.6)), Simd.mul_f32x4(n1, Simd.splat_f32x4(0.3))),
-                   Simd.mul_f32x4(n2, Simd.splat_f32x4(0.1)))
+  pfn ridged_fbm_x4(xs : F32x4, zs : F32x4, seed : Int) : F32x4 do
+    let r0 = ridged_x4(xs, zs, seed)
+    let r1 = ridged_x4(add_k(mul_k(xs, 2.0), 11.7), add_k(mul_k(zs, 2.0), 5.3), seed + 3)
+    let r2 = ridged_x4(add_k(mul_k(xs, 4.0), 23.1), add_k(mul_k(zs, 4.0), 41.9), seed + 4)
+    let r12 = Simd.mul_f32x4(r1, r2)
+    Simd.mul_f32x4(r0, Simd.add_f32x4(Simd.add_f32x4(Simd.splat_f32x4(0.45), mul_k(r1, 0.33)), mul_k(r12, 0.22)))
   end
 
-  pfn ridged_fbm_x4(x0 : Float, z : Float, scale : Float, seed : Int) : F32x4 do
-    let r0 = ridged_x4(x0, z, scale, seed)
-    let r1 = ridged_x4(x0 +. 11.7 /. (2.0 *. scale), z +. 5.3 /. (2.0 *. scale), 2.0 *. scale, seed + 3)
-    let r2 = ridged_x4(x0 +. 23.1 /. (4.0 *. scale), z +. 41.9 /. (4.0 *. scale), 4.0 *. scale, seed + 4)
-    Simd.add_f32x4(Simd.add_f32x4(Simd.mul_f32x4(r0, Simd.splat_f32x4(0.45)), Simd.mul_f32x4(r1, Simd.splat_f32x4(0.33))),
-                   Simd.mul_f32x4(r2, Simd.splat_f32x4(0.22)))
+  pfn terrace_x4(v : F32x4, sharp : Float) : F32x4 do
+    let s = plateau_step()
+    let q = Simd.div_f32x4(v, Simd.splat_f32x4(s))
+    let k = floor_x4(q)
+    let g = smooth_x4(clamp01_x4(add_k(mul_k(sub_k(Simd.sub_f32x4(q, k), 0.5), sharp), 0.5)))
+    mul_k(Simd.add_f32x4(k, g), s)
   end
 
   doc """
@@ -183,17 +420,44 @@ mod CubeForge.Noise do
   """
   fn height_x4(wx : Int, wz : Int, seed : Int) : F32x4 do
     let x0 = int_to_float(wx)
-    let z = int_to_float(wz)
-    let cont = value2_x4(x0, z, 0.022, seed)
-    let detail = fbm_x4(x0 +. 5.1 /. 0.050, z +. 2.6 /. 0.050, 0.050, seed + 2)
-    let base = Simd.add_f32x4(Simd.splat_f32x4(30.0),
-      Simd.mul_f32x4(Simd.add_f32x4(Simd.mul_f32x4(cont, Simd.splat_f32x4(0.76)),
-                                    Simd.mul_f32x4(detail, Simd.splat_f32x4(0.24))), Simd.splat_f32x4(64.0)))
-    let hills = Simd.mul_f32x4(fbm_x4(x0 +. 3.7 /. 0.090, z +. 8.2 /. 0.090, 0.090, seed + 5), Simd.splat_f32x4(7.0))
-    let rugv = value2_x4(x0, z, 0.018, seed + 900)
-    let rug = smooth_x4(clamp01_x4(Simd.div_f32x4(Simd.sub_f32x4(rugv, Simd.splat_f32x4(0.50)), Simd.splat_f32x4(0.20))))
-    let mountains = Simd.mul_f32x4(Simd.mul_f32x4(ridged_fbm_x4(x0, z, 0.035, seed + 13), rug), Simd.splat_f32x4(50.0))
-    let h = Simd.add_f32x4(Simd.add_f32x4(base, hills), mountains)
+    let x = Simd.make_f32x4(x0, x0 +. 1.0, x0 +. 2.0, x0 +. 3.0)
+    let z = Simd.splat_f32x4(int_to_float(wz))
+    let a = age_frac(seed)
+    let warp2 = 2.0 *. warp_amp(a)
+    let xw = Simd.add_f32x4(x, mul_k(sub_k(value2_x4(add_k(mul_k(x, 0.011), 7.7), add_k(mul_k(z, 0.011), 3.1), seed + 700), 0.5), warp2))
+    let zw = Simd.add_f32x4(z, mul_k(sub_k(value2_x4(add_k(mul_k(x, 0.011), 1.9), add_k(mul_k(z, 0.011), 8.4), seed + 701), 0.5), warp2))
+    let cont = value2_x4(mul_k(xw, 0.022), mul_k(zw, 0.022), seed)
+    let detail = fbm_x4(add_k(mul_k(xw, 0.050), 5.1), add_k(mul_k(zw, 0.050), 2.6), seed + 2)
+    let dw = detail_weight(a)
+    let base = add_k(mul_k(Simd.add_f32x4(mul_k(cont, 1.0 -. dw), mul_k(detail, dw)), 64.0), 37.0)
+    let rugv = value2_x4(mul_k(x, 0.018), mul_k(z, 0.018), seed + 900)
+    let rug = smooth_x4(clamp01_x4(Simd.div_f32x4(sub_k(rugv, 0.50), Simd.splat_f32x4(0.20))))
+    let roll = fbm_x4(add_k(mul_k(xw, 0.030), 3.7), add_k(mul_k(zw, 0.030), 8.2), seed + 5)
+    let hills = Simd.mul_f32x4(mul_k(sub_k(roll, 0.5), hill_amp()), Simd.sub_f32x4(Simd.splat_f32x4(1.0), mul_k(rug, 0.6)))
+    let land = Simd.add_f32x4(base, hills)
+    let plat = smooth_x4(clamp01_x4(Simd.div_f32x4(sub_k(value2_x4(add_k(mul_k(xw, 0.016), 4.2), add_k(mul_k(zw, 0.016), 6.8), seed + 800), 0.52), Simd.splat_f32x4(0.18))))
+    let land2 = lerp_x4(land, terrace_x4(land, terrace_sharpness(a)), plat)
+    let mountains = mul_k(Simd.mul_f32x4(ridged_fbm_x4(mul_k(xw, 0.028), mul_k(zw, 0.028), seed + 13), rug), mountain_amp(a))
+    let edge = river_edge(a)
+    let river = smooth_x4(clamp01_x4(Simd.div_f32x4(sub_k(ridged_x4(add_k(mul_k(xw, 0.012), 2.3), add_k(mul_k(zw, 0.012), 9.9), seed + 950), edge), Simd.splat_f32x4(1.0 -. edge))))
+    let depth = Simd.mul_f32x4(Simd.splat_f32x4(river_depth(a)), Simd.sub_f32x4(Simd.splat_f32x4(1.0), mul_k(rug, 0.5)))
+    let raw = Simd.sub_f32x4(Simd.add_f32x4(land2, mountains), Simd.mul_f32x4(river, depth))
+    let floor = Simd.sub_f32x4(Simd.add_f32x4(land2, mountains), depth)
+    let pe = plain_edge(a)
+    let plain = smooth_x4(clamp01_x4(Simd.div_f32x4(sub_k(river, pe), Simd.splat_f32x4(1.0 -. pe))))
+    let hf = lerp_x4(raw, floor, mul_k(plain, plain_strength(a)))
+    -- dunes: the mask (hot, dry, out of the valley) times the crest shape
+    let sea = int_to_float(sea_level())
+    let t = clamp01_x4(Simd.sub_f32x4(value2_x4(mul_k(x, 0.018), mul_k(z, 0.018), seed + 1700), mul_k(sub_k(hf, sea), lapse())))
+    let hot = smooth_x4(clamp01_x4(Simd.div_f32x4(sub_k(t, dune_temp()), Simd.splat_f32x4(0.08))))
+    let dry = smooth_x4(clamp01_x4(Simd.div_f32x4(sub_k(hf, sea +. dune_rise()), Simd.splat_f32x4(3.0))))
+    let open = Simd.sub_f32x4(Simd.splat_f32x4(1.0), smooth_x4(clamp01_x4(Simd.div_f32x4(river, Simd.splat_f32x4(0.3)))))
+    let wa = wind_angle(seed)
+    let along = Simd.add_f32x4(mul_k(xw, Math.cos(wa)), mul_k(zw, Math.sin(wa)))
+    let across = Simd.sub_f32x4(mul_k(zw, Math.cos(wa)), mul_k(xw, Math.sin(wa)))
+    let crest = ridged_x4(add_k(mul_k(along, 0.08), 3.3), add_k(mul_k(across, 0.025), 1.1), seed + 1300)
+    let dune = mul_k(Simd.mul_f32x4(Simd.mul_f32x4(Simd.mul_f32x4(hot, dry), open), crest), dune_amp())
+    let h = Simd.add_f32x4(hf, dune)
     Simd.min_f32x4(Simd.max_f32x4(h, Simd.splat_f32x4(1.0)), Simd.splat_f32x4(200.0))
   end
 

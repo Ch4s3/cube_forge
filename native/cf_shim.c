@@ -126,18 +126,11 @@ int64_t cf_win_open(int64_t w, int64_t h, march_value title) {
     if (!g_win) { fprintf(stderr, "cf: glfwCreateWindow failed\n"); glfwTerminate(); return 0; }
     glfwMakeContextCurrent(g_win);
     if (!gladLoadGL(glfwGetProcAddress)) { fprintf(stderr, "cf: gladLoadGL failed\n"); return 0; }
-    /* CF_VSYNC=0 uncaps the frame rate, so frame cost can actually be measured;
-     * with vsync on every timing is pinned to the display refresh. */
-    glfwSwapInterval(getenv("CF_VSYNC") && atoi(getenv("CF_VSYNC")) == 0 ? 0 : 1);
-    /* CF_FULLSCREEN=1 moves the window onto the primary monitor at its current
-     * video mode. Note this takes GLFW's video mode, not the panel's native
-     * backing store, so on this Retina display it is 1920x1200 rather than
-     * 3456x2234 -- CF_WIDTH/CF_HEIGHT reach a larger framebuffer than this does. */
-    if (getenv("CF_FULLSCREEN") && atoi(getenv("CF_FULLSCREEN")) == 1) {
-        GLFWmonitor *m = glfwGetPrimaryMonitor();
-        const GLFWvidmode *mode = m ? glfwGetVideoMode(m) : NULL;
-        if (mode) glfwSetWindowMonitor(g_win, m, 0, 0, mode->width, mode->height, mode->refreshRate);
-    }
+    /* Vsync and fullscreen are settings (CubeForge.Settings), applied by March
+     * through cf_win_set_vsync / cf_win_set_fullscreen right after this returns
+     * and again whenever the player changes them. The window opens vsync-on
+     * so nothing spins before that first call. */
+    glfwSwapInterval(1);
     glfwGetFramebufferSize(g_win, &g_fb_w, &g_fb_h);
     glViewport(0, 0, g_fb_w, g_fb_h);
     glfwSetFramebufferSizeCallback(g_win, on_fb_size);
@@ -157,6 +150,42 @@ int64_t cf_win_fb_w(void)         { return g_fb_w; }
 int64_t cf_win_fb_h(void)         { return g_fb_h; }
 void    cf_win_close(void)        { if (g_win) { glfwDestroyWindow(g_win); g_win = NULL; } glfwTerminate(); }
 void    cf_win_request_close(void){ if (g_win) glfwSetWindowShouldClose(g_win, 1); }
+
+/* Vsync off uncaps the frame rate, so frame cost can actually be measured;
+ * with it on every timing is pinned to the display refresh. Remembered so a
+ * monitor change (below) can re-apply it: the swap interval belongs to the
+ * context and some platforms reset it when the window moves. */
+static int g_vsync = 1;
+void cf_win_set_vsync(int64_t on) {
+    g_vsync = on ? 1 : 0;
+    if (g_win) glfwSwapInterval(g_vsync);
+}
+
+/* Fullscreen takes the primary monitor at its current video mode. Note this
+ * is GLFW's video mode, not the panel's native backing store, so on a Retina
+ * display it is 1920x1200 rather than 3456x2234 -- CF_WIDTH/CF_HEIGHT reach a
+ * larger framebuffer than this does. Leaving fullscreen restores the windowed
+ * rectangle recorded on the way in. */
+static int g_fullscreen = 0;
+static int g_win_x = 0, g_win_y = 0, g_win_w = 800, g_win_h = 600;
+void cf_win_set_fullscreen(int64_t on) {
+    int want = on ? 1 : 0;
+    if (!g_win || want == g_fullscreen) return;
+    if (want) {
+        GLFWmonitor *m = glfwGetPrimaryMonitor();
+        const GLFWvidmode *mode = m ? glfwGetVideoMode(m) : NULL;
+        if (!mode) return;
+        glfwGetWindowPos(g_win, &g_win_x, &g_win_y);
+        glfwGetWindowSize(g_win, &g_win_w, &g_win_h);
+        glfwSetWindowMonitor(g_win, m, 0, 0, mode->width, mode->height, mode->refreshRate);
+    } else {
+        glfwSetWindowMonitor(g_win, NULL, g_win_x, g_win_y, g_win_w, g_win_h, 0);
+    }
+    g_fullscreen = want;
+    glfwSwapInterval(g_vsync);
+    glfwGetFramebufferSize(g_win, &g_fb_w, &g_fb_h);
+    glViewport(0, 0, g_fb_w, g_fb_h);
+}
 
 /* ── GL: shader program + one VAO shared by every mesh ──────────────────────
  * Vertex layout (9 floats): pos.xyz, uv, layer, shade, face, fx.
@@ -901,10 +930,12 @@ void cf_precip_frame(void *light, int64_t live, int64_t snow,
 #define CF_BIOME_SLOT 248
 #define CF_BIOME_Y    259.0f
 /* Order matches CubeForge.Biome: tundra, taiga, grassland, forest, desert,
- * wetland, beach, alpine. */
-static const float CF_BIOME_RGB[8][3] = {
+ * wetland, beach, alpine, oasis, grove. */
+#define CF_BIOME_COUNT 10
+static const float CF_BIOME_RGB[CF_BIOME_COUNT][3] = {
     {0.86f, 0.90f, 0.95f}, {0.25f, 0.45f, 0.35f}, {0.55f, 0.75f, 0.30f}, {0.15f, 0.50f, 0.15f},
     {0.90f, 0.80f, 0.45f}, {0.35f, 0.55f, 0.50f}, {0.95f, 0.90f, 0.70f}, {0.60f, 0.60f, 0.62f},
+    {0.30f, 0.85f, 0.35f}, {0.55f, 0.30f, 0.70f},
 };
 static float  *g_biome_vtx = NULL;
 static int64_t g_biome_cap = 0;
@@ -919,7 +950,7 @@ void cf_biome_map_upload(void *biomes, int64_t n) {
     const unsigned char *b = (const unsigned char *)narr_data(biomes);
     for (int64_t i = 0; i < cells; i++) {
         float x0 = (float)(i % n), z0 = (float)(i / n), x1 = x0 + 1.0f, z1 = z0 + 1.0f;
-        const float *c = CF_BIOME_RGB[b[i] & 7];
+        const float *c = CF_BIOME_RGB[b[i] < CF_BIOME_COUNT ? b[i] : 0];
         float *v = g_biome_vtx + i * 6 * CF_VERT_FLOATS;
         /* winding matches the mesher's top face: (x0,z0)->(x0,z1)->(x1,z1)->(x1,z0) */
         pcl_vert(v + 0 * CF_VERT_FLOATS, x0, CF_BIOME_Y, z0, c[0], c[1], c[2], 255.0f);

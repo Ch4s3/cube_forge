@@ -15,7 +15,7 @@ mod CubeForge.Test.Biome do
     if i < 0 do acc else flat_chunks(i - 1, h, Cons(flat_cells(C.new(), 0, h), acc)) end
   end
   pfn flat_world(h : Int) : CubeForge.World.World do
-    CubeForge.World.World(Array.from_list(flat_chunks(63, h, Nil)), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.World.shown_new(), 8)
+    CubeForge.World.World(Array.from_list(flat_chunks(63, h, Nil)), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.World.shown_new(), 8, CubeForge.Model.build())
   end
 
   -- Inland (far from water) at sea level, so only the axes decide.
@@ -45,6 +45,27 @@ mod CubeForge.Test.Biome do
       Test.assert_eq_int(Biome.classify(0.5, 0.9, 63, 1), Biome.b_beach(), "next to water, at sea level")
       Test.assert_eq_int(Biome.classify(0.5, 0.9, 70, 1), Biome.b_forest(), "next to water but high: not beach")
       Test.assert_eq_int(Biome.classify(0.5, 0.9, 63, 2), Biome.b_forest(), "low but two columns from water: not beach")
+    end
+  end
+
+  describe "Biome.classify_full" do
+    test "oasis is hot, damp and small water, and beats beach" do
+      Test.assert_eq_int(Biome.classify_full(0.9, 0.9, 63, 1, true, false), Biome.b_oasis(), "hot pool rim at sea level: oasis, not beach")
+      Test.assert_eq_int(Biome.classify_full(0.9, 0.9, 63, 1, false, false), Biome.b_beach(), "the same rim on the sea: beach")
+      Test.assert_eq_int(Biome.classify_full(0.9, 0.9, 70, 5, false, false), Biome.b_wetland(), "hot damp large water: wetland")
+      Test.assert_eq_int(Biome.classify_full(0.9, 0.9, 70, 5, true, false), Biome.b_oasis(), "hot damp small water: oasis")
+      Test.assert_eq_int(Biome.classify_full(0.5, 0.9, 70, 5, true, false), Biome.b_forest(), "temperate: no oasis")
+      Test.assert_eq_int(Biome.classify_full(0.9, 0.2, 70, 20, true, false), Biome.b_desert(), "dry: no oasis")
+    end
+    test "grove beats everything, alpine included" do
+      Test.assert_eq_int(Biome.classify_full(0.9, 0.9, 100, 5, true, true), Biome.b_grove(), "grove on a peak")
+      Test.assert_eq_int(Biome.classify_full(0.9, 0.9, 100, 5, true, false), Biome.b_alpine(), "the peak without the network")
+      Test.assert_eq_int(Biome.classify(0.9, 0.9, 100, 5), Biome.b_alpine(), "classify is the no-network, large-water case")
+    end
+    test "ten biomes, named" do
+      Test.assert_eq_int(Biome.count(), 10, "count")
+      Test.assert_true(Biome.name(Biome.b_oasis()) == "oasis", "oasis")
+      Test.assert_true(Biome.name(Biome.b_grove()) == "grove", "grove")
     end
   end
 
@@ -78,15 +99,18 @@ mod CubeForge.Test.Biome do
     test "distance to water is Chebyshev and capped at the reach" do
       let w = CubeForge.World.set_block(flat_world(70), 64, 70, 64, C.water())
       let d = Biome.distances(Biome.build(w, 7), w)
-      Test.assert_eq_int(NativeArray.get_u8(d, 64 + 128 * 64), 0, "on the water")
-      Test.assert_eq_int(NativeArray.get_u8(d, 67 + 128 * 66), 3, "Chebyshev: max(3, 2)")
-      Test.assert_eq_int(NativeArray.get_u8(d, 0), Biome.reach(), "far away is capped")
+      Test.assert_eq_int(Biome.dist_of(NativeArray.get_u8(d, 64 + 128 * 64)), 0, "on the water")
+      Test.assert_eq_int(Biome.dist_of(NativeArray.get_u8(d, 67 + 128 * 66)), 3, "Chebyshev: max(3, 2)")
+      Test.assert_true(Biome.is_small(NativeArray.get_u8(d, 64 + 128 * 64)), "one block is a small body")
+      Test.assert_true(Biome.is_small(NativeArray.get_u8(d, 67 + 128 * 66)), "and the flag rides out with the distance")
+      Test.assert_eq_int(NativeArray.get_u8(d, 0), Biome.reach(), "far away is capped, with no flag")
     end
 
-    test "a dry temperate flat world is grassland; beside water it is beach" do
-      let w = CubeForge.World.set_block(flat_world(63), 64, 63, 64, C.water())
+    test "a dry temperate flat world is grassland; beside a lake it is beach" do
+      -- seventy columns of water: a large body, so the rim is beach and not an oasis
+      let w = water_row(flat_world(63), 10, 79, 64, 63)
       let f = Biome.build(w, 7)
-      Test.assert_eq_int(Biome.biome_of(f, 65, 64), Biome.b_beach(), "next to the water")
+      Test.assert_eq_int(Biome.biome_of(f, 80, 64), Biome.b_beach(), "next to the water")
       let far = Biome.biome_of(f, 5, 5)
       Test.assert_true(far == Biome.b_grassland() || far == Biome.b_tundra() || far == Biome.b_desert(), "far away is one of the dry biomes")
     end
@@ -116,13 +140,14 @@ mod CubeForge.Test.Biome do
     test "a canal turns its banks from dry to wet, gradually" do
       let w0 = flat_world(66)
       let f0 = Biome.build(w0, 7)
-      let before = Biome.biome_of(f0, 68, 60)
+      -- three blocks of water are a small body: they wet two columns, not twelve
+      let before = Biome.biome_of(f0, 66, 60)
       let w1 = CubeForge.World.set_block(CubeForge.World.set_block(CubeForge.World.set_block(w0, 64, 65, 58, C.water()), 64, 65, 60, C.water()), 64, 65, 62, C.water())
       let f1 = Biome.note_edit(Biome.note_edit(Biome.note_edit(f0, w1, 64, 65, 58, C.water()), w1, 64, 65, 60, C.water()), w1, 64, 65, 62, C.water())
       let f2 = Biome.tick(f1, w1, 7, Biome.default_rate(), Biome.no_pulls(Biome.cols(w1)), Biome.no_rows(Biome.cols(w1)), 1.0)
-      Test.assert_eq_int(Biome.biome_of(f2, 68, 60), before, "no snap after one tick")
+      Test.assert_eq_int(Biome.biome_of(f2, 66, 60), before, "no snap after one tick")
       let f3 = tick_n(f2, w1, 200, 0.05)
-      Test.assert_true(Biome.biome_of(f3, 68, 60) != before, "the bank changed biome")
+      Test.assert_true(Biome.biome_of(f3, 66, 60) != before, "the bank changed biome")
     end
 
     test "levelling a peak leaves alpine" do
@@ -154,6 +179,8 @@ mod CubeForge.Test.Biome do
       Test.assert_true(Biome.precip_scale(Biome.b_desert()) < Biome.precip_scale(Biome.b_grassland()), "desert < grassland")
       Test.assert_true(Biome.precip_scale(Biome.b_grassland()) < Biome.precip_scale(Biome.b_wetland()), "grassland < wetland")
       Test.assert_true(Biome.precip_scale(Biome.b_forest()) > 0.99 && Biome.precip_scale(Biome.b_forest()) < 1.01, "forest is the reference")
+      Test.assert_true(Biome.precip_scale(Biome.b_oasis()) < Biome.precip_scale(Biome.b_grassland()), "an oasis is still in the desert")
+      Test.assert_true(Biome.precip_scale(Biome.b_grove()) > 1.0, "a grove is humid")
     end
   end
 
@@ -187,6 +214,19 @@ mod CubeForge.Test.Biome do
       Test.assert_true(all_mismatched(f, w, m), "every pick disagrees with its palette")
       let w2 = apply_palette(f, w, Biome.migrations(f, w, 0, 256, 256))
       Test.assert_eq_int(List.length(Biome.migrations(f, w2, 0, 256, 256)), 0, "nothing left in that range")
+    end
+    test "a grove wants no surface, so its column never migrates" do
+      -- column (5, 1) is index 133: inside the 256-column window the scan reads from tick 0
+      let w = grass_top16(flat_world(66), 0, 66)
+      let f = Biome.force_biome(Biome.build(w, 7), 128, 5, 1, Biome.b_grove())
+      Test.assert_eq_int(Biome.palette(Biome.b_grove(), 5, 1), 0, "no palette block")
+      Test.assert_eq_int(Biome.biome_of(f, 5, 1), Biome.b_grove(), "forced")
+      Test.assert_false(List.member(Biome.migrations(f, w, 0, 256, 256), 5 + 128 * 1), "not in the migration list")
+      let fd = Biome.force_biome(Biome.build(w, 7), 128, 5, 1, Biome.b_desert())
+      Test.assert_true(List.member(Biome.migrations(fd, w, 0, 256, 256), 5 + 128 * 1), "though grass under a desert would migrate")
+    end
+    test "an oasis wants grass" do
+      Test.assert_eq_int(Biome.palette(Biome.b_oasis(), 3, 3), 1, "grass")
     end
     test "stone is never a palette block; a stone surface never migrates" do
       let w = flat_world(66)
@@ -247,6 +287,117 @@ mod CubeForge.Test.Biome do
     end
   end
 
+  -- ── The grove ─────────────────────────────────────────────────────────────
+  pfn tick_net_k(f : CubeForge.Biome.Field, w : CubeForge.World.World, m : CubeForge.Myc.Field, drow : NativeU8Arr, k : Int) : CubeForge.Biome.Field do
+    let n = Biome.cols(w)
+    if k <= 0 do f
+    else tick_net_k(Biome.tick_net(f, w, 7, 0.05, Biome.no_pulls(n), Biome.no_rows(n), 1.0, CubeForge.Myc.field_species(m), CubeForge.Myc.field_vigour(m), drow), w, m, drow, k - 1) end
+  end
+
+  describe "Biome grove" do
+    test "an empty network changes nothing" do
+      let w = flat_world(70)
+      let n = Biome.cols(w)
+      let f0 = Biome.build(w, 7)
+      let a = tick_k(f0, w, Biome.no_pulls(n), 40)
+      let b = tick_net_k(f0, w, CubeForge.Myc.build(n), Biome.all_rows(n), 40)
+      Test.assert_eq_int(Biome.state_hash(a, n), Biome.state_hash(b, n), "tick and tick_net agree")
+    end
+    test "a mature patch is a grove one column inside its rim, after the hold" do
+      let w = flat_world(70)
+      let n = Biome.cols(w)
+      let m = CubeForge.Myc.plant_patch(CubeForge.Myc.build(n), n, 40, 40, 3)
+      Test.assert_true(Biome.is_grove(CubeForge.Myc.field_species(m), CubeForge.Myc.field_vigour(m), n, 40, 40), "the centre passes the 5-of-9 test")
+      Test.assert_true(!Biome.is_grove(CubeForge.Myc.field_species(m), CubeForge.Myc.field_vigour(m), n, 32, 40), "the rim (5 of 9 would need a column outside the patch) does not")
+      Test.assert_true(Biome.is_grove(CubeForge.Myc.field_species(m), CubeForge.Myc.field_vigour(m), n, 33, 40), "one inside the rim does")
+      let f0 = Biome.build(w, 7)
+      let before = Biome.biome_of(f0, 40, 40)
+      Test.assert_true(before != Biome.b_grove(), "not a grove before the network is in view")
+      let f1 = tick_net_k(f0, w, m, Biome.all_rows(n), 1)
+      Test.assert_eq_int(Biome.biome_of(f1, 40, 40), before, "no snap on the first tick: the hold counter")
+      let f2 = tick_net_k(f1, w, m, Biome.all_rows(n), Biome.hold_ticks() + 1)
+      Test.assert_eq_int(Biome.biome_of(f2, 40, 40), Biome.b_grove(), "grove at the centre")
+      Test.assert_eq_int(Biome.biome_of(f2, 33, 40), Biome.b_grove(), "grove one inside the rim")
+      Test.assert_true(Biome.biome_of(f2, 32, 40) != Biome.b_grove(), "the rim itself is not")
+      Test.assert_true(Biome.biome_of(f2, 20, 40) != Biome.b_grove(), "nor open ground")
+    end
+    test "a single planted column is never a grove" do
+      let n = 128
+      let m = CubeForge.Myc.plant(CubeForge.Myc.build(n), n, 40, 40, 3)
+      Test.assert_true(!Biome.is_grove(CubeForge.Myc.field_species(m), CubeForge.Myc.field_vigour(m), n, 40, 40), "seed vigour, alone")
+    end
+    test "the network's dirty rows wake a settled column; without them it stays settled" do
+      let w = flat_world(70)
+      let n = Biome.cols(w)
+      let f1 = tick_k(Biome.build(w, 7), w, Biome.no_pulls(n), 40)
+      Test.assert_eq_int(NativeArray.get_u8(Biome.active(f1), 40 + n * 40), 0, "settled")
+      let m = CubeForge.Myc.plant_patch(CubeForge.Myc.build(n), n, 40, 40, 3)
+      let quiet = tick_net_k(f1, w, m, Biome.no_rows(n), 1)
+      Test.assert_eq_int(NativeArray.get_u8(Biome.active(quiet), 40 + n * 40), 0, "no dirty rows: still settled, the network unseen")
+      let woken = tick_net_k(f1, w, m, NativeArray.set_u8(Biome.no_rows(n), 40, 1), 1)
+      Test.assert_eq_int(NativeArray.get_u8(Biome.active(woken), 40 + n * 40), 1, "row 40 dirty: the column is active")
+      Test.assert_eq_int(NativeArray.get_u8(Biome.active(woken), 40 + n * 44), 0, "row 44 was not")
+      -- a patch planted into a clean field reports its rows dirty (a fresh build
+      -- starts wholly dirty), so the real wake needs nothing more than dirty_rows
+      let mc = CubeForge.Myc.plant_patch(CubeForge.Myc.clean(CubeForge.Myc.build(n), n), n, 40, 40, 3)
+      Test.assert_eq_int(NativeArray.get_u8(CubeForge.Myc.dirty_rows(mc, n), 40), 1, "dirty_rows marks the patch's row")
+      Test.assert_eq_int(NativeArray.get_u8(CubeForge.Myc.dirty_rows(mc, n), 49), 1, "and the row beside its rim")
+      Test.assert_eq_int(NativeArray.get_u8(CubeForge.Myc.dirty_rows(mc, n), 60), 0, "not a row far away")
+    end
+  end
+
+  -- ── Water bodies ──────────────────────────────────────────────────────────
+  pfn water_line(w : CubeForge.World.World, x : Int, z0 : Int, z1 : Int, y : Int) : CubeForge.World.World do
+    if z0 > z1 do w else water_line(CubeForge.World.set_block(w, x, y, z0, C.water()), x, z0 + 1, z1, y) end
+  end
+  pfn water_row(w : CubeForge.World.World, x0 : Int, x1 : Int, z : Int, y : Int) : CubeForge.World.World do
+    if x0 > x1 do w else water_row(CubeForge.World.set_block(w, x0, y, z, C.water()), x0 + 1, x1, z, y) end
+  end
+  pfn near(a : Float, b : Float) : Bool do Math.abs(a -. b) < 0.0001 end
+
+  describe "Biome water bodies" do
+    test "a long trench is a large body and wets the full reach" do
+      let w = water_line(flat_world(70), 64, 30, 89, 70)
+      let d = Biome.distances(Biome.build(w, 7), w)
+      Test.assert_false(Biome.is_small(NativeArray.get_u8(d, 67 + 128 * 60)), "sixty columns are not small")
+      Test.assert_true(near(Biome.moisture_target_of(NativeArray.get_u8(d, 67 + 128 * 60)), 0.875), "three columns out: 1 - 3/24")
+    end
+    test "a puddle is a small body and wets only small_reach columns" do
+      let w = water_row(flat_world(70), 64, 68, 64, 70)
+      let d = Biome.distances(Biome.build(w, 7), w)
+      Test.assert_true(Biome.is_small(NativeArray.get_u8(d, 66 + 128 * 66)), "five columns are small")
+      Test.assert_true(near(Biome.moisture_target_of(NativeArray.get_u8(d, 66 + 128 * 66)), 0.5), "two out: 1 - 2/4")
+      Test.assert_true(Biome.moisture_target_of(NativeArray.get_u8(d, 66 + 128 * 68)) < 0.0001, "four out: dry")
+      Test.assert_true(Biome.moisture_target_of(NativeArray.get_u8(d, 66 + 128 * 69)) < 0.0001, "five out: dry")
+      Test.assert_eq_int(Biome.dist_of(NativeArray.get_u8(d, 66 + 128 * 69)), 5, "but the distance is still carried")
+    end
+    test "a pool touching a large body is part of it" do
+      let w0 = water_row(flat_world(70), 10, 79, 20, 70)
+      let w = water_row(water_row(w0, 80, 81, 20, 70), 80, 81, 21, 70)
+      let d = Biome.distances(Biome.build(w, 7), w)
+      Test.assert_false(Biome.is_small(NativeArray.get_u8(d, 81 + 128 * 21)), "the pool joined the body")
+      Test.assert_false(Biome.is_small(NativeArray.get_u8(d, 83 + 128 * 22)), "and so did its shore")
+    end
+    test "an edit that adds water is seen by the next tick even though the flags already agree" do
+      let w0 = flat_world(70)
+      let f0 = tick_n(Biome.build(w0, 7), w0, 3, 0.05)
+      let w1 = CubeForge.World.set_block(w0, 64, 70, 64, C.water())
+      let f1 = Biome.note_edit(f0, w1, 64, 70, 64, C.water())
+      Test.assert_true(Biome.is_wet(f1, 64, 64), "the edit set the flag")
+      let f2 = Biome.tick(f1, w1, 7, 0.05, Biome.no_pulls(128), Biome.no_rows(128), 1.0)
+      Test.assert_true(Biome.moist_of(f2, 66, 64) > 0.04, "the neighbour's moisture is moving: the distances were resweept")
+      -- the batched path too
+      let f3 = Biome.note_edits(f0, w1, Cons(Biome.pack_edit(64, 70, 64, C.water()), Nil))
+      let f4 = Biome.tick(f3, w1, 7, 0.05, Biome.no_pulls(128), Biome.no_rows(128), 1.0)
+      Test.assert_true(Biome.moist_of(f4, 66, 64) > 0.04, "note_edits also marks the distances stale")
+    end
+    test "the small-body threshold and reach are the knobs" do
+      Test.assert_eq_int(Biome.small_body(), 48, "48 columns")
+      Test.assert_eq_int(Biome.small_reach(), 4, "4 columns")
+      Test.assert_true(near(Biome.moisture_target_of(Biome.small_bit() + 0), 1.0), "on small water")
+      Test.assert_true(near(Biome.moisture_target_of(12), 0.5), "large: unchanged curve")
+    end
+  end
 
   describe "Biome export and import" do
     test "the eased axes round-trip and classify as before" do

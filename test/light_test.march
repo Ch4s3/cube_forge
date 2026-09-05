@@ -15,7 +15,7 @@ mod CubeForge.Test.Light do
   -- An 8x8 world of entirely empty chunks (no terrain), so seeding tests see
   -- only the blocks they place themselves.
   pfn air_world() : CubeForge.World.World do
-    CubeForge.World.rebuild_occupancy(CubeForge.World.World(Array.from_list(air_chunks(63, Nil)), L.new(), L.new(), L.new(), CubeForge.World.shown_new(), 8))
+    CubeForge.World.rebuild_occupancy(CubeForge.World.World(Array.from_list(air_chunks(63, Nil)), L.new(), L.new(), L.new(), CubeForge.World.shown_new(), 8, CubeForge.Model.build()))
   end
 
 
@@ -30,7 +30,7 @@ mod CubeForge.Test.Light do
     if i < 0 do acc else slab_chunks(i - 1, y, Cons(slab_cells(C.new(), 0, y), acc)) end
   end
   pfn slab_world(y : Int) : CubeForge.World.World do
-    CubeForge.World.rebuild_occupancy(CubeForge.World.World(Array.from_list(slab_chunks(63, y, Nil)), L.new(), L.new(), L.new(), CubeForge.World.shown_new(), 8))
+    CubeForge.World.rebuild_occupancy(CubeForge.World.World(Array.from_list(slab_chunks(63, y, Nil)), L.new(), L.new(), L.new(), CubeForge.World.shown_new(), 8, CubeForge.Model.build()))
   end
 
 
@@ -292,7 +292,7 @@ mod CubeForge.Test.Light do
       -- sideways: above the slab is open sky, below it is sealed.
       let w = CubeForge.World.relight_all(slab_world(8))
       let c = CubeForge.World.chunk_at(w, 2, 2)
-      let b = CubeForge.Mesher.mesh_section_opaque(c, c, c, c, c, CubeForge.World.light(w), CubeForge.World.block_light(w), CubeForge.World.shown(w), CubeForge.World.occupancy(w), 0, 32.0, 32.0)
+      let b = CubeForge.Mesher.mesh_section_opaque(c, c, c, c, c, CubeForge.World.light(w), CubeForge.World.block_light(w), CubeForge.World.shown(w), CubeForge.World.occupancy(w), 0, 32.0, 32.0, CubeForge.Model.build())
       let n = CubeForge.Mesher.vertex_count(b)
       Test.assert_true(n > 0, "the slab meshed to something")
       -- face 0 is +y (the sunlit top), face 1 is -y (the sealed underside)
@@ -303,7 +303,7 @@ mod CubeForge.Test.Light do
     test "opening a shaft lights the ceiling around it" do
       let w0 = CubeForge.World.relight_all(CubeForge.World.set_block(slab_world(8), 34, 8, 34, 0))
       let c = CubeForge.World.chunk_at(w0, 2, 2)
-      let b = CubeForge.Mesher.mesh_section_opaque(c, c, c, c, c, CubeForge.World.light(w0), CubeForge.World.block_light(w0), CubeForge.World.shown(w0), CubeForge.World.occupancy(w0), 0, 32.0, 32.0)
+      let b = CubeForge.Mesher.mesh_section_opaque(c, c, c, c, c, CubeForge.World.light(w0), CubeForge.World.block_light(w0), CubeForge.World.shown(w0), CubeForge.World.occupancy(w0), 0, 32.0, 32.0, CubeForge.Model.build())
       let n = CubeForge.Mesher.vertex_count(b)
       -- the underside is no longer uniformly black: light now reaches it
       Test.assert_true(shade_of_face(b, 1.0, 0, n) >= 0.0, "underside still meshes")
@@ -422,7 +422,7 @@ mod CubeForge.Test.Light do
       Test.assert_true(L.is_opaque(C.glow_cap()), "a glow cap is a solid block")
     end
     test "the glow cap has its own texture layer" do
-      Test.assert_eq_int(CubeForge.Texture.layers(), 87, "layer count")
+      Test.assert_eq_int(CubeForge.Texture.layers(), 92, "layer count")
       Test.assert_true(near(CubeForge.Texture.layer_for(C.glow_cap()), 20.0), "layer 20")
     end
   end

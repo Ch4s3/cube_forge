@@ -101,6 +101,20 @@ mod CubeForge.Myc do
   fn dirty_count(f : Field, n : Int) : Int do
     match f do Field(_, _, _, _, _, dt, cs, pl, pr) -> count_go(dt, 1, 0, n * n, 0) end
   end
+  pfn dirty_rows_go(dt : NativeU8Arr, n : Int, i : Int, rows : NativeU8Arr) : NativeU8Arr do
+    if i >= n * n do rows
+    else if NativeArray.get_u8(dt, i) != 0 do
+      let z = i / n
+      let r1 = NativeArray.set_u8(rows, z, 1)
+      let r2 = if z > 0 do NativeArray.set_u8(r1, z - 1, 1) else r1 end
+      dirty_rows_go(dt, n, i + 1, if z < n - 1 do NativeArray.set_u8(r2, z + 1, 1) else r2 end)
+    else dirty_rows_go(dt, n, i + 1, rows) end end
+  end
+  doc "One byte per row: 1 where the row or a row beside it holds a dirty column. What the biome tick looks at to notice a grove forming or fading, since a column's grove test reads its 3x3."
+  fn dirty_rows(f : Field, n : Int) : NativeU8Arr do
+    match f do Field(_, _, _, _, _, dt, cs, pl, pr) -> dirty_rows_go(dt, n, 0, NativeArray.make_u8(n, 0)) end
+  end
+
   doc "The field with nothing marked: for tests that want to see what a change wakes."
   fn clean(f : Field, n : Int) : Field do
     match f do Field(sps, vg, rc, hd, cl, _, cs, pl, pr) -> Field(sps, vg, rc, hd, cl, NativeArray.make_u8(n * n, 0), cs, pl, pr) end

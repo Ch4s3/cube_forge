@@ -5,14 +5,17 @@ mod CubeForge.Test.Menu do
 
   import Test
   alias CubeForge.Menu as Menu
+  alias CubeForge.Settings as Sx
 
   pfn centres_ok(m : CubeForge.Menu.Menu, i : Int) : Bool do
     if i >= Menu.items(m) do true
-    else if Menu.item_at(m, Menu.item_x0(m) +. Menu.item_w(m) /. 2.0,
+    else if Menu.item_at(m, Menu.item_x0(m, i) +. Menu.item_w(m, i) /. 2.0,
                          Menu.item_y0(m, i) +. Menu.item_h(m) /. 2.0) == i do centres_ok(m, i + 1)
     else false end end
   end
-  pfn slots_page() : CubeForge.Menu.Menu do Menu.set_page(Menu.new(7), Menu.page_slots()) end
+  pfn slots_page() : CubeForge.Menu.Menu do Menu.set_page(Menu.new(7, Sx.defaults()), Menu.page_slots()) end
+  pfn settings_page() : CubeForge.Menu.Menu do Menu.set_page(Menu.new(7, Sx.defaults()), Menu.page_settings()) end
+  pfn right_edge(m : CubeForge.Menu.Menu, i : Int) : Float do Menu.item_x0(m, i) +. Menu.item_w(m, i) end
   pfn with_slot(m : CubeForge.Menu.Menu, slot : Int, seed : Int, at : Int) : CubeForge.Menu.Menu do
     Menu.set_slots(m, Cons(CubeForge.Save.SlotInfo(slot, seed, at), Nil))
   end
@@ -23,42 +26,42 @@ mod CubeForge.Test.Menu do
     else Menu.append_digit(type_int(m, n / 10), n % 10) end
   end
 
-  pfn zeroed() : CubeForge.Menu.Menu do Menu.set_seed(Menu.new(0), 0) end
+  pfn zeroed() : CubeForge.Menu.Menu do Menu.set_seed(Menu.new(0, Sx.defaults()), 0) end
 
   describe "Menu geometry" do
     test "every item's own centre resolves back to that item, on both pages" do
-      Test.assert_true(centres_ok(Menu.new(7), 0), "main page")
+      Test.assert_true(centres_ok(Menu.new(7, Sx.defaults()), 0), "main page")
       Test.assert_true(centres_ok(slots_page(), 0), "slots page")
       Test.assert_eq_int(Menu.items(slots_page()), 6, "five slots and BACK")
     end
     test "the gap between items is not clickable" do
-      let m = Menu.new(7)
+      let m = Menu.new(7, Sx.defaults())
       let between = Menu.item_y0(m, 0) -. 0.03
-      Test.assert_eq_int(Menu.item_at(m, Menu.item_x0(m) +. 0.1, between), -1, "between two items")
+      Test.assert_eq_int(Menu.item_at(m, Menu.item_x0(m, 0) +. 0.1, between), -1, "between two items")
       let sp = slots_page()
-      Test.assert_eq_int(Menu.item_at(sp, Menu.item_x0(sp) +. 0.1, Menu.item_y0(sp, 0) -. 0.01), -1, "between two slot rows")
+      Test.assert_eq_int(Menu.item_at(sp, Menu.item_x0(sp, 0) +. 0.1, Menu.item_y0(sp, 0) -. 0.01), -1, "between two slot rows")
     end
     test "outside the panel is not clickable" do
-      let m = Menu.new(7)
+      let m = Menu.new(7, Sx.defaults())
       Test.assert_eq_int(Menu.item_at(m, -0.99, 0.99), -1, "top-left corner")
       Test.assert_eq_int(Menu.item_at(m, 0.0, -0.99), -1, "below the panel")
     end
     test "items do not overlap the seed field" do
-      let m = Menu.new(7)
+      let m = Menu.new(7, Sx.defaults())
       Test.assert_true(Menu.seed_y0(m) +. Menu.item_h(m) < Menu.item_y0(m, Menu.items(m) - 1), "seed sits below the last item")
       Test.assert_true(Menu.has_seed_field(m), "main page has the field")
       Test.assert_true(!Menu.has_seed_field(slots_page()), "slots page does not")
     end
     test "the panel contains every item" do
-      let m = Menu.new(7)
-      Test.assert_true(Menu.item_x0(m) > Menu.panel_x0(m), "left edge inside")
-      Test.assert_true(Menu.item_x0(m) +. Menu.item_w(m) < Menu.panel_x1(m), "right edge inside")
+      let m = Menu.new(7, Sx.defaults())
+      Test.assert_true(Menu.item_x0(m, 0) > Menu.panel_x0(m), "left edge inside")
+      Test.assert_true(Menu.item_x0(m, 0) +. Menu.item_w(m, 0) < Menu.panel_x1(m), "right edge inside")
       Test.assert_true(Menu.item_y0(m, 0) +. Menu.item_h(m) < Menu.panel_y1(m), "first item inside")
       Test.assert_true(Menu.seed_y0(m) > Menu.panel_y0(m), "seed field inside")
       let sp = slots_page()
       Test.assert_true(Menu.item_y0(sp, 0) +. Menu.item_h(sp) < Menu.panel_y1(sp), "first slot row inside")
-      Test.assert_true(Menu.item_x0(sp) > Menu.panel_x0(sp) && Menu.item_x0(sp) +. Menu.item_w(sp) < Menu.panel_x1(sp), "slot rows inside the wider panel")
-      Test.assert_true(Menu.item_y0(sp, Menu.item_back()) > Menu.panel_y0(sp), "BACK inside")
+      Test.assert_true(Menu.item_x0(sp, 0) > Menu.panel_x0(sp) && Menu.item_x0(sp, 0) +. Menu.item_w(sp, 0) < Menu.panel_x1(sp), "slot rows inside the wider panel")
+      Test.assert_true(Menu.item_y0(sp, Menu.item_back(sp)) > Menu.panel_y0(sp), "BACK inside")
     end
   end
 
@@ -88,7 +91,8 @@ mod CubeForge.Test.Menu do
       let m = Menu.set_seed(zeroed(), 12345)
       let r = Menu.reroll(m, 987654321)
       Test.assert_true(Menu.seed(r) != 12345, "changed")
-      Test.assert_true(Menu.seed(r) >= 0 && Menu.seed(r) <= Menu.max_seed(), "in range")
+      Test.assert_true(Menu.base_seed(r) >= 0 && Menu.base_seed(r) <= Menu.max_seed(), "digits in range")
+      Test.assert_true(Menu.age(r) >= 0 && Menu.age(r) <= CubeForge.Noise.max_age(), "age in range")
     end
     test "reroll is a function of its entropy, so a run is reproducible" do
       Test.assert_eq_int(Menu.seed(Menu.reroll(zeroed(), 42)), Menu.seed(Menu.reroll(zeroed(), 42)), "same entropy, same seed")
@@ -96,56 +100,75 @@ mod CubeForge.Test.Menu do
     end
   end
 
+  describe "age" do
+    test "digits edit the base and leave the age alone" do
+      let m = Menu.set_seed(zeroed(), CubeForge.Noise.with_age(12, 40))
+      Test.assert_eq_int(Menu.base_seed(Menu.append_digit(m, 3)), 123, "digit appended to the base")
+      Test.assert_eq_int(Menu.age(Menu.append_digit(m, 3)), 40, "age kept through a digit")
+      Test.assert_eq_int(Menu.base_seed(Menu.backspace(m)), 1, "backspace on the base")
+      Test.assert_eq_int(Menu.age(Menu.backspace(m)), 40, "age kept through backspace")
+      Test.assert_eq_int(Menu.seed(Menu.append_digit(m, 3)), CubeForge.Noise.with_age(123, 40), "the packed seed is what a new game gets")
+    end
+    test "- and = move the age by a step and clamp" do
+      let m = Menu.set_seed(zeroed(), CubeForge.Noise.with_age(12, 40))
+      Test.assert_eq_int(Menu.age(Menu.age_up(m)), 40 + Menu.age_step(), "up")
+      Test.assert_eq_int(Menu.age(Menu.age_down(m)), 40 - Menu.age_step(), "down")
+      Test.assert_eq_int(Menu.base_seed(Menu.age_up(m)), 12, "digits untouched")
+      Test.assert_eq_int(Menu.age(Menu.age_down(Menu.set_seed(zeroed(), 12))), 0, "cannot go below 0")
+      Test.assert_eq_int(Menu.age(Menu.age_up(Menu.set_seed(zeroed(), CubeForge.Noise.with_age(12, 100)))), 100, "cannot go above max")
+    end
+  end
+
   describe "open state" do
     test "a new menu is closed" do
-      Test.assert_true(!Menu.is_open(Menu.new(7)), "closed")
-      Test.assert_eq_int(Menu.seed(Menu.new(7)), 7, "keeps the seed it was given")
+      Test.assert_true(!Menu.is_open(Menu.new(7, Sx.defaults())), "closed")
+      Test.assert_eq_int(Menu.seed(Menu.new(7, Sx.defaults())), 7, "keeps the seed it was given")
     end
     test "opening and closing preserves the seed and the focus" do
-      let m = Menu.set_focus(Menu.set_seed(Menu.new(7), 99), 1)
+      let m = Menu.set_focus(Menu.set_seed(Menu.new(7, Sx.defaults()), 99), 1)
       let cycled = Menu.set_open(Menu.set_open(m, true), false)
       Test.assert_eq_int(Menu.seed(cycled), 99, "seed survives")
       Test.assert_eq_int(Menu.focused(cycled), 1, "focus survives")
     end
     test "labels are distinct" do
-      let m = Menu.new(7)
+      let m = Menu.new(7, Sx.defaults())
       Test.assert_true(Menu.label(m, Menu.item_new_game()) != Menu.label(m, Menu.item_quit()), "two labels")
     end
   end
 
   describe "modes and pages" do
     test "the start screen is open in start mode with a title; the escape menu has none" do
-      let s = Menu.new_start(7)
+      let s = Menu.new_start(7, Sx.defaults())
       Test.assert_true(Menu.is_open(s) && Menu.is_start(s), "open, start mode")
       Test.assert_eq_str(Menu.title(s), "CUBE FORGE", "title")
-      Test.assert_eq_str(Menu.title(Menu.new(7)), "", "no title in escape mode")
+      Test.assert_eq_str(Menu.title(Menu.new(7, Sx.defaults())), "", "no title in escape mode")
     end
     test "the second item is LOAD GAME on the start screen and SAVE GAME in the escape menu" do
-      Test.assert_eq_str(Menu.label(Menu.new_start(7), Menu.item_second()), "LOAD GAME", "start")
-      Test.assert_eq_str(Menu.label(Menu.new(7), Menu.item_second()), "SAVE GAME", "escape")
-      Test.assert_eq_str(Menu.label(Menu.new(7), Menu.item_quit()), "QUIT", "quit")
+      Test.assert_eq_str(Menu.label(Menu.new_start(7, Sx.defaults()), Menu.item_second()), "LOAD GAME", "start")
+      Test.assert_eq_str(Menu.label(Menu.new(7, Sx.defaults()), Menu.item_second()), "SAVE GAME", "escape")
+      Test.assert_eq_str(Menu.label(Menu.new(7, Sx.defaults()), Menu.item_quit()), "QUIT", "quit")
     end
     test "escape: slots page goes back, escape mode closes, start mode stays" do
-      let back = Menu.escape(Menu.set_page(Menu.set_open(Menu.new(7), true), Menu.page_slots()))
+      let back = Menu.escape(Menu.set_page(Menu.set_open(Menu.new(7, Sx.defaults()), true), Menu.page_slots()))
       Test.assert_eq_int(Menu.page(back), Menu.page_main(), "back to main")
       Test.assert_true(Menu.is_open(back), "still open")
-      Test.assert_true(!Menu.is_open(Menu.escape(Menu.set_open(Menu.new(7), true))), "escape menu closes")
-      Test.assert_true(Menu.is_open(Menu.escape(Menu.new_start(7))), "start screen stays")
-      let start_slots = Menu.escape(Menu.set_page(Menu.new_start(7), Menu.page_slots()))
+      Test.assert_true(!Menu.is_open(Menu.escape(Menu.set_open(Menu.new(7, Sx.defaults()), true))), "escape menu closes")
+      Test.assert_true(Menu.is_open(Menu.escape(Menu.new_start(7, Sx.defaults()))), "start screen stays")
+      let start_slots = Menu.escape(Menu.set_page(Menu.new_start(7, Sx.defaults()), Menu.page_slots()))
       Test.assert_eq_int(Menu.page(start_slots), Menu.page_main(), "start slots page goes back too")
     end
     test "slot rows name the slot, its seed or EMPTY, and BACK" do
       let m = with_slot(slots_page(), 2, 7, 1757000000)
-      Test.assert_eq_str(Menu.label(m, 1), "SLOT 2 SEED 7", "used")
+      Test.assert_eq_str(Menu.label(m, 1), "SLOT 2 SEED 7 AGE 0", "used")
       Test.assert_eq_str(Menu.label(m, 0), "SLOT 1 EMPTY", "empty")
-      Test.assert_eq_str(Menu.label(m, Menu.item_back()), "BACK", "back")
+      Test.assert_eq_str(Menu.label(m, Menu.item_back(m)), "BACK", "back")
       Test.assert_eq_int(Menu.slot_of_item(4), 5, "item 4 is slot 5")
     end
     test "a used row shows its save time; an empty one shows nothing" do
       let m = with_slot(slots_page(), 2, 7, 1757000000)
       Test.assert_eq_str(Menu.sublabel(m, 1), "2025 09 04 15 33", "stamp")
       Test.assert_eq_str(Menu.sublabel(m, 0), "", "empty")
-      Test.assert_eq_str(Menu.sublabel(m, Menu.item_back()), "", "back")
+      Test.assert_eq_str(Menu.sublabel(m, Menu.item_back(m)), "", "back")
     end
     test "a status replaces the row's label until it expires" do
       let m = Menu.set_status(with_slot(slots_page(), 2, 7, 1), 2, Menu.status_saved(), 100)
@@ -153,7 +176,60 @@ mod CubeForge.Test.Menu do
       Test.assert_eq_str(Menu.label(Menu.set_status(m, 2, Menu.status_failed(), 100), 1), "FAILED", "failed")
       Test.assert_eq_str(Menu.label(m, 0), "SLOT 1 EMPTY", "other rows unchanged")
       Test.assert_eq_str(Menu.label(Menu.expire_status(m, 130), 1), "SAVED", "still shown at 30 frames")
-      Test.assert_eq_str(Menu.label(Menu.expire_status(m, 160), 1), "SLOT 2 SEED 7", "gone at 60")
+      Test.assert_eq_str(Menu.label(Menu.expire_status(m, 160), 1), "SLOT 2 SEED 7 AGE 0", "gone at 60")
+    end
+  end
+
+  describe "settings page" do
+    test "the main page has four items with the seed field below the fourth" do
+      let m = Menu.new(7, Sx.defaults())
+      Test.assert_eq_int(Menu.items(m), 4, "four")
+      Test.assert_eq_str(Menu.label(m, Menu.item_settings()), "SETTINGS", "settings")
+      Test.assert_eq_str(Menu.label(m, Menu.item_quit()), "QUIT", "quit is last")
+      Test.assert_true(Menu.seed_y0(m) +. Menu.item_h(m) < Menu.item_y0(m, Menu.item_quit()), "seed below QUIT")
+    end
+    test "every box's own centre resolves back to it, and BACK is last" do
+      let sp = settings_page()
+      Test.assert_true(centres_ok(sp, 0), "settings page")
+      Test.assert_eq_int(Menu.items(sp), Sx.fields() * 3 + 1, "three per row and BACK")
+      Test.assert_eq_str(Menu.label(sp, Menu.item_back(sp)), "BACK", "back")
+    end
+    test "the three boxes of a row are disjoint and inside the panel" do
+      let sp = settings_page()
+      Test.assert_true(right_edge(sp, 0) < Menu.item_x0(sp, 1), "left arrow ends before the body")
+      Test.assert_true(right_edge(sp, 1) < Menu.item_x0(sp, 2), "body ends before the right arrow")
+      Test.assert_true(Menu.item_x0(sp, 0) > Menu.panel_x0(sp), "left arrow inside")
+      Test.assert_true(right_edge(sp, 2) < Menu.panel_x1(sp), "right arrow inside")
+      Test.assert_true(Menu.item_y0(sp, 3) +. Menu.item_h(sp) < Menu.item_y0(sp, 0), "row 1 sits below row 0")
+      Test.assert_true(Menu.item_y0(sp, Menu.item_back(sp)) > Menu.panel_y0(sp), "BACK inside")
+      Test.assert_true(Menu.item_y0(sp, 0) +. Menu.item_h(sp) < Menu.panel_y1(sp), "first row inside")
+    end
+    test "an item index recovers its row and part" do
+      let i = Menu.settings_item(3, Menu.part_right())
+      Test.assert_eq_int(Menu.settings_row(i), 3, "row")
+      Test.assert_eq_int(Menu.settings_part(i), Menu.part_right(), "part")
+      Test.assert_eq_str(Menu.label(settings_page(), Menu.settings_item(0, Menu.part_left())), "<", "left arrow")
+      Test.assert_eq_str(Menu.label(settings_page(), Menu.settings_item(0, Menu.part_right())), ">", "right arrow")
+      Test.assert_eq_str(Menu.label(settings_page(), Menu.settings_item(2, Menu.part_body())), "SHADOWS", "name")
+      Test.assert_eq_str(Menu.value_label(settings_page(), Menu.settings_item(2, Menu.part_body())), "64", "value")
+      Test.assert_eq_str(Menu.value_label(settings_page(), Menu.settings_item(2, Menu.part_left())), "", "arrows have no value")
+    end
+    test "clicking an arrow steps its field; the body and other pages do nothing" do
+      let sp = settings_page()
+      let f = Sx.field_shadow_dist()
+      Test.assert_eq_int(Sx.value(Menu.settings(Menu.click(sp, Menu.settings_item(f, Menu.part_right()))), f), 128, "right")
+      Test.assert_eq_int(Sx.value(Menu.settings(Menu.click(sp, Menu.settings_item(f, Menu.part_left()))), f), 32, "left")
+      Test.assert_eq_int(Sx.value(Menu.settings(Menu.click(sp, Menu.settings_item(f, Menu.part_body()))), f), 64, "body")
+      Test.assert_eq_int(Sx.value(Menu.settings(Menu.click(sp, Menu.item_back(sp))), f), 64, "back")
+      Test.assert_eq_int(Sx.value(Menu.settings(Menu.click(Menu.new(7, Sx.defaults()), 2)), f), 64, "main page")
+    end
+    test "a failed write shows on its row until it expires; escape goes back to main" do
+      let sp = Menu.set_status(settings_page(), 4, Menu.status_failed(), 100)
+      Test.assert_eq_str(Menu.value_label(sp, Menu.settings_item(4, Menu.part_body())), "FAILED", "failed")
+      Test.assert_eq_str(Menu.value_label(sp, Menu.settings_item(3, Menu.part_body())), "ON", "other rows unchanged")
+      Test.assert_eq_str(Menu.value_label(Menu.expire_status(sp, 160), Menu.settings_item(4, Menu.part_body())), "HIGH", "gone at 60")
+      Test.assert_eq_int(Menu.page(Menu.escape(sp)), Menu.page_main(), "escape goes back")
+      Test.assert_eq_int(Menu.status_kind(Menu.escape(sp)), Menu.status_none(), "a page change drops the status")
     end
   end
 

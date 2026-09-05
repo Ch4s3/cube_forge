@@ -102,7 +102,9 @@ mod CubeForge.Audio do
     else if b == Biome.b_desert() do Tone.form_r()
     else if b == Biome.b_wetland() do Tone.form_ri()
     else if b == Biome.b_beach() do Tone.form_p()
-    else Tone.form_r() end end end end end end end
+    else if b == Biome.b_oasis() do Tone.form_r()
+    else if b == Biome.b_grove() do Tone.form_ri()
+    else Tone.form_r() end end end end end end end end end
   end
 
   doc "Semitones this biome transposes the row by."
@@ -114,7 +116,9 @@ mod CubeForge.Audio do
     else if b == Biome.b_desert() do 2
     else if b == Biome.b_wetland() do 10
     else if b == Biome.b_beach() do 8
-    else 0 end end end end end end end
+    else if b == Biome.b_oasis() do 2
+    else if b == Biome.b_grove() do 10
+    else 0 end end end end end end end end end
   end
 
   doc "Octave the voice sits in. Alpine sings above the treeline and forests sit under it."
@@ -126,7 +130,9 @@ mod CubeForge.Audio do
     else if b == Biome.b_desert() do 5
     else if b == Biome.b_wetland() do 3
     else if b == Biome.b_beach() do 4
-    else 6 end end end end end end end
+    else if b == Biome.b_oasis() do 3
+    else if b == Biome.b_grove() do 2
+    else 6 end end end end end end end end end
   end
 
   doc "Waveform id for the voice: 0 glass, 1 triangle, 2 filtered saw, 3 sine, 4 hollow square. Read by the synthesiser in cf_audio.c."
@@ -138,7 +144,9 @@ mod CubeForge.Audio do
     else if b == Biome.b_desert() do 3
     else if b == Biome.b_wetland() do 4
     else if b == Biome.b_beach() do 3
-    else 0 end end end end end end end
+    else if b == Biome.b_oasis() do 3
+    else if b == Biome.b_grove() do 4
+    else 0 end end end end end end end end end
   end
 
   doc "Notes per minute. A desert is sparse and a wetland busy, which is the pacing half of the biome shift."
@@ -150,7 +158,9 @@ mod CubeForge.Audio do
     else if b == Biome.b_desert() do 5
     else if b == Biome.b_wetland() do 12
     else if b == Biome.b_beach() do 8
-    else 5 end end end end end end end
+    else if b == Biome.b_oasis() do 10
+    else if b == Biome.b_grove() do 4
+    else 5 end end end end end end end end end
   end
 
   -- ── The schedule ──────────────────────────────────────────────────────────
