@@ -25,6 +25,14 @@ yields a spring.
 | **water** (hotbar slot 4) | from any water cell | **seven units**, id 5 |
 | **spring** (new) | only by breaking a spring block | id 4 |
 
+*As built, 2026-09-05:* springs could not be mined at all. The break ray passed
+through water unless hotbar *slot 4* was selected -- a rule from the fixed-slot
+hotbar, and the inventory window left slots holding whatever was dropped in
+them, with the hotbar starting empty. Now the ray passes through water unless
+the *held item* is water, and a spring (a source above sea level) stops it
+regardless, so it is mined like any block; the sea, also id 4, stays
+passable.
+
 The spring gets texture layer 15 — a pale ring on the water blue — so its icon
 is not a lake.
 
@@ -49,6 +57,20 @@ block every few hundred ticks. That is what water does; a finite aquifer
 recharged by rain would bound it and ties into weather — recorded as the
 follow-up in `todos.md`, not built here.
 
+*As built, 2026-09-05 -- levelling.* Spreading only across a difference of
+two left every pool a pyramid: seven at the inlet, one level less per cell
+outward, a rim of thin cells evaporating, and a still stream stopped one cell
+short of a drop. Now, after the two-difference pass, a cell holding two or
+more gives one unit to a neighbour exactly one below **when that neighbour has
+somewhere lower to pass it on**: air or room beneath it, or a horizontal
+neighbour of its own, other than the giver, lower still. A flat surface has
+nowhere lower, so nothing churns and the queue drains (tested). The lookahead
+is one cell, so a settled pool is terraced two cells wide -- a slope of one
+unit per two cells, never a two-unit step -- and a pool being fed carries a
+gradient toward its frontier. A lone unit is never passed along: it ran a
+whole slope in one tick and the brook was invisible, so thin water still only
+falls and waits to be pushed.
+
 ## 3. Evaporation
 
 A volume cell at **level 1 with sky above it** — nothing but air all the way to
@@ -61,6 +83,17 @@ re-marked at the start of the next tick, not re-queued immediately — re-queuin
 let it be drawn dozens of times within one tick and a puddle dried in one. The
 same once-a-tick marking is how a spring gives exactly `spring_rate` a tick:
 neighbours never re-mark a spring; `tick` does, once.
+
+*As built, 2026-09-05:* the draw is weighted by **exposure**, the number of a
+thin cell's four sides that are open air, over four. A per-cell rate on every
+thin cell could not fill a depression: the sim levels a pool by spreading, so a
+pool's floor is a thin film until it is covered, the film's whole frontier is
+thin, and a film wider than `evap` cells lost more than the trickle brought. A
+10x10 bowl never filled. Weighted, a film's interior never evaporates and its
+frontier (one or two open sides) loses at a quarter to a half of the rate, so
+the bowl covers its floor and rises; a brook cell (two open sides) loses at
+half, so brooks run about twice as far (~120 active cells at seed 7 against
+~87, actors ~2 ms); a stray cell (four) at the full rate.
 
 Two effects: a brook reaches a length instead of a valley, and stray puddles
 dry. The hash is `Noise.hash2` on the cell and the tick, so it is deterministic

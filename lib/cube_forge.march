@@ -918,9 +918,12 @@ mod CubeForge do
         let inv0 = if new_sel > 0 do Inv.select(ui_inv(ui0), new_sel) else ui_inv(ui0) end
         let e = Player.eye(p)
         let d = Player.forward(Player.yaw(p), Player.pitch(p))
-        -- water is only a target while the water slot is selected (to place against / remove sources);
-        -- otherwise the ray passes through it so the bed can be worked from the surface or underwater
-        let hit = Ray.cast(world, V.x(e), V.y(e), V.z(e), V.x(d), V.y(d), V.z(d), reach(), Inv.sel(inv0) != 4)
+        -- water is only a target while a water item is held (to place against / scoop);
+        -- otherwise the ray passes through it so the bed can be worked from the surface or
+        -- underwater. Keyed on the held item, not the slot: slots hold whatever was dropped
+        -- in them since the inventory window, and the hotbar starts empty. Springs stop the
+        -- ray regardless (see Raycast.blocks_ray), so they can be mined with an empty hand.
+        let hit = Ray.cast(world, V.x(e), V.y(e), V.z(e), V.x(d), V.y(d), V.z(d), reach(), !Chunk.is_water(Inv.selected_id(inv0)))
         let outline1 = if Ray.is_hit(hit) do Outline.build(outline, Ray.bx(hit), Ray.by_(hit), Ray.bz(hit)) else F32Buf.clear(outline) end
         if Ray.is_hit(hit) do CubeForge.Ffi.Window.gfx_upload(254, F32Buf.storage(outline1), F32Buf.len(outline1)) else () end
         -- breaking: hold accumulates on the same target; release, a miss, or an
