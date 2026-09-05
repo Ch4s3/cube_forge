@@ -129,9 +129,49 @@ mod CubeForge.Test.Terrain do
         let wz = col / 4096
         let h = CubeForge.Noise.height(wx, wz, seed)
         let ch = CubeForge.Chunk.generate(wx - wx % 16, wz - wz % 16, seed)
-        if CubeForge.Noise.slope(wx, wz, seed) >= 2 && h >= 72 && CubeForge.Chunk.is_source(CubeForge.Chunk.get(ch, wx % 16, h, wz % 16)) do all_springs_ok(i + 1, seed) else false end
+        let block = CubeForge.Chunk.get(ch, wx % 16, h, wz % 16)
+        let is_valid_spring = CubeForge.Chunk.is_source(block) || block == CubeForge.Chunk.ice()
+        if CubeForge.Noise.slope(wx, wz, seed) >= 2 && h >= 72 && is_valid_spring do all_springs_ok(i + 1, seed) else false end
       end
     end
+  end
+
+  describe "spring freezing" do
+    test "springs at or above the snow line freeze to ice; below it, they're water" do
+      Test.assert_true(all_springs_frozen_correctly(0, 0), "every sampled spring, across seeds, matches the altitude rule")
+      Test.assert_true(any_spring_at_or_above_snowline(0, 0), "at least one sampled spring is at/above the snow line, so the ice branch is actually exercised")
+    end
+  end
+  pfn all_springs_frozen_correctly(seed : Int, i : Int) : Bool do
+    if seed >= 20 do true
+    else if i >= 256 do all_springs_frozen_correctly(seed + 1, 0)
+    else
+      let col = CubeForge.Trees.spring_at_cell(i % 16, i / 16, seed)
+      if col < 0 do all_springs_frozen_correctly(seed, i + 1)
+      else
+        let wx = col % 4096
+        let wz = col / 4096
+        let h = CubeForge.Noise.height(wx, wz, seed)
+        let ch = CubeForge.Chunk.generate(wx - wx % 16, wz - wz % 16, seed)
+        let block = CubeForge.Chunk.get(ch, wx % 16, h, wz % 16)
+        let want = if h >= CubeForge.Noise.snow_line() do CubeForge.Chunk.ice() else CubeForge.Chunk.water() end
+        if block == want do all_springs_frozen_correctly(seed, i + 1) else false end
+      end
+    end end
+  end
+  pfn any_spring_at_or_above_snowline(seed : Int, i : Int) : Bool do
+    if seed >= 20 do false
+    else if i >= 256 do any_spring_at_or_above_snowline(seed + 1, 0)
+    else
+      let col = CubeForge.Trees.spring_at_cell(i % 16, i / 16, seed)
+      if col < 0 do any_spring_at_or_above_snowline(seed, i + 1)
+      else
+        let wx = col % 4096
+        let wz = col / 4096
+        if CubeForge.Noise.height(wx, wz, seed) >= CubeForge.Noise.snow_line() do true
+        else any_spring_at_or_above_snowline(seed, i + 1) end
+      end
+    end end
   end
 
 end

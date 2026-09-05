@@ -277,7 +277,8 @@ mod CubeForge.Chunk do
         let lx = col % 4096 - wx0
         let lz = col / 4096 - wz0
         let h = CubeForge.Noise.height(col % 4096, col / 4096, seed)
-        let c1 = if lx < 0 || lx >= 16 || lz < 0 || lz >= 16 || h < 1 || h >= 255 do c else set(c, lx, h, lz, water()) end
+        let sid = if h >= CubeForge.Noise.snow_line() do ice() else water() end
+        let c1 = if lx < 0 || lx >= 16 || lz < 0 || lz >= 16 || h < 1 || h >= 255 do c else set(c, lx, h, lz, sid) end
         plant_springs_go(c1, wx0, wz0, seed, i + 1, cx0, cz0, span)
       end
     end
