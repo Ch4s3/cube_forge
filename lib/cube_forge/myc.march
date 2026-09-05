@@ -44,6 +44,8 @@ mod CubeForge.Myc do
   fn contest_factor() : Float do 3.0 end
   doc "Vigour differences below this are no difference: f32 storage against f64 targets."
   fn vigour_eps() : Float do 0.000001 end
+  doc "A column this close to its vigour target is settled: below what the map or the readout can show."
+  fn settle_eps() : Float do 0.002 end
 
   -- ── Build, plant, read ────────────────────────────────────────────────────
   doc "An empty field of n x n columns. Every column starts dirty: the first tick looks at all of them once."
@@ -194,8 +196,12 @@ mod CubeForge.Myc do
     -- vigour is stored as f32 and compared against f64 targets: within eps is equal,
     -- or a column whose fitness is not f32-representable would never settle
     let changed = if sp != osp do true else if r != orc do true else if h != oh do true else if c != oc do true else Math.abs(v -. ov) > vigour_eps() end end end end
+    -- Neighbours read only species, reach and whether vigour clears the spread
+    -- threshold: a column drifting toward its target re-evaluates itself (1)
+    -- without waking its eight neighbours (2).
+    let seen_by_others = if sp != osp do true else if r != orc do true else (v >= spread_vigour()) != (ov >= spread_vigour()) end end
     Field(NativeArray.set_u8(nsps, i, sp), NativeArray.set_f32(nvg, i, v), NativeArray.set_u8(nrc, i, r), NativeArray.set_u8(nhd, i, h), NativeArray.set_u8(ncl, i, c),
-          NativeArray.set_u8(ndt, i, if changed || unsettled do 1 else 0 end),
+          NativeArray.set_u8(ndt, i, if seen_by_others do 2 else if changed || unsettled do 1 else 0 end end),
           NativeArray.set_f32(NativeArray.set_f32(ncs, 2 * i, t), 2 * i + 1, m))
   end
 
@@ -230,20 +236,23 @@ mod CubeForge.Myc do
       else
         let v2 = if v1 < 0.0 do 0.0 else v1 end
         -- unsettled while the vigour is still moving or someone wants the column
-        let unsettled = if c != 0 do true else Math.abs(v2 -. fit) > vigour_eps() end
+        -- within settle_eps of its target is settled: the target creeps under the
+        -- biome's easing by less than that per tick, and the column wakes again
+        -- once the climate has moved climate_eps
+        let unsettled = if c != 0 do true else Math.abs(v2 -. fit) > settle_eps() end
         put(nsps, nvg, nrc, nhd, ncl, ndt, ncs, i, sp, v2, rc0, hd2, c, unsettled, sp, v0, rc0, hd0, cl0, t, m)
       end
     end
   end
 
-  -- Anything dirty in the 3x3 neighbourhood of (x, z)?
+  -- Is (x, z) itself dirty at all, or a 3x3 neighbour dirty for others (2)?
   pfn any_near(dt : NativeU8Arr, n : Int, x : Int, z : Int, k : Int) : Bool do
     if k >= 9 do false
     else
       let nx = x + k % 3 - 1
       let nz = z + k / 3 - 1
       if nx < 0 || nz < 0 || nx >= n || nz >= n do any_near(dt, n, x, z, k + 1)
-      else if NativeArray.get_u8(dt, nx + n * nz) != 0 do true
+      else if NativeArray.get_u8(dt, nx + n * nz) >= (if k == 4 do 1 else 2 end) do true
       else any_near(dt, n, x, z, k + 1) end end
     end
   end
@@ -252,10 +261,12 @@ mod CubeForge.Myc do
   -- pass over the two flag arrays. A row with nothing in it or beside it skips
   -- the 3x3 test for all n of its columns, so a settled world's tick is 32k
   -- byte reads and the memcpys.
+  doc "How far the climate must drift under a column before it is looked at again: a step this size moves a fitness on a band edge by about 0.07, and a column under the biome's day-long easing wakes every fifty ticks instead of every tick."
+  fn climate_eps() : Float do 0.004 end
   -- Did the climate move under column i since it was last evaluated?
   pfn moved(cs : NativeF32Arr, ta : NativeFloatArr, ma : NativeFloatArr, i : Int) : Bool do
-    if Math.abs(NativeArray.get_f32(cs, 2 * i) -. NativeArray.get_float(ta, i)) > vigour_eps() do true
-    else Math.abs(NativeArray.get_f32(cs, 2 * i + 1) -. NativeArray.get_float(ma, i)) > vigour_eps() end
+    if Math.abs(NativeArray.get_f32(cs, 2 * i) -. NativeArray.get_float(ta, i)) > climate_eps() do true
+    else Math.abs(NativeArray.get_f32(cs, 2 * i + 1) -. NativeArray.get_float(ma, i)) > climate_eps() end
   end
   pfn rows_go(dt : NativeU8Arr, cs : NativeF32Arr, ta : NativeFloatArr, ma : NativeFloatArr, n : Int, i : Int, rows : NativeU8Arr) : NativeU8Arr do
     if i >= n * n do rows
