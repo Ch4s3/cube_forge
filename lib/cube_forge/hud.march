@@ -240,8 +240,20 @@ mod CubeForge.Hud do
     end
   end
 
+  -- ── The reticle's tint over fungus ───────────────────────────────────────
+  -- Over a mycelium or fruit block the crosshair leans toward that species'
+  -- cap colour: white blended [reticle_blend] of the way there. Subtle on
+  -- purpose -- a hint of what the ground is, not a target lock.
+  fn reticle_blend() : Float do 0.45 end
+  pfn lean(c : Int) : Float do 1.0 -. reticle_blend() *. (1.0 -. int_to_float(c) /. 255.0) end
+  doc "Crosshair red for species [tint] (0 = plain white)."
+  fn reticle_r(tint : Int) : Float do if tint <= 0 do 1.0 else lean(CubeForge.Species.colour_r(tint)) end end
+  fn reticle_g(tint : Int) : Float do if tint <= 0 do 1.0 else lean(CubeForge.Species.colour_g(tint)) end end
+  fn reticle_b(tint : Int) : Float do if tint <= 0 do 1.0 else lean(CubeForge.Species.colour_b(tint)) end end
+
+  doc "The untextured HUD. [tint] is the species under the crosshair, 0 for none (see reticle_r)."
   fn build_hotbar(b : CubeForge.F32Buf.F32Buf, inv : CubeForge.Inventory.Inv, progress : Float,
-                  open : Bool, drag_from : Int) : CubeForge.F32Buf.F32Buf do
+                  open : Bool, drag_from : Int, tint : Int) : CubeForge.F32Buf.F32Buf do
     let sel = CubeForge.Inventory.sel(inv)
     let b0 = B.clear(b)
     -- dim the world and lay a panel behind the backpack grid
@@ -251,9 +263,12 @@ mod CubeForge.Hud do
     else b0 end
     let n = if open do slots() + pack_cols() * pack_rows() else slots() end
     let b4 = slots_go(bp, inv, sel, drag_from, 0, n)
-    -- crosshair
-    let b5 = crect(b4, -0.004, -0.03, 0.004, 0.03, 1.0, 1.0, 1.0)
-    let b6 = crect(b5, -0.03, -0.004, 0.03, 0.004, 1.0, 1.0, 1.0)
+    -- crosshair, leaning toward the cap colour of whatever fungus it rests on
+    let rr = reticle_r(tint)
+    let rg = reticle_g(tint)
+    let rb = reticle_b(tint)
+    let b5 = crect(b4, -0.004, -0.03, 0.004, 0.03, rr, rg, rb)
+    let b6 = crect(b5, -0.03, -0.004, 0.03, 0.004, rr, rg, rb)
     -- progress bar under the crosshair while breaking
     if progress > 0.0 do
       let b7 = crect(b6, -0.06, -0.075, 0.06, -0.06, 0.2, 0.2, 0.2)
@@ -371,7 +386,10 @@ mod CubeForge.Hud do
       let sy = Menu.seed_y0(m)
       let b4 = arect(b3, sx, sy, sx +. Menu.item_w(m, 0), sy +. Menu.item_h(m), 0.05, 0.06, 0.08, 0.98)
       let b5 = emit_text(b4, "SEED", sx +. 0.014, sy +. Menu.item_h(m) -. 0.010, 0.006, 0.009)
-      emit_digits(b5, digits_of(Menu.seed(m), Nil), sx +. 0.014, sy +. 0.062, 0.008, 0.011)
+      -- the age sits at the right of the label row: - and = move it
+      let age = "AGE " ++ int_to_string(Menu.age(m)) ++ "  - ="
+      let b6 = emit_text(b5, age, sx +. Menu.item_w(m, 0) -. 0.014 -. text_width(age, 0.006), sy +. Menu.item_h(m) -. 0.010, 0.006, 0.009)
+      emit_digits(b6, digits_of(Menu.base_seed(m), Nil), sx +. 0.014, sy +. 0.062, 0.008, 0.011)
     end
   end
 

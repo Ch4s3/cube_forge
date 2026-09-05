@@ -15,14 +15,20 @@ mod CubeForge.Menu do
 
   alias CubeForge.Save as Save
   alias CubeForge.Settings as Settings
+  alias CubeForge.Noise as N
 
   -- Menu(open?, seed under edit, item the cursor is over, mode, page,
   --      status row, status kind, frame the status was set, slot listing,
   --      settings under edit)
+  -- The seed under edit is the PACKED seed (Noise.with_age): the digits the
+  -- player types are its base, the age its high bits. Both are edited here and
+  -- the one number is what a new game starts from and what a save records.
   type Menu = Menu(Bool, Int, Int, Int, Int, Int, Int, Int, List(CubeForge.Save.SlotInfo), CubeForge.Settings.Settings)
 
-  doc "The world generator masks its seed to 30 bits; the field will not exceed that."
+  doc "The world generator masks its seed to 30 bits; the digits field will not exceed that."
   fn max_seed() : Int do 1073741823 end
+  doc "How far one - or = press moves the age."
+  fn age_step() : Int do 5 end
 
   fn mode_start() : Int do 0 end
   fn mode_escape() : Int do 1 end
@@ -68,7 +74,12 @@ mod CubeForge.Menu do
   fn new_start(seed : Int, s : CubeForge.Settings.Settings) : Menu do Menu(true, seed, -1, mode_start(), page_main(), 0, status_none(), 0, Nil, s) end
 
   fn is_open(m : Menu) : Bool do match m do Menu(o, _, _, _, _, _, _, _, _, _) -> o end end
+  doc "The packed seed: base and age together, what a new game starts from."
   fn seed(m : Menu) : Int do match m do Menu(_, s, _, _, _, _, _, _, _, _) -> s end end
+  doc "The digits the player edits: the seed with its age stripped."
+  fn base_seed(m : Menu) : Int do N.base_seed(seed(m)) end
+  doc "The world age under edit, 0..Noise.max_age()."
+  fn age(m : Menu) : Int do N.age_of(seed(m)) end
   fn focused(m : Menu) : Int do match m do Menu(_, _, f, _, _, _, _, _, _, _) -> f end end
   fn mode(m : Menu) : Int do match m do Menu(_, _, _, md, _, _, _, _, _, _) -> md end end
   fn page(m : Menu) : Int do match m do Menu(_, _, _, _, p, _, _, _, _, _) -> p end end
@@ -128,27 +139,34 @@ mod CubeForge.Menu do
   fn append_digit(m : Menu, d : Int) : Menu do
     if d < 0 || d > 9 do m
     else
-      let next = seed(m) * 10 + d
-      if next > max_seed() do m else set_seed(m, next) end
+      let next = base_seed(m) * 10 + d
+      if next > max_seed() do m else set_seed(m, N.with_age(next, age(m))) end
     end
   end
 
-  doc "Remove the last digit. Deleting the only digit leaves 0, not an empty field."
-  fn backspace(m : Menu) : Menu do set_seed(m, seed(m) / 10) end
+  doc "Remove the last digit. Deleting the only digit leaves 0, not an empty field. The age stays."
+  fn backspace(m : Menu) : Menu do set_seed(m, N.with_age(base_seed(m) / 10, age(m))) end
 
-  doc "Replace the seed with a fresh one derived from [entropy] (a clock reading)."
+  doc "Replace the seed AND the age with fresh ones derived from [entropy] (a clock reading)."
   fn reroll(m : Menu, entropy : Int) : Menu do
-    set_seed(m, int_and(entropy * 2654435761 + 40503, max_seed()))
+    let base = int_and(entropy * 2654435761 + 40503, max_seed())
+    let age = int_and(entropy * 2246822519 + 3266489917, max_seed()) % (N.max_age() + 1)
+    set_seed(m, N.with_age(base, age))
   end
+
+  doc "Move the age by [delta], clamped to 0..Noise.max_age(); the digits stay."
+  fn nudge_age(m : Menu, delta : Int) : Menu do set_seed(m, N.with_age(base_seed(m), age(m) + delta)) end
+  fn age_up(m : Menu) : Menu do nudge_age(m, age_step()) end
+  fn age_down(m : Menu) : Menu do nudge_age(m, 0 - age_step()) end
 
   -- ── Geometry (NDC) ────────────────────────────────────────────────────────
   -- One source for both drawing and hit-testing. The slots and settings pages
   -- are taller and tighter than the main page; everything below is a function
   -- of the page, and on the settings page also of the item.
 
-  doc "The sub-pages are wider: a slot row holds a ten-digit seed, a settings row two arrows and a long name."
+  doc "The sub-pages are wider: a slot row holds SLOT 5 SEED, a ten-digit seed and AGE 100; a settings row two arrows and a long name."
   fn panel_x0(m : Menu) : Float do
-    if page(m) == page_slots() do -0.40
+    if page(m) == page_slots() do -0.52
     else if page(m) == page_settings() do -0.45
     else -0.36 end end
   end
@@ -158,7 +176,7 @@ mod CubeForge.Menu do
 
   doc "Full width of a row: the whole row on the main and slots pages, arrows included on the settings page."
   pfn row_w(m : Menu) : Float do
-    if page(m) == page_slots() do 0.66
+    if page(m) == page_slots() do 0.90
     else if page(m) == page_settings() do 0.80
     else 0.44 end end
   end
@@ -233,7 +251,9 @@ mod CubeForge.Menu do
         (if status_kind(m) == status_saved() do "SAVED" else "FAILED" end)
       else
         let info = Save.info_for(slot_infos(m), slot)
-        "SLOT " ++ int_to_string(slot) ++ (if Save.info_is_empty(info) do " EMPTY" else " SEED " ++ int_to_string(Save.info_seed(info)) end)
+        "SLOT " ++ int_to_string(slot)
+          ++ (if Save.info_is_empty(info) do " EMPTY"
+              else " SEED " ++ int_to_string(N.base_seed(Save.info_seed(info))) ++ " AGE " ++ int_to_string(N.age_of(Save.info_seed(info))) end)
       end
     end end end
   end

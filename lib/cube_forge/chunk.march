@@ -83,6 +83,9 @@ mod CubeForge.Chunk do
   fn mud() : Int do 24 end
   doc "Glowing mushroom cap: the first emissive block. Placeholder until the fungus fruit blocks land; the block-light channel is verified with it."
   fn glow_cap() : Int do 25 end
+  doc "Palm trunk and frond: the oasis tree. Fronds are foliage in every sense leaves are."
+  fn palm_log() : Int do 65 end
+  fn palm_frond() : Int do 66 end
 
   -- ── Mycelium: a surface block wearing the network ─────────────────────────
   -- Ids 26..46 encode base x glow: id = 26 + 3 * base_index + glow. The base
@@ -130,8 +133,8 @@ mod CubeForge.Chunk do
   fn fruit_species(id : Int) : Int do if is_fruit(id) do (id - 47) % 6 + 1 else 0 end end
   doc "Alpha-cutout blocks: leaves and small mushrooms. Meshed in the cutout pass and see-through for face culling and light."
   fn is_cutout(id : Int) : Bool do is_foliage(id) || is_fruit_small(id) end
-  fn is_log(id : Int) : Bool do id == oak_log() || id == pine_log() end
-  fn is_foliage(id : Int) : Bool do id == oak_leaves() || id == pine_leaves() end
+  fn is_log(id : Int) : Bool do id == oak_log() || id == pine_log() || id == palm_log() end
+  fn is_foliage(id : Int) : Bool do id == oak_leaves() || id == pine_leaves() || id == palm_frond() end
 
   doc "Blocks the player cannot break."
   fn is_unbreakable(id : Int) : Bool do id == bedrock() end
@@ -233,7 +236,7 @@ mod CubeForge.Chunk do
   pfn floor_div(a : Int, b : Int) : Int do if a >= 0 do a / b else (a - b + 1) / b end end
 
   -- Write one tree's blocks that land inside this chunk.
-  pfn stamp_tree(c : Chunk, wx0 : Int, wz0 : Int, tx : Int, tz : Int, base : Int, trunk : Int, pine : Bool, i : Int) : Chunk do
+  pfn stamp_tree(c : Chunk, wx0 : Int, wz0 : Int, tx : Int, tz : Int, base : Int, trunk : Int, species : Int, i : Int) : Chunk do
     -- the tree occupies a 9x9 column footprint around its trunk, trunk + 2 tall
     if i >= 9 * 9 * 12 do c
     else
@@ -243,12 +246,12 @@ mod CubeForge.Chunk do
       let lx = x - wx0
       let lz = z - wz0
       if lx < 0 || lx >= 16 || lz < 0 || lz >= 16 || y < 0 || y >= 256 do
-        stamp_tree(c, wx0, wz0, tx, tz, base, trunk, pine, i + 1)
+        stamp_tree(c, wx0, wz0, tx, tz, base, trunk, species, i + 1)
       else
-        let id = CubeForge.Trees.block_of_tree(tx, tz, base, trunk, pine, x, y, z)
+        let id = CubeForge.Trees.block_of_tree(tx, tz, base, trunk, species, x, y, z)
         -- only grow into air, so a tree never eats terrain or another trunk
         let c1 = if id != 0 && get(c, lx, y, lz) == 0 do set(c, lx, y, lz, id) else c end
-        stamp_tree(c1, wx0, wz0, tx, tz, base, trunk, pine, i + 1)
+        stamp_tree(c1, wx0, wz0, tx, tz, base, trunk, species, i + 1)
       end
     end
   end
@@ -284,8 +287,8 @@ mod CubeForge.Chunk do
         let tz = col / 4096
         let base = CubeForge.Noise.height(tx, tz, seed)
         let trunk = CubeForge.Trees.trunk_height(tx, tz, seed)
-        let pine = CubeForge.Trees.is_pine(base)
-        plant_trees_go(stamp_tree(c, wx0, wz0, tx, tz, base, trunk, pine, 0), wx0, wz0, seed, i + 1, cx0, cz0, span)
+        let species = CubeForge.Trees.species_at(base)
+        plant_trees_go(stamp_tree(c, wx0, wz0, tx, tz, base, trunk, species, 0), wx0, wz0, seed, i + 1, cx0, cz0, span)
       end
     end
   end

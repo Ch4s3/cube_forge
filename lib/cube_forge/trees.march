@@ -1,5 +1,6 @@
--- Trees — oak and pine trees and bushes, placed as a pure function of world
--- coordinates.
+-- Trees — oak, pine and palm trees and bushes, placed as a pure function of
+-- world coordinates. Species: 0 oak, 1 pine, 2 palm. Generation plants oaks and
+-- pines by height; palms come only through Veg growth in an oasis.
 --
 -- Chunks generate independently, but a tree near a chunk edge spills its canopy
 -- into the neighbour. Rather than communicate, placement is derived from a hash
@@ -79,13 +80,23 @@ mod CubeForge.Trees do
     C.surface_id(h, slope) == 1 && h > C.sea_level() && slope <= 1
   end
 
-  doc "Species for a trunk at height [h]: pine above the treeline, oak below."
-  fn is_pine(h : Int) : Bool do h >= treeline() end
+  doc "Tree species ids."
+  fn oak() : Int do 0 end
+  fn pine() : Int do 1 end
+  fn palm() : Int do 2 end
+  doc "Species for a trunk at height [h] at generation: pine above the treeline, oak below."
+  fn species_at(h : Int) : Int do if h >= treeline() do pine() else oak() end end
+  doc "The species a log id belongs to: 0 oak, 1 pine, 2 palm. A non-log is oak."
+  fn species_of_log(id : Int) : Int do
+    if id == C.pine_log() do pine() else if id == C.palm_log() do palm() else oak() end end
+  end
+  doc "Trunk logs Veg grows for a species: oaks 5, pines 7, palms 6."
+  fn grown_trunk(species : Int) : Int do if species == pine() do 7 else if species == palm() do 6 else 5 end end end
 
   doc "Trunk height for the tree at (wx, wz)."
   fn trunk_height(wx : Int, wz : Int, seed : Int) : Int do
     let h = N.height(wx, wz, seed)
-    if is_pine(h) do 6 + float_to_int(cell_hash(wx, wz, seed, 4) *. 3.0)
+    if species_at(h) == pine() do 6 + float_to_int(cell_hash(wx, wz, seed, 4) *. 3.0)
     else 4 + float_to_int(cell_hash(wx, wz, seed, 5) *. 3.0) end
   end
 
@@ -97,16 +108,27 @@ mod CubeForge.Trees do
   Block a tree contributes at world (x, y, z), or 0. [tx, tz] is the trunk column,
   [base] the ground height it stands on. Pure, so any chunk can ask about any tree.
   """
-  fn block_of_tree(tx : Int, tz : Int, base : Int, trunk : Int, pine : Bool, x : Int, y : Int, z : Int) : Int do
+  fn block_of_tree(tx : Int, tz : Int, base : Int, trunk : Int, species : Int, x : Int, y : Int, z : Int) : Int do
     let dx = x - tx
     let dz = z - tz
     let dy = y - base
     if dx == 0 && dz == 0 && dy >= 1 && dy <= trunk do
-      if pine do C.pine_log() else C.oak_log() end
+      if species == pine() do C.pine_log() else if species == palm() do C.palm_log() else C.oak_log() end end
     else
-      let leaf = if pine do pine_leaf_at(dx, dy, dz, trunk) else oak_leaf_at(dx, dy, dz, trunk) end
-      if leaf do (if pine do C.pine_leaves() else C.oak_leaves() end) else 0 end
+      let leaf = if species == pine() do pine_leaf_at(dx, dy, dz, trunk)
+                 else if species == palm() do palm_frond_at(dx, dy, dz, trunk)
+                 else oak_leaf_at(dx, dy, dz, trunk) end end
+      if leaf do (if species == pine() do C.pine_leaves() else if species == palm() do C.palm_frond() else C.oak_leaves() end end) else 0 end
     end
+  end
+
+  -- Palm: a bare trunk with a small spread head. Twelve fronds ring the trunk
+  -- top one and two out (|dx| + |dz| in 1..2), and a plus of five sits one above.
+  pfn palm_frond_at(dx : Int, dy : Int, dz : Int, trunk : Int) : Bool do
+    let d = abs_i(dx) + abs_i(dz)
+    if dy == trunk do d >= 1 && d <= 2
+    else if dy == trunk + 1 do d <= 1
+    else false end end
   end
 
   -- Oak: a rounded blob centred just below the trunk top.

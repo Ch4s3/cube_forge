@@ -91,11 +91,31 @@ mod CubeForge.Test.Menu do
       let m = Menu.set_seed(zeroed(), 12345)
       let r = Menu.reroll(m, 987654321)
       Test.assert_true(Menu.seed(r) != 12345, "changed")
-      Test.assert_true(Menu.seed(r) >= 0 && Menu.seed(r) <= Menu.max_seed(), "in range")
+      Test.assert_true(Menu.base_seed(r) >= 0 && Menu.base_seed(r) <= Menu.max_seed(), "digits in range")
+      Test.assert_true(Menu.age(r) >= 0 && Menu.age(r) <= CubeForge.Noise.max_age(), "age in range")
     end
     test "reroll is a function of its entropy, so a run is reproducible" do
       Test.assert_eq_int(Menu.seed(Menu.reroll(zeroed(), 42)), Menu.seed(Menu.reroll(zeroed(), 42)), "same entropy, same seed")
       Test.assert_true(Menu.seed(Menu.reroll(zeroed(), 42)) != Menu.seed(Menu.reroll(zeroed(), 43)), "different entropy")
+    end
+  end
+
+  describe "age" do
+    test "digits edit the base and leave the age alone" do
+      let m = Menu.set_seed(zeroed(), CubeForge.Noise.with_age(12, 40))
+      Test.assert_eq_int(Menu.base_seed(Menu.append_digit(m, 3)), 123, "digit appended to the base")
+      Test.assert_eq_int(Menu.age(Menu.append_digit(m, 3)), 40, "age kept through a digit")
+      Test.assert_eq_int(Menu.base_seed(Menu.backspace(m)), 1, "backspace on the base")
+      Test.assert_eq_int(Menu.age(Menu.backspace(m)), 40, "age kept through backspace")
+      Test.assert_eq_int(Menu.seed(Menu.append_digit(m, 3)), CubeForge.Noise.with_age(123, 40), "the packed seed is what a new game gets")
+    end
+    test "- and = move the age by a step and clamp" do
+      let m = Menu.set_seed(zeroed(), CubeForge.Noise.with_age(12, 40))
+      Test.assert_eq_int(Menu.age(Menu.age_up(m)), 40 + Menu.age_step(), "up")
+      Test.assert_eq_int(Menu.age(Menu.age_down(m)), 40 - Menu.age_step(), "down")
+      Test.assert_eq_int(Menu.base_seed(Menu.age_up(m)), 12, "digits untouched")
+      Test.assert_eq_int(Menu.age(Menu.age_down(Menu.set_seed(zeroed(), 12))), 0, "cannot go below 0")
+      Test.assert_eq_int(Menu.age(Menu.age_up(Menu.set_seed(zeroed(), CubeForge.Noise.with_age(12, 100)))), 100, "cannot go above max")
     end
   end
 
@@ -139,7 +159,7 @@ mod CubeForge.Test.Menu do
     end
     test "slot rows name the slot, its seed or EMPTY, and BACK" do
       let m = with_slot(slots_page(), 2, 7, 1757000000)
-      Test.assert_eq_str(Menu.label(m, 1), "SLOT 2 SEED 7", "used")
+      Test.assert_eq_str(Menu.label(m, 1), "SLOT 2 SEED 7 AGE 0", "used")
       Test.assert_eq_str(Menu.label(m, 0), "SLOT 1 EMPTY", "empty")
       Test.assert_eq_str(Menu.label(m, Menu.item_back(m)), "BACK", "back")
       Test.assert_eq_int(Menu.slot_of_item(4), 5, "item 4 is slot 5")
@@ -156,7 +176,7 @@ mod CubeForge.Test.Menu do
       Test.assert_eq_str(Menu.label(Menu.set_status(m, 2, Menu.status_failed(), 100), 1), "FAILED", "failed")
       Test.assert_eq_str(Menu.label(m, 0), "SLOT 1 EMPTY", "other rows unchanged")
       Test.assert_eq_str(Menu.label(Menu.expire_status(m, 130), 1), "SAVED", "still shown at 30 frames")
-      Test.assert_eq_str(Menu.label(Menu.expire_status(m, 160), 1), "SLOT 2 SEED 7", "gone at 60")
+      Test.assert_eq_str(Menu.label(Menu.expire_status(m, 160), 1), "SLOT 2 SEED 7 AGE 0", "gone at 60")
     end
   end
 

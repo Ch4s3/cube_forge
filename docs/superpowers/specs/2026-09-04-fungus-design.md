@@ -246,6 +246,13 @@ column if it can carry mycelium and is dry, and consumes one; otherwise
 nothing happens. The readout is a HUD text line, uppercase, rebuilt on change.
 `CF_WILD`, `CF_AUTOSPORE`. Measurements in `RESULTS.md`.
 
+*As built (food, 2026-09-05):* caps are food. Using one with nothing in
+reach eats it and starts a thirty-second effect by species: Meadowbell and
+Sunshelf speed, Frostcap and Pinewart jump, Marshlight swim, Lanterncap the
+lantern (the flashlight, hands free). `CubeForge.Effects` is the subsystem;
+the readout line shows what is active. Saves now carry the mycelium field,
+the shown species and the biome's eased axes (§11's risk), in `fields.bin`.
+
 ## 8. Map view
 
 The map gains a mycelium overlay under `CF_MYC_MAP=1`: species colour,
@@ -318,4 +325,4 @@ collection of fungus a terraforming tool. `CF_MYC_FEEDBACK` scales it.
 ## Out of scope
 
 Player buffs on network, signalling or travel along the network,
-mushrooms as food, underground mycelium (the field is surface-only).
+underground mycelium (the field is surface-only).
