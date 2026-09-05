@@ -12,6 +12,7 @@
 mod CubeForge.Myc do
 
   alias CubeForge.Species as S
+  alias CubeForge.Noise as N
 
   type Field = Field(NativeU8Arr, NativeFloatArr, NativeU8Arr, NativeU8Arr, NativeU8Arr)
 
@@ -290,6 +291,89 @@ mod CubeForge.Myc do
   fn migrations(f : Field, n : Int, shown : NativeU8Arr, tick : Int, scan : Int, budget : Int) : List(Int) do
     match f do
       Field(sps, vg, _, _, _) -> migrations_go(sps, vg, shown, n, (tick * scan) % (n * n), scan, budget, Nil)
+    end
+  end
+
+
+  -- ── Mature patches, wild fungus, spores ────────────────────────────────
+  -- Octagonal distance in half-hops: straight steps cost 2, diagonal 3, the
+  -- same metric the spread uses, so a patch written here is exactly the one
+  -- a planting would have grown into.
+  pfn oct_cost(dx : Int, dz : Int) : Int do
+    let ax = if dx < 0 do 0 - dx else dx end
+    let az = if dz < 0 do 0 - dz else dz end
+    let hi = if ax > az do ax else az end
+    let lo = if ax > az do az else ax end
+    2 * hi + lo
+  end
+
+  pfn patch_go(sps : NativeU8Arr, vg : NativeFloatArr, rc : NativeU8Arr, n : Int, x : Int, z : Int, sp : Int, r : Int, i : Int) : Field do
+    let span = 2 * r + 1
+    if i >= span * span do Field(sps, vg, rc, NativeArray.make_u8(0, 0), NativeArray.make_u8(0, 0))
+    else
+      let dx = i % span - r
+      let dz = i / span - r
+      let cx = x + dx
+      let cz = z + dz
+      let cost = oct_cost(dx, dz)
+      if cx < 0 || cz < 0 || cx >= n || cz >= n || cost > plant_reach() do patch_go(sps, vg, rc, n, x, z, sp, r, i + 1)
+      else
+        let j = cx + n * cz
+        patch_go(NativeArray.set_u8(sps, j, sp), NativeArray.set_float(vg, j, 1.0), NativeArray.set_u8(rc, j, plant_reach() - cost), n, x, z, sp, r, i + 1)
+      end
+    end
+  end
+
+  doc "A mature patch of [sp] centred on (x, z): the octagon a planting grows into, at full vigour, reach falling with distance. Copies the arrays once."
+  fn plant_patch(f : Field, n : Int, x : Int, z : Int, sp : Int) : Field do
+    match f do
+      Field(sps, vg, rc, hd, cl) ->
+        match patch_go(copy_u8(sps, n * n), copy_f(vg, n * n), copy_u8(rc, n * n), n, x, z, sp, plant_radius(), 0) do
+          Field(s1, v1, r1, _, _) -> Field(s1, v1, r1, hd, cl)
+        end
+    end
+  end
+
+  doc "Fraction of 16x16 cells that hold a wild patch."
+  fn wild_density() : Float do 0.12 end
+  fn wild_cell() : Int do 16 end
+
+  pfn wild_go(f : Field, n : Int, ta : NativeFloatArr, ma : NativeFloatArr, seed : Int, c : Int, cells : Int) : Field do
+    if c >= cells * cells do f
+    else
+      let cx = c % cells
+      let cz = c / cells
+      if N.hash2(cx * 31, cz * 17, seed + 9001) >= wild_density() do wild_go(f, n, ta, ma, seed, c + 1, cells)
+      else
+        let x = cx * wild_cell() + wild_cell() / 2
+        let z = cz * wild_cell() + wild_cell() / 2
+        let i = x + n * z
+        let sp = S.best_for(NativeArray.get_float(ta, i), NativeArray.get_float(ma, i))
+        if sp == 0 do wild_go(f, n, ta, ma, seed, c + 1, cells)
+        else wild_go(plant_patch(f, n, x, z, sp), n, ta, ma, seed, c + 1, cells) end
+      end
+    end
+  end
+
+  doc "Seed the world's wild fungus: one mature patch of the fittest species per 16x16 cell the hash picks, against the climate arrays. Seeded, so a world's wild fungus is stable across runs."
+  fn wild(f : Field, n : Int, ta : NativeFloatArr, ma : NativeFloatArr, seed : Int) : Field do
+    wild_go(f, n, ta, ma, seed, 0, n / wild_cell())
+  end
+
+  doc "Whether digging the mycelium block at (x, y, z) yields a spore: about one in four, by a position hash so it cannot be farmed by re-placing."
+  fn dig_spore(x : Int, y : Int, z : Int, seed : Int) : Bool do
+    N.hash2(x * 3 + y, z * 5 + y, seed + 77) < 0.25
+  end
+
+  pfn pct(v : Float) : String do int_to_string(float_to_int(v *. 100.0 +. 0.5)) ++ "%" end
+  doc "One line for the HUD: what the column holds, or what would grow there."
+  fn readout(f : Field, n : Int, x : Int, z : Int, temp : Float, moist : Float) : String do
+    let sp = species_of(f, n, x, z)
+    if sp != 0 do S.name(sp) ++ " " ++ pct(vigour_of(f, n, x, z))
+    else
+      let best = S.best_for(temp, moist)
+      if best == 0 do "bare: nothing grows here"
+      else "bare: " ++ S.name(best) ++ " " ++ pct(S.fitness(best, temp, moist)) ++ " would grow" end
     end
   end
 

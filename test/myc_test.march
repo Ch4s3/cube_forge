@@ -57,6 +57,11 @@ mod CubeForge.Test.Myc do
     end
   end
 
+
+  pfn dig_count(i : Int, acc : Int) : Int do
+    if i >= 1000 do acc else dig_count(i + 1, if Myc.dig_spore(i % 37, 60 + i % 5, i / 37, 7) do acc + 1 else acc end) end
+  end
+
   describe "Myc.tick" do
     test "vigour eases toward fitness and a planting in the wrong climate withers" do
       let n = 32
@@ -137,6 +142,61 @@ mod CubeForge.Test.Myc do
       let f1 = tick_n(f0, n, uniform(n, 0.9), uniform(n, 0.9), 0.1, 50)
       Test.assert_eq_int(Myc.wanted(f1, n, 10 + n * 10), 0, "nothing wanted")
       Test.assert_eq_int(List.length(Myc.migrations(f1, n, shown, 0, n * n, 10)), 1, "one migration back")
+    end
+  end
+
+
+  describe "Myc.plant_patch and wild" do
+    test "a mature patch is the octagon a planting would have grown into" do
+      let n = 40
+      let f = Myc.plant_patch(Myc.build(n), n, 20, 20, 3)
+      Test.assert_eq_int(radius_go(f, n, 3, 20, 20, 0, 0), Myc.plant_radius(), "radius")
+      Test.assert_true(near(Myc.vigour_of(f, n, 20, 20), 1.0), "full vigour at the centre")
+      Test.assert_true(near(Myc.vigour_of(f, n, 27, 20), 1.0), "full vigour at the rim")
+      Test.assert_eq_int(Myc.reach_of(f, n, 20, 20), Myc.plant_reach(), "full reach at the centre")
+      Test.assert_eq_int(Myc.reach_of(f, n, 28, 20), 0, "no reach at the rim")
+      Test.assert_eq_int(Myc.species_of(f, n, 28, 28), 0, "the diagonal corner is outside the octagon")
+      Test.assert_true(Myc.count_species(f, n, 3) > 100, "a real patch")
+      let f1 = Myc.tick(f, n, uniform(n, 0.5), uniform(n, 0.3), 0.1)
+      Test.assert_eq_int(Myc.state_hash(f1, n), Myc.state_hash(f, n), "already settled")
+    end
+    test "wild seeds patches by the cell hash, fittest species, seeded" do
+      let n = 128
+      let f = Myc.wild(Myc.build(n), n, uniform(n, 0.5), uniform(n, 0.3), 7)
+      let held = Myc.count_species(f, n, 3)
+      Test.assert_true(held > 0, "some Meadowbell on grassland")
+      Test.assert_eq_int(Myc.count_species(f, n, 4), 0, "no Lanterncap on dry ground")
+      Test.assert_eq_int(Myc.state_hash(Myc.wild(Myc.build(n), n, uniform(n, 0.5), uniform(n, 0.3), 7), n), Myc.state_hash(f, n), "same seed, same world")
+      Test.assert_true(Myc.state_hash(Myc.wild(Myc.build(n), n, uniform(n, 0.5), uniform(n, 0.3), 8), n) != Myc.state_hash(f, n), "a different seed differs")
+      Test.assert_true(held < n * n / 2, "low density: well under half the world")
+    end
+    test "a dig yields a spore about a quarter of the time" do
+      Test.assert_true(dig_count(0, 0) > 150 && dig_count(0, 0) < 350, "roughly 250 of 1000")
+    end
+    test "the readout names what is there or what would grow" do
+      let n = 32
+      let f = Myc.plant(Myc.build(n), n, 5, 5, 4)
+      Test.assert_true(Myc.readout(f, n, 5, 5, 0.5, 0.7) == "Lanterncap 25%", "held column")
+      Test.assert_true(Myc.readout(f, n, 6, 5, 0.5, 0.7) == "bare: Lanterncap 100% would grow", "bare forest ground")
+      -- every climate has a species in band with the current table, so the
+      -- "nothing grows" branch is reserved for a future roster; cold and wet is Pinewart's
+      Test.assert_true(Myc.readout(f, n, 6, 5, 0.01, 0.99) == "bare: Pinewart 100% would grow", "cold wet ground")
+    end
+  end
+
+  describe "the canal" do
+    test "wetting the desert lets Marshlight in and pushes Sunshelf out" do
+      let n = 32
+      let dry_t = uniform(n, 0.85)
+      let dry_m = uniform(n, 0.1)
+      let wet_m = uniform(n, 0.7)
+      let f0 = Myc.plant(Myc.build(n), n, 16, 16, 6)
+      let f1 = tick_n(f0, n, dry_t, dry_m, 0.1, 300)
+      Test.assert_true(Myc.count_species(f1, n, 6) > 50, "Sunshelf thrives in the desert")
+      Test.assert_eq_int(Myc.count_species(tick_n(Myc.plant(Myc.build(n), n, 16, 16, 5), n, dry_t, dry_m, 0.1, 100), n, 5), 0, "Marshlight cannot live there dry")
+      let f2 = tick_n(Myc.plant(f1, n, 10, 16, 5), n, dry_t, wet_m, 0.1, 900)
+      Test.assert_true(Myc.count_species(f2, n, 5) > 50, "Marshlight lives there wet")
+      Test.assert_true(Myc.count_species(f2, n, 6) < Myc.count_species(f1, n, 6), "and Sunshelf has lost ground")
     end
   end
 
