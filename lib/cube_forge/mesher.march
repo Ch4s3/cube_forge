@@ -383,6 +383,8 @@ mod CubeForge.Mesher do
                la : NativeU8Arr, lb : NativeU8Arr, sps : NativeU8Arr, occ : NativeU8Arr, oxi : Int, ozi : Int, x : Int, y : Int, z : Int, d : Int, cat : Int) : Int do
     let id = C.get(c, x, y, z)
     if id == 0 || C.is_water(id) || category_of(id) != cat do 0
+    -- a model block draws as a stamped template, never as cube faces
+    else if is_model(c, n, s, e, w, x, y, z, id) do 0
     else
       let nb = if d == 0 do nb_get(c, n, s, e, w, x, y + 1, z) else if d == 1 do nb_get(c, n, s, e, w, x, y - 1, z)
                else if d == 2 do nb_get(c, n, s, e, w, x + 1, y, z) else if d == 3 do nb_get(c, n, s, e, w, x - 1, y, z)
@@ -406,7 +408,7 @@ mod CubeForge.Mesher do
         let sp = if C.is_myc(id) do NativeArray.get_u8(sps, oxi + x + 128 * (ozi + z)) else 0 end
         key_of(id, k0, k1, k2, k3, sp)
       end
-    end
+    end end
   end
 
   -- Fill the 16x16 mask for slice [a] of direction [d] in section [sy]. Mask index = u + 16 * v.
@@ -534,25 +536,118 @@ mod CubeForge.Mesher do
 
   -- Greedy-meshed faces of one category in section [sy] of chunk [c] (with its 4 neighbours).
   fn mesh_section_cat(c : CubeForge.Chunk.Chunk, n : CubeForge.Chunk.Chunk, s : CubeForge.Chunk.Chunk, e : CubeForge.Chunk.Chunk, w : CubeForge.Chunk.Chunk,
-                      la : NativeU8Arr, lb : NativeU8Arr, sps : NativeU8Arr, occ : NativeU8Arr, sy : Int, ox : Float, oz : Float, cat : Int) : CubeForge.F32Buf.F32Buf do
+                      la : NativeU8Arr, lb : NativeU8Arr, sps : NativeU8Arr, occ : NativeU8Arr, sy : Int, ox : Float, oz : Float, cat : Int, models : CubeForge.Model.Templates) : CubeForge.F32Buf.F32Buf do
     if !section_has(c, sy * 4096, (sy + 1) * 4096, cat) do B.new(1)
     else
       match dirs_go(Greedy(B.new(1024), NativeArray.make_int(257, 0)), c, n, s, e, w, la, lb, sps, occ, float_to_int(ox), float_to_int(oz), sy, 0, ox, oz, cat) do
-        Greedy(b, _) -> b
+        Greedy(b, _) ->
+          -- the foliage pass carries the models: each model block stamped after the cubes
+          if cat == cat_foliage() do stamp_go(b, models, c, n, s, e, w, la, lb, float_to_int(ox), float_to_int(oz), ox, oz, sy * 4096, (sy + 1) * 4096) else b end
       end
     end
   end
 
   doc "Greedy-meshed opaque faces of section [sy]."
   fn mesh_section_opaque(c : CubeForge.Chunk.Chunk, n : CubeForge.Chunk.Chunk, s : CubeForge.Chunk.Chunk, e : CubeForge.Chunk.Chunk, w : CubeForge.Chunk.Chunk,
-                         la : NativeU8Arr, lb : NativeU8Arr, sps : NativeU8Arr, occ : NativeU8Arr, sy : Int, ox : Float, oz : Float) : CubeForge.F32Buf.F32Buf do
-    mesh_section_cat(c, n, s, e, w, la, lb, sps, occ, sy, ox, oz, cat_opaque())
+                         la : NativeU8Arr, lb : NativeU8Arr, sps : NativeU8Arr, occ : NativeU8Arr, sy : Int, ox : Float, oz : Float, models : CubeForge.Model.Templates) : CubeForge.F32Buf.F32Buf do
+    mesh_section_cat(c, n, s, e, w, la, lb, sps, occ, sy, ox, oz, cat_opaque(), models)
   end
 
-  doc "Greedy-meshed alpha-cutout foliage faces of section [sy]."
+  doc "Greedy-meshed alpha-cutout foliage faces of section [sy], plus the stamped models."
   fn mesh_section_foliage(c : CubeForge.Chunk.Chunk, n : CubeForge.Chunk.Chunk, s : CubeForge.Chunk.Chunk, e : CubeForge.Chunk.Chunk, w : CubeForge.Chunk.Chunk,
-                          la : NativeU8Arr, lb : NativeU8Arr, sps : NativeU8Arr, occ : NativeU8Arr, sy : Int, ox : Float, oz : Float) : CubeForge.F32Buf.F32Buf do
-    mesh_section_cat(c, n, s, e, w, la, lb, sps, occ, sy, ox, oz, cat_foliage())
+                          la : NativeU8Arr, lb : NativeU8Arr, sps : NativeU8Arr, occ : NativeU8Arr, sy : Int, ox : Float, oz : Float, models : CubeForge.Model.Templates) : CubeForge.F32Buf.F32Buf do
+    mesh_section_cat(c, n, s, e, w, la, lb, sps, occ, sy, ox, oz, cat_foliage(), models)
+  end
+
+  -- ── Models: small things stamped as templates ───────────────────────────
+  -- A model block is drawn as its Model template inside the cell: small
+  -- mushrooms, palm fronds, and oak leaves standing on the ground (a bush --
+  -- the same test Veg.has_bush uses; canopy leaves stay cubes so a forest keeps
+  -- the greedy mesher). Model blocks stay see-through for their neighbours and
+  -- emit no cube faces of their own (face_key).
+  doc "Is the block [id] at (x, y, z) drawn as a model?"
+  fn is_model(c : CubeForge.Chunk.Chunk, n : CubeForge.Chunk.Chunk, s : CubeForge.Chunk.Chunk, e : CubeForge.Chunk.Chunk, w : CubeForge.Chunk.Chunk,
+              x : Int, y : Int, z : Int, id : Int) : Bool do
+    if C.is_fruit_small(id) do true
+    else if id == C.palm_frond() do true
+    else if id == C.oak_leaves() do
+      let below = nb_get(c, n, s, e, w, x, y - 1, z)
+      if below == 0 do false else if C.is_water(below) do false else if C.is_foliage(below) do false else !C.is_log(below) end end end
+    else false end end end
+  end
+
+  -- Frond direction (Model.frond's 0..7) for the blade pointing away from (sx, sz).
+  pfn away_dir(sx : Int, sz : Int) : Int do
+    let ax = 0 - sx
+    let az = 0 - sz
+    if az == 0 do (if ax > 0 do 0 else 2 end)
+    else if ax == 0 do (if az > 0 do 1 else 3 end)
+    else if ax > 0 && az > 0 do 4
+    else if ax < 0 && az > 0 do 5
+    else if ax < 0 && az < 0 do 6
+    else 7 end end end end end
+  end
+  pfn sgn(b : Bool) : Int do if b do 1 else 0 end end
+
+  doc "The template a model block at (x, y, z) stamps: mushrooms by species; fronds by where the trunk is; bushes by a position hash."
+  fn template_of(c : CubeForge.Chunk.Chunk, n : CubeForge.Chunk.Chunk, s : CubeForge.Chunk.Chunk, e : CubeForge.Chunk.Chunk, w : CubeForge.Chunk.Chunk,
+                 x : Int, y : Int, z : Int, id : Int, oxi : Int, ozi : Int) : Int do
+    if C.is_fruit_small(id) do CubeForge.Model.t_mushroom(C.fruit_species(id))
+    else if id == C.palm_frond() do
+      let px = nb_get(c, n, s, e, w, x + 1, y, z)
+      let mx = nb_get(c, n, s, e, w, x - 1, y, z)
+      let pz = nb_get(c, n, s, e, w, x, y, z + 1)
+      let mz = nb_get(c, n, s, e, w, x, y, z - 1)
+      -- a palm log beside it: the blade points away from the trunk
+      if px == C.palm_log() do CubeForge.Model.t_frond(2)
+      else if mx == C.palm_log() do CubeForge.Model.t_frond(0)
+      else if pz == C.palm_log() do CubeForge.Model.t_frond(3)
+      else if mz == C.palm_log() do CubeForge.Model.t_frond(1)
+      else
+        -- fronds beside it: away from where they are
+        let sx = sgn(px == C.palm_frond()) - sgn(mx == C.palm_frond())
+        let sz = sgn(pz == C.palm_frond()) - sgn(mz == C.palm_frond())
+        if sx != 0 || sz != 0 do CubeForge.Model.t_frond(away_dir(sx, sz))
+        else if nb_get(c, n, s, e, w, x, y - 1, z) == C.palm_log() do CubeForge.Model.t_umbrella()
+        else CubeForge.Model.t_tuft() end end
+      end end end end
+    else CubeForge.Model.t_bush(float_to_int(CubeForge.Noise.hash2(oxi + x, ozi + z, 4242) *. 4.0) % 4) end end
+  end
+
+  -- Append template k translated to (fx, fy, fz) with [shade] on every vertex.
+  pfn stamp_verts(b : CubeForge.F32Buf.F32Buf, m : CubeForge.Model.Templates, off : Int, i : Int, nv : Int, fx : Float, fy : Float, fz : Float, shade : Float) : CubeForge.F32Buf.F32Buf do
+    if i >= nv do b
+    else
+      let o = off + i * Vx.floats()
+      let b1 = b |> B.push3(CubeForge.Model.at(m, o) +. fx, CubeForge.Model.at(m, o + 1) +. fy, CubeForge.Model.at(m, o + 2) +. fz)
+                 |> B.push(CubeForge.Model.at(m, o + 3)) |> B.push(CubeForge.Model.at(m, o + 4)) |> B.push(CubeForge.Model.at(m, o + 5))
+                 |> B.push(shade) |> B.push(CubeForge.Model.at(m, o + 7)) |> B.push(CubeForge.Model.at(m, o + 8))
+      stamp_verts(b1, m, off, i + 1, nv, fx, fy, fz, shade)
+    end
+  end
+  doc "Stamp template [k] into the cell whose origin is (fx, fy, fz), every vertex carrying [shade]."
+  fn stamp(b : CubeForge.F32Buf.F32Buf, m : CubeForge.Model.Templates, k : Int, fx : Float, fy : Float, fz : Float, shade : Float) : CubeForge.F32Buf.F32Buf do
+    stamp_verts(b, m, CubeForge.Model.offset(m, k), 0, CubeForge.Model.floats(m, k) / Vx.floats(), fx, fy, fz, shade)
+  end
+
+  -- Every model block of the section, stamped with one shade from its own cell's light.
+  pfn stamp_go(b : CubeForge.F32Buf.F32Buf, m : CubeForge.Model.Templates, c : CubeForge.Chunk.Chunk, n : CubeForge.Chunk.Chunk, s : CubeForge.Chunk.Chunk, e : CubeForge.Chunk.Chunk, w : CubeForge.Chunk.Chunk,
+               la : NativeU8Arr, lb : NativeU8Arr, oxi : Int, ozi : Int, ox : Float, oz : Float, i : Int, stop : Int) : CubeForge.F32Buf.F32Buf do
+    if i >= stop do b
+    else
+      let id = C.get_idx(c, i)
+      let x = i % 16
+      let y = i / 256
+      let z = (i / 16) % 16
+      let model = if id == 0 do false else if !C.is_cutout(id) do false else is_model(c, n, s, e, w, x, y, z, id) end end
+      if !model do stamp_go(b, m, c, n, s, e, w, la, lb, oxi, ozi, ox, oz, i + 1, stop)
+      else
+        let sky = int_to_float(CubeForge.Light.get(la, oxi + x, y, ozi + z)) /. 15.0
+        let blk = int_to_float(CubeForge.Light.get(lb, oxi + x, y, ozi + z)) /. 15.0
+        let k = template_of(c, n, s, e, w, x, y, z, id, oxi, ozi)
+        stamp_go(stamp(b, m, k, ox +. int_to_float(x), int_to_float(y), oz +. int_to_float(z), Vx.pack_shade(sky, blk)), m, c, n, s, e, w, la, lb, oxi, ozi, ox, oz, i + 1, stop)
+      end
+    end
   end
 
   pfn water_section_go(b : CubeForge.F32Buf.F32Buf, c : CubeForge.Chunk.Chunk, n : CubeForge.Chunk.Chunk, s : CubeForge.Chunk.Chunk,

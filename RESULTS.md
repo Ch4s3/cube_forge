@@ -1730,3 +1730,108 @@ where the mycelium is established.
   coast and the lake's reach did not move. The spring brook at (116, 74) is
   outside that frame.
 - 349 tests (329 before).
+
+
+## Perf pass over the fungus features, on March origin/main 9ca8a98d (2026-09-05)
+
+**Toolchain.** `.march-version` moves from `watch-ac782d80` to `watch-9ca8a98d`,
+March origin/main at the time: 21 commits, among them aggregate reference
+counting and deep drop, owned aggregate parameters, record FBIP reuse, and a
+scheduler count that follows the CPUs. Built with `make install
+PREFIX=~/.march/versions/watch-9ca8a98d` from a detached checkout; dune puts
+the stdlib under `share/march`, and the toolchain layout forge expects wants
+it at `<version>/stdlib`, so that is a symlink (without it every module fails
+with "Unknown module `Array`", which reads like a project bug). The project
+builds, lints and passes 365 tests on it unchanged. Paired runs on a machine
+carrying other sessions' benchmarks (load average 15-20; every number below
+is from such pairs, back to back): startup, fps, the allocation gauge (132
+live objects per frame) and the budget all within noise of the old pin. The
+new runtime changed nothing this project can measure.
+
+**Where a body's cost was.** A fruit body growing cost 6-8 ms and a tree 7-8;
+instrumented, a body was stamp 0.7 ms, relight 6-10 ms, occupancy sync 0.5,
+biome rescan 0.3. The relight was skylight 4.6 ms + block light 2.5 ms on
+average, and the block pass's "nothing glows here" exit almost never fired
+near a wild patch, because glowing mycelium is everywhere. Both channels ran
+the same sweep: fourteen level passes, each visiting every voxel of the
+33-wide scan box and each preceded by a slice copy.
+
+**The worklist sweep.** Per-level lists of the voxels that hold each level,
+gathered in one pass after seeding and appended to as writes happen, so a
+level costs its own list and not the box; and in place on one buffer, no
+slice copies. `Light.sweep_box_lists`, shared by both relights; the old
+two-buffer sweep is gone. The "incremental equals a full flood" tests for
+both channels are the oracle and pass unchanged.
+
+| | before | after |
+|---|---|---|
+| skylight relight, median of 112 | 4.6 ms | **3.5 ms** |
+| block-light relight, median | 2.5 ms | **1.5 ms** |
+| a body, both relights | ~7 ms | **5.2 ms** |
+| the sweep alone, skylight | ~4 ms | 1.1-2.1 ms |
+| the sweep alone, block light | ~2 ms | 0.15-0.2 ms |
+
+What is left of a relight is the clear, the seed, the before-copy and the
+section diff, each a pass over the box; the sweep is no longer the biggest.
+
+**Two traps on the way, both worth a GAPS entry (G70).** The first version
+returned a two-field pair per level and cost 1.2 s a relight: while that cell
+held both arrays every in-place write copied the 4 MB field. The second
+version, one return at the very end, still cost 2.4 s -- in the GATHER, where
+12-22k pushes each copied the ~700 KB worklist. The push read the free slot
+and the list head and then wrote, in one function. The rule this project
+already had (G21/G67) is sharper than it was written: a NativeArray read
+inside the function that goes on to write the array -- or that hands it to a
+writer -- holds the refcount up until that function returns, and the write
+copies; a read in a leaf callee that only reads is released on return and
+costs nothing. Every read of the pool and of the light field in the walk is
+now a leaf (`wl_head`, `wl_entry_index`, `at_level`, `give_level`), and the
+gather went from 2.7 s to 0.1-0.4 ms.
+
+**The ground readout** is rebuilt only when a key of its inputs moves (the
+target column, its species, its vigour to the byte); the string was built
+every frame the crosshair rested on a block. The allocation gauge did not
+move (132 per frame), so that string was not what the gauge counts either.
+
+Budget on the loaded machine: 13.3 ms best of 3 against 16 (13.9 before the
+pass, same load). fps in the pinned scenario 224 against 207-209.
+
+
+## Micro-voxel models (2026-09-05)
+
+`docs/superpowers/specs/2026-09-05-micro-voxel-models-design.md`, plan
+`docs/superpowers/plans/2026-09-05-micro-voxel-models.md`. Small mushrooms,
+palm fronds and bush leaves are drawn as 8x8x8 sculptures of coloured
+sub-cubes inside their cell: `CubeForge.Model` builds each shape as a grid of
+palette indices, greedy-meshes it once into a template, and the templates ride
+in the `World` beside the shown species; the foliage mesher skips model blocks
+in its greedy pass and stamps their templates afterward, translated to the cell
+and shaded from the cell's own light. Colours come from one palette texture
+layer (89), so no shader or vertex-format change.
+
+- **Twenty templates**, faces under caps of 160 / 120 / 100 (mushroom / frond /
+  bush), asserted by `model_test`. Frond orientation reads the neighbours the
+  mesher already fetches: away from an adjacent palm log, else away from
+  adjacent fronds, else an umbrella over a log below, else a tuft.
+- **Foliage vertices, seed 7, world start:** 47,166 before -> 142,014 after
+  (3.0x; total 234,570 -> 328,000). All of it is bushes -- wild fungus has not
+  fruited at frame 0. The first bush (three 2x3 plates on stems) read as little
+  tables at a distance; the mound (four layers, half-widths 1, 2, 1, 0) reads as
+  a bush and costs this; a five-layer mound was 171,222 (3.6x) and looked no
+  better. Startup meshing 244 -> 270 ms.
+- **Frame budget** (`scratch/frame_budget.sh 16 400 3`): worst frame **10.63 ms**
+  after against 11.62 ms before on the same machine minutes apart -- no
+  movement; the deferred and full-rebuild meshes still agree.
+- **Frames:** `docs/models-mushrooms.png` -- two Meadowbell bodies on their
+  mycelium at seed 7 (`CF_WILD=0 CF_AUTOPLANT=100 CF_AUTOPLANT_SPECIES=3
+  CF_AUTOPLANT_MATURE=1 CF_FRUIT_RATE=2000 CF_PITCH=-140`, frame 850);
+  `docs/models-bushes.png` -- bush mounds on the seed 199 oasis grass. No frame
+  shows a palm: the oasis run grew none in view. Fronds are covered by the
+  mesher tests (orientation on a stamped palm, and the crown stamped as
+  templates rather than cubes).
+- **Language notes:** an alias cannot stand in a type position
+  (`B.F32Buf` fails, `CubeForge.F32Buf.F32Buf` works); a `doc` before a `type`
+  is a parse error; a type named `Set` collides with the stdlib's and reports
+  "expected CubeForge.Model.Set but got Set" -- renamed `Templates`; the
+  alias `M` is taken by `CubeForge.Math.Mat4` across the test binary.
+- 378 tests (365 before).

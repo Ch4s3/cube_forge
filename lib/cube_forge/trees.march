@@ -61,15 +61,35 @@ mod CubeForge.Trees do
   doc "Springs per mille of 8-block cells, before the ground test. CF_SPRING_DENSITY."
   fn spring_density() : Int do Env.get_int("CF_SPRING_DENSITY", 100) end
 
-  doc "Trunk-style column of the spring in cell (cx, cz), packed x + 4096 * z, or -1. A spring needs a slope of at least two and ground at 72 or higher: a mountainside, not a plain. The biome field does not exist at generation, so height and slope stand in, as they do for pines."
+  doc "Valley springs per mille of cells whose trunk column is on a river centreline. CF_VALLEY_SPRING_DENSITY."
+  fn valley_spring_density() : Int do Env.get_int("CF_VALLEY_SPRING_DENSITY", 500) end
+
+  doc """
+  What spring the cell (cx, cz) holds at its trunk column: 0 none, 1 a
+  mountainside spring (slope at least two, ground at 72 or higher), 2 a
+  valley spring (on a river centreline -- Noise.river_at at spring_mask() or
+  more -- above sea level by Noise.spring_rise, with some slope to run down).
+  Each has its own density draw. The biome field does not exist at
+  generation, so height, slope and the river mask stand in, as they do for
+  pines. A chain of valley springs down one channel is a brook: each is a
+  trickle that evaporation ends in a dozen cells, and the next takes over.
+  """
+  fn spring_kind(cx : Int, cz : Int, seed : Int) : Int do
+    let col = cell_trunk(cx, cz, seed)
+    let wx = col % 4096
+    let wz = col / 4096
+    let h = N.height(wx, wz, seed)
+    let slope = N.slope(wx, wz, seed)
+    let mountain = cell_hash(cx, cz, seed, 6) *. 1000.0 < int_to_float(spring_density()) && slope >= 2 && h >= 72
+    let valley = cell_hash(cx, cz, seed, 7) *. 1000.0 < int_to_float(valley_spring_density())
+                 && N.river_at(wx, wz, seed) >= N.spring_mask()
+                 && h > C.sea_level() + N.spring_rise(N.age_frac(seed)) && slope >= 1
+    if mountain do 1 else if valley do 2 else 0 end end
+  end
+
+  doc "Trunk-style column of the spring in cell (cx, cz), packed x + 4096 * z, or -1 (see spring_kind)."
   fn spring_at_cell(cx : Int, cz : Int, seed : Int) : Int do
-    if cell_hash(cx, cz, seed, 6) *. 1000.0 >= int_to_float(spring_density()) do 0 - 1
-    else
-      let col = cell_trunk(cx, cz, seed)
-      let wx = col % 4096
-      let wz = col / 4096
-      if N.slope(wx, wz, seed) >= 2 && N.height(wx, wz, seed) >= 72 do col else 0 - 1 end
-    end
+    if spring_kind(cx, cz, seed) == 0 do 0 - 1 else cell_trunk(cx, cz, seed) end
   end
 
   doc "A column can hold a plant only on flat grass above the water line."

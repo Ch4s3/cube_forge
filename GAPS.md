@@ -824,6 +824,16 @@ are freed immediately.
 
 ---
 
+### G78. Test modules share one alias namespace: the same alias for two modules fails to link
+- `alias CubeForge.Lakes as L` in `test/lakes_test.march` while
+  `test/light_test.march` has `alias CubeForge.Light as L`: the test binary
+  compiles, then the linker wants `_CubeForge.Lakes.chunk_layer`,
+  `_CubeForge.Lakes.emission` -- Light's functions resolved against the
+  Lakes alias from another file. `forge test` builds every test module into
+  one unit and the aliases leak across them. (`world_size_test` already
+  aliases World as `Wf` for the same reason.) Workaround: an alias name is
+  used for one module across the whole test tree; `Lk` here. Found 2026-09-05.
+
 ## Terrain generation notes
 
 ### G61. A `NativeU8Arr` store wraps mod 256 silently, and near-white textures came out red
@@ -1400,3 +1410,19 @@ transitive closure of the alias graph either.
 - **Done instead:** unique aliases per test module (`Myc`, `Sp`).
 - **Would need:** module-scoped aliases in the test build, or a duplicate-alias
   error at compile time.
+
+### G70 — a read in the writer copies; a read in a leaf does not
+
+Sharper than G21/G67 as written. A `NativeArray.get_*` of an array inside a
+function that later writes that array, or passes it to a function that
+writes it, holds the refcount up until the reading function returns, and
+the write copies the whole array. The same read inside a leaf callee that
+only reads is released when the callee returns and costs nothing. So a hot
+writer must do its reads through leaf helpers. Found in the worklist light
+sweep: a push that read the free slot and the list head before writing
+copied a 700 KB pool per push (2.7 s a relight); the same push with the two
+reads in one-line helpers is in place. See RESULTS.md, the perf pass of
+2026-09-05. Also: a variant cell holding two arrays keeps both refcounts at
+2 for as long as it lives, so a per-iteration pair return makes every write
+in the next iteration a copy (G12/G68 restated for this shape).
+

@@ -94,15 +94,18 @@ mod CubeForge do
   -- + the ground readout's buffer and the text it was last built from
   -- + the food effects (see CubeForge.Effects)
   -- + the last effects summary, kept until Effects.stamp moves
-  type Ui = Ui(CubeForge.Inventory.Inv, CubeForge.F32Buf.F32Buf, CubeForge.F32Buf.F32Buf, Int, CubeForge.F32Buf.F32Buf, String, CubeForge.Effects.Effects, String)
-  fn ui_inv(u : Ui) : CubeForge.Inventory.Inv do match u do Ui(i, _, _, _, _, _, _, _) -> i end end
+  -- + the key of the ground readout's inputs (column, species, vigour byte), so the string is rebuilt only when one of them moved
+  type Ui = Ui(CubeForge.Inventory.Inv, CubeForge.F32Buf.F32Buf, CubeForge.F32Buf.F32Buf, Int, CubeForge.F32Buf.F32Buf, String, CubeForge.Effects.Effects, String, Int, String)
+  fn ui_inv(u : Ui) : CubeForge.Inventory.Inv do match u do Ui(i, _, _, _, _, _, _, _, _, _) -> i end end
   @[no_alloc]
-  fn ui_with_inv(u : Ui, i : CubeForge.Inventory.Inv) : Ui do match u do Ui(_, a, b, k, r, t, e, fx) -> Ui(i, a, b, k, r, t, e, fx) end end
-  fn ui_readout(u : Ui) : String do match u do Ui(_, _, _, _, _, t, _, _) -> t end end
-  fn ui_effects(u : Ui) : CubeForge.Effects.Effects do match u do Ui(_, _, _, _, _, _, e, _) -> e end end
-  fn ui_fx(u : Ui) : String do match u do Ui(_, _, _, _, _, _, _, fx) -> fx end end
-  fn ui_with_effects(u : Ui, e : CubeForge.Effects.Effects) : Ui do match u do Ui(i, a, b, k, r, t, _, fx) -> Ui(i, a, b, k, r, t, e, fx) end end
-  pfn readout_verts(u : Ui) : Int do match u do Ui(_, _, _, _, r, _, _, _) -> F32Buf.len(r) / Vx.floats() end end
+  fn ui_with_inv(u : Ui, i : CubeForge.Inventory.Inv) : Ui do match u do Ui(_, a, b, k, r, t, e, fx, g, gr) -> Ui(i, a, b, k, r, t, e, fx, g, gr) end end
+  fn ui_readout(u : Ui) : String do match u do Ui(_, _, _, _, _, t, _, _, _, _) -> t end end
+  fn ui_gkey(u : Ui) : Int do match u do Ui(_, _, _, _, _, _, _, _, g, _) -> g end end
+  fn ui_ground(u : Ui) : String do match u do Ui(_, _, _, _, _, _, _, _, _, gr) -> gr end end
+  fn ui_effects(u : Ui) : CubeForge.Effects.Effects do match u do Ui(_, _, _, _, _, _, e, _, _, _) -> e end end
+  fn ui_fx(u : Ui) : String do match u do Ui(_, _, _, _, _, _, _, fx, _, _) -> fx end end
+  fn ui_with_effects(u : Ui, e : CubeForge.Effects.Effects) : Ui do match u do Ui(i, a, b, k, r, t, _, fx, g, gr) -> Ui(i, a, b, k, r, t, e, fx, g, gr) end end
+  pfn readout_verts(u : Ui) : Int do match u do Ui(_, _, _, _, r, _, _, _, _, _) -> F32Buf.len(r) / Vx.floats() end end
   doc "VBO slot of the ground readout line."
   fn readout_slot() : Int do 245 end
 
@@ -112,9 +115,9 @@ mod CubeForge do
   -- when the inventory actually changed, as before.
   -- [tint]: the species under the crosshair, folded into the rebuild key so the
   -- reticle recolours only when the target's species changes.
-  pfn refresh_hud(u : Ui, open : Bool, drag_from : Int, nx : Float, ny : Float, text : String, fx : String, tint : Int) : Ui do
+  pfn refresh_hud(u : Ui, open : Bool, drag_from : Int, nx : Float, ny : Float, text : String, fx : String, tint : Int, gkey : Int, ground : String) : Ui do
     match u do
-      Ui(inv, hb, ic, key, rb, last, ef, _) ->
+      Ui(inv, hb, ic, key, rb, last, ef, _, _, _) ->
         -- the readout rebuilds only when its string changed
         let rb1 = if text == last do rb
                   else
@@ -123,13 +126,13 @@ mod CubeForge do
                     b
                   end
         let k = (Inv.hud_key(inv) * 4 + (if open do 2 else 0 end) + (if drag_from >= 0 do 1 else 0 end)) * 8 + tint
-        if k == key && !open do Ui(inv, hb, ic, key, rb1, text, ef, fx)
+        if k == key && !open do Ui(inv, hb, ic, key, rb1, text, ef, fx, gkey, ground)
         else
           let hb1 = Hud.build_hotbar(hb, inv, Inv.progress(inv), open, drag_from, tint)
           Win.gfx_upload(252, F32Buf.storage(hb1), F32Buf.len(hb1))
           let ic1 = Hud.build_icons(ic, inv, open, drag_from, nx, ny)
           Win.gfx_upload(251, F32Buf.storage(ic1), F32Buf.len(ic1))
-          Ui(inv, hb1, ic1, k, rb1, text, ef, fx)
+          Ui(inv, hb1, ic1, k, rb1, text, ef, fx, gkey, ground)
         end
     end
   end
@@ -141,8 +144,8 @@ mod CubeForge do
     else if Chunk.is_myc(id) do World.shown_at(w, x, z)
     else 0 end end
   end
-  pfn hud_verts(u : Ui) : Int do match u do Ui(_, hb, _, _, _, _, _, _) -> F32Buf.len(hb) / Vx.floats() end end
-  pfn icon_verts(u : Ui) : Int do match u do Ui(_, _, ic, _, _, _, _, _) -> F32Buf.len(ic) / Vx.floats() end end
+  pfn hud_verts(u : Ui) : Int do match u do Ui(_, hb, _, _, _, _, _, _, _, _) -> F32Buf.len(hb) / Vx.floats() end end
+  pfn icon_verts(u : Ui) : Int do match u do Ui(_, _, ic, _, _, _, _, _, _, _) -> F32Buf.len(ic) / Vx.floats() end end
   -- VBO slot map. 0..63 opaque chunks, 64..127 water, 128..191 foliage, and the
   -- named slots below. They are all one array in the shim (CF_MAX_MESHES = 256),
   -- so a slot used twice silently overwrites; keep this list complete.
@@ -616,6 +619,13 @@ mod CubeForge do
     end
   end
 
+  -- Flowing water over the whole world: the brooks. CF_WATER_LOG=1 prints it every 100 frames.
+  pfn world_flow_go(w : CubeForge.World.World, n : Int, i : Int, acc : Int) : Int do
+    if i >= n * n do acc else world_flow_go(w, n, i + 1, acc + Chunk.count_flow(World.chunk_at(w, i % n, i / n))) end
+  end
+  pfn scene_flow_count(sc) : Int do
+    match sc do Scene(w, _, _, _, _, _, _, _, _, _, _) -> world_flow_go(w, World.side(w), 0, 0) end
+  end
   pfn scene_water_count(sc, cx : Int, cz : Int) : Int do
     match sc do Scene(w, _, _, _, _, _, _, _, _, _, myc) -> Chunk.count_water(World.chunk_at(w, cx, cz)) end
   end
@@ -686,8 +696,8 @@ mod CubeForge do
         let t0 = Win.time()
         let w0 = World.set_occupied(World.set_block(world, x, y, z, id), x, y, z, CubeForge.Light.occludes(id))
         let bio1 = Biome.note_edit(bio, w0, x, y, z, id)
-        let was_spring = y > Chunk.sea_level() && Chunk.is_source(World.block_at(world, x, y, z))
-        let is_spring = y > Chunk.sea_level() && Chunk.is_source(id)
+        let was_spring = is_world_spring(world, x, y, z)
+        let is_spring = is_world_spring(w0, x, y, z)
         if was_spring != is_spring do Win.spring_set(x, y, z, is_spring) else () end
         if is_spring && !was_spring do Win.spray_at(x, y, z, 40) else () end
         Win.gfx_set_voxel(x, y, z, CubeForge.Light.occludes(id))
@@ -1032,6 +1042,14 @@ mod CubeForge do
   -- Water on the surface at (px+3, pz+dz) for dz in [k, 4]: nine columns east of the player.
   -- Every source above sea level: told to the shim, and its chunk flagged so the
   -- water actor ticks from the first frame (a chunk with a spring is always live).
+  -- A source above sea level with somewhere to give (Water.is_spring_at, over
+  -- the world): the interior of an upland lake is not one, its outlet is.
+  pfn is_world_spring(w : CubeForge.World.World, x : Int, y : Int, z : Int) : Bool do
+    y > Chunk.sea_level() && Chunk.is_source(World.block_at(w, x, y, z))
+      && (Chunk.open_for_spring(World.block_at(w, x + 1, y, z)) || Chunk.open_for_spring(World.block_at(w, x - 1, y, z))
+          || Chunk.open_for_spring(World.block_at(w, x, y, z + 1)) || Chunk.open_for_spring(World.block_at(w, x, y, z - 1))
+          || Chunk.open_for_spring(World.block_at(w, x, y - 1, z)))
+  end
   pfn spring_flags(w : CubeForge.World.World, f : CubeForge.Biome.Field, i : Int, n : Int, flags : NativeIntArr) : NativeIntArr do
     if i >= n * n * 256 do
       println("springs: " ++ int_to_string(Win.spring_count()))
@@ -1040,7 +1058,7 @@ mod CubeForge do
       let x = i % (n * 16)
       let z = i / (n * 16)
       let h = Biome.height_of(f, x, z)
-      if h > Chunk.sea_level() && Chunk.is_source(World.block_at(w, x, h, z)) do
+      if is_world_spring(w, x, h, z) do
         Win.spring_set(x, h, z, true)
         println("  spring at " ++ int_to_string(x) ++ "," ++ int_to_string(h) ++ "," ++ int_to_string(z))
         spring_flags(w, f, i + 1, n, NativeArray.set_int(flags, World.floor_div16(x) + n * World.floor_div16(z), 1))
@@ -1914,6 +1932,9 @@ mod CubeForge do
           -- of the difference between a 14 ms frame and a 5 ms one. Five drain
           -- frames a period is more throughput than the phases can generate.
           let sc1 = if phase % 2 == 1 do drain(sc1pre2, remesh_budget()) else sc1pre2 end
+          if frame % 100 == 0 && Env.get_int("CF_WATER_LOG", 0) == 1 do
+            println("frame " ++ int_to_string(frame) ++ " flowing water cells: " ++ int_to_string(scene_flow_count(sc1)))
+          else () end
           if autoflow >= 0 && frame >= autoflow && (frame - autoflow) % 100 == 0 do
             let cx = World.floor_div16(float_to_int(Math.floor(V.x(Player.position(player1)))))
             let cz = World.floor_div16(float_to_int(Math.floor(V.z(Player.position(player1)))))
@@ -2081,10 +2102,22 @@ mod CubeForge do
           Win.gfx_draw_hud(255, fps_hud_verts(fps1), false)
           -- The ground readout: what the looked-at column holds, or what would grow there.
           let hit_now = scene_hit(sc1)
-          let ground = if Ray.is_hit(hit_now) && !map_mode1 do
-              Myc.readout(scene_myc(sc1), World.side(scene_world(sc1)) * 16, Ray.bx(hit_now), Ray.bz(hit_now),
+          -- The ground readout is a string; building one every frame was the last
+          -- per-frame allocator on the HUD path. Its inputs are the target column,
+          -- that column's species and its vigour to the byte (the climate under it
+          -- moves far slower than vigour does), so they make a key, and the string
+          -- is rebuilt only when the key moves. -1 is "no target".
+          let gcols = World.side(scene_world(sc1)) * 16
+          let gkey = if Ray.is_hit(hit_now) && !map_mode1 do
+              Ray.bx(hit_now) + 128 * Ray.bz(hit_now) + 16384 * (Myc.species_of(scene_myc(sc1), gcols, Ray.bx(hit_now), Ray.bz(hit_now))
+              + 8 * float_to_int(Myc.vigour_of(scene_myc(sc1), gcols, Ray.bx(hit_now), Ray.bz(hit_now)) *. 255.0 +. 0.5))
+            else 0 - 1 end
+          let ground = if gkey == ui_gkey(scene_ui(sc1)) do ui_ground(scene_ui(sc1))
+            else if gkey < 0 do ""
+            else
+              Myc.readout(scene_myc(sc1), gcols, Ray.bx(hit_now), Ray.bz(hit_now),
                           Biome.temp_of(scene_biome(sc1), Ray.bx(hit_now), Ray.bz(hit_now)), Biome.moist_of(scene_biome(sc1), Ray.bx(hit_now), Ray.bz(hit_now)))
-            else "" end
+            end end
           -- the active effects follow the ground readout on the same line
           -- rebuilt only when the whole seconds on some effect moved since the
           -- last frame (a bite this frame counts: its timer was longer a frame ago)
@@ -2093,7 +2126,7 @@ mod CubeForge do
           let readout = if fx_line == "" do ground else if ground == "" do fx_line else ground ++ "   " ++ fx_line end end
           -- the species under the crosshair: a fruit block's own, a mycelium block's column
           let tint = if Ray.is_hit(hit_now) && !map_mode1 do target_species(scene_world(sc1), Ray.bx(hit_now), Ray.by_(hit_now), Ray.bz(hit_now)) else 0 end
-          let sc2 = scene_with_ui(sc1, refresh_hud(scene_ui(sc1), inv_open2, drag2, ndc_x, ndc_y, readout, fx_line, tint))
+          let sc2 = scene_with_ui(sc1, refresh_hud(scene_ui(sc1), inv_open2, drag2, ndc_x, ndc_y, readout, fx_line, tint, gkey, ground))
           Win.gfx_draw_hud(252, hud_verts(scene_ui(sc2)), false)
           Win.gfx_draw_hud(251, icon_verts(scene_ui(sc2)), true)
           if readout != "" do Win.gfx_draw_hud(readout_slot(), readout_verts(scene_ui(sc2)), false) else () end
@@ -2296,6 +2329,13 @@ mod CubeForge do
     end
   end
 
+  pfn count_foliage_verts(meshes : List(CubeForge.ChunkMesh.ChunkMesh), acc : Int) : Int do
+    match meshes do
+      Nil -> acc
+      Cons(m, rest) -> count_foliage_verts(rest, acc + CM.foliage_vertices(m))
+    end
+  end
+
   pfn count_water_verts(meshes : List(CubeForge.ChunkMesh.ChunkMesh), acc : Int) : Int do
     match meshes do
       Nil -> acc
@@ -2323,37 +2363,62 @@ mod CubeForge do
   -- CF_TERRAIN_STATS=1: sample the generator over the world and report height and
   -- surface-material distributions, so terrain tuning is measured rather than eyeballed.
   pfn stats_go(n : Int, i : Int, seed : Int, lo : Int, hi : Int, sum : Int,
-               grass : Int, sand : Int, snow : Int, granite : Int, under : Int) : Unit do
+               grass : Int, sand : Int, snow : Int, granite : Int, under : Int, flat : Int, gravel : Int, climate : Int) : Unit do
     let span = 16 * n
     if i >= span * span / 16 do
       let cols = span * span / 16
+      -- climate packs dune, glacier and bog counts as d + 4096 * (g + 4096 * b)
+      println("  climate ground: dune " ++ int_to_string(climate % 4096 * 100 / cols) ++ "%  glacier " ++ int_to_string(climate / 4096 % 4096 * 100 / cols)
+              ++ "%  bog " ++ int_to_string(climate / 16777216 * 100 / cols) ++ "%")
       println("  height min=" ++ int_to_string(lo) ++ " max=" ++ int_to_string(hi) ++ " mean=" ++ int_to_string(sum / cols)
-              ++ "  (sea level " ++ int_to_string(Chunk.sea_level()) ++ ", snow line " ++ int_to_string(CubeForge.Noise.snow_line()) ++ ")")
+              ++ "  (sea level " ++ int_to_string(Chunk.sea_level()) ++ ", snow line " ++ int_to_string(CubeForge.Noise.snow_line()) ++ ")"
+              ++ "  flat (slope <= 1) " ++ int_to_string(flat * 100 / cols) ++ "%")
       println("  surface: grass " ++ int_to_string(grass * 100 / cols) ++ "%  sand " ++ int_to_string(sand * 100 / cols)
               ++ "%  granite " ++ int_to_string(granite * 100 / cols) ++ "%  snow " ++ int_to_string(snow * 100 / cols)
-              ++ "%  underwater " ++ int_to_string(under * 100 / cols) ++ "%")
+              ++ "%  underwater " ++ int_to_string(under * 100 / cols) ++ "%  gravel (talus) " ++ int_to_string(gravel * 100 / cols) ++ "%")
     else
       -- sample every 4th column in each direction
       let wx = (i % (span / 4)) * 4
       let wz = (i / (span / 4)) * 4
       let h = CubeForge.Noise.height(wx, wz, seed)
-      let sfc = Chunk.surface_id(h, CubeForge.Noise.slope(wx, wz, seed))
+      let slope = CubeForge.Noise.slope(wx, wz, seed)
+      let sfc = Chunk.surface_id(h, slope)
+      -- the pile, from a heightmap around this one column (a 9x9 apron is cheap at 1 in 16 columns)
+      let hs = Chunk.heights(wx - 8, wz - 8, seed)
+      let pile = Chunk.pile_at(hs, 8, 8, CubeForge.Noise.age_frac(seed))
+      let dune = if CubeForge.Noise.dune_mask_at(wx, wz, seed) >= Chunk.dune_min() do 1 else 0 end
+      let glacier = if CubeForge.Noise.glacier_at(wx, wz, seed) do 4096 else 0 end
+      let bog = if Chunk.is_bog(h, slope, CubeForge.Noise.river_at(wx, wz, seed), 0, seed) do 16777216 else 0 end
       stats_go(n, i + 1, seed,
                if h < lo do h else lo end, if h > hi do h else hi end, sum + h,
                if sfc == 1 do grass + 1 else grass end,
                if sfc == Chunk.sand() do sand + 1 else sand end,
                if sfc == Chunk.snow() do snow + 1 else snow end,
                if sfc == Chunk.granite() do granite + 1 else granite end,
-               if h < Chunk.sea_level() do under + 1 else under end)
+               if h < Chunk.sea_level() do under + 1 else under end,
+               if slope <= 1 do flat + 1 else flat end,
+               if pile > 0 do gravel + 1 else gravel end,
+               climate + dune + glacier + bog)
     end
   end
 
   -- CF_TERRAIN_MAP=1 (alongside CF_TERRAIN_STATS): the world as a character map, one
   -- character per 2x2 columns, so plateaus, valleys and rivers can be seen, not inferred.
   --   ~ underwater   . sand   # granite (cliff)   * snow
-  --   , : = +  grass, by height band (below 70, 78, 86, above)
-  pfn map_char(h : Int, sfc : Int) : String do
-    if h < Chunk.sea_level() do "~"
+  --   , : = +  grass, by height band (below 70, 78, 86, above)   d dune  g glacier  b bog
+  -- Is any of the 2x2 columns at (x, z) a spring column? A spring sits at its
+  -- cell's trunk column, so the test is against that.
+  pfn spring_in_2x2(x : Int, z : Int, seed : Int, k : Int) : Bool do
+    if k >= 4 do false
+    else
+      let cx = x + k % 2
+      let cz = z + k / 2
+      if CubeForge.Trees.spring_at_cell(cx / CubeForge.Trees.cell_size(), cz / CubeForge.Trees.cell_size(), seed) == cx + 4096 * cz do true
+      else spring_in_2x2(x, z, seed, k + 1) end
+    end
+  end
+  pfn map_char(h : Int, sfc : Int, lake : Int) : String do
+    if h < Chunk.sea_level() || lake > 0 do "~"
     else if sfc == Chunk.sand() do "."
     else if sfc == Chunk.granite() do "#"
     else if sfc == Chunk.snow() do "*"
@@ -2362,18 +2427,47 @@ mod CubeForge do
     else if h < 86 do "="
     else "+" end end end end end end end
   end
-  pfn map_row_go(n : Int, z : Int, x : Int, seed : Int, acc : String) : String do
+  pfn map_row_go(n : Int, z : Int, x : Int, seed : Int, lk : NativeU8Arr, acc : String) : String do
     if x >= 16 * n do acc
     else
       let h = CubeForge.Noise.height(x, z, seed)
-      map_row_go(n, z, x + 2, seed, acc ++ map_char(h, Chunk.surface_id(h, CubeForge.Noise.slope(x, z, seed))))
+      let slope = CubeForge.Noise.slope(x, z, seed)
+      let lake = CubeForge.Lakes.level_at(lk, n, x, z)
+      -- d dune field, g glacier, b bog: the climate-shaped ground, over the material
+      let ch = if spring_in_2x2(x, z, seed, 0) do "s"
+               else if lake == 0 && h >= Chunk.sea_level() && CubeForge.Noise.glacier_at(x, z, seed) do "g"
+               else if lake == 0 && Chunk.is_bog(h, slope, CubeForge.Noise.river_at(x, z, seed), 0, seed) do "b"
+               else if lake == 0 && h >= Chunk.sea_level() && CubeForge.Noise.dune_mask_at(x, z, seed) >= Chunk.dune_min() do "d"
+               else map_char(h, Chunk.surface_id(h, slope), lake) end end end end
+      map_row_go(n, z, x + 2, seed, lk, acc ++ ch)
     end
   end
-  pfn map_go(n : Int, z : Int, seed : Int) : Unit do
+  pfn map_go(n : Int, z : Int, seed : Int, lk : NativeU8Arr) : Unit do
     if z >= 16 * n do ()
     else
-      println("  " ++ map_row_go(n, z, 0, seed, ""))
-      map_go(n, z + 2, seed)
+      println("  " ++ map_row_go(n, z, 0, seed, lk, ""))
+      map_go(n, z + 2, seed, lk)
+    end
+  end
+
+  -- Caves over the world: air under the surface, and how many cells hold a worm.
+  pfn cave_air_go(w : CubeForge.World.World, n : Int, i : Int, acc : Int, seed : Int) : Int do
+    if i >= n * n do acc else cave_air_go(w, n, i + 1, acc + CubeForge.Caves.air_below_surface(World.chunk_at(w, i % n, i / n), 16 * (i % n), 16 * (i / n), seed), seed) end
+  end
+  pfn worm_cells_go(n : Int, seed : Int, i : Int, acc : Int) : Int do
+    let cells = 16 * n / CubeForge.Caves.cell_size()
+    if i >= cells * cells do acc
+    else worm_cells_go(n, seed, i + 1, if CubeForge.Caves.worm_at_cell(i % cells, i / cells, seed) do acc + 1 else acc end) end
+  end
+
+  -- Springs over the world by kind, so a density is measured, not guessed.
+  pfn springs_go(n : Int, i : Int, seed : Int, mountain : Int, valley : Int) : Unit do
+    let cells = 16 * n / CubeForge.Trees.cell_size()
+    if i >= cells * cells do
+      println("  springs: mountainside " ++ int_to_string(mountain) ++ "  valley " ++ int_to_string(valley))
+    else
+      let k = CubeForge.Trees.spring_kind(i % cells, i / cells, seed)
+      springs_go(n, i + 1, seed, if k == 1 do mountain + 1 else mountain end, if k == 2 do valley + 1 else valley end)
     end
   end
 
@@ -2399,16 +2493,21 @@ mod CubeForge do
   -- Pick a spawn column near the world centre: the HIGHEST flat, above-water column in a
   -- 32x32 box. Flat alone is not enough — the floor of a pit is flat, and spawning there
   -- boxes the camera in; the highest such column is open ground. Returns x + 4096 * z.
-  pfn find_spawn_go(n : Int, i : Int, seed : Int, best : Int, best_h : Int) : Int do
+  -- The world's own surface, not the generator's: a sinkhole or a lake is
+  -- where the blocks say it is.
+  pfn abs_i(v : Int) : Int do if v < 0 do 0 - v else v end end
+  pfn find_spawn_go(w : CubeForge.World.World, n : Int, i : Int, best : Int, best_h : Int) : Int do
     let centre = 8 * n
     if i >= 1024 do if best_h > 0 do best else centre + 4096 * centre end
     else
       let cx = centre - 16 + i % 32
       let cz = centre - 16 + i / 32
-      let h = CubeForge.Noise.height(cx, cz, seed)
-      let ok = h > Chunk.sea_level() + 1 && CubeForge.Noise.slope(cx, cz, seed) <= 1 && h > best_h
-      if ok do find_spawn_go(n, i + 1, seed, cx + 4096 * cz, h)
-      else find_spawn_go(n, i + 1, seed, best, best_h) end
+      let h = World.surface_y(w, cx, cz)
+      let slope = Math.max_int(Math.max_int(abs_i(World.surface_y(w, cx + 1, cz) - h), abs_i(World.surface_y(w, cx - 1, cz) - h)),
+                               Math.max_int(abs_i(World.surface_y(w, cx, cz + 1) - h), abs_i(World.surface_y(w, cx, cz - 1) - h)))
+      let ok = h > Chunk.sea_level() + 1 && slope <= 1 && h > best_h && !Chunk.is_water(World.block_at(w, cx, h, cz))
+      if ok do find_spawn_go(w, n, i + 1, cx + 4096 * cz, h)
+      else find_spawn_go(w, n, i + 1, best, best_h) end
     end
   end
 
@@ -2597,9 +2696,15 @@ mod CubeForge do
     let t3 = System.monotonic_time()
     let nverts = count_verts(meshes, 0)
     if Env.get_int("CF_TERRAIN_STATS", 0) == 1 do
-      stats_go(n, 0, seed, 999, 0, 0, 0, 0, 0, 0, 0)
+      stats_go(n, 0, seed, 999, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+      springs_go(n, 0, seed, 0, 0)
+      println("  caves: " ++ int_to_string(cave_air_go(world, n, 0, 0, seed)) ++ " air voxels below the surface, " ++ int_to_string(worm_cells_go(n, seed, 0, 0)) ++ " worm cells")
+      let tl0 = System.monotonic_time()
+      let lk = CubeForge.Lakes.levels(seed, n)
+      let lsum = CubeForge.Lakes.summary(lk)
+      println("  lakes: " ++ int_to_string(lsum / 1000) ++ " columns, highest surface " ++ int_to_string(lsum % 1000) ++ ", " ++ int_to_string(CubeForge.Lakes.notches(lk)) ++ " outlets, table in " ++ int_to_string(System.monotonic_time() - tl0) ++ " ms")
       println("  SIMD/scalar height mismatches: " ++ int_to_string(mismatch_go(n, 0, seed, 0)) ++ " of " ++ int_to_string(16 * n * 16 * n) ++ " columns")
-      if Env.get_int("CF_TERRAIN_MAP", 0) == 1 do map_go(n, 0, seed) else () end
+      if Env.get_int("CF_TERRAIN_MAP", 0) == 1 do map_go(n, 0, seed, lk) else () end
     else () end
     if headless do
       let tn0 = System.monotonic_time()
@@ -2611,12 +2716,12 @@ mod CubeForge do
     println("world " ++ int_to_string(n) ++ "x" ++ int_to_string(n) ++ " chunks, " ++ int_to_string(workers) ++ " workers, "
             ++ int_to_string(Env.get_int("MARCH_NUM_SCHEDULERS", 4)) ++ " scheduler threads (MARCH_NUM_SCHEDULERS)")
     println("  terrain scalar noise: " ++ int_to_string(t1 - t0) ++ " ms   terrain F32x4 noise: " ++ int_to_string(t2 - t1) ++ " ms")
-    println("  mesh all (greedy sections): " ++ int_to_string(t3 - t2) ++ " ms wall, " ++ float_to_string(int_to_float(t3 - t2) /. int_to_float(n * n)) ++ " ms per chunk (wall / chunks), " ++ int_to_string(nverts) ++ " vertices (" ++ int_to_string(count_water_verts(meshes, 0)) ++ " water)")
+    println("  mesh all (greedy sections): " ++ int_to_string(t3 - t2) ++ " ms wall, " ++ float_to_string(int_to_float(t3 - t2) /. int_to_float(n * n)) ++ " ms per chunk (wall / chunks), " ++ int_to_string(nverts) ++ " vertices (" ++ int_to_string(count_water_verts(meshes, 0)) ++ " water, " ++ int_to_string(count_foliage_verts(meshes, 0)) ++ " foliage)")
     if headless do Next(NoStart, settings0)
     else
       let counts = upload_meshes(meshes, 0, NativeArray.make_int(3 * water_slot_base(), 0))
       let water_col = World.find_water(world)
-      let spawn_col = find_spawn_go(n, 0, seed, 0, 0)
+      let spawn_col = find_spawn_go(world, n, 0, 0, 0)
       let spawn_x = spawn_col % 4096
       let spawn_z = spawn_col / 4096
       let ground_y = int_to_float(World.surface_y(world, spawn_x, spawn_z) + 1)
@@ -2650,7 +2755,7 @@ mod CubeForge do
       if is_loaded(loaded) do reload_water_slot(pids, n * n - 1, n, seed, Save.dir(), start_slot(start))
       else reload_water(pids, n * n - 1, n, seed) end
       println("reloaded " ++ int_to_string(n * n) ++ " water actors in " ++ ms(Win.time() -. tw0) ++ " (loads run asynchronously)")
-      let scene = Scene(world, counts, F32Buf.new(256), Ray.miss(), Ui(inv0, F32Buf.new(2048), F32Buf.new(256), -1, F32Buf.new(2048), "", Effects.new(), ""), pids, spring_flags(world, biome0, 0, n, NativeArray.make_int(n * n, 0)), Array.from_list(meshes), biome0, CubeForge.Light.marks_new(), myc0)
+      let scene = Scene(world, counts, F32Buf.new(256), Ray.miss(), Ui(inv0, F32Buf.new(2048), F32Buf.new(256), -1, F32Buf.new(2048), "", Effects.new(), "", -1, ""), pids, spring_flags(world, biome0, 0, n, NativeArray.make_int(n * n, 0)), Array.from_list(meshes), biome0, CubeForge.Light.marks_new(), myc0)
       let fps0 = Fps(t4, 0, 0, F32Buf.new(4096))
       -- Seed first, then the saved phase, so a fresh phase never overwrites it.
       Weather.send_seed(wxpid, seed)

@@ -42,25 +42,59 @@ mod CubeForge.Water do
   fn evap() : Int do Env.get_int("CF_EVAP", 16) end
 
   fn new_sim(c : CubeForge.Chunk.Chunk, edges : NativeU8Arr) : Sim do
-    Sim(c, edges, NativeArray.make_int(65536, 0), 0, 0, NativeArray.make_u8(65536, 0), Nil, springs_in(c, 0, Nil), Nil)
+    Sim(c, edges, NativeArray.make_int(65536, 0), 0, 0, NativeArray.make_u8(65536, 0), Nil, springs_in(c, edges, 0, Nil), Nil)
   end
 
   fn empty_edges() : NativeU8Arr do NativeArray.make_u8(4 * 4096, 0) end
 
   -- ── Springs ──────────────────────────────────────────────────────────────────
-  -- A source above sea level is a spring. Lake sources (at or below it) are
-  -- left to the on-demand rule; there are thousands and they converge.
-  pfn is_spring_at(i : Int, id : Int) : Bool do C.is_source(id) && i / 256 > C.sea_level() end
-  pfn springs_in(c : CubeForge.Chunk.Chunk, i : Int, acc : List(Int)) : List(Int) do
-    if i >= 65536 do acc
-    else springs_in(c, i + 1, if is_spring_at(i, C.get_idx(c, i)) do Cons(i, acc) else acc end) end
+  -- A source above sea level WITH SOMEWHERE TO GIVE is a spring: a horizontal
+  -- or downward neighbour that is air or non-source water. Sea-level sources
+  -- are left to the on-demand rule; there are thousands and they converge.
+  -- The interior of an upland lake (Lakes) is sources above sea level too,
+  -- and marking every one of them each tick would eat the budget doing
+  -- nothing; only its outlet -- the pour point, with a lower neighbour
+  -- outside the basin -- gives, and it gives at the spring rate: a brook
+  -- leaves every lake. Neighbours are read through the edge mirrors, so a
+  -- lake that crosses a chunk edge is still all interior.
+  pfn is_spring_at(c : CubeForge.Chunk.Chunk, e : NativeU8Arr, i : Int) : Bool do
+    let x = i % 16
+    let y = i / 256
+    let z = (i / 16) % 16
+    C.is_source(C.get_idx(c, i)) && y > C.sea_level()
+      && (C.open_for_spring(cell(c, e, x + 1, y, z)) || C.open_for_spring(cell(c, e, x - 1, y, z))
+          || C.open_for_spring(cell(c, e, x, y, z + 1)) || C.open_for_spring(cell(c, e, x, y, z - 1))
+          || C.open_for_spring(cell(c, e, x, y - 1, z)))
   end
-  pfn springs_upd(sp : List(Int), i : Int, old : Int, new : Int) : List(Int) do
-    let was = is_spring_at(i, old)
-    let now = is_spring_at(i, new)
-    if was == now do sp
-    else if now do Cons(i, sp)
-    else remove_go(sp, i, Nil) end end
+  pfn springs_in(c : CubeForge.Chunk.Chunk, e : NativeU8Arr, i : Int, acc : List(Int)) : List(Int) do
+    if i >= 65536 do acc
+    else springs_in(c, e, i + 1, if is_spring_at(c, e, i) do Cons(i, acc) else acc end) end
+  end
+  -- Re-decide cell [j]'s place in the list against the chunk as it now is.
+  pfn refresh_spring(sp : List(Int), c : CubeForge.Chunk.Chunk, e : NativeU8Arr, j : Int) : List(Int) do
+    let now = is_spring_at(c, e, j)
+    let without = remove_go(sp, j, Nil)
+    if now do Cons(j, without) else without end
+  end
+  -- A change at [i] from [old] to [new] can make or unmake a spring of [i]
+  -- and of any of its six neighbours (a dug lake wall opens the source
+  -- behind it) -- but only when a source came or went, or the cell's
+  -- openness flipped. A flow cell changing level is neither, and that is
+  -- most of what set_cell does.
+  pfn springs_after(sp : List(Int), c : CubeForge.Chunk.Chunk, e : NativeU8Arr, i : Int, old : Int, new : Int) : List(Int) do
+    if C.is_source(old) || C.is_source(new) || C.open_for_spring(old) != C.open_for_spring(new) do springs_upd(sp, c, e, i) else sp end
+  end
+  pfn springs_upd(sp : List(Int), c : CubeForge.Chunk.Chunk, e : NativeU8Arr, i : Int) : List(Int) do
+    let x = i % 16
+    let y = i / 256
+    let z = (i / 16) % 16
+    let s1 = refresh_spring(sp, c, e, i)
+    let s2 = if x + 1 < 16 do refresh_spring(s1, c, e, i + 1) else s1 end
+    let s3 = if x > 0 do refresh_spring(s2, c, e, i - 1) else s2 end
+    let s4 = if z + 1 < 16 do refresh_spring(s3, c, e, i + 16) else s3 end
+    let s5 = if z > 0 do refresh_spring(s4, c, e, i - 16) else s4 end
+    let s6 = if y + 1 < 256 do refresh_spring(s5, c, e, i + 256) else s5 end
+    if y > 0 do refresh_spring(s6, c, e, i - 256) else s6 end
   end
   pfn remove_go(sp : List(Int), i : Int, acc : List(Int)) : List(Int) do
     match sp do
@@ -173,7 +207,9 @@ mod CubeForge.Water do
         match s do
           Sim(c, e, q, qh, qn, bm, po, sp, wk) ->
             let i = idx(x, y, z)
-            let s1 = mark_neighbors(Sim(C.set_idx(c, i, id), e, q, qh, qn, bm, po, springs_upd(sp, i, C.get_idx(c, i), id), wk), x, y, z)
+            let old = C.get_idx(c, i)
+            let c1 = C.set_idx(c, i, id)
+            let s1 = mark_neighbors(Sim(c1, e, q, qh, qn, bm, po, springs_after(sp, c1, e, i, old, id), wk), x, y, z)
             let out1 = Cons(kind_cell() + i * 256 + id, out)
             let out2 = if z == 0 do Cons(kind_edge() + 0 * 1048576 + edge_slot(0, x, y, z) * 256 + id, out1) else out1 end
             let out3 = if z == 15 do Cons(kind_edge() + 1 * 1048576 + edge_slot(1, x, y, z) * 256 + id, out2) else out2 end
@@ -444,7 +480,10 @@ mod CubeForge.Water do
     let y = i / 256
     let z = (i / 16) % 16
     match s do
-      Sim(c, e, q, qh, qn, bm, po, sp, wk) -> mark(mark_neighbors(Sim(C.set_idx(c, i, id), e, q, qh, qn, bm, po, springs_upd(sp, i, C.get_idx(c, i), id), wk), x, y, z), x, y, z)
+      Sim(c, e, q, qh, qn, bm, po, sp, wk) ->
+        let old = C.get_idx(c, i)
+        let c1 = C.set_idx(c, i, id)
+        mark(mark_neighbors(Sim(c1, e, q, qh, qn, bm, po, springs_after(sp, c1, e, i, old, id), wk), x, y, z), x, y, z)
     end
   end
 
@@ -461,8 +500,10 @@ mod CubeForge.Water do
   end
 
   pfn load_sim(cx : Int, cz : Int, n : Int, seed : Int) : Sim do
-    let c = C.generate(16 * cx, 16 * cz, seed)
-    let nb = fn (x, z) -> if x >= 0 && x < n && z >= 0 && z < n do C.generate(16 * x, 16 * z, seed) else C.new() end
+    -- the lake table is a pure function of the seed: this actor computes its own
+    let lk = CubeForge.Lakes.levels(seed, n)
+    let c = C.generate_lakes(16 * cx, 16 * cz, seed, lk, n)
+    let nb = fn (x, z) -> if x >= 0 && x < n && z >= 0 && z < n do C.generate_lakes(16 * x, 16 * z, seed, lk, n) else C.new() end
     let e0 = load_edge(empty_edges(), 0, nb(cx, cz - 1))
     let e1 = load_edge(e0, 1, nb(cx, cz + 1))
     let e2 = load_edge(e1, 2, nb(cx + 1, cz))
