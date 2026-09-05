@@ -88,9 +88,9 @@ mod CubeForge do
   -- VBO slot map. 0..63 opaque chunks, 64..127 water, 128..191 foliage, and the
   -- named slots below. They are all one array in the shim (CF_MAX_MESHES = 256),
   -- so a slot used twice silently overwrites; keep this list complete.
-  --   247 escape menu   248 biome map   249 precipitation   250 map marker
-  --   251 hotbar icons  252 hotbar      253 underwater tint 254 selection outline
-  --   255 fps counter
+  --   246 water spray   247 escape menu 248 biome map      249 precipitation
+  --   250 map marker    251 hotbar icons 252 hotbar        253 underwater tint
+  --   254 selection outline               255 fps counter
   fn menu_slot() : Int do 247 end
   fn water_slot_base() : Int do 64 end
   fn foliage_slot_base() : Int do 128 end
@@ -1465,7 +1465,7 @@ mod CubeForge do
           draw_water(scene_counts(sc1), 0, nchunks)
           if live > 0 do Win.gfx_draw_precip(Precip.slot(), Precip.vertex_count(live)) else () end
           let spray_verts = Win.spray_frame(pdt, frame)
-          if spray_verts > 0 do Win.gfx_draw_precip(247, spray_verts) else () end
+          if spray_verts > 0 do Win.gfx_draw_precip(246, spray_verts) else () end
           if scene_has_hit(sc1) do CubeForge.Ffi.Window.gfx_draw_lines(254, Outline.vertex_count()) else () end
           -- the underwater screen tint only makes sense from the real first-person eye
           if map_mode1 do ()
