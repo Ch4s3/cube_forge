@@ -613,6 +613,13 @@ mod CubeForge do
     end
   end
 
+  -- Flowing water over the whole world: the brooks. CF_WATER_LOG=1 prints it every 100 frames.
+  pfn world_flow_go(w : CubeForge.World.World, n : Int, i : Int, acc : Int) : Int do
+    if i >= n * n do acc else world_flow_go(w, n, i + 1, acc + Chunk.count_flow(World.chunk_at(w, i % n, i / n))) end
+  end
+  pfn scene_flow_count(sc) : Int do
+    match sc do Scene(w, _, _, _, _, _, _, _, _, _, _) -> world_flow_go(w, World.side(w), 0, 0) end
+  end
   pfn scene_water_count(sc, cx : Int, cz : Int) : Int do
     match sc do Scene(w, _, _, _, _, _, _, _, _, _, myc) -> Chunk.count_water(World.chunk_at(w, cx, cz)) end
   end
@@ -1886,6 +1893,9 @@ mod CubeForge do
           -- of the difference between a 14 ms frame and a 5 ms one. Five drain
           -- frames a period is more throughput than the phases can generate.
           let sc1 = if phase % 2 == 1 do drain(sc1pre2, remesh_budget()) else sc1pre2 end
+          if frame % 100 == 0 && Env.get_int("CF_WATER_LOG", 0) == 1 do
+            println("frame " ++ int_to_string(frame) ++ " flowing water cells: " ++ int_to_string(scene_flow_count(sc1)))
+          else () end
           if autoflow >= 0 && frame >= autoflow && (frame - autoflow) % 100 == 0 do
             let cx = World.floor_div16(float_to_int(Math.floor(V.x(Player.position(player1)))))
             let cz = World.floor_div16(float_to_int(Math.floor(V.z(Player.position(player1)))))
@@ -2317,6 +2327,17 @@ mod CubeForge do
   -- character per 2x2 columns, so plateaus, valleys and rivers can be seen, not inferred.
   --   ~ underwater   . sand   # granite (cliff)   * snow
   --   , : = +  grass, by height band (below 70, 78, 86, above)
+  -- Is any of the 2x2 columns at (x, z) a spring column? A spring sits at its
+  -- cell's trunk column, so the test is against that.
+  pfn spring_in_2x2(x : Int, z : Int, seed : Int, k : Int) : Bool do
+    if k >= 4 do false
+    else
+      let cx = x + k % 2
+      let cz = z + k / 2
+      if CubeForge.Trees.spring_at_cell(cx / CubeForge.Trees.cell_size(), cz / CubeForge.Trees.cell_size(), seed) == cx + 4096 * cz do true
+      else spring_in_2x2(x, z, seed, k + 1) end
+    end
+  end
   pfn map_char(h : Int, sfc : Int) : String do
     if h < Chunk.sea_level() do "~"
     else if sfc == Chunk.sand() do "."
@@ -2331,7 +2352,8 @@ mod CubeForge do
     if x >= 16 * n do acc
     else
       let h = CubeForge.Noise.height(x, z, seed)
-      map_row_go(n, z, x + 2, seed, acc ++ map_char(h, Chunk.surface_id(h, CubeForge.Noise.slope(x, z, seed))))
+      let ch = if spring_in_2x2(x, z, seed, 0) do "s" else map_char(h, Chunk.surface_id(h, CubeForge.Noise.slope(x, z, seed))) end
+      map_row_go(n, z, x + 2, seed, acc ++ ch)
     end
   end
   pfn map_go(n : Int, z : Int, seed : Int) : Unit do
@@ -2339,6 +2361,17 @@ mod CubeForge do
     else
       println("  " ++ map_row_go(n, z, 0, seed, ""))
       map_go(n, z + 2, seed)
+    end
+  end
+
+  -- Springs over the world by kind, so a density is measured, not guessed.
+  pfn springs_go(n : Int, i : Int, seed : Int, mountain : Int, valley : Int) : Unit do
+    let cells = 16 * n / CubeForge.Trees.cell_size()
+    if i >= cells * cells do
+      println("  springs: mountainside " ++ int_to_string(mountain) ++ "  valley " ++ int_to_string(valley))
+    else
+      let k = CubeForge.Trees.spring_kind(i % cells, i / cells, seed)
+      springs_go(n, i + 1, seed, if k == 1 do mountain + 1 else mountain end, if k == 2 do valley + 1 else valley end)
     end
   end
 
@@ -2537,6 +2570,7 @@ mod CubeForge do
     let nverts = count_verts(meshes, 0)
     if Env.get_int("CF_TERRAIN_STATS", 0) == 1 do
       stats_go(n, 0, seed, 999, 0, 0, 0, 0, 0, 0, 0)
+      springs_go(n, 0, seed, 0, 0)
       println("  SIMD/scalar height mismatches: " ++ int_to_string(mismatch_go(n, 0, seed, 0)) ++ " of " ++ int_to_string(16 * n * 16 * n) ++ " columns")
       if Env.get_int("CF_TERRAIN_MAP", 0) == 1 do map_go(n, 0, seed) else () end
     else () end

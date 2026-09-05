@@ -231,8 +231,27 @@ mod CubeForge.Test.Terrain do
     test "a spring column has slope and height, and a generated chunk holds it" do
       let n = count_springs(0, 0, 7, 0, 0)
       Test.assert_true(n >= 0, "ran")
-      Test.assert_true(all_springs_ok(0, 7), "every spring cell is a mountainside")
+      Test.assert_true(all_springs_ok(0, 7), "every spring cell is a mountainside or a valley centreline")
     end
+    test "valley springs sit on the centreline, above the rise, and exist somewhere" do
+      Test.assert_true(valley_springs_ok(0, 0, 0) > 0, "some seed in 0..7 has a valley spring")
+      Test.assert_true(CubeForge.Noise.spring_rise(1.0) < CubeForge.Noise.spring_rise(0.0), "an old valley runs lower")
+    end
+  end
+  -- Every valley spring (kind 2) across seeds 0..7 is on the centreline and above
+  -- the rise; returns how many were seen, or -1 when one is misplaced.
+  pfn valley_springs_ok(seed : Int, i : Int, seen : Int) : Int do
+    if seed >= 8 do seen
+    else if i >= 256 do valley_springs_ok(seed + 1, 0, seen)
+    else if CubeForge.Trees.spring_kind(i % 16, i / 16, seed) != 2 do valley_springs_ok(seed, i + 1, seen)
+    else
+      let col = CubeForge.Trees.spring_at_cell(i % 16, i / 16, seed)
+      let wx = col % 4096
+      let wz = col / 4096
+      let ok = CubeForge.Noise.river_at(wx, wz, seed) >= CubeForge.Noise.spring_mask()
+               && CubeForge.Noise.height(wx, wz, seed) > CubeForge.Chunk.sea_level() + CubeForge.Noise.spring_rise(0.0)
+      if ok do valley_springs_ok(seed, i + 1, seen + 1) else 0 - 1 end
+    end end end
   end
   pfn count_springs(cx : Int, cz : Int, seed : Int, i : Int, acc : Int) : Int do
     if i >= 256 do acc else count_springs(cx, cz, seed, i + 1, if CubeForge.Trees.spring_at_cell(i % 16, i / 16, seed) >= 0 do acc + 1 else acc end) end
@@ -249,7 +268,11 @@ mod CubeForge.Test.Terrain do
         let ch = CubeForge.Chunk.generate(wx - wx % 16, wz - wz % 16, seed)
         let block = CubeForge.Chunk.get(ch, wx % 16, h, wz % 16)
         let is_valid_spring = if h >= CubeForge.Noise.snow_line() do block == CubeForge.Chunk.ice() else CubeForge.Chunk.is_source(block) end
-        if CubeForge.Noise.slope(wx, wz, seed) >= 2 && h >= 72 && is_valid_spring do all_springs_ok(i + 1, seed) else false end
+        let mountainside = CubeForge.Noise.slope(wx, wz, seed) >= 2 && h >= 72
+        let valley = CubeForge.Noise.river_at(wx, wz, seed) >= CubeForge.Noise.spring_mask()
+                     && h > CubeForge.Chunk.sea_level() + CubeForge.Noise.spring_rise(CubeForge.Noise.age_frac(seed))
+                     && CubeForge.Noise.slope(wx, wz, seed) >= 1
+        if (mountainside || valley) && is_valid_spring do all_springs_ok(i + 1, seed) else false end
       end
     end
   end

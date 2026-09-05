@@ -52,6 +52,17 @@ mod CubeForge.Chunk do
   pfn count_water_go(a : NativeU8Arr, i : Int, acc : Int) : Int do
     if i >= 65536 do acc else count_water_go(a, i + 1, if is_water(NativeArray.get_u8(a, i)) do acc + 1 else acc end) end
   end
+  -- Flowing water: cells that are water but not a source -- the finite units a
+  -- spring has given, so a brook's length. The sea and the lakes are sources.
+  pfn count_flow_go(a : NativeU8Arr, i : Int, acc : Int) : Int do
+    if i >= 65536 do acc
+    else
+      let id = NativeArray.get_u8(a, i)
+      count_flow_go(a, i + 1, if is_water(id) && !is_source(id) do acc + 1 else acc end)
+    end
+  end
+  doc "Number of flowing (non-source) water cells in the chunk: what springs have given and evaporation not yet taken."
+  fn count_flow(c : Chunk) : Int do match c do Chunk(a) -> count_flow_go(a, 0, 0) end end
   doc "Number of water cells in the chunk (test/verification helper)."
   fn count_water(c : Chunk) : Int do match c do Chunk(a) -> count_water_go(a, 0, 0) end end
   doc "Raw cell by flat index."

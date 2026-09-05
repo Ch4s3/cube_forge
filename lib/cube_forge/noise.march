@@ -164,14 +164,32 @@ mod CubeForge.Noise do
     smooth(clamp01((ridged(xw *. 0.012 +. 2.3, zw *. 0.012 +. 9.9, seed + 950) -. edge) /. (1.0 -. edge)))
   end
 
+  -- Domain warp: the point every layer is sampled at.
+  fn warp_x(x : Float, z : Float, seed : Int) : Float do
+    x +. (value2(x *. 0.011 +. 7.7, z *. 0.011 +. 3.1, seed + 700) -. 0.5) *. (2.0 *. warp_amp(age_frac(seed)))
+  end
+  fn warp_z(x : Float, z : Float, seed : Int) : Float do
+    z +. (value2(x *. 0.011 +. 1.9, z *. 0.011 +. 8.4, seed + 701) -. 0.5) *. (2.0 *. warp_amp(age_frac(seed)))
+  end
+
+  doc "The river mask (0..1, 1 on a valley's centreline) for a world column: what `height` carves with."
+  fn river_at(wx : Int, wz : Int, seed : Int) : Float do
+    let x = int_to_float(wx)
+    let z = int_to_float(wz)
+    river_mask(warp_x(x, z, seed), warp_z(x, z, seed), seed)
+  end
+  doc "River mask at and above which a column is on a valley's centreline, where a valley spring may sit."
+  fn spring_mask() : Float do 0.6 end
+  doc "Blocks above sea level a valley spring needs: the channel below that already holds water. Age lets springs run lower, so an old valley is wet almost to the sea."
+  fn spring_rise(a : Float) : Int do 12 - float_to_int(8.0 *. a) end
+
   doc "Terrain height for a world column."
   fn height(wx : Int, wz : Int, seed : Int) : Int do
     let x = int_to_float(wx)
     let z = int_to_float(wz)
     let a = age_frac(seed)
-    -- Domain warp: the point every layer below is sampled at.
-    let xw = x +. (value2(x *. 0.011 +. 7.7, z *. 0.011 +. 3.1, seed + 700) -. 0.5) *. (2.0 *. warp_amp(a))
-    let zw = z +. (value2(x *. 0.011 +. 1.9, z *. 0.011 +. 8.4, seed + 701) -. 0.5) *. (2.0 *. warp_amp(a))
+    let xw = warp_x(x, z, seed)
+    let zw = warp_z(x, z, seed)
     -- Continental shape from a single broad octave (wide spread), with fBm detail on top.
     -- The continental octave must span several lattice cells across the map, or every
     -- seed produces one flat elevation for the whole world.

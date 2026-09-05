@@ -59,13 +59,34 @@ mostly dry washes. No new knob is age-specific.
 
 ## 4. Measured
 
-- Springs per world and water cells at equilibrium (tick 600) for densities
-  250, 500, 750, three seeds, ages 0/50/100; pick the density where a mid-age
-  valley reads as one stream, not beads.
-- Water tick cost with the new count, `CF_HEADLESS=1` frame timing; the
-  budget is that no chunk's queue grows without bound (`kind_pending` stays
-  near zero after warm-up).
-- `CF_TERRAIN_MAP` gains `s` for a spring column, so the placement is seen.
+*As built, 2026-09-05.* The centreline test at 0.85 was a block and a half
+wide and a cell's trunk column almost never landed on it (0-6 valley springs
+a world at any density); `spring_mask()` is 0.6, the valley floor, and the
+density default is 500. Springs by kind (`CF_TERRAIN_STATS`), seed 1234
+being the valley-rich one:
+
+| seed | age 0 | age 50 | age 100 |
+|---|---|---|---|
+| 7 | 6 + 5 | 7 + 3 | 3 + 7 |
+| 1234 | 10 + 13 | 7 + 16 | 2 + 25 |
+| 99 | 5 + 2 | 4 + 3 | 2 + 5 |
+| 2024 | 11 + 1 | 9 + 4 | 9 + 10 |
+
+(mountainside + valley). `CF_WATER_LOG=1` prints the world's flowing
+(non-source) water cells every 100 frames, `Chunk.count_flow`. Seed 1234,
+1200 frames, windowed:
+
+| | frame 100 | 500 | 1100 |
+|---|---|---|---|
+| age 0 | 90 | 270 | 413 |
+| age 50 | 144 | 360 | 491 |
+| age 100 | 155 | 317 | 412 |
+| age 100, valley density 0 | 12 | 37 | 38 |
+
+About twenty cells a spring at the plateau, and a tenfold rise over the
+mountainside springs alone. Frame time did not move outside its noise
+(worst frame 18-23 ms with or without them, one 85 ms outlier with them off).
+`CF_TERRAIN_MAP` draws `s` on a 2x2 holding a spring column.
 
 ## 5. Tests
 
