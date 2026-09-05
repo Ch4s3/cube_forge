@@ -134,6 +134,46 @@ mod CubeForge.Test.Terrain do
     end
   end
 
+  -- The floodplain: pairs of neighbouring columns on a river's floor, and how
+  -- many of them step more than one. Along the channel the floor still falls
+  -- with the land, so the test is that an ancient floor steps LESS than a
+  -- young one, not that it is level. Returns pairs * 1000 + steep.
+  pfn floor_pairs(seed : Int, i : Int, pairs : Int, steep : Int) : Int do
+    if i >= 16384 do pairs * 1000 + steep
+    else
+      let wx = i % 128
+      let wz = i / 128
+      if wx >= 127 || N.river_at(wx, wz, seed) < 0.7 || N.river_at(wx + 1, wz, seed) < 0.7 do floor_pairs(seed, i + 1, pairs, steep)
+      else
+        let d = N.height(wx + 1, wz, seed) - N.height(wx, wz, seed)
+        floor_pairs(seed, i + 1, pairs + 1, if d > 1 || d < -1 do steep + 1 else steep end)
+      end
+    end
+  end
+
+  describe "sediment and floodplains" do
+    test "an ancient river's floor steps less than a young one's" do
+      let young = floor_pairs(N.with_age(1234, 0), 0, 0, 0)
+      let old = floor_pairs(N.with_age(1234, 100), 0, 0, 0)
+      Test.assert_true(young / 1000 > 50 && old / 1000 > 50, "the seed has a river to measure at both ages")
+      -- steep fraction in per mille, so the comparison is between fractions, not counts
+      Test.assert_true((old % 1000) * 1000 / (old / 1000) < (young % 1000) * 1000 / (young / 1000), "fewer steep pairs per pair when ancient")
+    end
+    test "the plain widens and flattens with age" do
+      Test.assert_true(N.plain_edge(1.0) < N.plain_edge(0.0), "wider")
+      Test.assert_true(N.plain_strength(1.0) > N.plain_strength(0.0), "flatter")
+      Test.assert_true(N.plain_mask(1.0, 0.5) == 1.0 && N.plain_mask(0.0, 0.5) == 0.0, "1 on the centreline, 0 outside")
+    end
+    test "sediment lies under a floodplain and nowhere else" do
+      let s = N.with_age(5, 50)
+      Test.assert_eq_int(C.sediment_id(1, 0.9, C.sea_level(), s), C.mud(), "wet floor is mud")
+      Test.assert_eq_int(C.sediment_id(1, 0.9, C.sea_level() + 6, s), C.clay(), "dry floor is clay")
+      Test.assert_eq_int(C.sediment_id(1, 0.1, C.sea_level() + 6, s), 2, "outside the valley is dirt")
+      Test.assert_eq_int(C.sediment_id(C.sand(), 0.9, C.sea_level(), s), C.sand(), "a sand shore stays sand")
+      Test.assert_eq_int(C.sediment_id(C.granite(), 0.9, 80, s), C.granite(), "a cliff stays granite")
+    end
+  end
+
   describe "plateaus and rivers" do
     test "ridged_fbm and the plateau and river masks stay within [0, 1]" do
       Test.assert_true(masks_in_range(0), "every layer mask in range")

@@ -60,10 +60,20 @@ One `smooth` and one `lerp` per column in each height path. Nothing else.
 
 ## 5. Measured
 
-- `CF_TERRAIN_STATS`: flat columns (slope <= 1) as a percentage, ages 0/50/
-  100 — expected to rise with age; granite unchanged or lower.
-- `CF_TERRAIN_MAP` at age 100, a river seed: the floor reads as a band of
-  one character, not a gradient.
+*As built, 2026-09-05.* Seed 1234 (the valley-rich one), `CF_TERRAIN_STATS`,
+which now reports flat columns (slope <= 1):
+
+| age | flat | granite | snow | underwater | SIMD/scalar mismatches |
+|---|---|---|---|---|---|
+| 0 | 53% | 24% | 15% | 15% | 1 |
+| 50 | 55% | 17% | 7% | 21% | 0 |
+| 100 | 67% | 6% | 0% | 29% | 0 |
+
+The map at age 100 reads the valley floors as one character wide bands
+with springs strung along them. Along the channel the floor still falls
+with the land (the pull is toward the channel's floor at that column, not
+to one level), so the test compares steep pairs per pair between ages
+rather than asking for a level floor.
 
 ## 6. Tests
 

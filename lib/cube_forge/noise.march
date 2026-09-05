@@ -135,6 +135,15 @@ mod CubeForge.Noise do
   fn river_depth(a : Float) : Float do 4.0 +. 18.0 *. a end
   doc "Where a river valley starts, on the 0..1 crease of its noise; lower is wider. Age widens the valley."
   fn river_edge(a : Float) : Float do 0.86 -. 0.20 *. a end
+  doc "Where the floodplain starts, on the 0..1 river mask: the flat inner part of the valley. Age widens it."
+  fn plain_edge(a : Float) : Float do 0.55 -. 0.20 *. a end
+  doc "How far the land inside the plain is pulled to the channel's floor. A young valley is a V; an ancient one a flat floor with the slopes pushed to its edges."
+  fn plain_strength(a : Float) : Float do 0.5 +. 0.4 *. a end
+  doc "1 on the floodplain, 0 outside it, from the river mask."
+  fn plain_mask(river : Float, a : Float) : Float do
+    let e = plain_edge(a)
+    smooth(clamp01((river -. e) /. (1.0 -. e)))
+  end
 
   doc """
   Snap a height onto plateau_step()-spaced terraces: flat except for a ramp of
@@ -206,8 +215,13 @@ mod CubeForge.Noise do
     let land2 = lerp(land, terrace(land, terrace_sharpness(a)), plateau_mask(xw, zw, seed))
     let mountains = ridged_fbm(xw *. 0.028, zw *. 0.028, seed + 13) *. rug *. mountain_amp(a)
     -- River valleys cut less through mountains: a canyon, not a plain.
-    let carve = river_mask(xw, zw, seed) *. river_depth(a) *. (1.0 -. 0.5 *. rug)
-    let h = float_to_int(land2 +. mountains -. carve)
+    let river = river_mask(xw, zw, seed)
+    let depth = river_depth(a) *. (1.0 -. 0.5 *. rug)
+    let raw = land2 +. mountains -. river *. depth
+    -- The floodplain: inside the valley the land is pulled toward the
+    -- channel's floor, so what the river moved lies flat beside it.
+    let floor = land2 +. mountains -. depth
+    let h = float_to_int(lerp(raw, floor, plain_mask(river, a) *. plain_strength(a)))
     if h < 1 do 1 else if h > 200 do 200 else h end end
   end
 
@@ -330,8 +344,12 @@ mod CubeForge.Noise do
     let mountains = mul_k(Simd.mul_f32x4(ridged_fbm_x4(mul_k(xw, 0.028), mul_k(zw, 0.028), seed + 13), rug), mountain_amp(a))
     let edge = river_edge(a)
     let river = smooth_x4(clamp01_x4(Simd.div_f32x4(sub_k(ridged_x4(add_k(mul_k(xw, 0.012), 2.3), add_k(mul_k(zw, 0.012), 9.9), seed + 950), edge), Simd.splat_f32x4(1.0 -. edge))))
-    let carve = Simd.mul_f32x4(mul_k(river, river_depth(a)), Simd.sub_f32x4(Simd.splat_f32x4(1.0), mul_k(rug, 0.5)))
-    let h = Simd.sub_f32x4(Simd.add_f32x4(land2, mountains), carve)
+    let depth = Simd.mul_f32x4(Simd.splat_f32x4(river_depth(a)), Simd.sub_f32x4(Simd.splat_f32x4(1.0), mul_k(rug, 0.5)))
+    let raw = Simd.sub_f32x4(Simd.add_f32x4(land2, mountains), Simd.mul_f32x4(river, depth))
+    let floor = Simd.sub_f32x4(Simd.add_f32x4(land2, mountains), depth)
+    let pe = plain_edge(a)
+    let plain = smooth_x4(clamp01_x4(Simd.div_f32x4(sub_k(river, pe), Simd.splat_f32x4(1.0 -. pe))))
+    let h = lerp_x4(raw, floor, mul_k(plain, plain_strength(a)))
     Simd.min_f32x4(Simd.max_f32x4(h, Simd.splat_f32x4(1.0)), Simd.splat_f32x4(200.0))
   end
 
