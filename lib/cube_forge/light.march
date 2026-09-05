@@ -53,7 +53,9 @@ mod CubeForge.Light do
   -- about nine, and keeps every relight box small.
   fn emission(id : Int) : Int do
     if id == C.glow_cap() do 10
-    else if C.is_myc(id) do 2 * C.myc_glow(id)
+    -- dim 3, bright 6: measured at 2/4 a lone bright column lifted the ground
+    -- by about 25/255 at night, too faint to read as lit
+    else if C.is_myc(id) do 3 * C.myc_glow(id)
     else 0 end end
   end
 

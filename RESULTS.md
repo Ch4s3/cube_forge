@@ -1268,3 +1268,50 @@ Two test findings worth keeping:
   species with fitness 0.33 to spread past the 0.6 spread threshold. Both
   "failures" were the rules doing what the spec says; the tests were corrected
   to assert what reach and the threshold actually predict.
+
+## Mycelium blocks (fungus phase 3, 2026-09-05)
+
+The field reaches the world: a held column's surface becomes "mycelium over
+<base>" and a lost column's surface goes back, through a budgeted queue on the
+retexture slots. Plan `docs/superpowers/plans/2026-09-05-fungus-phase3-blocks.md`.
+
+| | cost (debug) |
+|---|---|
+| `myc migrate`, no glow change: set_block + shown + geometry marks | **0.013 ms per column** (12 columns in 0.16 ms) |
+| `myc migrate`, a glow change: the above plus a block-light relight | **10.4 ms per column** |
+| `scratch/frame_budget.sh`, 12 ms budget, release, no fungus in the scenario | **8.81 ms** best of 3, drained mesh equals full rebuild |
+
+So two budgets. `CF_MYC_BUDGET` (32 per period, split over the two slots) bounds
+the cheap kind, and `CF_MYC_GLOW_BUDGET` (default **1** per slot, measured at 2
+and lowered) bounds the relights; a glow column skipped for budget stays a
+candidate and lands on a later slot. A 120-column glowing patch therefore takes
+about ten seconds to light up fully, which reads as the glow "coming on".
+
+**Species is not in the block id.** Ids 23..43 encode base x glow (seven bases,
+three glow levels), so `Light.emission` stays a pure function of the id and the
+base can be restored when the network leaves. The species the surface shows
+lives in `World.shown`, one byte per column, written in the same migration step
+as the block; the mesher reads it into the greedy key (bits 48..55) and picks
+one of 42 per-(base, species) texture layers. A species change with no glow
+change is therefore no block edit at all -- `shown` moves and the section is
+marked, the migration list keys on `wanted != shown` -- which is what keeps a
+contest border cheap. The rejected alternative, species in the id, was 42 ids
+now and seven more per future species.
+
+Texture generators never read the texture array: each mycelium layer
+reproduces its base from the base's formula and overlays threads, because a
+read before a write copies all 60 KB per texel (GAPS G21).
+
+Mycelium emission is **dim 3, bright 6**, not the spec's 4: at 4 a lone bright
+column lifted the ground by about 25/255 at night, which did not read as lit.
+`docs/fungus-myc-ground.png` is a Meadowbell patch by day (seed 7,
+`CF_AUTOPLANT=100 CF_MYC_RATE=5000`, frame 2000); `docs/fungus-myc-glow.png`
+is a forced Lanterncap column at night (`CF_AUTOPLANT_SPECIES=4`, frame 400,
+before it withers: it is unfit on grassland and is shown from roughly frame
+120 to 640).
+
+Finding: a dump at frame 1200 of that run showed no glow and a world hash equal
+to the run without the planting. The column had been shown and then migrated
+back, so the blocks matched again -- the hash cannot see a change that undoes
+itself. The `mycelium at <column>` line in the dump summary (species, vigour,
+wanted, shown, surface id, block light) is what settled it; it stays.

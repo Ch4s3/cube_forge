@@ -134,6 +134,15 @@ a glowing species is a **light block** — the only portable light in the game,
 which is the resource half of the design. Placed fruit blocks are inert: they
 neither fruit nor spread.
 
+*As built (phase 3, 2026-09-05):* the block id encodes **base x glow** (21
+ids, 23..43) rather than base alone, so `Light.emission` stays a function of
+the id; the species comes from `World.shown`, a per-column byte the migration
+writes in step with the block, and the mesher carries it in the greedy key to
+pick one of 42 per-(base, species) layers. Two budgets: `CF_MYC_BUDGET` for
+plain migrations and `CF_MYC_GLOW_BUDGET` for the ones that relight. Mycelium
+emission is dim 3 / bright 6 (§6's 4 was too faint to read). The spore chance
+on digging waits for the spore item in phase 4. Measurements in `RESULTS.md`.
+
 ## 5. Fruiting
 
 Fruit follows the tree pattern: a **fruit cell** grid and a pure function of
