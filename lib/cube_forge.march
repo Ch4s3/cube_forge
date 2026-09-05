@@ -2298,7 +2298,7 @@ mod CubeForge do
   -- CF_TERRAIN_STATS=1: sample the generator over the world and report height and
   -- surface-material distributions, so terrain tuning is measured rather than eyeballed.
   pfn stats_go(n : Int, i : Int, seed : Int, lo : Int, hi : Int, sum : Int,
-               grass : Int, sand : Int, snow : Int, granite : Int, under : Int, flat : Int) : Unit do
+               grass : Int, sand : Int, snow : Int, granite : Int, under : Int, flat : Int, gravel : Int) : Unit do
     let span = 16 * n
     if i >= span * span / 16 do
       let cols = span * span / 16
@@ -2307,7 +2307,7 @@ mod CubeForge do
               ++ "  flat (slope <= 1) " ++ int_to_string(flat * 100 / cols) ++ "%")
       println("  surface: grass " ++ int_to_string(grass * 100 / cols) ++ "%  sand " ++ int_to_string(sand * 100 / cols)
               ++ "%  granite " ++ int_to_string(granite * 100 / cols) ++ "%  snow " ++ int_to_string(snow * 100 / cols)
-              ++ "%  underwater " ++ int_to_string(under * 100 / cols) ++ "%")
+              ++ "%  underwater " ++ int_to_string(under * 100 / cols) ++ "%  gravel (talus) " ++ int_to_string(gravel * 100 / cols) ++ "%")
     else
       -- sample every 4th column in each direction
       let wx = (i % (span / 4)) * 4
@@ -2315,6 +2315,9 @@ mod CubeForge do
       let h = CubeForge.Noise.height(wx, wz, seed)
       let slope = CubeForge.Noise.slope(wx, wz, seed)
       let sfc = Chunk.surface_id(h, slope)
+      -- the pile, from a heightmap around this one column (a 9x9 apron is cheap at 1 in 16 columns)
+      let hs = Chunk.heights(wx - 8, wz - 8, seed)
+      let pile = Chunk.pile_at(hs, 8, 8, CubeForge.Noise.age_frac(seed))
       stats_go(n, i + 1, seed,
                if h < lo do h else lo end, if h > hi do h else hi end, sum + h,
                if sfc == 1 do grass + 1 else grass end,
@@ -2322,7 +2325,8 @@ mod CubeForge do
                if sfc == Chunk.snow() do snow + 1 else snow end,
                if sfc == Chunk.granite() do granite + 1 else granite end,
                if h < Chunk.sea_level() do under + 1 else under end,
-               if slope <= 1 do flat + 1 else flat end)
+               if slope <= 1 do flat + 1 else flat end,
+               if pile > 0 do gravel + 1 else gravel end)
     end
   end
 
@@ -2572,7 +2576,7 @@ mod CubeForge do
     let t3 = System.monotonic_time()
     let nverts = count_verts(meshes, 0)
     if Env.get_int("CF_TERRAIN_STATS", 0) == 1 do
-      stats_go(n, 0, seed, 999, 0, 0, 0, 0, 0, 0, 0, 0)
+      stats_go(n, 0, seed, 999, 0, 0, 0, 0, 0, 0, 0, 0, 0)
       springs_go(n, 0, seed, 0, 0)
       println("  SIMD/scalar height mismatches: " ++ int_to_string(mismatch_go(n, 0, seed, 0)) ++ " of " ++ int_to_string(16 * n * 16 * n) ++ " columns")
       if Env.get_int("CF_TERRAIN_MAP", 0) == 1 do map_go(n, 0, seed) else () end

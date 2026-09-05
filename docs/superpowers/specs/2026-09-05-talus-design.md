@@ -59,10 +59,25 @@ noise. Expected under 5 ms over the world at reach 3.
 
 ## 6. Measured
 
-- `CF_TERRAIN_STATS` gains a gravel percentage; expected 0% at age 0, a few
-  percent at 100 on a mountain seed (7, 1234).
-- Granite percentage at age 100, expected to fall by the columns that turned
-  to ramp.
+*As built, 2026-09-05.* Three things moved from the design above, each by
+measurement. The angle of rest is charged for every column of distance
+beyond the first (the adjacent face sheds straight down; charging it made a
+three-block face shed nothing). The least drop that sheds is
+`cliff_slope() + 1` = 4: at 3 every terrace lip piled and a fifth of the
+world was scree. And the reach is 1 until the world is three-quarters old,
+then 2: reach 2 at mid-age put scree on a seventh of the world. The pile is
+`(drop - 2) / 2` capped at `talus_depth(a)` = 0, 1, 3. `CF_TERRAIN_STATS`
+reports columns with a pile:
+
+| seed | age 0 | age 50 | age 100 |
+|---|---|---|---|
+| 7 | 0% | 7% | 5% |
+| 1234 | 0% | 10% | 10% |
+
+against granite at 15/10/3% and 24/17/6%: roughly one scree column per
+cliff column, fewer when ancient because there are fewer cliffs. World
+build unchanged within noise (the apron went to 4; piles read 8 or 24
+array cells a column).
 
 ## 7. Tests
 

@@ -304,10 +304,10 @@ mod CubeForge.Chunk do
   -- height_x4 stays as the benchmark and the lanes test's reference. One
   -- path also means a chunk and its neighbour agree on shared columns
   -- exactly, and the surface materials agree with Noise.slope everywhere.
-  doc "Columns of heightmap kept beyond the chunk on every side."
-  fn apron() : Int do 1 end
+  doc "Columns of heightmap kept beyond the chunk on every side: talus_reach() at its widest, plus the one column slope needs around the piled ring."
+  fn apron() : Int do 4 end
   doc "Side of the heightmap array: 16 + 2 * apron(). A literal, like the world's strides."
-  fn heights_side() : Int do 18 end
+  fn heights_side() : Int do 24 end
   doc "Index of local column (lx, lz), each in [-apron(), 16 + apron()), in a heightmap array."
   fn height_index(lx : Int, lz : Int) : Int do (lx + apron()) + heights_side() * (lz + apron()) end
   doc "Height of local column (lx, lz) from a chunk heightmap (see heights). height_at is the M2 test terrain."
@@ -326,6 +326,70 @@ mod CubeForge.Chunk do
     heights_go(NativeArray.make_int(heights_side() * heights_side(), 0), wx0, wz0, seed, 0)
   end
 
+  -- ── Talus ───────────────────────────────────────────────────────────────────
+  -- A cliff sheds rock, and it piles at the foot at the angle it comes to rest.
+  -- A column under a face gets a pile of gravel whose depth grows with the
+  -- world's age: none in a young world, three blocks when ancient. The pile
+  -- is the surface (gravel over gravel), so the cliff's foot is a short ramp
+  -- of scree rather than a right angle, and it reads the heightmap, so it is a
+  -- pure function of the world column like every other rule.
+  doc "How far (columns) a cliff sheds: the adjacent column until the world is old, two columns when ancient. Reach 2 at mid-age put scree on a seventh of the world."
+  fn talus_reach(a : Float) : Int do if a >= 0.75 do 2 else 1 end end
+  doc "The deepest pile, in blocks: 0 young, 1 mid-age, 3 ancient."
+  fn talus_depth(a : Float) : Int do float_to_int(3.0 *. a) end
+  doc "Blocks of rise per column at which rock rests: a neighbour this much higher per column away sheds nothing."
+  fn talus_angle() : Int do 2 end
+  doc "The least drop that sheds: one more than cliff_slope(), so a single terrace lip stays clean and a face piles. At cliff_slope() itself a fifth of the world was scree."
+  fn talus_min_drop() : Int do CubeForge.Noise.cliff_slope() + 1 end
+
+  -- The largest drop onto (lx, lz) from the ring within [r], less the angle
+  -- of rest for every column of distance beyond the first (the adjacent
+  -- face sheds straight down). k walks the (2r + 1)^2 offsets.
+  pfn drop_go(hs : NativeIntArr, lx : Int, lz : Int, h : Int, r : Int, k : Int, best : Int) : Int do
+    let side = 2 * r + 1
+    if k >= side * side do best
+    else
+      let dx = k % side - r
+      let dz = k / side - r
+      let dist = Math.max_int(abs_int(dx), abs_int(dz))
+      let d = if dist == 0 do 0 else hmap_at(hs, lx + dx, lz + dz) - h - (dist - 1) * talus_angle() end
+      drop_go(hs, lx, lz, h, r, k + 1, if d > best do d else best end)
+    end
+  end
+  doc """
+  Blocks of gravel piled on local column (lx, lz) at age fraction [a]: 0
+  unless something within talus_reach(a) stands talus_min_drop() or more above
+  it after the angle of rest, then (drop - 2) / 2 capped at talus_depth(a).
+  """
+  fn pile_at(hs : NativeIntArr, lx : Int, lz : Int, a : Float) : Int do
+    let depth = talus_depth(a)
+    if depth <= 0 do 0
+    else
+      let drop = drop_go(hs, lx, lz, hmap_at(hs, lx, lz), talus_reach(a), 0, 0)
+      if drop < talus_min_drop() do 0 else Math.min_int(depth, (drop - 2) / 2) end
+    end
+  end
+
+  -- The PILED heightmap: height plus pile for the chunk and a one-column ring,
+  -- laid out with piled_index. Slope and the surface rules read this one, so a
+  -- pile counts as ground for its neighbours too.
+  fn piled_side() : Int do 18 end
+  fn piled_index(lx : Int, lz : Int) : Int do (lx + 1) + piled_side() * (lz + 1) end
+  doc "Piled height of local column (lx, lz) in [-1, 17)."
+  fn piled_at(ps : NativeIntArr, lx : Int, lz : Int) : Int do NativeArray.get_int(ps, piled_index(lx, lz)) end
+  pfn piled_go(hs : NativeIntArr, ps : NativeIntArr, a : Float, i : Int) : NativeIntArr do
+    if i >= piled_side() * piled_side() do ps
+    else
+      let lx = i % piled_side() - 1
+      let lz = i / piled_side() - 1
+      piled_go(hs, NativeArray.set_int(ps, i, hmap_at(hs, lx, lz) + pile_at(hs, lx, lz, a)), a, i + 1)
+    end
+  end
+  doc "The piled heightmap over [hs] at age fraction [a]."
+  fn piled(hs : NativeIntArr, a : Float) : NativeIntArr do
+    piled_go(hs, NativeArray.make_int(piled_side() * piled_side(), 0), a, 0)
+  end
+
   pfn abs_int(v : Int) : Int do if v < 0 do 0 - v else v end end
   doc "Largest height difference between local column (lx, lz) and its four neighbours, from the heightmap: Noise.slope over the array."
   fn slope_at(hs : NativeIntArr, lx : Int, lz : Int) : Int do
@@ -336,22 +400,37 @@ mod CubeForge.Chunk do
     let d3 = abs_int(hmap_at(hs, lx, lz - 1) - h)
     Math.max_int(Math.max_int(d0, d1), Math.max_int(d2, d3))
   end
+  doc "slope_at over the piled heightmap."
+  fn piled_slope_at(ps : NativeIntArr, lx : Int, lz : Int) : Int do
+    let h = piled_at(ps, lx, lz)
+    let d0 = abs_int(piled_at(ps, lx + 1, lz) - h)
+    let d1 = abs_int(piled_at(ps, lx - 1, lz) - h)
+    let d2 = abs_int(piled_at(ps, lx, lz + 1) - h)
+    let d3 = abs_int(piled_at(ps, lx, lz - 1) - h)
+    Math.max_int(Math.max_int(d0, d1), Math.max_int(d2, d3))
+  end
 
-  pfn fill_noise_go(c : Chunk, i : Int, hs : NativeIntArr, wx0 : Int, wz0 : Int, seed : Int) : Chunk do
+  -- A column with a pile is gravel over gravel: the pile IS the surface, and
+  -- its slope is read from the piled map, so the foot of a cliff is scree at
+  -- a walkable angle while the face above it keeps its granite.
+  pfn fill_noise_go(c : Chunk, i : Int, hs : NativeIntArr, ps : NativeIntArr, wx0 : Int, wz0 : Int, seed : Int) : Chunk do
     if i >= 256 do c
     else
       let x = i % 16
       let z = i / 16
-      let h = hmap_at(hs, x, z)
-      let sfc = surface_id(h, slope_at(hs, x, z))
-      let sub = sediment_id(sfc, CubeForge.Noise.river_at(wx0 + x, wz0 + z, seed), h, seed)
-      fill_noise_go(fill_column_world(c, x, z, wx0 + x, wz0 + z, seed, h, sfc, sub), i + 1, hs, wx0, wz0, seed)
+      let top = piled_at(ps, x, z)
+      let piled_up = top > hmap_at(hs, x, z)
+      let sfc = if piled_up do gravel() else surface_id(top, piled_slope_at(ps, x, z)) end
+      let sub = if piled_up do gravel() else sediment_id(sfc, CubeForge.Noise.river_at(wx0 + x, wz0 + z, seed), top, seed) end
+      fill_noise_go(fill_column_world(c, x, z, wx0 + x, wz0 + z, seed, top, sfc, sub), i + 1, hs, ps, wx0, wz0, seed)
     end
   end
 
   doc "Generate the chunk whose world origin is (wx0, wz0) from the noise heightmap."
   fn generate(wx0 : Int, wz0 : Int, seed : Int) : Chunk do
-    plant(fill_noise_go(new(), 0, heights(wx0, wz0, seed), wx0, wz0, seed), wx0, wz0, seed)
+    let hs = heights(wx0, wz0, seed)
+    let ps = piled(hs, CubeForge.Noise.age_frac(seed))
+    plant(fill_noise_go(new(), 0, hs, ps, wx0, wz0, seed), wx0, wz0, seed)
   end
 
   -- ── Vegetation ──────────────────────────────────────────────────────────────
