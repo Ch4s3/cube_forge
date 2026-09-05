@@ -84,6 +84,20 @@ mod CubeForge.Test.Terrain do
     end
   end
 
+  describe "new terrain block ids" do
+    test "basalt, ice and mud have distinct ids above clay" do
+      Test.assert_eq_int(C.basalt(), 22, "basalt id")
+      Test.assert_eq_int(C.ice(), 23, "ice id")
+      Test.assert_eq_int(C.mud(), 24, "mud id")
+    end
+    test "each has its own texture layer" do
+      Test.assert_true(CubeForge.Texture.layer_for(C.basalt()) == 17.0, "basalt layer")
+      Test.assert_true(CubeForge.Texture.layer_for(C.ice()) == 18.0, "ice layer")
+      Test.assert_true(CubeForge.Texture.layer_for(C.mud()) == 19.0, "mud layer")
+      Test.assert_true(CubeForge.Texture.layer_for(C.basalt()) != CubeForge.Texture.layer_for(C.mud()), "basalt and mud are visually distinct")
+    end
+  end
+
 
   describe "Trees.spring_at_cell" do
     test "a spring column has slope and height, and a generated chunk holds it" do
