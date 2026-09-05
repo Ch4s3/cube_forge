@@ -405,7 +405,7 @@ mod CubeForge.Mesher do
         let k2 = corner_pack(la, lb, sps, occ, oxi, ozi, nx, ny, nz, ux, uz, vy, vz)
         let k3 = corner_pack(la, lb, sps, occ, oxi, ozi, nx, ny, nz, 0 - ux, 0 - uz, vy, vz)
         -- mycelium takes its texture from the column's shown species
-        let sp = if C.is_myc(id) do NativeArray.get_u8(sps, oxi + x + 128 * (ozi + z)) else 0 end
+        let sp = if C.is_myc(id) do NativeArray.get_u8(sps, oxi + x + CubeForge.Biome.side_of(sps) * (ozi + z)) else 0 end
         key_of(id, k0, k1, k2, k3, sp)
       end
     end end

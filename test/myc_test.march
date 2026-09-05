@@ -144,7 +144,7 @@ mod CubeForge.Test.Myc do
     test "lists columns whose wanted species differs from what is shown, within the budget" do
       let n = 128
       let f0 = Myc.plant(Myc.plant(Myc.build(n), n, 10, 10, 3), n, 50, 50, 4)
-      let shown = CubeForge.World.shown_new()
+      let shown = CubeForge.World.shown_new(8)
       let picks = Myc.migrations(f0, n, shown, 0, n * n, 10)
       Test.assert_eq_int(List.length(picks), 2, "two plantings, two migrations")
       Test.assert_eq_int(Myc.wanted(f0, n, 10 + n * 10), 3, "column 10,10 wants Meadowbell")
@@ -156,7 +156,7 @@ mod CubeForge.Test.Myc do
     test "a withered column wants nothing, so a shown one migrates back" do
       let n = 128
       let f0 = Myc.plant(Myc.build(n), n, 10, 10, 3)
-      let shown = NativeArray.set_u8(CubeForge.World.shown_new(), 10 + n * 10, 3)
+      let shown = NativeArray.set_u8(CubeForge.World.shown_new(8), 10 + n * 10, 3)
       let f1 = tick_n(f0, n, uniform(n, 0.9), uniform(n, 0.9), 0.1, 50)
       Test.assert_eq_int(Myc.wanted(f1, n, 10 + n * 10), 0, "nothing wanted")
       Test.assert_eq_int(List.length(Myc.migrations(f1, n, shown, 0, n * n, 10)), 1, "one migration back")

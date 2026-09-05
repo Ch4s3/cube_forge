@@ -57,8 +57,9 @@ mod CubeForge.Test.Save do
       let _ = Test.assert_err(Save.parse_header(s, 8), "version 2")
       ()
     end
-    test "a wrong side is rejected" do
+    test "a wrong side is rejected, and any side is taken when none is asked for" do
       let _ = Test.assert_err(Save.parse_header(Save.encode_header(sample(), 8), 4), "side 4 vs 8")
+      let _ = Test.assert_ok(Save.parse_header(Save.encode_header(sample(), 4), -1), "side -1 reads a 4")
       ()
     end
     test "unknown keys are ignored" do

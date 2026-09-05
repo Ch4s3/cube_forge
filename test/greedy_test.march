@@ -60,7 +60,7 @@ mod CubeForge.Test.Greedy do
   end
   pfn foliage_of(c : CubeForge.Chunk.Chunk, models : CubeForge.Model.Templates) : CubeForge.F32Buf.F32Buf do
     let e = C.new()
-    Mesher.mesh_section_foliage(c, e, e, e, e, CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.World.shown_new(), CubeForge.Light.new(), 0, 0.0, 0.0, models)
+    Mesher.mesh_section_foliage(c, e, e, e, e, CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.World.shown_new(8), CubeForge.Light.new(), 0, 0.0, 0.0, models)
   end
   pfn nverts(b : CubeForge.F32Buf.F32Buf) : Int do B.len(b) / CubeForge.Vertex.floats() end
   pfn tverts(m : CubeForge.Model.Templates, k : Int) : Int do CubeForge.Model.floats(m, k) / CubeForge.Vertex.floats() end
@@ -78,7 +78,7 @@ mod CubeForge.Test.Greedy do
       -- a slab under it: the slab's top still renders in the opaque pass
       let c2 = C.set(slab_go(C.new(), 0), 5, 10, 5, C.fruit_small(3))
       let e = C.new()
-      let o = Mesher.mesh_section_opaque(c2, e, e, e, e, CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.World.shown_new(), CubeForge.Light.new(), 0, 0.0, 0.0, m)
+      let o = Mesher.mesh_section_opaque(c2, e, e, e, e, CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.World.shown_new(8), CubeForge.Light.new(), 0, 0.0, 0.0, m)
       Test.assert_eq_int(nverts(o) / 6, 6, "the slab is still six merged quads: the model hides no face")
       Test.assert_eq_int(nverts(foliage_of(C.new(), m)), 0, "air stamps nothing")
     end
@@ -119,27 +119,27 @@ mod CubeForge.Test.Greedy do
     if i >= 256 do c else grass_go(C.set(c, i % 16, 69, i / 16, 1), i + 1) end
   end
   pfn grass_top16_world() : CubeForge.World.World do
-    CubeForge.World.World(Array.from_list([grass_go(flat_cells(C.new(), 0), 0)]), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.World.shown_new(), 1, CubeForge.Model.build())
+    CubeForge.World.World(Array.from_list([grass_go(flat_cells(C.new(), 0), 0)]), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.World.shown_new(1), 1, CubeForge.Model.build())
   end
 
   describe "greedy sections" do
     test "a flat slab is one quad per face direction it exposes" do
       let e = C.new()
-      let b = Mesher.mesh_section_opaque(slab_go(C.new(), 0), e, e, e, e, CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.World.shown_new(), CubeForge.Light.new(), 0, 0.0, 0.0, CubeForge.Model.build())
+      let b = Mesher.mesh_section_opaque(slab_go(C.new(), 0), e, e, e, e, CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.World.shown_new(8), CubeForge.Light.new(), 0, 0.0, 0.0, CubeForge.Model.build())
       -- top: 1 quad, bottom: 1 quad, four sides: 1 quad each (neighbours are empty chunks) = 6 quads
       Test.assert_eq_int(B.len(b) / (6 * CubeForge.Vertex.floats()), 6, "6 merged quads")
       Test.assert_true(near(total_area(b), 256.0 *. 2.0 +. 16.0 *. 4.0), "area matches the naive face count")
     end
     test "a checkerboard slab cannot merge its top" do
       let e = C.new()
-      let b = Mesher.mesh_section_opaque(checker_go(C.new(), 0), e, e, e, e, CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.World.shown_new(), CubeForge.Light.new(), 0, 0.0, 0.0, CubeForge.Model.build())
+      let b = Mesher.mesh_section_opaque(checker_go(C.new(), 0), e, e, e, e, CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.World.shown_new(8), CubeForge.Light.new(), 0, 0.0, 0.0, CubeForge.Model.build())
       -- 256 top + 256 bottom + 4 sides of 16 cells each that alternate (16 quads per side)
       Test.assert_eq_int(B.len(b) / (6 * CubeForge.Vertex.floats()), 256 + 256 + 64, "no merging across different ids")
     end
     test "greedy covers the same face area as the naive mesher" do
       let c = C.test_terrain()
       let e = C.new()
-      let greedy = Mesher.mesh_section_opaque(c, e, e, e, e, CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.World.shown_new(), CubeForge.Light.new(), 4, 0.0, 0.0, CubeForge.Model.build())
+      let greedy = Mesher.mesh_section_opaque(c, e, e, e, e, CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.World.shown_new(8), CubeForge.Light.new(), 4, 0.0, 0.0, CubeForge.Model.build())
       let naive = Mesher.mesh_with_neighbors(c, e, e, e, e, 0.0, 0.0)
       -- naive: count faces of section 4 only (y in 64..79) by scanning vertex y
       Test.assert_true(total_area(greedy) > 0.0, "section 4 has faces")
@@ -175,9 +175,9 @@ mod CubeForge.Test.Greedy do
     test "a glow beside a slab splits the merged top face" do
       let c = slab_go(C.new(), 0)
       let e = C.new()
-      let dark = Mesher.mesh_section_opaque(c, e, e, e, e, CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.World.shown_new(), CubeForge.Light.new(), 0, 0.0, 0.0, CubeForge.Model.build())
+      let dark = Mesher.mesh_section_opaque(c, e, e, e, e, CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.World.shown_new(8), CubeForge.Light.new(), 0, 0.0, 0.0, CubeForge.Model.build())
       let lb = NativeArray.set_u8(CubeForge.Light.new(), CubeForge.Light.index(5, 10, 5), 9)
-      let lit = Mesher.mesh_section_opaque(c, e, e, e, e, CubeForge.Light.new(), lb, CubeForge.World.shown_new(), CubeForge.Light.new(), 0, 0.0, 0.0, CubeForge.Model.build())
+      let lit = Mesher.mesh_section_opaque(c, e, e, e, e, CubeForge.Light.new(), lb, CubeForge.World.shown_new(8), CubeForge.Light.new(), 0, 0.0, 0.0, CubeForge.Model.build())
       Test.assert_true(Mesher.vertex_count(lit) > Mesher.vertex_count(dark), "a lit corner cannot merge with dark ones")
     end
   end
@@ -187,8 +187,8 @@ mod CubeForge.Test.Greedy do
     test "a slab of mycelium under two species is two top quads, not one" do
       let e = C.new()
       let c = myc_slab_go(C.new(), 0)
-      let one = Mesher.mesh_section_opaque(c, e, e, e, e, CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.World.shown_new(), CubeForge.Light.new(), 0, 0.0, 0.0, CubeForge.Model.build())
-      let sps = half_go(CubeForge.World.shown_new(), 0)
+      let one = Mesher.mesh_section_opaque(c, e, e, e, e, CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.World.shown_new(8), CubeForge.Light.new(), 0, 0.0, 0.0, CubeForge.Model.build())
+      let sps = half_go(CubeForge.World.shown_new(8), 0)
       let two = Mesher.mesh_section_opaque(c, e, e, e, e, CubeForge.Light.new(), CubeForge.Light.new(), sps, CubeForge.Light.new(), 0, 0.0, 0.0, CubeForge.Model.build())
       Test.assert_eq_int(B.len(one) / (6 * CubeForge.Vertex.floats()), 6, "one species: six quads")
       -- the species is part of every face: top, bottom and the two sides that run

@@ -421,7 +421,7 @@ mod CubeForge.Test.Flow do
 
   describe "Raycast through water" do
     test "with water ignored the ray reaches the lake bed; otherwise it stops at the surface" do
-      let w = CubeForge.World.World(Array.from_list([lake_go(C.new(), 0)]), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.World.shown_new(), 1, CubeForge.Model.build())
+      let w = CubeForge.World.World(Array.from_list([lake_go(C.new(), 0)]), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.World.shown_new(1), 1, CubeForge.Model.build())
       -- eye at (4.5, 64.5, 4.5) looking almost straight down over the lake (x < 8)
       let bed = CubeForge.Raycast.cast(w, 4.5, 64.5, 4.5, 0.0, -0.985, -0.17, 8.0, true)
       Test.assert_true(CubeForge.Raycast.is_hit(bed), "hits something")
@@ -431,7 +431,7 @@ mod CubeForge.Test.Flow do
     end
     test "a spring above sea level stops the ray even when water is ignored, so it can be mined" do
       -- a source on the stone at (10, 63, 8): y = 63 > sea_level, so it is a spring, not the lake
-      let w = CubeForge.World.World(Array.from_list([C.set(lake_go(C.new(), 0), 10, 63, 8, C.water())]), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.World.shown_new(), 1, CubeForge.Model.build())
+      let w = CubeForge.World.World(Array.from_list([C.set(lake_go(C.new(), 0), 10, 63, 8, C.water())]), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.World.shown_new(1), 1, CubeForge.Model.build())
       let h = CubeForge.Raycast.cast(w, 10.5, 66.5, 8.5, 0.0, -1.0, 0.0, 8.0, true)
       Test.assert_true(CubeForge.Raycast.is_hit(h), "hits")
       Test.assert_eq_int(CubeForge.Raycast.by_(h), 63, "the spring, not the stone under it")

@@ -153,7 +153,8 @@ mod CubeForge.Test.MycBlock do
   describe "World.with_shown" do
     test "replaces the shown array whole" do
       let w0 = CubeForge.World.generate(1, 1, 1)
-      let sh = NativeArray.set_u8(CubeForge.World.shown_new(), 7 + 128 * 9, 5)
+      -- strided by the world's own width: one chunk, 16 columns a side
+      let sh = NativeArray.set_u8(CubeForge.World.shown_new(1), 7 + 16 * 9, 5)
       let w1 = CubeForge.World.with_shown(w0, sh)
       Test.assert_eq_int(CubeForge.World.shown_at(w1, 7, 9), 5, "from the array")
       Test.assert_eq_int(CubeForge.World.shown_at(w1, 8, 9), 0, "elsewhere empty")

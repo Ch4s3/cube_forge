@@ -123,6 +123,8 @@ mod CubeForge.Biome do
   literal for the same reason Light.index's bounds are -- see World.cols.
   """
   fn stride() : Int do 128 end
+  doc "The width of a field from one of its arrays: the world's columns per side. The accessors index by this, so a field built for a 64-wide world reads right."
+  fn side_of(hs : NativeU8Arr) : Int do float_to_int(Math.sqrt(int_to_float(NativeArray.length_u8(hs))) +. 0.5) end
 
   -- Highest non-air block in a column, scanning down from [top]. 0 if none.
   pfn surface_go(w : CubeForge.World.World, wx : Int, wz : Int, y : Int) : Int do
@@ -342,10 +344,10 @@ mod CubeForge.Biome do
   end
 
   fn height_of(f : Field, wx : Int, wz : Int) : Int do
-    match f do Field(hs, _, _, _, _, _, _, _, _) -> NativeArray.get_u8(hs, wx + stride() * wz) end
+    match f do Field(hs, _, _, _, _, _, _, _, _) -> NativeArray.get_u8(hs, wx + side_of(hs) * wz) end
   end
   fn biome_of(f : Field, wx : Int, wz : Int) : Int do
-    match f do Field(_, _, _, _, bs, _, _, _, _) -> NativeArray.get_u8(bs, wx + stride() * wz) end
+    match f do Field(_, _, _, _, bs, _, _, _, _) -> NativeArray.get_u8(bs, wx + side_of(bs) * wz) end
   end
   fn field_biomes(f : Field) : NativeU8Arr do match f do Field(_, _, _, _, bs, _, _, _, _) -> bs end end
 
@@ -781,7 +783,7 @@ mod CubeForge.Biome do
   fn debug_axes(f : Field, wx : Int, wz : Int) : String do
     match f do
       Field(_, ws, ta, ma, _, _, _, _, _) ->
-        let i = wx + stride() * wz
+        let i = wx + side_of(ws) * wz
         "temp " ++ float_to_string(NativeArray.get_float(ta, i)) ++ " moist " ++ float_to_string(NativeArray.get_float(ma, i)) ++ " wet " ++ int_to_string(NativeArray.get_u8(ws, i))
     end
   end
@@ -789,11 +791,11 @@ mod CubeForge.Biome do
 
   doc "Eased temperature 0..1 of one column."
   fn temp_of(f : Field, wx : Int, wz : Int) : Float do
-    match f do Field(_, _, ta, _, _, _, _, _, _) -> NativeArray.get_float(ta, wx + stride() * wz) end
+    match f do Field(hs, _, ta, _, _, _, _, _, _) -> NativeArray.get_float(ta, wx + side_of(hs) * wz) end
   end
   doc "Eased moisture 0..1 of one column."
   fn moist_of(f : Field, wx : Int, wz : Int) : Float do
-    match f do Field(_, _, _, ma, _, _, _, _, _) -> NativeArray.get_float(ma, wx + 128 * wz) end
+    match f do Field(hs, _, _, ma, _, _, _, _, _) -> NativeArray.get_float(ma, wx + side_of(hs) * wz) end
   end
   doc "The eased temperature array, one entry per column: the climate the mycelium field reads."
   fn temps(f : Field) : NativeFloatArr do match f do Field(_, _, ta, _, _, _, _, _, _) -> ta end end
@@ -874,7 +876,7 @@ mod CubeForge.Biome do
 
   doc "The column's water flag."
   fn is_wet(f : Field, wx : Int, wz : Int) : Bool do
-    match f do Field(_, ws, _, _, _, _, _, _, _) -> NativeArray.get_u8(ws, wx + stride() * wz) == 1 end
+    match f do Field(_, ws, _, _, _, _, _, _, _) -> NativeArray.get_u8(ws, wx + side_of(ws) * wz) == 1 end
   end
 
   -- A rolling hash of the field's discrete state: heights, water flags and biome

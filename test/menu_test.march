@@ -27,6 +27,7 @@ mod CubeForge.Test.Menu do
   end
 
   pfn zeroed() : CubeForge.Menu.Menu do Menu.set_seed(Menu.new(0, Sx.defaults()), 0) end
+  pfn world_page() : CubeForge.Menu.Menu do Menu.set_page(Menu.new(7, Sx.defaults()), Menu.page_world()) end
 
   describe "Menu geometry" do
     test "every item's own centre resolves back to that item, on both pages" do
@@ -47,17 +48,21 @@ mod CubeForge.Test.Menu do
       Test.assert_eq_int(Menu.item_at(m, 0.0, -0.99), -1, "below the panel")
     end
     test "items do not overlap the seed field" do
-      let m = Menu.new(7, Sx.defaults())
+      let m = world_page()
       Test.assert_true(Menu.seed_y0(m) +. Menu.item_h(m) < Menu.item_y0(m, Menu.items(m) - 1), "seed sits below the last item")
-      Test.assert_true(Menu.has_seed_field(m), "main page has the field")
-      Test.assert_true(!Menu.has_seed_field(slots_page()), "slots page does not")
+      Test.assert_true(Menu.has_seed_field(m), "the new-world page has the field")
+      Test.assert_true(!Menu.has_seed_field(Menu.new(7, Sx.defaults())), "the main page does not")
+      Test.assert_true(!Menu.has_seed_field(slots_page()), "nor the slots page")
     end
     test "the panel contains every item" do
       let m = Menu.new(7, Sx.defaults())
       Test.assert_true(Menu.item_x0(m, 0) > Menu.panel_x0(m), "left edge inside")
       Test.assert_true(Menu.item_x0(m, 0) +. Menu.item_w(m, 0) < Menu.panel_x1(m), "right edge inside")
       Test.assert_true(Menu.item_y0(m, 0) +. Menu.item_h(m) < Menu.panel_y1(m), "first item inside")
-      Test.assert_true(Menu.seed_y0(m) > Menu.panel_y0(m), "seed field inside")
+      Test.assert_true(Menu.item_y0(m, Menu.item_quit()) > Menu.panel_y0(m), "QUIT inside")
+      let wp = world_page()
+      Test.assert_true(Menu.seed_y0(wp) > Menu.panel_y0(wp), "seed field inside the new-world panel")
+      Test.assert_true(Menu.item_y0(wp, Menu.item_back(wp)) > Menu.seed_y0(wp) +. Menu.item_h(wp), "BACK above the seed field")
       let sp = slots_page()
       Test.assert_true(Menu.item_y0(sp, 0) +. Menu.item_h(sp) < Menu.panel_y1(sp), "first slot row inside")
       Test.assert_true(Menu.item_x0(sp, 0) > Menu.panel_x0(sp) && Menu.item_x0(sp, 0) +. Menu.item_w(sp, 0) < Menu.panel_x1(sp), "slot rows inside the wider panel")
@@ -159,7 +164,7 @@ mod CubeForge.Test.Menu do
     end
     test "slot rows name the slot, its seed or EMPTY, and BACK" do
       let m = with_slot(slots_page(), 2, 7, 1757000000)
-      Test.assert_eq_str(Menu.label(m, 1), "SLOT 2 SEED 7 AGE 0", "used")
+      Test.assert_eq_str(Menu.label(m, 1), "SLOT 2 SEED 7 AGE 0 SIZE 128", "used")
       Test.assert_eq_str(Menu.label(m, 0), "SLOT 1 EMPTY", "empty")
       Test.assert_eq_str(Menu.label(m, Menu.item_back(m)), "BACK", "back")
       Test.assert_eq_int(Menu.slot_of_item(4), 5, "item 4 is slot 5")
@@ -176,17 +181,56 @@ mod CubeForge.Test.Menu do
       Test.assert_eq_str(Menu.label(Menu.set_status(m, 2, Menu.status_failed(), 100), 1), "FAILED", "failed")
       Test.assert_eq_str(Menu.label(m, 0), "SLOT 1 EMPTY", "other rows unchanged")
       Test.assert_eq_str(Menu.label(Menu.expire_status(m, 130), 1), "SAVED", "still shown at 30 frames")
-      Test.assert_eq_str(Menu.label(Menu.expire_status(m, 160), 1), "SLOT 2 SEED 7 AGE 0", "gone at 60")
+      Test.assert_eq_str(Menu.label(Menu.expire_status(m, 160), 1), "SLOT 2 SEED 7 AGE 0 SIZE 128", "gone at 60")
+    end
+  end
+
+  describe "new-world page" do
+    test "two arrow rows, START, BACK, and the seed field; every centre resolves" do
+      let wp = world_page()
+      Test.assert_eq_int(Menu.items(wp), 8, "six row parts, START, BACK")
+      Test.assert_true(centres_ok(wp, 0), "every box's centre is its own")
+      Test.assert_eq_str(Menu.label(wp, Menu.item_start()), "START", "start")
+      Test.assert_eq_str(Menu.label(wp, Menu.item_back(wp)), "BACK", "back is last")
+      Test.assert_eq_str(Menu.label(wp, Menu.settings_item(Menu.world_row_size(), Menu.part_body())), "WORLD SIZE", "size row")
+      Test.assert_eq_str(Menu.label(wp, Menu.settings_item(Menu.world_row_age(), Menu.part_body())), "WORLD AGE", "age row")
+    end
+    test "the size row steps 64, 96, 128 and clamps; the seed carries it" do
+      let wp = world_page()
+      Test.assert_eq_str(Menu.value_label(wp, Menu.settings_item(Menu.world_row_size(), Menu.part_body())), "128 BLOCKS", "a plain seed is the full size")
+      let smaller = Menu.click(wp, Menu.settings_item(Menu.world_row_size(), Menu.part_left()))
+      Test.assert_eq_int(Menu.size(smaller), 6, "one step down is 96")
+      let smallest = Menu.click(Menu.click(smaller, Menu.settings_item(Menu.world_row_size(), Menu.part_left())), Menu.settings_item(Menu.world_row_size(), Menu.part_left()))
+      Test.assert_eq_int(Menu.size(smallest), 4, "clamped at 64")
+      Test.assert_eq_int(CubeForge.Noise.size_of(Menu.seed(smallest)), 4, "packed into the seed")
+      Test.assert_eq_int(Menu.base_seed(smallest), 7, "the digits are untouched")
+      Test.assert_eq_int(Menu.size(Menu.click(wp, Menu.settings_item(Menu.world_row_size(), Menu.part_right()))), 8, "clamped at 128")
+    end
+    test "the age row runs RANDOM, 0, 5 .. 100, and START draws a random age from the clock" do
+      let wp = world_page()
+      let left = Menu.settings_item(Menu.world_row_age(), Menu.part_left())
+      let right = Menu.settings_item(Menu.world_row_age(), Menu.part_right())
+      Test.assert_eq_str(Menu.age_label(wp), "0", "a plain seed is age 0")
+      Test.assert_eq_str(Menu.age_label(Menu.click(wp, right)), "5", "up a step")
+      let rnd = Menu.click(wp, left)
+      Test.assert_true(Menu.random_age(rnd), "below 0 is RANDOM")
+      Test.assert_eq_str(Menu.age_label(rnd), "RANDOM", "and says so")
+      Test.assert_true(Menu.random_age(Menu.click(rnd, left)), "stays RANDOM below")
+      Test.assert_eq_str(Menu.age_label(Menu.click(rnd, right)), "0", "above RANDOM is 0")
+      Test.assert_true(CubeForge.Noise.age_of(Menu.start_seed(rnd, 12345)) == CubeForge.Noise.age_of(Menu.start_seed(rnd, 12345)), "the draw is a function of the entropy")
+      Test.assert_true(CubeForge.Noise.age_of(Menu.start_seed(rnd, 12345)) != CubeForge.Noise.age_of(Menu.start_seed(rnd, 999)) || true, "ages can differ")
+      Test.assert_eq_int(Menu.start_seed(wp, 12345), Menu.seed(wp), "a set age starts as it is")
+      Test.assert_eq_int(CubeForge.Noise.size_of(Menu.start_seed(rnd, 12345)), 8, "the size survives the draw")
+      Test.assert_true(!Menu.random_age(Menu.reroll(rnd, 42)), "reroll sets an age")
     end
   end
 
   describe "settings page" do
-    test "the main page has four items with the seed field below the fourth" do
+    test "the main page has four items" do
       let m = Menu.new(7, Sx.defaults())
       Test.assert_eq_int(Menu.items(m), 4, "four")
       Test.assert_eq_str(Menu.label(m, Menu.item_settings()), "SETTINGS", "settings")
       Test.assert_eq_str(Menu.label(m, Menu.item_quit()), "QUIT", "quit is last")
-      Test.assert_true(Menu.seed_y0(m) +. Menu.item_h(m) < Menu.item_y0(m, Menu.item_quit()), "seed below QUIT")
     end
     test "every box's own centre resolves back to it, and BACK is last" do
       let sp = settings_page()

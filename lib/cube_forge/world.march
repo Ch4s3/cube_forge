@@ -10,7 +10,7 @@ mod CubeForge.World do
 
   type World = World(Array.PVec(CubeForge.Chunk.Chunk), NativeU8Arr, NativeU8Arr, NativeU8Arr, NativeU8Arr, Int, CubeForge.Model.Templates)   -- chunks, skylight field, block-light field, occupancy field, shown species per column, side length in chunks, the model templates the mesher stamps
 
-  doc "The world's side in chunks. The one number the world's size comes from."
+  doc "The LARGEST world side in chunks: what the fixed-width fields (light, occupancy, the shader) are written for. A world's own side is World.side(w), from Noise.size_of its seed, 4..8."
   fn size() : Int do 8 end
 
   doc "Columns per side: size() chunks of 16."
@@ -59,21 +59,23 @@ mod CubeForge.World do
     match w do World(_, _, lb, _, _, _, _) -> CubeForge.Light.get(lb, x, y, z) end
   end
 
-  doc "A fresh, empty shown-species array: one byte per column of a 128-wide world."
-  fn shown_new() : NativeU8Arr do NativeArray.make_u8(16384, 0) end
+  doc "A fresh, empty shown-species array: one byte per column of a world [n] chunks a side, strided by its width like the biome and mycelium fields."
+  fn shown_new(n : Int) : NativeU8Arr do NativeArray.make_u8(16 * n * 16 * n, 0) end
   doc "The species each column's surface currently displays (0 = none). The mesher reads it to pick mycelium textures; the fungus migration writes it in step with the block."
   fn shown(w : World) : NativeU8Arr do match w do World(_, _, _, _, sh, _, _) -> sh end end
   doc "The model templates the mesher stamps for small mushrooms, fronds and bushes: built once with the world, constant after."
   fn models(w : World) : CubeForge.Model.Templates do match w do World(_, _, _, _, _, _, mo) -> mo end end
   fn shown_at(w : World, x : Int, z : Int) : Int do
-    if x < 0 || z < 0 || x >= 128 || z >= 128 do 0
-    else match w do World(_, _, _, _, sh, _, _) -> NativeArray.get_u8(sh, x + 128 * z) end end
+    let c = 16 * side(w)
+    if x < 0 || z < 0 || x >= c || z >= c do 0
+    else match w do World(_, _, _, _, sh, _, _) -> NativeArray.get_u8(sh, x + c * z) end end
   end
   doc "Replace the shown-species array whole (a load)."
   fn with_shown(w : World, sh : NativeU8Arr) : World do match w do World(cs, la, lb, o, _, n, mo) -> World(cs, la, lb, o, sh, n, mo) end end
   fn set_shown(w : World, x : Int, z : Int, sp : Int) : World do
-    if x < 0 || z < 0 || x >= 128 || z >= 128 do w
-    else match w do World(cs, la, lb, o, sh, n, mo) -> World(cs, la, lb, o, NativeArray.set_u8(sh, x + 128 * z, sp), n, mo) end end
+    let c = 16 * side(w)
+    if x < 0 || z < 0 || x >= c || z >= c do w
+    else match w do World(cs, la, lb, o, sh, n, mo) -> World(cs, la, lb, o, NativeArray.set_u8(sh, x + c * z, sp), n, mo) end end
   end
 
   doc "Recompute both light fields from scratch."
@@ -222,19 +224,19 @@ mod CubeForge.World do
     -- the lake table once, read by every chunk (a read only: no copy -- GAPS G68)
     let lk = CubeForge.Lakes.levels(seed, n)
     let chunks = List.pmap_n(coords(n), fn i -> C.generate_lakes(16 * (i % n), 16 * (i / n), seed, lk, n), workers)
-    World(Array.from_list(chunks), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), shown_new(), n, CubeForge.Model.build())
+    World(Array.from_list(chunks), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), shown_new(n), n, CubeForge.Model.build())
   end
 
   doc "A world over chunks read from a save, with empty light and occupancy fields (rebuilt by the caller)."
   fn from_chunks(chunks : Array.PVec(CubeForge.Chunk.Chunk), n : Int) : World do
-    World(chunks, CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), shown_new(), n, CubeForge.Model.build())
+    World(chunks, CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), shown_new(n), n, CubeForge.Model.build())
   end
   doc "The chunk array, in grid order."
   fn chunks(w : World) : Array.PVec(CubeForge.Chunk.Chunk) do match w do World(cs, _, _, _, _, _, _) -> cs end end
 
   fn generate_scalar(n : Int, seed : Int, workers : Int) : World do
     let chunks = List.pmap_n(coords(n), fn i -> C.generate_scalar(16 * (i % n), 16 * (i / n), seed), workers)
-    World(Array.from_list(chunks), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), shown_new(), n, CubeForge.Model.build())
+    World(Array.from_list(chunks), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), shown_new(n), n, CubeForge.Model.build())
   end
 
   -- A rolling hash over every voxel of every chunk. Four million reads, so this

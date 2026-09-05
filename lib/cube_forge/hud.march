@@ -328,7 +328,7 @@ mod CubeForge.Hud do
       let w = Menu.item_w(m, i)
       let hot = Menu.focused(m) == i
       -- A settings body is not a button: it never lights up.
-      let body = Menu.page(m) == Menu.page_settings() && i < Menu.item_back(m) && Menu.settings_part(i) == Menu.part_body()
+      let body = Menu.is_arrow_page(m) && i < Menu.arrow_rows(m) * 3 && Menu.settings_part(i) == Menu.part_body()
       let lit = hot && !body
       let b1 = arect(b, x0, y0, x0 +. w, y0 +. h,
                      if lit do 0.30 else 0.15 end, if lit do 0.35 else 0.17 end,
@@ -339,7 +339,7 @@ mod CubeForge.Hud do
       -- The sub-pages are set smaller: SLOT 5 SEED plus ten digits must fit a
       -- slot row, PRECIPITATION MEDIUM plus two arrows a settings row.
       let px = if Menu.page(m) == Menu.page_slots() do slot_px()
-               else if Menu.page(m) == Menu.page_settings() do settings_px()
+               else if Menu.is_arrow_page(m) do settings_px()
                else menu_px() end end
       let py = px *. 1.4
       let tw = text_width(lbl, px)
@@ -384,12 +384,14 @@ mod CubeForge.Hud do
     else
       let sx = Menu.seed_x0(m)
       let sy = Menu.seed_y0(m)
-      let b4 = arect(b3, sx, sy, sx +. Menu.item_w(m, 0), sy +. Menu.item_h(m), 0.05, 0.06, 0.08, 0.98)
+      -- the field spans the row, like BACK does (item 0 here is an arrow button)
+      let fw = Menu.item_w(m, Menu.item_back(m))
+      let b4 = arect(b3, sx, sy, sx +. fw, sy +. Menu.item_h(m), 0.05, 0.06, 0.08, 0.98)
       let b5 = emit_text(b4, "SEED", sx +. 0.014, sy +. Menu.item_h(m) -. 0.010, 0.006, 0.009)
-      -- the age sits at the right of the label row: - and = move it
-      let age = "AGE " ++ int_to_string(Menu.age(m)) ++ "  - ="
-      let b6 = emit_text(b5, age, sx +. Menu.item_w(m, 0) -. 0.014 -. text_width(age, 0.006), sy +. Menu.item_h(m) -. 0.010, 0.006, 0.009)
-      emit_digits(b6, digits_of(Menu.base_seed(m), Nil), sx +. 0.014, sy +. 0.062, 0.008, 0.011)
+      -- the keys, at the right of the label row: digits type, backspace deletes, R rerolls
+      let hint = "TYPE DIGITS  R REROLLS"
+      let b6 = emit_text(b5, hint, sx +. fw -. 0.014 -. text_width(hint, 0.006), sy +. Menu.item_h(m) -. 0.010, 0.006, 0.009)
+      emit_digits(b6, digits_of(Menu.base_seed(m), Nil), sx +. 0.014, sy +. 0.050, 0.008, 0.011)
     end
   end
 

@@ -1486,6 +1486,9 @@ mod CubeForge do
     if In.key_pressed(code) do Menu.append_digit(m, d) else m end
   end
   pfn menu_keys(m : CubeForge.Menu.Menu) : CubeForge.Menu.Menu do
+    if !Menu.has_seed_field(m) do m else menu_keys_field(m) end
+  end
+  pfn menu_keys_field(m : CubeForge.Menu.Menu) : CubeForge.Menu.Menu do
     let m0 = menu_digit(menu_digit(menu_digit(menu_digit(menu_digit(
              menu_digit(menu_digit(menu_digit(menu_digit(menu_digit(m,
              In.key_0(), 0), In.key_1(), 1), In.key_2(), 2), In.key_3(), 3), In.key_4(), 4),
@@ -1617,19 +1620,20 @@ mod CubeForge do
 
   -- Read a slot's header and chunks. A failure here is the deleted-mid-load
   -- race (the slot was checked before the restart); it falls back to a new world.
-  pfn load_slot(slot : Int, n : Int) : Loaded do
+  -- A slot is read at the side its world was saved with: the seed says (Noise.size_of).
+  pfn load_slot(slot : Int) : Loaded do
     let tl0 = System.monotonic_time()
-    match Save.check(Save.dir(), slot, n) do
+    match Save.check(Save.dir(), slot, -1) do
       Err(e) ->
         println("load slot " ++ int_to_string(slot) ++ " failed: " ++ e ++ "; generating instead")
         NoLoad
       Ok(h) ->
-        match Save.read_chunks(Save.dir(), slot, n) do
+        match Save.read_chunks(Save.dir(), slot, CubeForge.Noise.size_of(Save.h_seed(h))) do
           Err(e) ->
             println("load slot " ++ int_to_string(slot) ++ " failed: " ++ e ++ "; generating instead")
             NoLoad
           Ok(cs) ->
-            println("loaded slot " ++ int_to_string(slot) ++ " (seed " ++ int_to_string(Save.h_seed(h)) ++ ") in " ++ int_to_string(System.monotonic_time() - tl0) ++ " ms, world hash " ++ int_to_string(World.state_hash(World.from_chunks(cs, n))))
+            println("loaded slot " ++ int_to_string(slot) ++ " (seed " ++ int_to_string(Save.h_seed(h)) ++ ") in " ++ int_to_string(System.monotonic_time() - tl0) ++ " ms, world hash " ++ int_to_string(World.state_hash(World.from_chunks(cs, CubeForge.Noise.size_of(Save.h_seed(h))))))
             Loaded(h, cs)
         end
     end
@@ -1663,10 +1667,10 @@ mod CubeForge do
           -- while the session's own seed differs from the target, so the restart
           -- happens exactly once however long the run is.
           let scripted_menu = automenu >= 0 && seed != automenu_seed()
-          let menu1a = if scripted_menu && frame == automenu do Menu.set_seed(Menu.set_open(menu0, true), automenu_seed()) else menu0 end
+          let menu1a = if scripted_menu && frame == automenu do Menu.set_seed(Menu.set_page(Menu.set_open(menu0, true), Menu.page_world()), automenu_seed()) else menu0 end
           -- CF_AUTOSLOTS=<frame>: open the slots page at that frame (headless look at the page).
           let menu1b = if autoslots >= 0 && frame == autoslots do
-                        Menu.set_slots(Menu.set_page(Menu.set_open(menu1a, true), Menu.page_slots()), Save.list(Save.dir(), World.side(scene_world(sc))))
+                        Menu.set_slots(Menu.set_page(Menu.set_open(menu1a, true), Menu.page_slots()), Save.list(Save.dir(), -1))
                       else menu1a end
           -- CF_AUTOSETTINGS=<frame>: open the settings page at that frame; the click comes five frames later.
           let menu1 = if autosettings >= 0 && frame == autosettings do Menu.set_page(Menu.set_open(menu1b, true), Menu.page_settings()) else menu1b end
@@ -1730,8 +1734,9 @@ mod CubeForge do
           -- written at once, so a crash never loses a choice; an environment
           -- override is applied but never written (Settings.merge).
           let on_settings = Menu.page(menu2) == Menu.page_settings()
+          let on_world = Menu.page(menu2) == Menu.page_world()
           let s_item = if autosettings >= 0 && frame == autosettings + 5 && on_settings do Menu.settings_item(Settings.field_shadow_dist(), Menu.part_right())
-                       else if m_click && on_settings do m_hover else -1 end end
+                       else if m_click && (on_settings || on_world) do m_hover else -1 end end
           let menu2s = Menu.click(menu2, s_item)
           let s_old = Menu.settings(menu2)
           let s_new = Menu.settings(menu2s)
@@ -1741,22 +1746,24 @@ mod CubeForge do
           let s_stored = if s_changed >= 0 do Settings.store(Save.dir(), Settings.merge(s_new, settings_disk, settings_mask)) else true end
           if s_changed >= 0 do println("settings: " ++ Settings.name(s_changed) ++ " " ++ Settings.label(s_new, s_changed) ++ (if s_stored do "" else " (write failed)" end)) else () end
           let menu2b = if s_stored do menu2s else Menu.set_status(menu2s, s_changed, Menu.status_failed(), frame) end
-          -- Enter starts too, so the seed can be typed and committed without the mouse.
-          let start = (m_click && on_main && m_hover == Menu.item_new_game())
-                      || (Menu.is_open(menu2) && on_main && In.key_pressed(In.key_enter()))
+          -- NEW GAME opens the new-world page; START there (or Enter, so the seed
+          -- can be typed and committed without the mouse) begins the world.
+          let start = (m_click && on_world && m_hover == Menu.item_start())
+                      || (Menu.is_open(menu2) && on_world && In.key_pressed(In.key_enter()))
                       || (scripted_menu && frame == automenu + 5 && Menu.is_open(menu2))
-          -- On the start screen, NEW GAME with the seed untouched means "play this
+          let start_seed = Menu.start_seed(menu2, float_to_int(now *. 1000000.0))
+          -- On the start screen, START with the seed untouched means "play this
           -- world": the menu closes and becomes the escape menu. A changed seed restarts.
-          let play_here = start && Menu.is_start(menu2) && Menu.seed(menu2) == seed
-          let side = World.side(scene_world(sc_drag))
-          let menu3 = if play_here do Menu.set_mode(Menu.set_open(menu2b, false), Menu.mode_escape())
+          let play_here = start && Menu.is_start(menu2) && start_seed == seed
+          let menu3 = if play_here do Menu.set_mode(Menu.set_page(Menu.set_open(menu2b, false), Menu.page_main()), Menu.mode_escape())
+                      else if m_click && on_main && m_hover == Menu.item_new_game() do Menu.set_page(menu2b, Menu.page_world())
                       else if m_click && on_main && m_hover == Menu.item_second() do
-                        Menu.set_slots(Menu.set_page(menu2b, Menu.page_slots()), Save.list(Save.dir(), side))
+                        Menu.set_slots(Menu.set_page(menu2b, Menu.page_slots()), Save.list(Save.dir(), -1))
                       else if m_click && on_main && m_hover == Menu.item_settings() do Menu.set_page(menu2b, Menu.page_settings())
                       else if m_click && !on_main && m_hover == Menu.item_back(menu2b) do Menu.set_page(menu2b, Menu.page_main())
-                      else menu2b end end end end
-          let next_a = if start && !play_here do FromSeed(Menu.seed(menu2)) else next_seed end
-          if start && !play_here do println("new game, seed " ++ int_to_string(Menu.seed(menu2)) ++ " (base " ++ int_to_string(Menu.base_seed(menu2)) ++ ", age " ++ int_to_string(Menu.age(menu2)) ++ ")") else () end
+                      else menu2b end end end end end
+          let next_a = if start && !play_here do FromSeed(start_seed) else next_seed end
+          if start && !play_here do println("new game, seed " ++ int_to_string(start_seed) ++ " (base " ++ int_to_string(CubeForge.Noise.base_seed(start_seed)) ++ ", age " ++ int_to_string(CubeForge.Noise.age_of(start_seed)) ++ ", size " ++ int_to_string(16 * CubeForge.Noise.size_of(start_seed)) ++ ")") else () end
           -- Slot rows: save in escape mode, load on the start screen. CF_AUTOSAVE and
           -- CF_AUTOLOAD drive the same two paths for the headless round-trip test.
           let on_slots = Menu.page(menu2) == Menu.page_slots()
@@ -1767,10 +1774,10 @@ mod CubeForge do
                           else if slot_click > 0 && Menu.is_start(menu3) do slot_click else 0 end end
           let menu4 = if save_slot > 0 do
                         let saved = save_game(save_slot, scene_world(sc_drag), player, ui_inv(scene_ui(sc_drag)), seed, now -. t0 +. day0, wxpid, scene_biome(sc_drag), scene_myc(sc_drag))
-                        Menu.set_slots(Menu.set_status(menu3, save_slot, if saved do Menu.status_saved() else Menu.status_failed() end, frame), Save.list(Save.dir(), side))
+                        Menu.set_slots(Menu.set_status(menu3, save_slot, if saved do Menu.status_saved() else Menu.status_failed() end, frame), Save.list(Save.dir(), -1))
                       else menu3 end
           -- A slot is validated while this world still runs, so a bad slot never leaves you without one.
-          let load_ok = if load_slot > 0 do slot_loadable(load_slot, side) else false end   -- && is strict: no check on slot 0
+          let load_ok = if load_slot > 0 do slot_loadable(load_slot, -1) else false end   -- && is strict: no check on slot 0
           let menu5 = if load_slot > 0 && !load_ok do Menu.set_status(menu4, load_slot, Menu.status_failed(), frame) else menu4 end
           let next_seed1 = if load_ok do FromSlot(load_slot) else next_a end
           let menubuf1 = if Menu.is_open(menu5) do
@@ -2145,14 +2152,14 @@ mod CubeForge do
             let mh = Biome.height_of(scene_biome(sc1), mx, pcz)
             println("  mycelium at " ++ int_to_string(mx) ++ "," ++ int_to_string(pcz) ++ ": species " ++ int_to_string(Myc.species_of(scene_myc(sc1), World.side(scene_world(sc1)) * 16, mx, pcz))
                     ++ " vigour " ++ float_to_string(Myc.vigour_of(scene_myc(sc1), World.side(scene_world(sc1)) * 16, mx, pcz))
-                    ++ " wanted " ++ int_to_string(Myc.wanted(scene_myc(sc1), World.side(scene_world(sc1)) * 16, mx + 128 * pcz))
+                    ++ " wanted " ++ int_to_string(Myc.wanted(scene_myc(sc1), World.side(scene_world(sc1)) * 16, mx + World.side(scene_world(sc1)) * 16 * pcz))
                     ++ " shown " ++ int_to_string(World.shown_at(scene_world(sc1), mx, pcz))
                     ++ " surface " ++ int_to_string(World.block_at(scene_world(sc1), mx, mh, pcz)) ++ " at y " ++ int_to_string(mh)
                     ++ " wet " ++ (if Biome.is_wet(scene_biome(sc1), mx, pcz) do "1" else "0" end)
                     ++ " block light above " ++ int_to_string(World.block_light_at(scene_world(sc1), mx, mh + 1, pcz))
                     ++ " climate " ++ Biome.debug_axes(scene_biome(sc1), mx, pcz) ++ " biome " ++ Biome.name(Biome.biome_of(scene_biome(sc1), mx, pcz))
-                    ++ " offset t " ++ float_to_string(NativeArray.get_f32(Myc.bonuses(scene_myc(sc1), World.side(scene_world(sc1)) * 16, 1.0), 2 * (mx + 128 * pcz)))
-                    ++ " m " ++ float_to_string(NativeArray.get_f32(Myc.bonuses(scene_myc(sc1), World.side(scene_world(sc1)) * 16, 1.0), 2 * (mx + 128 * pcz) + 1)))
+                    ++ " offset t " ++ float_to_string(NativeArray.get_f32(Myc.bonuses(scene_myc(sc1), World.side(scene_world(sc1)) * 16, 1.0), 2 * (mx + World.side(scene_world(sc1)) * 16 * pcz)))
+                    ++ " m " ++ float_to_string(NativeArray.get_f32(Myc.bonuses(scene_myc(sc1), World.side(scene_world(sc1)) * 16, 1.0), 2 * (mx + World.side(scene_world(sc1)) * 16 * pcz) + 1)))
             println("  weather " ++ float_to_string(wx) ++ " (overcast " ++ float_to_string(ov) ++ ", fog " ++ float_to_string(fog_density(wx)) ++ ", bolt " ++ float_to_string(bolt) ++ ", live " ++ int_to_string(live) ++ (if snowing do " snow" else " rain" end) ++ ")")
             -- Behaviour oracle for refactors: the discrete field state and every
             -- voxel, hashed. Resolution-independent, unlike a frame dump, and it
@@ -2516,13 +2523,16 @@ mod CubeForge do
     let workers = Env.get_int("CF_WORKERS", System.cpu_count())
     -- CF_SEED unset: a new world each run, seeded from the clock, at a random age.
     -- The (packed) seed is always printed, so any world can be reproduced with
-    -- CF_SEED=<n> alone. CF_AGE=<0..100> sets or overrides the age (Noise.with_age).
+    -- CF_SEED=<n> alone. CF_AGE=<0..100> sets or overrides the age (Noise.with_age);
+    -- CF_SIZE=<4..8> the side in chunks (Noise.with_size).
     let seed_env = Env.get_int("CF_SEED", -1)
     let age_env = Env.get_int("CF_AGE", -1)
+    let size_env = Env.get_int("CF_SIZE", -1)
     let entropy = int_and(System.monotonic_time() * 2654435761 + unix_time_ms(), 1073741823)
-    let seed = if age_env >= 0 do CubeForge.Noise.with_age(if seed_env >= 0 do seed_env else entropy end, age_env)
-               else if seed_env >= 0 do seed_env
-               else CubeForge.Noise.with_age(entropy, int_and(entropy * 40503 + 7919, 1073741823) % (CubeForge.Noise.max_age() + 1)) end end
+    let seed_a = if age_env >= 0 do CubeForge.Noise.with_age(if seed_env >= 0 do seed_env else entropy end, age_env)
+                 else if seed_env >= 0 do seed_env
+                 else CubeForge.Noise.with_age(entropy, int_and(entropy * 40503 + 7919, 1073741823) % (CubeForge.Noise.max_age() + 1)) end end
+    let seed = if size_env > 0 do CubeForge.Noise.with_size(seed_a, size_env) else seed_a end
     let headless = Env.get_int("CF_HEADLESS", 0) == 1
     -- Graphics settings: the file, then any environment override on top. The
     -- overridden fields are remembered so they are never written back.
@@ -2621,14 +2631,17 @@ mod CubeForge do
       end
     end
   end
-  pfn run_session(start : Start, settings0 : CubeForge.Settings.Settings, first : Bool, n : Int, workers : Int, headless : Bool, from_env : Bool, k : Knobs,
+  pfn run_session(start : Start, settings0 : CubeForge.Settings.Settings, first : Bool, n_max : Int, workers : Int, headless : Bool, from_env : Bool, k : Knobs,
                   proj : NativeFloatArr, map_proj : NativeFloatArr, pids, wxpid, autoswim : Bool) : Next do
     -- A slot is read first; everything after "terrain" is the same for both.
     let loaded = match start do
-      FromSlot(slot) -> load_slot(slot, n)
+      FromSlot(slot) -> load_slot(slot)
       _ -> NoLoad
     end
     let seed = loaded_seed(loaded, start)
+    -- The world's side comes with its seed (Noise.size_of), 4..n_max chunks;
+    -- the actor pool and the fixed-width fields are n_max's.
+    let n = Math.min_int(CubeForge.Noise.size_of(seed), n_max)
     -- stage 1: terrain (independent chunks). The scalar generator is a benchmark
     -- reference only, so a loaded world skips it.
     let t0 = System.monotonic_time()
@@ -2661,7 +2674,7 @@ mod CubeForge do
     let tw2 = System.monotonic_time()
     -- A loaded world already holds its fungus as blocks: shown comes from the
     -- save with the fields, and the wild patches are never stamped over it.
-    let world_wild = if have_fields do World.with_shown(world_dark, Win.u8_blit(World.shown_new(), 0, fields, 3 * cols * cols, cols * cols))
+    let world_wild = if have_fields do World.with_shown(world_dark, Win.u8_blit(World.shown_new(n), 0, fields, 3 * cols * cols, cols * cols))
                      else if is_loaded(loaded) do world_dark else apply_shown_all(world_dark, biome0, myc0, n, 0) end end
     println("  biome field: " ++ int_to_string(tw1 - tw0) ++ " ms, wild fungus: " ++ myc_summary(myc0, cols, 1, "") ++ "in " ++ int_to_string(tw2 - tw1) ++ " ms, applied in " ++ int_to_string(System.monotonic_time() - tw2) ++ " ms")
     let t2 = System.monotonic_time()
@@ -2703,7 +2716,7 @@ mod CubeForge do
       let naive_verts = mesh_all_naive(world, n, workers)
       println("  naive mesher for comparison: " ++ int_to_string(System.monotonic_time() - tn0) ++ " ms wall, " ++ int_to_string(naive_verts) ++ " vertices")
     else () end
-    println("seed " ++ int_to_string(seed) ++ " (base " ++ int_to_string(CubeForge.Noise.base_seed(seed)) ++ ", age " ++ int_to_string(CubeForge.Noise.age_of(seed)) ++ ")"
+    println("seed " ++ int_to_string(seed) ++ " (base " ++ int_to_string(CubeForge.Noise.base_seed(seed)) ++ ", age " ++ int_to_string(CubeForge.Noise.age_of(seed)) ++ ", size " ++ int_to_string(16 * n) ++ ")"
             ++ (if from_env do " (CF_SEED)" else " (set CF_SEED to reproduce)" end))
     println("world " ++ int_to_string(n) ++ "x" ++ int_to_string(n) ++ " chunks, " ++ int_to_string(workers) ++ " workers, "
             ++ int_to_string(Env.get_int("MARCH_NUM_SCHEDULERS", 4)) ++ " scheduler threads (MARCH_NUM_SCHEDULERS)")

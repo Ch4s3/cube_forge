@@ -138,7 +138,7 @@ mod CubeForge.Save do
     end
   end
 
-  doc "Parse a header. Fails on a missing key, a version other than [version], a side other than [side], or a malformed value."
+  doc "Parse a header. Fails on a missing key, a version other than [version], a side other than [side] (any side when [side] is negative: worlds come in sizes now, and the seed says which), or a malformed value."
   fn parse_header(s : String, side : Int) : Result(Header, String) do
     let lines = String.split(s, "\n")
     match int_field(lines, "version") do
@@ -148,7 +148,7 @@ mod CubeForge.Save do
         else match int_field(lines, "side") do
           Err(e) -> Err(e)
           Ok(sd) ->
-            if sd != side do Err("side " ++ int_to_string(sd) ++ ", this world is " ++ int_to_string(side))
+            if side >= 0 && sd != side do Err("side " ++ int_to_string(sd) ++ ", this world is " ++ int_to_string(side))
             else match int_field(lines, "seed") do
               Err(e) -> Err(e)
               Ok(seed) -> match int_field(lines, "saved_at") do

@@ -647,8 +647,15 @@ mod CubeForge.Light do
     else
       let x = x0 + i % bw
       let z = z0 + i / bw
-      let c = CubeForge.World.chunk_at(w, CubeForge.World.floor_div16(x), CubeForge.World.floor_div16(z))
-      seed_emit_box_go(seed_emit_col_go(lb, c, CubeForge.World.mod16(x), CubeForge.World.mod16(z), x, z, y0, y1), w, x0, bw, z0, y0, y1, i + 1, n)
+      let cx = CubeForge.World.floor_div16(x)
+      let cz = CubeForge.World.floor_div16(z)
+      -- the box is clamped to the fixed width, not the world's: a column past
+      -- the last chunk of a smaller world has no chunk and no emitter
+      if !CubeForge.World.in_bounds(w, cx, cz) do seed_emit_box_go(lb, w, x0, bw, z0, y0, y1, i + 1, n)
+      else
+        let c = CubeForge.World.chunk_at(w, cx, cz)
+        seed_emit_box_go(seed_emit_col_go(lb, c, CubeForge.World.mod16(x), CubeForge.World.mod16(z), x, z, y0, y1), w, x0, bw, z0, y0, y1, i + 1, n)
+      end
     end
   end
 
