@@ -468,6 +468,8 @@ mod CubeForge.Biome do
   fn temps(f : Field) : NativeFloatArr do match f do Field(_, _, ta, _, _, _, _, _, _) -> ta end end
   doc "The eased moisture array, one entry per column."
   fn moists(f : Field) : NativeFloatArr do match f do Field(_, _, _, ma, _, _, _, _, _) -> ma end end
+  doc "The active flags, one entry per column: 1 where the last tick eased the climate or an edit woke the column. What the mycelium tick must look at whatever its own dirty set says."
+  fn active(f : Field) : NativeU8Arr do match f do Field(_, _, _, _, _, _, _, _, act) -> act end end
 
   doc "How much of a storm actually falls here, as a multiplier on the particle count. Deserts stay dry under the same storm that soaks a wetland; the sea and the mountains sit in between."
   fn precip_scale(id : Int) : Float do

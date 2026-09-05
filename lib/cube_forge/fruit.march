@@ -139,7 +139,7 @@ mod CubeForge.Fruit do
 
   -- One column: a body that the network has left decays; an empty canonical
   -- column of a mature, shown species may grow when its roll passes.
-  pfn scan_go(sps : NativeU8Arr, vg : NativeFloatArr, shown : NativeU8Arr, w : CubeForge.World.World, bio : CubeForge.Biome.Field, seed : Int, tick : Int,
+  pfn scan_go(sps : NativeU8Arr, vg : NativeF32Arr, shown : NativeU8Arr, w : CubeForge.World.World, bio : CubeForge.Biome.Field, seed : Int, tick : Int,
               n : Int, i : Int, left : Int, budget : Int, scale : Float, acc : List(Int)) : List(Int) do
     if left <= 0 || budget <= 0 do acc
     else
@@ -157,7 +157,7 @@ mod CubeForge.Fruit do
       else if sp == 0 do scan_go(sps, vg, shown, w, bio, seed, tick, n, i + 1, left - 1, budget, scale, acc)
       else
         let tier = S.tier(sp)
-        let ok = if NativeArray.get_float(vg, ci) < CubeForge.Myc.fruit_vigour() do false
+        let ok = if NativeArray.get_f32(vg, ci) < CubeForge.Myc.fruit_vigour() do false
                  else if NativeArray.get_u8(shown, ci) != sp do false
                  else if !is_canonical(x, z, tier, seed) do false
                  else if base <= 0 || base + height_of(sp, x, z, seed) >= 255 do false

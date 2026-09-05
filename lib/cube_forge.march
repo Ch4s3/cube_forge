@@ -1106,6 +1106,10 @@ mod CubeForge do
     end
   end
 
+  pfn count_u8(a : NativeU8Arr, i : Int, n : Int, acc : Int) : Int do
+    if i >= n do acc else count_u8(a, i + 1, n, if NativeArray.get_u8(a, i) != 0 do acc + 1 else acc end) end
+  end
+
   pfn myc_summary(f : CubeForge.Myc.Field, n : Int, sp : Int, acc : String) : String do
     if sp > Species.count() do acc
     else myc_summary(f, n, sp + 1, acc ++ Species.name(sp) ++ " " ++ int_to_string(Myc.count_species(f, n, sp)) ++ "  ") end
@@ -1600,7 +1604,7 @@ mod CubeForge do
             let tm0 = Win.time()
             let myc1 = Myc.tick(scene_myc(f1), World.side(scene_world(f1)) * 16, Biome.temps(bio1), Biome.moists(bio1), Myc.default_rate() *. int_to_float(myc_rate) /. 100.0)
             let f2 = scene_with_myc(f1, myc1)
-            if autoflow >= 0 && frame % 100 == field_slot() do println("biome tick: " ++ ms(tm0 -. tb0) ++ "  myc tick: " ++ ms(Win.time() -. tm0)) else () end
+            if autoflow >= 0 && frame % 100 == field_slot() do println("biome tick: " ++ ms(tm0 -. tb0) ++ "  myc tick: " ++ ms(Win.time() -. tm0) ++ " (biome active " ++ int_to_string(count_u8(Biome.active(bio1), 0, World.side(scene_world(f1)) * 16 * World.side(scene_world(f1)) * 16, 0)) ++ ", myc dirty " ++ int_to_string(Myc.dirty_count(myc1, World.side(scene_world(f1)) * 16)) ++ ")") else () end
             f2
           else scw end
           -- Retexturing: the surface migrates toward the biome's palette, each
