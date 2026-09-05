@@ -457,7 +457,8 @@ mod CubeForge.Light do
     let slo = sy0 * 16384
     -- Both buffers are copies: [la2] itself is read again below, so it cannot be
     -- one of the pair. Two copies up front replace fourteen.
-    let swept = box_sweep_go2(copy_prefix(la2, plen), copy_prefix(la2, plen), w, max_level(),
+    let swept = box_sweep_go2(copy_prefix(la2, plen), copy_prefix(la2, plen), w,
+                              box_max_go(la2, sx0, sx1, sy0, sy1, sz0, sz1, 0, 0),
                               sx0, sx1, sy0, sy1, sz0, sz1, slo, plen - slo)
     -- Write the swept slice back into la2 itself. Only [slo, plen) differs --
     -- the sweep started from copies of la2 and writes nothing outside that
@@ -506,6 +507,22 @@ mod CubeForge.Light do
   end
 
   doc "Repair the block-light field after the block at (ex, ey, ez) changed, reporting which sections moved. [w] is the world after the edit."
+  -- The brightest voxel in the box. The sweep starts here rather than at
+  -- max_level(): box_level_go only propagates from voxels holding exactly the
+  -- level it is on, so every level above the box's maximum is a blit and a full
+  -- box scan that can find nothing. Underground -- which is where mining
+  -- happens -- the maximum is small and most of the fourteen levels are waste.
+  pfn box_max_go(la : NativeU8Arr, x0 : Int, x1 : Int, y0 : Int, y1 : Int, z0 : Int, z1 : Int, i : Int, acc : Int) : Int do
+    let bw = x1 - x0 + 1
+    let bh = y1 - y0 + 1
+    if i >= bw * bh * (z1 - z0 + 1) do acc
+    else if acc >= max_level() do acc
+    else
+      let v = get(la, x0 + i % bw, y0 + (i / bw) % bh, z0 + i / (bw * bh))
+      box_max_go(la, x0, x1, y0, y1, z0, z1, i + 1, if v > acc do v else acc end)
+    end end
+  end
+
   -- Is any voxel of the box lit? Reads through get(), which is bounds-checked,
   -- and stops at the first hit.
   pfn box_any_go(lb : NativeU8Arr, x0 : Int, x1 : Int, y0 : Int, y1 : Int, z0 : Int, z1 : Int, i : Int) : Bool do
@@ -559,7 +576,8 @@ mod CubeForge.Light do
     let sz1 = clampi(ez + r + 1, 0, 127)
     let sy0 = if cy0 <= 0 do 0 else clampi(cy0 - 1, 0, 255) end
     let slo = sy0 * 16384
-    let swept = box_sweep_go2(copy_prefix(lb2, plen), copy_prefix(lb2, plen), w, max_level(),
+    let swept = box_sweep_go2(copy_prefix(lb2, plen), copy_prefix(lb2, plen), w,
+                              box_max_go(lb2, sx0, sx1, sy0, sy1, sz0, sz1, 0, 0),
                               sx0, sx1, sy0, sy1, sz0, sz1, slo, plen - slo)
     let out = CubeForge.Ffi.Window.u8_blit(lb2, slo, swept, slo, plen - slo)
     Relit(out, mark_box(marks_new(), before, out, sx0, sx1, sy0, sy1, sz0, sz1))
