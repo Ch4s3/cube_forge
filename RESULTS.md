@@ -1673,3 +1673,16 @@ this frame, whose timer was a second longer a frame ago -- and the UI keeps
 the last string otherwise. The allocation gauge did not move (127 live
 objects per frame with an effect active, the same as before): the ground
 readout string is the per-frame allocator, not this one. Listed.
+
+
+## The reticle over fungus (2026-09-05)
+
+The crosshair leans 45% of the way from white toward the cap colour of the
+fungus under it: a fruit block's own species, a mycelium block's column
+species from `World.shown`. `Hud.reticle_r/g/b(tint)`; the species is folded
+into the HUD rebuild key, so the bars recolour only when the target's species
+changes and nothing is rebuilt per frame. `docs/fungus-reticle.png`: looking
+straight down at a Lanterncap patch (`CF_PITCH=-140`, a new knob for the
+spawn pitch in hundredths of a radian), the reticle is a warm cream against
+the white it keeps over sky and water. Budget 11.26 ms best of 3 on a machine
+still carrying other sessions' benchmarks.

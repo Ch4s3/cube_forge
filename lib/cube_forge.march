@@ -2498,7 +2498,7 @@ mod CubeForge do
         -- CF_SPAWN_Y=<y>: start at a chosen height (inspection aid, e.g. to look at the bedrock floor)
         let forced_y = Env.get_int("CF_SPAWN_Y", -1)
         let y0 = if forced_y >= 0 do int_to_float(forced_y) else ground_y end
-        Player.with_pitch(Player.new(int_to_float(spawn_x) +. 0.5, y0, int_to_float(spawn_z) +. 0.5), -0.25)
+        Player.with_pitch(Player.new(int_to_float(spawn_x) +. 0.5, y0, int_to_float(spawn_z) +. 0.5), int_to_float(Env.get_int("CF_PITCH", -25)) /. 100.0)   -- CF_PITCH: spawn pitch in hundredths of a radian, for headless looks at the ground
       end
       let player = match loaded do
         Loaded(h, _) -> Player.of_floats(Save.h_player(h))
