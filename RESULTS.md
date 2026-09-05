@@ -1353,3 +1353,54 @@ right shape for "rebuild on change and upload".
 
 The "nothing grows here" readout is unreachable with six species: every
 climate has at least one band over it. It stays for a roster that leaves gaps.
+
+## Fruit (fungus phases 5-6, 2026-09-05)
+
+Mushroom bodies of three tiers on mature mycelium. Plan
+`docs/superpowers/plans/2026-09-05-fungus-phase5-fruit.md`.
+
+| | debug | release |
+|---|---|---|
+| one body grown or felled (stamp/fell + both-field relight + occupancy sync + marks), any tier | 32-44 ms | **6-7 ms** (a tree: 7-8 ms) |
+| the candidate scan, 2,048 columns per fruit slot | 2-3 ms | **0.3-0.6 ms** |
+| `myc tick` on the field slot with fourteen wild patches live | -- | 3.2 ms (beside the 1.7 ms biome tick) |
+| `scratch/frame_budget.sh`, 12 ms budget, release, wild fungus and fruit live | -- | **11.09 ms** best of 3 (12.21 and a 55 ms outlier seen; the pinned run's own worst frame was 10.0 ms when re-run with timings) |
+
+The fruit phase runs on the vegetation slot on the periods vegetation skips, so
+no frame carries a tree and a mushroom at once; a body is a tree-sized edit and
+the budget is one per slot.
+
+**A cursor bug, found here, pre-dates the fungus.** Both every-other-period
+phases keyed their rolling scan window on the tick count: `(tick * 2048) %
+16384` over eight windows, visited on even ticks only, reaches the even four.
+Vegetation had been growing and felling in half the world since it landed
+(RESULTS 2026-09-04 measured it without noticing); fruit inherited the bug on
+the odd ticks and it showed at once, as a mature patch whose centre never
+fruited. Both now key on the period count. Trees grow everywhere from this
+commit, which moves the pinned scenario's mesh hash.
+
+**Glow migrations batch under one relight.** A planted glowing patch changes
+the emission of every column it covers, and phase 3's rule -- one relight per
+retexture slot -- would have taken fifteen seconds to show a 181-column
+Marshlight patch. Now the first glow column in a slot anchors, further glow
+columns within 4 of it are taken too, and the slot ends with a single
+`relight_block_marked` at the anchor: every emitter in that 9x9 is within 4
+of the anchor and shines at most 6, so the radius-15 relight box covers them
+all. `CF_MYC_GLOW_BUDGET` is gone; `CF_MYC_BUDGET` defaults to 64 per period.
+Migration of 16 glowing columns: 12 ms debug in one slot.
+
+`docs/fungus-fruit.png`: small Meadowbell bodies on a planted patch by day
+(`CF_WILD=0 CF_AUTOPLANT=100 CF_MYC_RATE=5000 CF_FRUIT_RATE=2000`, frame 2000).
+They are cutout cubes, the choice the vegetation design made for leaves; the
+silhouette reads as a mushroom from the side and as a splayed shape from above,
+which a top-face cap texture would fix. `docs/fungus-giant.png`: a mature
+Marshlight patch at night (`CF_AUTOPLANT_SPECIES=5 CF_AUTOPLANT_MATURE=1
+CF_MYC_RATE=0 CF_FRUIT_RATE=5000`, frame 1200): the mycelium carpet-glows at
+emission 6, a giant stands on the crosshair column (`surface 61 at y 90, block
+light above 9` in the dump), its cap above the horizontal view. On the wild
+world at seed 7 a 2,100-frame run at `CF_FRUIT_RATE=2000` grew 45 bodies: 39
+small, 5 medium, 1 giant.
+
+`CF_AUTOPLANT_MATURE=1` plants a full-vigour patch at once, which with
+`CF_MYC_RATE=0` stays whatever the climate says: the way to put a chosen
+species' fruit in front of the camera without waiting.

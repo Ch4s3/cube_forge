@@ -170,6 +170,19 @@ patch keeps growing without the player replanting.
 Rates: a mature patch fruits a small body about once a day and a giant every
 several days. `CF_FRUIT_RATE` scales them for inspection.
 
+*As built (phases 5-6, 2026-09-05):* fruit ids encode **kind x species**
+(45..62), unlike mycelium, so a placed cap glows and textures on its own. Cells
+3 / 6 / 16 per tier, one canonical column each by hash; stem 2-3 (medium) or
+5-9 (giant), giant cap a disc of radius 3-4, with a second dome layer for
+Marshlight only. Growth rolls per visit at 0.05 / 0.02 / 0.005 scaled by
+`CF_FRUIT_RATE`, one body per fruit slot (`CF_FRUIT_BUDGET`), on the
+vegetation slot's off periods. Decay when the canonical column's shown species
+is not the body's. Breaking a small block or any stem fells the body: spores by
+tier, its stems and caps as blocks, and the column's reach resets. Cap
+emission is 10 bright / 5 dim for both medium and giant (a giant has 49+ cap
+blocks); small 6 / 3. Small bodies are cutout cubes you walk through.
+Measurements in `RESULTS.md`.
+
 ## 6. Block light
 
 A **second light byte per voxel** in the chunk beside skylight, so

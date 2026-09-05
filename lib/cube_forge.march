@@ -40,6 +40,7 @@ mod CubeForge do
   alias CubeForge.Ffi.Audio as Aud
   alias CubeForge.Myc as Myc
   alias CubeForge.Species as Species
+  alias CubeForge.Fruit as Fruit
 
   fn ms(seconds : Float) : String do float_to_string(seconds *. 1000.0) ++ "ms" end
 
@@ -708,6 +709,65 @@ mod CubeForge do
       Cons(e, rest) -> count_bush(rest, if Veg.is_bush(e) do acc + 1 else acc end)
     end
   end
+  -- Grow and fell mushroom bodies: each one a tree-sized edit with its own relight.
+  pfn fruit_go(sc, seed : Int, entries : List(Int)) do
+    match entries do
+      Nil -> sc
+      _ ->
+        match sc do
+          Scene(world, counts, outline, hit, ui, pids, flags, meshes, bio, pend, myc) ->
+            let n = World.side(world)
+            match fruit_edits(world, bio, myc, CubeForge.Light.marks_new(), seed, n, entries) do
+              FruitEdited(w1, bio1, myc1, marks) ->
+                Scene(w1, counts, outline, hit, ui, pids, flags, meshes, bio1, stage_go(pend, marks, 0, pass_solid()), myc1)
+            end
+        end
+    end
+  end
+  type FruitEdited = FruitEdited(CubeForge.World.World, CubeForge.Biome.Field, CubeForge.Myc.Field, NativeIntArr)
+  pfn fruit_edits(w : CubeForge.World.World, bio : CubeForge.Biome.Field, myc : CubeForge.Myc.Field, marks : NativeIntArr, seed : Int, n : Int, entries : List(Int)) : FruitEdited do
+    match entries do
+      Nil -> FruitEdited(w, bio, myc, marks)
+      Cons(e, rest) ->
+        let ci = Fruit.column_of(e)
+        let x = ci % (n * 16)
+        let z = ci / (n * 16)
+        let h = Biome.height_of(bio, x, z)
+        let base = Fruit.base_of(w, x, z, h)
+        let sp = if Fruit.is_decay(e) do Chunk.fruit_species(World.block_at(w, x, base + 1, z)) else World.shown_at(w, x, z) end
+        if sp == 0 do fruit_edits(w, bio, myc, marks, seed, n, rest)
+        else
+          let top = base + Fruit.height_of(sp, x, z, seed)
+          let w1 = if Fruit.is_decay(e) do Fruit.felled_world(Fruit.fell(w, sp, x, base, z, seed)) else Fruit.stamp(w, sp, x, base, z, seed) end
+          let relit = World.relight_marked(w1, x, base + 2, z)
+          let w2 = World.relit_world(relit)
+          sync_occupancy(w2, x, z, base, top)
+          let marks1 = or_marks(mark_box(marks, x - 4, base, z - 4, x + 4, top, z + 4, n, 0), World.relit_marks(relit), 0)
+          fruit_edits(w2, Biome.rescan_box(bio, w2, x, z, Fruit.footprint() + 1, top), myc, marks1, seed, n, rest)
+        end
+    end
+  end
+
+  -- A body of [sp] whose block at (x, y, z) the player just broke, rooted on
+  -- [base] (read before the break): take the rest down, pay out spores by tier
+  -- and the stems and caps as blocks, and reseed the column.
+  pfn fell_body(sc, x : Int, base : Int, z : Int, sp : Int, seed : Int) do
+    match sc do
+      Scene(world, counts, outline, hit, ui, pids, flags, meshes, bio, pend, myc) ->
+        let n = World.side(world)
+        let r = Fruit.fell(world, sp, x, base, z, seed)
+        let w1 = Fruit.felled_world(r)
+        let top = base + Fruit.height_of(sp, x, z, seed)
+        let relit = World.relight_marked(w1, x, base + 2, z)
+        let w2 = World.relit_world(relit)
+        sync_occupancy(w2, x, z, base, top)
+        let marks = or_marks(mark_box(CubeForge.Light.marks_new(), x - 4, base, z - 4, x + 4, top, z + 4, n, 0), World.relit_marks(relit), 0)
+        let inv1 = Inv.give(Inv.give(Inv.give(ui_inv(ui), Species.spore_item(sp), Species.spores(sp)), Chunk.fruit_stem(sp), Fruit.felled_stems(r)), Chunk.fruit_cap(sp), Fruit.felled_caps(r))
+        Scene(w2, counts, outline, hit, ui_with_inv(ui, inv1), pids, flags, meshes, Biome.rescan_box(bio, w2, x, z, Fruit.footprint() + 1, top),
+              stage_go(pend, marks, 0, pass_solid()), Myc.reseed(myc, n * 16, x, z))
+    end
+  end
+
   pfn vegetate(sc, seed : Int, entries : List(Int)) do
     match entries do
       Nil -> sc
@@ -774,14 +834,19 @@ mod CubeForge do
   pfn all_marks(i : Int, m : NativeIntArr) : NativeIntArr do if i >= 1024 do m else all_marks(i + 1, NativeArray.set_int(m, i, 1)) end end
 
   -- One mycelium migration: the column's surface takes or drops its mycelium
-  -- block, `shown` follows, and block light is repaired only when the emission
-  -- changed. Skips wet columns and columns whose surface cannot carry mycelium.
-  -- [glow_left] bounds the relights, which are the expensive part.
-  type MycMigrated = MycMigrated(CubeForge.World.World, NativeIntArr, Int)
+  -- block and `shown` follows. Columns whose EMISSION changes need block light
+  -- repaired, and a relight is the expensive part (10 ms debug per column),
+  -- so they are batched: the first such column in the slot becomes the anchor,
+  -- further ones are taken only within 4 columns of it, and the caller runs
+  -- ONE relight at the anchor. Every emitter in that 9x9 lies within 4 of the
+  -- anchor and shines at most 6, so the relight's radius-15 box covers all of
+  -- them. Glow columns outside the window stay candidates for a later slot.
+  -- Skips wet columns and columns whose surface cannot carry mycelium.
+  type MycMigrated = MycMigrated(CubeForge.World.World, NativeIntArr, Int, Int, Int)   -- world, marks, anchor x, anchor h, anchor z (x < 0: none)
   pfn migrate_myc_go(w : CubeForge.World.World, bio : CubeForge.Biome.Field, myc : CubeForge.Myc.Field, marks : NativeIntArr,
-                     n : Int, cols : List(Int), glow_left : Int) : MycMigrated do
+                     n : Int, cols : List(Int), ax : Int, ah : Int, az : Int) : MycMigrated do
     match cols do
-      Nil -> MycMigrated(w, marks, glow_left)
+      Nil -> MycMigrated(w, marks, ax, ah, az)
       Cons(ci, rest) ->
         let x = ci % (n * 16)
         let z = ci / (n * 16)
@@ -792,19 +857,36 @@ mod CubeForge do
         let new_id = if want == 0 do base else Chunk.myc_id(base, Species.glow(want)) end
         -- cannot carry it (water, logs, granite, bedrock...): show nothing and move on
         if h <= 0 || Biome.is_wet(bio, x, z) || new_id == 0 do
-          migrate_myc_go(World.set_shown(w, x, z, 0), bio, myc, marks, n, rest, glow_left)
+          migrate_myc_go(World.set_shown(w, x, z, 0), bio, myc, marks, n, rest, ax, ah, az)
         else
           let glow_changes = CubeForge.Light.emission(sfc) != CubeForge.Light.emission(new_id)
-          if glow_changes && glow_left <= 0 do migrate_myc_go(w, bio, myc, marks, n, rest, glow_left)
+          let near_anchor = if ax < 0 do true else (if x - ax <= 4 && ax - x <= 4 do (z - az <= 4 && az - z <= 4) else false end) end
+          if glow_changes && !near_anchor do migrate_myc_go(w, bio, myc, marks, n, rest, ax, ah, az)
           else
             let w1 = World.set_shown(if new_id == sfc do w else World.set_block(w, x, h, z, new_id) end, x, z, want)
             let marks1 = mark_geometry(marks, x, h, z, n)
-            if glow_changes do
-              let relit = CubeForge.Light.relight_block_marked(World.block_light(w1), w1, x, h, z)
-              migrate_myc_go(World.set_block_light(w1, CubeForge.Light.relit_field(relit)), bio, myc,
-                             CubeForge.Light.or_marks(marks1, CubeForge.Light.relit_marks(relit)), n, rest, glow_left - 1)
-            else migrate_myc_go(w1, bio, myc, marks1, n, rest, glow_left) end
+            if glow_changes && ax < 0 do migrate_myc_go(w1, bio, myc, marks1, n, rest, x, h, z)
+            else migrate_myc_go(w1, bio, myc, marks1, n, rest, ax, ah, az) end
           end
+        end
+    end
+  end
+
+  pfn migrate_myc(sc, cols : List(Int)) do
+    match cols do
+      Nil -> sc
+      _ ->
+        match sc do
+          Scene(world, counts, outline, hit, ui, pids, flags, meshes, bio, pend, myc) ->
+            match migrate_myc_go(world, bio, myc, CubeForge.Light.marks_new(), World.side(world), cols, 0 - 1, 0, 0) do
+              MycMigrated(w1, marks, ax, ah, az) ->
+                if ax < 0 do Scene(w1, counts, outline, hit, ui, pids, flags, meshes, bio, stage_go(pend, marks, 0, pass_opaque()), myc)
+                else
+                  let relit = CubeForge.Light.relight_block_marked(World.block_light(w1), w1, ax, ah, az)
+                  let w2 = World.set_block_light(w1, CubeForge.Light.relit_field(relit))
+                  Scene(w2, counts, outline, hit, ui, pids, flags, meshes, bio, stage_go(pend, CubeForge.Light.or_marks(marks, CubeForge.Light.relit_marks(relit)), 0, pass_opaque()), myc)
+                end
+            end
         end
     end
   end
@@ -852,20 +934,6 @@ mod CubeForge do
         _ -> World.set_cells(w, cx, cz, cells)
       end
       apply_shown_all(shown_mark_go(w1, bio, myc, n * 16, cx, cz, 0), bio, myc, n, ci + 1)
-    end
-  end
-
-  pfn migrate_myc(sc, cols : List(Int), glow_budget : Int) do
-    match cols do
-      Nil -> sc
-      _ ->
-        match sc do
-          Scene(world, counts, outline, hit, ui, pids, flags, meshes, bio, pend, myc) ->
-            match migrate_myc_go(world, bio, myc, CubeForge.Light.marks_new(), World.side(world), cols, glow_budget) do
-              MycMigrated(w1, marks, _) ->
-                Scene(w1, counts, outline, hit, ui, pids, flags, meshes, bio, stage_go(pend, marks, 0, pass_opaque()), myc)
-            end
-        end
     end
   end
 
@@ -959,7 +1027,7 @@ mod CubeForge do
   end
 
   -- Plant the species that best fits the column three east of the player.
-  pfn plant_near(sc, p : CubeForge.Player.Player, force : Int) do
+  pfn plant_near(sc, p : CubeForge.Player.Player, force : Int, mature : Bool) do
     let pos = Player.position(p)
     let px = float_to_int(Math.floor(V.x(pos))) + 3
     let pz = float_to_int(Math.floor(V.z(pos)))
@@ -967,8 +1035,12 @@ mod CubeForge do
     if px < 0 || pz < 0 || px >= n || pz >= n do sc
     else
       let sp = if force > 0 do force else Species.best_for(Biome.temp_of(scene_biome(sc), px, pz), Biome.moist_of(scene_biome(sc), px, pz)) end
-      println("planted " ++ Species.name(sp) ++ " at " ++ int_to_string(px) ++ "," ++ int_to_string(pz))
-      if sp == 0 do sc else scene_with_myc(sc, Myc.plant(scene_myc(sc), n, px, pz, sp)) end
+      println("planted " ++ Species.name(sp) ++ " at " ++ int_to_string(px) ++ "," ++ int_to_string(pz) ++ (if mature do " (mature)" else "" end))
+      -- CF_AUTOPLANT_MATURE=1: a full-vigour patch at once, for fruit checks
+      -- that cannot wait for growth (with CF_MYC_RATE=0 it stays whatever the climate)
+      if sp == 0 do sc
+      else if mature do scene_with_myc(sc, Myc.plant_patch(scene_myc(sc), n, px, pz, sp))
+      else scene_with_myc(sc, Myc.plant(scene_myc(sc), n, px, pz, sp)) end end
     end
   end
 
@@ -1015,6 +1087,23 @@ mod CubeForge do
     if s >= Inv.slots() do -1
     else if Species.is_spore(Inv.item_at(inv, s)) && Inv.count_at(inv, s) > 0 do s
     else first_spore_slot(inv, s + 1) end end
+  end
+
+  -- The canonical giant-tier column of each 16x16 cell within one cell of the
+  -- player, with its species and shown species: which cells could fruit a giant.
+  pfn giant_cells(w : CubeForge.World.World, f : CubeForge.Myc.Field, seed : Int, px : Int, pz : Int, k : Int, acc : String) : String do
+    if k >= 9 do acc
+    else
+      let cx = px / 16 - 1 + k % 3
+      let cz = pz / 16 - 1 + k / 3
+      let c = Fruit.canonical(cx, cz, 2, seed)
+      let x = c % 4096
+      let z = c / 4096
+      let n = World.side(w) * 16
+      let line = if x < 0 || z < 0 || x >= n || z >= n do "" else
+        int_to_string(x) ++ "," ++ int_to_string(z) ++ ":sp" ++ int_to_string(Myc.species_of(f, n, x, z)) ++ "/shown" ++ int_to_string(World.shown_at(w, x, z)) ++ " " end
+      giant_cells(w, f, seed, px, pz, k + 1, acc ++ line)
+    end
   end
 
   pfn myc_summary(f : CubeForge.Myc.Field, n : Int, sp : Int, acc : String) : String do
@@ -1114,10 +1203,15 @@ mod CubeForge do
         let sc1 = Scene(world, counts, outline1, hit, ui_with_inv(ui0, inv1), pids, flags, meshes, bio, pend, myc)
         if Inv.is_complete(inv1) do
           let id = World.block_at(world, Ray.bx(hit), Ray.by_(hit), Ray.bz(hit))
+          -- the ground under a fruit block, read before the block goes
+          let fbase = Fruit.base_of(world, Ray.bx(hit), Ray.bz(hit), Ray.by_(hit))
           let sc2 = edit_block(sc1, Ray.bx(hit), Ray.by_(hit), Ray.bz(hit), 0)
           -- chopping a trunk drops the canopy it was holding up
-          let sc3 = if Chunk.is_log(id) do chop(sc2, Ray.bx(hit), Ray.by_(hit), Ray.bz(hit)) else sc2 end
-          let inv2 = Inv.harvest(inv1, id)
+          let sc3a = if Chunk.is_log(id) do chop(sc2, Ray.bx(hit), Ray.by_(hit), Ray.bz(hit)) else sc2 end
+          -- breaking a small mushroom or a stem fells the body: spores by tier,
+          -- its stems and caps as blocks, and the column reseeds
+          let sc3 = if Chunk.is_fruit_small(id) || Chunk.is_fruit_stem(id) do fell_body(sc3a, Ray.bx(hit), fbase, Ray.bz(hit), Chunk.fruit_species(id), seed) else sc3a end
+          let inv2 = Inv.harvest(ui_inv(scene_ui(sc3)), id)
           -- digging mycelium sometimes frees a spore of the species it showed
           let inv3 = if Chunk.is_myc(id) && Myc.dig_spore(Ray.bx(hit), Ray.by_(hit), Ray.bz(hit), seed) do
                        let sp = World.shown_at(world, Ray.bx(hit), Ray.bz(hit))
@@ -1350,13 +1444,13 @@ mod CubeForge do
 
   -- Frame loop. `max_frames < 0` means run until the window closes.
   -- Run-time knobs read once, outside the frame loop (an Env read allocates).
-  type Knobs = Knobs(Int, Int, String, Bool, Float, Int, Bool, Int, Int, Int, Float, Int, Float, Bool, Int, Int, Int, Int, Int, Bool, Int, Int, Int, Int, Int, Int, Int, Bool, Bool, Int, Int, Bool, Int, Int, Int, Int, Int)   -- max_frames, dump_frame, dump_path, autowalk, autospin, autoedit frame (<0 = off), autoswim, autoflow frame (<0 = off), workers, automap frame (<0 = off; forces map view on from this frame, for headless verification), day length in seconds, sun angle override in degrees (<0 = follow the clock), shadow reach in blocks (0 = off), soft shadow edges, autobreak frame (<0 = off): break the column under the player every 20 frames, for a repeatable edit benchmark, weather pin 0..100 (<0 = follow the actor), precipitation pool capacity, biome ease rate in percent (100 = one CF_DAY per full swing), draw the biome map in map view, autocanal frame (<0 = off): lay a 9-block line of water three columns east of the player, aim-independent, for the biome end-to-end test, biome migration budget: surface columns retextured per tick, vegetation budget: trees grown or felled per tick, time pin in seconds (<0 = live clock) for the water animation, remesh-all frame (<0 = off): rebuild every section of every chunk at that frame, a ground truth for stale-mesh hunts, automenu frame (<0 = off): open the escape menu at that frame and start a new game five frames later, for the restart test, audio mode (0 off, 1 device, 2 null device -- render a tick per push straight into the WAV, for reproducible headless dumps), audio log, autodive, autoglow frame (<0 = off): place a glow cap three columns east of the player, through edit_block, for the block-light end-to-end check, myc rate in percent, draw the mycelium map overlay in map view, autoplant frame (<0 = off): plant the fittest species three columns east of the player, myc migration budget (surface columns per retexture slot), of which how many may change emission and relight, autoplant species override (0 = fittest), autospore frame (<0 = off): give three spores and plant one through the item path thirty frames later
+  type Knobs = Knobs(Int, Int, String, Bool, Float, Int, Bool, Int, Int, Int, Float, Int, Float, Bool, Int, Int, Int, Int, Int, Bool, Int, Int, Int, Int, Int, Int, Int, Bool, Bool, Int, Int, Bool, Int, Int, Int, Int, Int, Int)   -- max_frames, dump_frame, dump_path, autowalk, autospin, autoedit frame (<0 = off), autoswim, autoflow frame (<0 = off), workers, automap frame (<0 = off; forces map view on from this frame, for headless verification), day length in seconds, sun angle override in degrees (<0 = follow the clock), shadow reach in blocks (0 = off), soft shadow edges, autobreak frame (<0 = off): break the column under the player every 20 frames, for a repeatable edit benchmark, weather pin 0..100 (<0 = follow the actor), precipitation pool capacity, biome ease rate in percent (100 = one CF_DAY per full swing), draw the biome map in map view, autocanal frame (<0 = off): lay a 9-block line of water three columns east of the player, aim-independent, for the biome end-to-end test, biome migration budget: surface columns retextured per tick, vegetation budget: trees grown or felled per tick, time pin in seconds (<0 = live clock) for the water animation, remesh-all frame (<0 = off): rebuild every section of every chunk at that frame, a ground truth for stale-mesh hunts, automenu frame (<0 = off): open the escape menu at that frame and start a new game five frames later, for the restart test, audio mode (0 off, 1 device, 2 null device -- render a tick per push straight into the WAV, for reproducible headless dumps), audio log, autodive, autoglow frame (<0 = off): place a glow cap three columns east of the player, through edit_block, for the block-light end-to-end check, myc rate in percent, draw the mycelium map overlay in map view, autoplant frame (<0 = off): plant the fittest species three columns east of the player, myc migration budget (surface columns per retexture slot; glow changes batch under one relight per slot), autoplant species override (0 = fittest), autospore frame (<0 = off): give three spores and plant one through the item path thirty frames later, fruit budget (bodies per fruit slot), fruit rate in percent
 
   fn frame_loop(f : Frame, k : Knobs, sc, nchunks : Int, proj : NativeFloatArr, map_proj : NativeFloatArr, fps : Fps, wxpid, seed : Int) : Frame do
     match f do
       Frame(frame, last_t, player, sample, view, vp, map_mode, marker, flash, wcache, bcache, inv_open, drag_from, menu, menubuf, next_seed, worst, worst_at, sched) ->
         match k do
-        Knobs(max_frames, dump_frame, dump_path, autowalk, autospin, autoedit, autoswim, autoflow, workers, automap, day_len, sun_deg, shadow_dist, soft_shadows, autoinv, autobreak, weather_pin, precip_cap, biome_rate, biome_map, autocanal, biome_budget, veg_budget, time_pin, remesh_all_at, automenu, audio_mode, audio_log, autodive, autoglow, myc_rate, myc_map, autoplant, myc_budget, myc_glow_budget, autoplant_species, autospore) ->
+        Knobs(max_frames, dump_frame, dump_path, autowalk, autospin, autoedit, autoswim, autoflow, workers, automap, day_len, sun_deg, shadow_dist, soft_shadows, autoinv, autobreak, weather_pin, precip_cap, biome_rate, biome_map, autocanal, biome_budget, veg_budget, time_pin, remesh_all_at, automenu, audio_mode, audio_log, autodive, autoglow, myc_rate, myc_map, autoplant, myc_budget, autoplant_species, autospore, fruit_budget, fruit_rate) ->
         if Win.should_close() || (max_frames >= 0 && frame >= max_frames) || next_seed >= 0 do
           Frame(frame, last_t, player, sample, view, vp, map_mode, marker, flash, wcache, bcache, inv_open, drag_from, menu, menubuf, next_seed, worst, worst_at, sched)
         else
@@ -1474,7 +1568,7 @@ mod CubeForge do
           let sc0d2 = if autoglow >= 0 && frame == autoglow do place_glow(sc0d0, player1) else sc0d0 end
           -- CF_AUTOPLANT=<frame>: plant the fittest species for the player's
           -- column three columns east of the player, for the field end-to-end check.
-          let sc0d_pre = if autoplant >= 0 && frame == autoplant do plant_near(sc0d2, player1, autoplant_species) else sc0d2 end
+          let sc0d_pre = if autoplant >= 0 && frame == autoplant do plant_near(sc0d2, player1, autoplant_species, Env.get_int("CF_AUTOPLANT_MATURE", 0) == 1) else sc0d2 end
           -- CF_AUTOSPORE=<frame>: spores into the inventory, then one used on
           -- the column three east through the same path a hotbar spore takes.
           let sc0d3 = if autospore >= 0 && frame == autospore do give_spores(sc0d_pre, player1) else sc0d_pre end
@@ -1525,7 +1619,7 @@ mod CubeForge do
           let scm2 = if is_migrate_slot(phase) do
             let tq0 = Win.time()
             let mpicks = Myc.migrations(scene_myc(scm), World.side(scene_world(scm)) * 16, World.shown(scene_world(scm)), frame / tick_period(), 2048, myc_budget / migrate_slots())
-            let m2 = migrate_myc(scm, mpicks, myc_glow_budget)
+            let m2 = migrate_myc(scm, mpicks)
             -- printed whenever a slot did something: the slots that hit a patch's
             -- window are not the ones a fixed frame sample lands on
             if autoflow >= 0 && List.length(mpicks) > 0 do println("myc migrate: " ++ int_to_string(List.length(mpicks)) ++ " columns in " ++ ms(Win.time() -. tq0)) else () end
@@ -1540,11 +1634,25 @@ mod CubeForge do
             -- Vegetation: grow where the biome wants a tree and the cell says so,
             -- fell where it no longer does. Each one is a chop-sized edit.
             let tv0 = Win.time()
-            let vpicks = Veg.candidates(scene_biome(scm2), scene_world(scm2), seed, frame / tick_period(), 2048, veg_budget)
+            -- The cursor is the PERIOD count, not the tick: this phase runs every
+            -- other tick, and a tick-keyed cursor over eight windows only ever
+            -- visited the even four -- half the world never grew a tree.
+            let vpicks = Veg.candidates(scene_biome(scm2), scene_world(scm2), seed, frame / tick_period() / 2, 2048, veg_budget)
             let scv = vegetate(scm2, seed, vpicks)
             if autoflow >= 0 && frame % 100 == veg_slot() do println("biome veg: " ++ int_to_string(List.length(vpicks) - count_bush(vpicks, 0)) ++ " trees, " ++ int_to_string(count_bush(vpicks, 0)) ++ " bushes in " ++ ms(Win.time() -. tv0)) else () end
             scv
           else scm2 end
+          -- Fruit: on the vegetation slot, on the periods vegetation skips, so
+          -- no frame carries a tree and a mushroom at once.
+          let sc1pre2 = if if phase == veg_slot() do (frame / tick_period()) % 2 == 1 else false end do
+            let tf0 = Win.time()
+            -- period count as the cursor, for the same reason as vegetation
+            let fpicks = Fruit.candidates(scene_myc(sc1pre), World.shown(scene_world(sc1pre)), scene_world(sc1pre), scene_biome(sc1pre), seed, frame / tick_period() / 2, 2048, fruit_budget, int_to_float(fruit_rate) /. 100.0)
+            let tf1 = Win.time()
+            let scf = fruit_go(sc1pre, seed, fpicks)
+            if autoflow >= 0 && (List.length(fpicks) > 0 || frame % 100 == veg_slot()) do println("fruit: scan " ++ ms(tf1 -. tf0) ++ ", " ++ int_to_string(List.length(fpicks)) ++ " bodies in " ++ ms(Win.time() -. tf1)) else () end
+            scf
+          else sc1pre end
           -- Pay off the mesh the world owes, a bounded number of sections a
           -- frame. This is what holds the frame time down: the phases above
           -- change blocks in bursts, and the rebuild is spread behind them.
@@ -1554,7 +1662,7 @@ mod CubeForge do
           -- stacking on top of the work that asked for it -- which was the whole
           -- of the difference between a 14 ms frame and a 5 ms one. Five drain
           -- frames a period is more throughput than the phases can generate.
-          let sc1 = if phase % 2 == 1 do drain(sc1pre, remesh_budget()) else sc1pre end
+          let sc1 = if phase % 2 == 1 do drain(sc1pre2, remesh_budget()) else sc1pre2 end
           if autoflow >= 0 && frame >= autoflow && (frame - autoflow) % 100 == 0 do
             let cx = World.floor_div16(float_to_int(Math.floor(V.x(Player.position(player1)))))
             let cz = World.floor_div16(float_to_int(Math.floor(V.z(Player.position(player1)))))
@@ -1738,6 +1846,8 @@ mod CubeForge do
             let pcz = float_to_int(V.z(Player.position(player1)))
             println("  biome at player column (" ++ int_to_string(pcx) ++ "," ++ int_to_string(pcz) ++ "): " ++ Biome.name(Biome.biome_of(scene_biome(sc1), pcx, pcz)) ++ " height " ++ int_to_string(Biome.height_of(scene_biome(sc1), pcx, pcz)) ++ " " ++ Biome.debug_axes(scene_biome(sc1), pcx, pcz))
             println("  mycelium: " ++ myc_summary(scene_myc(sc1), World.side(scene_world(sc1)) * 16, 1, ""))
+            println("  giant cells near the player: " ++ giant_cells(scene_world(sc1), scene_myc(sc1), seed, pcx, pcz, 0, ""))
+            println("  fruit: small " ++ int_to_string(Fruit.count_bodies(scene_world(sc1), scene_biome(sc1), 0)) ++ " medium " ++ int_to_string(Fruit.count_bodies(scene_world(sc1), scene_biome(sc1), 1)) ++ " giant " ++ int_to_string(Fruit.count_bodies(scene_world(sc1), scene_biome(sc1), 2)))
             -- the column three east of the player: where CF_AUTOPLANT plants
             let mx = pcx + 3
             let mh = Biome.height_of(scene_biome(sc1), mx, pcz)
@@ -2029,7 +2139,7 @@ mod CubeForge do
         else () end
       else () end
       let knobs = Knobs(max_frames, Env.get_int("CF_DUMP_FRAME", 30), Env.get("CF_DUMP", ""), Env.get_int("CF_AUTOWALK", 0) == 1,
-                        int_to_float(Env.get_int("CF_AUTOSPIN", 0)) /. 1000.0 /. Player.mouse_sens(), Env.get_int("CF_AUTOEDIT", -1), autoswim, Env.get_int("CF_AUTOFLOW", -1), workers, Env.get_int("CF_AUTOMAP", -1), int_to_float(Env.get_int("CF_DAY", 1800)), Env.get_int("CF_SUN", -1), int_to_float(Env.get_int("CF_SHADOW_DIST", 64)), Env.get_int("CF_SHADOW_SOFT", 1) == 1, Env.get_int("CF_AUTOINV", -1), Env.get_int("CF_AUTOBREAK", -1), Env.get_int("CF_WEATHER", -1), Env.get_int("CF_PRECIP", 4000), Env.get_int("CF_BIOME_RATE", 100), Env.get_int("CF_BIOME_MAP", 0) == 1, Env.get_int("CF_AUTOCANAL", -1), Env.get_int("CF_BIOME_BUDGET", 32), Env.get_int("CF_VEG_BUDGET", 1), Env.get_int("CF_TIME", -1), Env.get_int("CF_REMESH_ALL_AT", -1), Env.get_int("CF_AUTOMENU", -1), audio_mode, Env.get_int("CF_AUDIO_LOG", 0) == 1, Env.get_int("CF_AUTODIVE", 0) == 1, Env.get_int("CF_AUTOGLOW", -1), Env.get_int("CF_MYC_RATE", 100), Env.get_int("CF_MYC_MAP", 0) == 1, Env.get_int("CF_AUTOPLANT", -1), Env.get_int("CF_MYC_BUDGET", 32), Env.get_int("CF_MYC_GLOW_BUDGET", 1), Env.get_int("CF_AUTOPLANT_SPECIES", 0), Env.get_int("CF_AUTOSPORE", -1))
+                        int_to_float(Env.get_int("CF_AUTOSPIN", 0)) /. 1000.0 /. Player.mouse_sens(), Env.get_int("CF_AUTOEDIT", -1), autoswim, Env.get_int("CF_AUTOFLOW", -1), workers, Env.get_int("CF_AUTOMAP", -1), int_to_float(Env.get_int("CF_DAY", 1800)), Env.get_int("CF_SUN", -1), int_to_float(Env.get_int("CF_SHADOW_DIST", 64)), Env.get_int("CF_SHADOW_SOFT", 1) == 1, Env.get_int("CF_AUTOINV", -1), Env.get_int("CF_AUTOBREAK", -1), Env.get_int("CF_WEATHER", -1), Env.get_int("CF_PRECIP", 4000), Env.get_int("CF_BIOME_RATE", 100), Env.get_int("CF_BIOME_MAP", 0) == 1, Env.get_int("CF_AUTOCANAL", -1), Env.get_int("CF_BIOME_BUDGET", 32), Env.get_int("CF_VEG_BUDGET", 1), Env.get_int("CF_TIME", -1), Env.get_int("CF_REMESH_ALL_AT", -1), Env.get_int("CF_AUTOMENU", -1), audio_mode, Env.get_int("CF_AUDIO_LOG", 0) == 1, Env.get_int("CF_AUTODIVE", 0) == 1, Env.get_int("CF_AUTOGLOW", -1), Env.get_int("CF_MYC_RATE", 100), Env.get_int("CF_MYC_MAP", 0) == 1, Env.get_int("CF_AUTOPLANT", -1), Env.get_int("CF_MYC_BUDGET", 64), Env.get_int("CF_AUTOPLANT_SPECIES", 0), Env.get_int("CF_AUTOSPORE", -1), Env.get_int("CF_FRUIT_BUDGET", 1), Env.get_int("CF_FRUIT_RATE", 100))
       let pids = Array.from_list(spawn_water(n * n - 1, n, Nil))
       let wxpid = Weather.spawn_weather()
       session_loop(seed, n, workers, headless, seed_env >= 0, knobs, proj, map_proj, pids, wxpid, autoswim)
