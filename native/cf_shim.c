@@ -933,7 +933,7 @@ int64_t cf_spring_count(void) { return g_nsprings; }
  * White, short-lived, up then down. Fed by an emitter queue March fills from
  * the water actors' drop entries, by every spring's mouth bubbling, and by a
  * burst when a spring is placed. Same idioms as the precipitation pool. */
-#define CF_SPRAY_SLOT 247
+#define CF_SPRAY_SLOT 246
 #define CF_SPRAY_LIFE 0.6f
 static float  *g_spray = NULL;     /* x y z vx vy vz life, 7 floats */
 static float  *g_spray_vtx = NULL;
