@@ -36,7 +36,8 @@ mod CubeForge.Test.Bedrock do
     end
     test "sits below the terrain, not on top of it" do
       let c = C.generate(0, 0, 5)
-      Test.assert_eq_int(C.get(c, 8, C.bedrock_depth(), 8), 3, "stone directly above the bedrock")
+      let block_above = C.get(c, 8, C.bedrock_depth(), 8)
+      Test.assert_true(block_above == 3 || block_above == C.basalt(), "stone or basalt directly above the bedrock")
       Test.assert_true(N.height(8, 8, 5) > C.bedrock_depth(), "terrain is well above the floor")
     end
     test "is solid, so nothing can fall through it" do

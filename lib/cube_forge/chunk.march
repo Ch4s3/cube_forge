@@ -85,6 +85,9 @@ mod CubeForge.Chunk do
   doc "Thickness of the bedrock floor, at y = 0 .. bedrock_depth() - 1."
   fn bedrock_depth() : Int do 3 end
 
+  doc "Below this depth, the deep stone band is basalt instead of plain stone."
+  fn deep_stone_depth() : Int do 24 end
+
   doc """
   Surface block for a column of height [h] whose steepest neighbour differs by
   [slope]. Ordered so a rock face beats altitude, and a cliff beats a beach.
@@ -117,7 +120,8 @@ mod CubeForge.Chunk do
       let id = if y < bedrock_depth() do bedrock()
                else if y == top do surface
                else if y > top - 4 do sub
-               else 3 end end end
+               else if y < deep_stone_depth() do basalt()
+               else 3 end end end end
       fill_column_mat(set(c, x, y, z, id), x, z, y + 1, top, surface, sub)
     end
   end

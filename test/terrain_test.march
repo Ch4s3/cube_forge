@@ -84,6 +84,16 @@ mod CubeForge.Test.Terrain do
     end
   end
 
+  describe "deep stone band" do
+    test "test_terrain uses basalt below deep_stone_depth, stone above it" do
+      let c = C.test_terrain()
+      Test.assert_eq_int(C.get(c, 0, 10, 0), C.basalt(), "below the deep stone depth is basalt")
+      Test.assert_eq_int(C.get(c, 0, C.deep_stone_depth(), 0), 3, "at the depth boundary is plain stone")
+      Test.assert_eq_int(C.get(c, 0, 40, 0), 3, "well above the boundary is plain stone")
+      Test.assert_eq_int(C.get(c, 0, 1, 0), C.bedrock(), "still bedrock at the floor")
+    end
+  end
+
   describe "new terrain block ids" do
     test "basalt, ice and mud have distinct ids above clay" do
       Test.assert_eq_int(C.basalt(), 22, "basalt id")
