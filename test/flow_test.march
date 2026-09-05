@@ -342,7 +342,7 @@ mod CubeForge.Test.Flow do
 
   describe "Raycast through water" do
     test "with water ignored the ray reaches the lake bed; otherwise it stops at the surface" do
-      let w = CubeForge.World.World(Array.from_list([lake_go(C.new(), 0)]), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), 1)
+      let w = CubeForge.World.World(Array.from_list([lake_go(C.new(), 0)]), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.World.shown_new(), 1)
       -- eye at (4.5, 64.5, 4.5) looking almost straight down over the lake (x < 8)
       let bed = CubeForge.Raycast.cast(w, 4.5, 64.5, 4.5, 0.0, -0.985, -0.17, 8.0, true)
       Test.assert_true(CubeForge.Raycast.is_hit(bed), "hits something")

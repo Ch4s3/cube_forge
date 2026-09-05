@@ -62,4 +62,17 @@ mod CubeForge.Test.MycBlock do
     end
   end
 
+
+  describe "World.shown" do
+    test "starts empty, reads back a write, and is out of range safe" do
+      let w0 = CubeForge.World.generate(1, 1, 1)
+      Test.assert_eq_int(CubeForge.World.shown_at(w0, 5, 5), 0, "empty")
+      let w1 = CubeForge.World.set_shown(w0, 5, 5, 4)
+      Test.assert_eq_int(CubeForge.World.shown_at(w1, 5, 5), 4, "written")
+      Test.assert_eq_int(CubeForge.World.shown_at(w1, 6, 5), 0, "neighbour untouched")
+      Test.assert_eq_int(CubeForge.World.shown_at(w1, -1, 5), 0, "outside reads 0")
+      Test.assert_eq_int(CubeForge.World.shown_at(CubeForge.World.set_shown(w1, 200, 5, 3), 5, 5), 4, "outside write is a no-op")
+    end
+  end
+
 end
