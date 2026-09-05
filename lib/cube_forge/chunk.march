@@ -461,10 +461,12 @@ mod CubeForge.Chunk do
       let slope = piled_slope_at(ps, x, z)
       let bog = is_bog(top, slope, river, lake, seed)
       let pool = bog && bog_pool(wx, wz, seed)
+      -- a lake's pour point is dug one block down: the notch its outlet runs over
+      let notch = CubeForge.Lakes.notch_at(lk, n, wx, wz)
       let dune = !piled_up && !bog && CubeForge.Noise.dune_mask_at(wx, wz, seed) >= dune_min()
       let glacier = !piled_up && lake == 0 && CubeForge.Noise.glacier_at(wx, wz, seed)
       let moraine = glacier && CubeForge.Noise.moraine_at(wx, wz, seed)
-      let top1 = if pool do sea_level() - 1 else top end
+      let top1 = if pool do sea_level() - 1 else if notch do top - 1 else top end end
       let sfc = if piled_up || moraine do gravel()
                 else if dune do sand()
                 else if bog && !pool do bog_surface(wx, wz)
@@ -487,7 +489,7 @@ mod CubeForge.Chunk do
     let hs = heights(wx0, wz0, seed)
     let ps = piled(hs, CubeForge.Noise.age_frac(seed))
     -- the caves are carved last: through the strata, under the trees, never through water
-    CubeForge.Caves.carve(plant_lakes(fill_noise_go(new(), 0, hs, ps, wx0, wz0, seed, lk, n), wx0, wz0, seed, lk, n), wx0, wz0, seed)
+    CubeForge.Caves.carve(plant_lakes(fill_noise_go(new(), 0, hs, ps, wx0, wz0, seed, lk, n), wx0, wz0, seed, lk, n), wx0, wz0, seed, lk, n)
   end
 
   -- ── Vegetation ──────────────────────────────────────────────────────────────

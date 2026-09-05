@@ -2672,7 +2672,7 @@ mod CubeForge do
       let tl0 = System.monotonic_time()
       let lk = CubeForge.Lakes.levels(seed, n)
       let lsum = CubeForge.Lakes.summary(lk)
-      println("  lakes: " ++ int_to_string(lsum / 1000) ++ " columns, highest surface " ++ int_to_string(lsum % 1000) ++ ", table in " ++ int_to_string(System.monotonic_time() - tl0) ++ " ms")
+      println("  lakes: " ++ int_to_string(lsum / 1000) ++ " columns, highest surface " ++ int_to_string(lsum % 1000) ++ ", " ++ int_to_string(CubeForge.Lakes.notches(lk)) ++ " outlets, table in " ++ int_to_string(System.monotonic_time() - tl0) ++ " ms")
       println("  SIMD/scalar height mismatches: " ++ int_to_string(mismatch_go(n, 0, seed, 0)) ++ " of " ++ int_to_string(16 * n * 16 * n) ++ " columns")
       if Env.get_int("CF_TERRAIN_MAP", 0) == 1 do map_go(n, 0, seed, lk) else () end
     else () end

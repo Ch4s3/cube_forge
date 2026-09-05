@@ -9,19 +9,25 @@
 -- so that apron is enough.
 --
 -- A worm never removes anything but rock (stone, basalt, granite, the strata
--- blocks): the surface, the subsurface, water and bedrock are not rock. And
--- it stays above sea_level() + 2 + its radius: a pocket opened under the
--- water table would have the sea rule filling it for a thousand ticks. Karst
--- stops at the water table, as it does.
+-- blocks): the surface, the subsurface, water and bedrock are not rock. It
+-- stays above sea_level() + 2 + its radius: a pocket opened under the water
+-- table would have the sea rule filling it for a thousand ticks. And it keeps
+-- out of a lake's basin: a voxel at or below a lake's surface in, or beside,
+-- a lake column is the basin's wall, and a carved wall is a leak -- every
+-- lake cell along it became an infinite spring into the tunnel (measured:
+-- 26 springs and 739 flowing cells on seed 1234 at age 100 with caves,
+-- 1 and 11 without). Karst stops at the water table, as it does.
 mod CubeForge.Caves do
+
+  needs IO.Process   -- CF_KARST
 
   alias CubeForge.Noise as N
   alias CubeForge.Chunk as C
 
   doc "Cell side in blocks: one worm at most per cell."
   fn cell_size() : Int do 32 end
-  doc "Fraction of cells holding a worm at age fraction [a]: none in a young world, 0.6 ancient."
-  fn karst_density(a : Float) : Float do 0.6 *. a end
+  doc "Fraction of cells holding a worm at age fraction [a]: none in a young world, 0.6 ancient, scaled by CF_KARST percent (100; 0 turns the caves off)."
+  fn karst_density(a : Float) : Float do 0.6 *. a *. int_to_float(Env.get_int("CF_KARST", 100)) /. 100.0 end
   doc "Steps of two blocks a worm takes: 12 young .. 32 ancient."
   fn worm_steps(a : Float) : Int do 12 + float_to_int(20.0 *. a) end
   doc "Radius of the tunnel: 1.5 young .. 3 ancient."
@@ -43,9 +49,16 @@ mod CubeForge.Caves do
     cell_hash(cx, cz, seed, 1) < karst_density(N.age_frac(seed))
   end
 
+  -- Is world voxel (wx, y, wz) part of a lake basin's wall: at or below the
+  -- surface of a lake in its own column or one of its four neighbours.
+  pfn basin_wall(lk : NativeU8Arr, n : Int, wx : Int, y : Int, wz : Int) : Bool do
+    y <= CubeForge.Lakes.level_at(lk, n, wx, wz) || y <= CubeForge.Lakes.level_at(lk, n, wx + 1, wz) || y <= CubeForge.Lakes.level_at(lk, n, wx - 1, wz)
+      || y <= CubeForge.Lakes.level_at(lk, n, wx, wz + 1) || y <= CubeForge.Lakes.level_at(lk, n, wx, wz - 1)
+  end
+
   -- Clear the rock in a sphere of radius [r] about (px, py, pz) that lies in
-  -- the chunk at (wx0, wz0). k walks the (2R+1)^3 box; R = ceil r.
-  pfn sphere_go(c : CubeForge.Chunk.Chunk, wx0 : Int, wz0 : Int, px : Int, py : Int, pz : Int, r : Float, big : Int, k : Int) : CubeForge.Chunk.Chunk do
+  -- the chunk at (wx0, wz0), leaving basin walls. k walks the (2R+1)^3 box; R = ceil r.
+  pfn sphere_go(c : CubeForge.Chunk.Chunk, wx0 : Int, wz0 : Int, px : Int, py : Int, pz : Int, r : Float, big : Int, k : Int, lk : NativeU8Arr, n : Int) : CubeForge.Chunk.Chunk do
     let side = 2 * big + 1
     if k >= side * side * side do c
     else
@@ -56,10 +69,10 @@ mod CubeForge.Caves do
       let y = py + dy
       let z = pz + dz - wz0
       let inside = int_to_float(dx * dx + dy * dy + dz * dz) <= r *. r
-      if !inside || x < 0 || x >= 16 || z < 0 || z >= 16 || y < 1 || y >= 255 do sphere_go(c, wx0, wz0, px, py, pz, r, big, k + 1)
+      if !inside || x < 0 || x >= 16 || z < 0 || z >= 16 || y < 1 || y >= 255 do sphere_go(c, wx0, wz0, px, py, pz, r, big, k + 1, lk, n)
       else
-        let c1 = if is_rock(C.get(c, x, y, z)) do C.set(c, x, y, z, 0) else c end
-        sphere_go(c1, wx0, wz0, px, py, pz, r, big, k + 1)
+        let c1 = if is_rock(C.get(c, x, y, z)) && !basin_wall(lk, n, px + dx, y, pz + dz) do C.set(c, x, y, z, 0) else c end
+        sphere_go(c1, wx0, wz0, px, py, pz, r, big, k + 1, lk, n)
       end
     end
   end
@@ -74,18 +87,20 @@ mod CubeForge.Caves do
   pfn column_wet(c : CubeForge.Chunk.Chunk, x : Int, z : Int, y : Int, top : Int) : Bool do
     if y > top do false else if C.is_water(C.get(c, x, y, z)) do true else column_wet(c, x, z, y + 1, top) end end
   end
-  pfn sinkhole_go(c : CubeForge.Chunk.Chunk, wx0 : Int, wz0 : Int, px : Int, py : Int, pz : Int, seed : Int, k : Int) : CubeForge.Chunk.Chunk do
+  pfn sinkhole_go(c : CubeForge.Chunk.Chunk, wx0 : Int, wz0 : Int, px : Int, py : Int, pz : Int, seed : Int, k : Int, lk : NativeU8Arr, n : Int) : CubeForge.Chunk.Chunk do
     if k >= 25 do c
     else
       let dx = k % 5 - 2
       let dz = k / 5 - 2
       let x = px + dx - wx0
       let z = pz + dz - wz0
-      if dx * dx + dz * dz > 4 || x < 0 || x >= 16 || z < 0 || z >= 16 do sinkhole_go(c, wx0, wz0, px, py, pz, seed, k + 1)
+      if dx * dx + dz * dz > 4 || x < 0 || x >= 16 || z < 0 || z >= 16 do sinkhole_go(c, wx0, wz0, px, py, pz, seed, k + 1, lk, n)
       else
         let top = N.height(px + dx, pz + dz, seed)
-        let c1 = if top > py && !column_wet(c, x, z, py, top) do column_clear(c, x, z, py, top) else c end
-        sinkhole_go(c1, wx0, wz0, px, py, pz, seed, k + 1)
+        -- a column that is, or stands beside, a lake at any height above py is a basin wall
+        let wall = basin_wall(lk, n, px + dx, py, pz + dz)
+        let c1 = if top > py && !wall && !column_wet(c, x, z, py, top) do column_clear(c, x, z, py, top) else c end
+        sinkhole_go(c1, wx0, wz0, px, py, pz, seed, k + 1, lk, n)
       end
     end
   end
@@ -96,7 +111,7 @@ mod CubeForge.Caves do
   -- ground; past it, a head within sinkhole_reach of the surface collapses.
   -- The head is boxed to its cell plus one either way by reflecting the yaw.
   pfn walk_go(c : CubeForge.Chunk.Chunk, wx0 : Int, wz0 : Int, seed : Int, cx : Int, cz : Int,
-              fx : Float, fy : Float, fz : Float, yaw : Float, k : Int, steps : Int, r : Float, sinkholes : Bool) : CubeForge.Chunk.Chunk do
+              fx : Float, fy : Float, fz : Float, yaw : Float, k : Int, steps : Int, r : Float, sinkholes : Bool, lk : NativeU8Arr, n : Int) : CubeForge.Chunk.Chunk do
     if k >= steps do c
     else
       let px = float_to_int(Math.floor(fx))
@@ -110,10 +125,10 @@ mod CubeForge.Caves do
       let near_top = py0 > ceil_y
       let py = float_to_int(Math.floor(if near_top && !sinkholes do ceil_y else py0 end))
       let wob = r +. (cell_hash(cx, cz, seed, 40 + k) -. 0.5)
-      let c1 = if py > C.sea_level() + 1 do sphere_go(c, wx0, wz0, px, py, pz, wob, float_to_int(Math.ceil(wob)), 0) else c end
-      let c2 = if sinkholes && surface - py <= sinkhole_reach() do sinkhole_go(c1, wx0, wz0, px, py, pz, seed, 0) else c1 end
+      let c1 = if py > C.sea_level() + 1 do sphere_go(c, wx0, wz0, px, py, pz, wob, float_to_int(Math.ceil(wob)), 0, lk, n) else c end
+      let c2 = if sinkholes && surface - py <= sinkhole_reach() do sinkhole_go(c1, wx0, wz0, px, py, pz, seed, 0, lk, n) else c1 end
       -- chamber: one worm in four gets a room at its midpoint
-      let c3 = if k == steps / 2 && cell_hash(cx, cz, seed, 5) < 0.25 do sphere_go(c2, wx0, wz0, px, py, pz, 5.0 +. 2.0 *. cell_hash(cx, cz, seed, 6), 7, 0) else c2 end
+      let c3 = if k == steps / 2 && cell_hash(cx, cz, seed, 5) < 0.25 do sphere_go(c2, wx0, wz0, px, py, pz, 5.0 +. 2.0 *. cell_hash(cx, cz, seed, 6), 7, 0, lk, n) else c2 end
       -- next head
       let yaw1 = yaw +. (cell_hash(cx, cz, seed, 100 + k) -. 0.5) *. 0.9
       let pitch = (cell_hash(cx, cz, seed, 200 + k) -. 0.5) *. 0.6
@@ -124,12 +139,12 @@ mod CubeForge.Caves do
       let box0z = int_to_float((cz - 1) * cell_size())
       let box1 = int_to_float(3 * cell_size())
       let out = nx < box0x || nx >= box0x +. box1 || nz < box0z || nz >= box0z +. box1
-      if out do walk_go(c3, wx0, wz0, seed, cx, cz, fx, ny, fz, yaw1 +. 3.14159, k + 1, steps, r, sinkholes)
-      else walk_go(c3, wx0, wz0, seed, cx, cz, nx, ny, nz, yaw1, k + 1, steps, r, sinkholes) end
+      if out do walk_go(c3, wx0, wz0, seed, cx, cz, fx, ny, fz, yaw1 +. 3.14159, k + 1, steps, r, sinkholes, lk, n)
+      else walk_go(c3, wx0, wz0, seed, cx, cz, nx, ny, nz, yaw1, k + 1, steps, r, sinkholes, lk, n) end
     end
   end
 
-  pfn carve_cell(c : CubeForge.Chunk.Chunk, wx0 : Int, wz0 : Int, seed : Int, cx : Int, cz : Int) : CubeForge.Chunk.Chunk do
+  pfn carve_cell(c : CubeForge.Chunk.Chunk, wx0 : Int, wz0 : Int, seed : Int, cx : Int, cz : Int, lk : NativeU8Arr, n : Int) : CubeForge.Chunk.Chunk do
     if !worm_at_cell(cx, cz, seed) do c
     else
       let a = N.age_frac(seed)
@@ -141,20 +156,20 @@ mod CubeForge.Caves do
       let sy = if hi <= lo do lo else lo + float_to_int(cell_hash(cx, cz, seed, 4) *. int_to_float(hi - lo)) end
       let sinkholes = N.age_of(seed) >= sinkhole_age()
       walk_go(c, wx0, wz0, seed, cx, cz, int_to_float(sx), int_to_float(sy), int_to_float(sz),
-              cell_hash(cx, cz, seed, 7) *. 6.2831853, 0, worm_steps(a), worm_radius(a), sinkholes)
+              cell_hash(cx, cz, seed, 7) *. 6.2831853, 0, worm_steps(a), worm_radius(a), sinkholes, lk, n)
     end
   end
 
   pfn floor_div(a : Int, b : Int) : Int do if a >= 0 do a / b else (a - b + 1) / b end end
-  pfn carve_go(c : CubeForge.Chunk.Chunk, wx0 : Int, wz0 : Int, seed : Int, cx0 : Int, cz0 : Int, i : Int) : CubeForge.Chunk.Chunk do
+  pfn carve_go(c : CubeForge.Chunk.Chunk, wx0 : Int, wz0 : Int, seed : Int, cx0 : Int, cz0 : Int, i : Int, lk : NativeU8Arr, n : Int) : CubeForge.Chunk.Chunk do
     if i >= 9 do c
-    else carve_go(carve_cell(c, wx0, wz0, seed, cx0 + i % 3, cz0 + i / 3), wx0, wz0, seed, cx0, cz0, i + 1) end
+    else carve_go(carve_cell(c, wx0, wz0, seed, cx0 + i % 3, cz0 + i / 3, lk, n), wx0, wz0, seed, cx0, cz0, i + 1, lk, n) end
   end
 
-  doc "Carve every worm whose cell is within one of the chunk at (wx0, wz0). Nothing at age 0."
-  fn carve(c : CubeForge.Chunk.Chunk, wx0 : Int, wz0 : Int, seed : Int) : CubeForge.Chunk.Chunk do
+  doc "Carve every worm whose cell is within one of the chunk at (wx0, wz0), keeping out of the lakes in [lk] (Lakes.levels for [n] chunks a side). Nothing at age 0."
+  fn carve(c : CubeForge.Chunk.Chunk, wx0 : Int, wz0 : Int, seed : Int, lk : NativeU8Arr, n : Int) : CubeForge.Chunk.Chunk do
     if N.age_of(seed) == 0 do c
-    else carve_go(c, wx0, wz0, seed, floor_div(wx0, cell_size()) - 1, floor_div(wz0, cell_size()) - 1, 0) end
+    else carve_go(c, wx0, wz0, seed, floor_div(wx0, cell_size()) - 1, floor_div(wz0, cell_size()) - 1, 0, lk, n) end
   end
 
   -- ── Measurement ─────────────────────────────────────────────────────────

@@ -32,7 +32,7 @@ measurements.
 - [x] **Lakes above sea level** — done 2026-09-05 (`docs/superpowers/specs/2026-09-05-upland-lakes-design.md`) — priority-flood pour of every closed basin to its rim; only the outlet is a spring, so a lake overflows as a brook.
 - [x] **Climate-shaped ground** — done 2026-09-05 (`docs/superpowers/specs/2026-09-05-climate-shaped-ground-design.md`) — dunes where hot and dry, glacier tongues in cold valleys above the snow line with moraines and U-troughs, bog pools on wet flats; temperature moves into `Noise`.
 - [x] **Caves and karst** — done 2026-09-05 (`docs/superpowers/specs/2026-09-05-caves-and-karst-design.md`) — worms carved per 32-block cell above the water table, joined into networks and pitted with sinkholes as the world ages; age 0 has none.
-- [ ] **Lake outlets on ancient worlds** — an outlet brook that reaches a flat terrace spreads into a sheet that barely evaporates: seed 1234 at age 100 was still gaining flowing cells at frame 1500 (~1,100-1,500) against a ~430 plateau at age 50, at 98-105 fps. A lower outlet rate than a spring's, or evaporation reaching a sheet's interior, would bound it. See the lakes spec §6.
+- [x] **Lake outlets on ancient worlds** — resolved 2026-09-05: the creeping flow was cave worms breaching lake basins, not sheets on terraces; worms now keep out of basin walls (`Caves.basin_wall`, `CF_KARST`), and since a full lake turned out to have no outlet at all, the pour point is dug one block down as a notch, one per basin of six or more columns. Flow plateaus at ~400 cells at both ages. See the lakes spec §3 and §6.
 
 ## Engine
 

@@ -108,6 +108,14 @@ may mesh 20-40% more vertices. Measured; `CF_MESH_REPS` exists for it.
   and its flatness from the world too, so it does not pick a rim.
 - **The stat** counts air at or below the *piled terrain height*, not
   below the top block: a canopy has air under it and is not a cave.
+- **Basin walls** (found by digging into the lakes, 2026-09-05): a worm
+  carving beside a lake below its surface opened the wall and turned every
+  lake cell along it into an infinite spring -- 26 springs and 739 flowing
+  cells on seed 1234 at age 100 against 1 and 11 with caves off. A voxel at
+  or below a lake's surface in, or beside, a lake column is never carved
+  (`basin_wall`), sinkholes skip such columns, and `CF_KARST=<percent>`
+  scales the density (0 turns caves off) for exactly this kind of
+  measurement.
 
 `CF_TERRAIN_STATS`, air voxels at or below the terrain surface, and worm
 cells of sixteen:
