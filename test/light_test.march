@@ -450,4 +450,64 @@ mod CubeForge.Test.Light do
     end
   end
 
+
+  describe "Light.relight_block_marked" do
+    test "placing a glow cap matches a full re-flood and marks its sections" do
+      let w0 = CubeForge.World.relight_all(CubeForge.World.generate(8, 1, 1))
+      let w1 = CubeForge.World.set_block(w0, 40, 90, 40, C.glow_cap())
+      let r = L.relight_block_marked(CubeForge.World.block_light(w1), w1, 40, 90, 40)
+      let full = L.flood_block(w1)
+      Test.assert_eq_int(first_difference(L.relit_field(r), full), -1, "incremental equals full re-flood")
+      Test.assert_eq_int(unmarked_go(CubeForge.World.block_light(w0), full, L.relit_marks(r), 0), -1, "every changed section is marked")
+      Test.assert_true(marked_count(L.relit_marks(r), 0, 0) > 0, "something was marked")
+    end
+
+    test "removing a glow cap darkens what it lit" do
+      let w0 = CubeForge.World.relight_all(CubeForge.World.set_block(air_world(), 40, 100, 40, C.glow_cap()))
+      Test.assert_eq_int(CubeForge.World.block_light_at(w0, 44, 100, 40), 6, "lit before removal")
+      let w1 = CubeForge.World.set_block(w0, 40, 100, 40, 0)
+      let inc = L.relit_field(L.relight_block_marked(CubeForge.World.block_light(w1), w1, 40, 100, 40))
+      Test.assert_eq_int(first_difference(inc, L.flood_block(w1)), -1, "incremental equals full re-flood")
+      Test.assert_eq_int(L.get(inc, 44, 100, 40), 0, "dark after removal")
+    end
+
+    test "walling off an emitter with stone matches a full re-flood" do
+      let w0 = CubeForge.World.relight_all(CubeForge.World.set_block(air_world(), 40, 100, 40, C.glow_cap()))
+      let w1 = CubeForge.World.set_block(w0, 42, 100, 40, 3)
+      let inc = L.relit_field(L.relight_block_marked(CubeForge.World.block_light(w1), w1, 42, 100, 40))
+      Test.assert_eq_int(first_difference(inc, L.flood_block(w1)), -1, "incremental equals full re-flood")
+      Test.assert_eq_int(L.get(inc, 43, 100, 40), 5, "behind the wall, light arrives around it two steps longer")
+    end
+
+    test "an edit at the world edge matches a full re-flood" do
+      let w0 = CubeForge.World.relight_all(air_world())
+      let w1 = CubeForge.World.set_block(w0, 0, 80, 127, C.glow_cap())
+      let inc = L.relit_field(L.relight_block_marked(CubeForge.World.block_light(w1), w1, 0, 80, 127))
+      Test.assert_eq_int(first_difference(inc, L.flood_block(w1)), -1, "incremental equals full re-flood")
+    end
+
+    test "an emitter just outside the relight box still feeds it" do
+      -- Two caps 20 apart: editing beside one must not lose the other's light.
+      let wa = CubeForge.World.set_block(air_world(), 40, 100, 40, C.glow_cap())
+      let w0 = CubeForge.World.relight_all(CubeForge.World.set_block(wa, 60, 100, 40, C.glow_cap()))
+      let w1 = CubeForge.World.set_block(w0, 41, 100, 40, 3)
+      let inc = L.relit_field(L.relight_block_marked(CubeForge.World.block_light(w1), w1, 41, 100, 40))
+      Test.assert_eq_int(first_difference(inc, L.flood_block(w1)), -1, "incremental equals full re-flood")
+      Test.assert_eq_int(L.get(inc, 55, 100, 40), 5, "the far cap still lights its own ground")
+    end
+  end
+
+  describe "World.relight_marked" do
+    test "repairs both fields and unions the marks" do
+      let w0 = CubeForge.World.relight_all(CubeForge.World.generate(8, 1, 1))
+      let w1 = CubeForge.World.set_block(w0, 40, 90, 40, C.glow_cap())
+      let r = CubeForge.World.relight_marked(w1, 40, 90, 40)
+      let w2 = CubeForge.World.relit_world(r)
+      Test.assert_eq_int(first_difference(CubeForge.World.light(w2), L.flood(w1)), -1, "skylight equals full re-flood")
+      Test.assert_eq_int(first_difference(CubeForge.World.block_light(w2), L.flood_block(w1)), -1, "block light equals full re-flood")
+      Test.assert_eq_int(unmarked_go(CubeForge.World.block_light(w0), CubeForge.World.block_light(w2), CubeForge.World.relit_marks(r), 0), -1, "block-light changes are marked")
+      Test.assert_eq_int(unmarked_go(CubeForge.World.light(w0), CubeForge.World.light(w2), CubeForge.World.relit_marks(r), 0), -1, "skylight changes are marked")
+    end
+  end
+
 end

@@ -60,10 +60,21 @@ mod CubeForge.World do
     set_block_light(set_light(w, CubeForge.Light.flood(w)), CubeForge.Light.flood_block(w))
   end
 
-  doc "Repair the skylight field after an edit at a world coordinate."
-  fn relight_at(w : World, x : Int, y : Int, z : Int) : World do
-    set_light(w, CubeForge.Light.relight_at(light(w), w, x, y, z))
+  -- A repaired world together with the sections whose light (either field) changed.
+  type Relit = Relit(World, NativeIntArr)
+  fn relit_world(r : Relit) : World do match r do Relit(w, _) -> w end end
+  fn relit_marks(r : Relit) : NativeIntArr do match r do Relit(_, m) -> m end end
+
+  doc "Repair both light fields after an edit at a world coordinate, reporting the union of the sections either moved."
+  fn relight_marked(w : World, x : Int, y : Int, z : Int) : Relit do
+    let rs = CubeForge.Light.relight_marked(light(w), w, x, y, z)
+    let rb = CubeForge.Light.relight_block_marked(block_light(w), w, x, y, z)
+    Relit(set_block_light(set_light(w, CubeForge.Light.relit_field(rs)), CubeForge.Light.relit_field(rb)),
+          CubeForge.Light.or_marks(CubeForge.Light.relit_marks(rs), CubeForge.Light.relit_marks(rb)))
   end
+
+  doc "Repair both light fields after an edit, discarding the dirty-section marks."
+  fn relight_at(w : World, x : Int, y : Int, z : Int) : World do relit_world(relight_marked(w, x, y, z)) end
 
   fn in_bounds(w : World, cx : Int, cz : Int) : Bool do
     let n = side(w)

@@ -457,6 +457,75 @@ mod CubeForge.Light do
     relit_field(relight_marked(la, w, ex, ey, ez))
   end
 
+  -- ── Incremental block-light relight ──────────────────────────────────────
+  --
+  -- The skylight relight, minus the sky column: block light has no source
+  -- above the box, so the box is simply the relight radius in every direction.
+  -- Clear it, re-seed the emitters inside it, and sweep the box one voxel wider
+  -- so the unchanged ring around it feeds inward. Emission is at most 12 < 15,
+  -- so an emitter outside the box cannot reach past the ring into the box's
+  -- interior except through the ring, which is exactly what the sweep reads.
+
+  -- Re-seed emitters in one column of the box. Write-only on [lb].
+  pfn seed_emit_col_go(lb : NativeU8Arr, c : CubeForge.Chunk.Chunk, lx : Int, lz : Int, x : Int, z : Int, y : Int, y1 : Int) : NativeU8Arr do
+    if y > y1 do lb
+    else
+      let e = emission(C.get_or_air(c, lx, y, lz))
+      if e <= 0 do seed_emit_col_go(lb, c, lx, lz, x, z, y + 1, y1)
+      else seed_emit_col_go(NativeArray.set_u8(lb, index(x, y, z), e), c, lx, lz, x, z, y + 1, y1) end
+    end
+  end
+
+  pfn seed_emit_box_go(lb : NativeU8Arr, w : CubeForge.World.World, x0 : Int, bw : Int, z0 : Int, y0 : Int, y1 : Int, i : Int, n : Int) : NativeU8Arr do
+    if i >= n do lb
+    else
+      let x = x0 + i % bw
+      let z = z0 + i / bw
+      let c = CubeForge.World.chunk_at(w, CubeForge.World.floor_div16(x), CubeForge.World.floor_div16(z))
+      seed_emit_box_go(seed_emit_col_go(lb, c, CubeForge.World.mod16(x), CubeForge.World.mod16(z), x, z, y0, y1), w, x0, bw, z0, y0, y1, i + 1, n)
+    end
+  end
+
+  doc "Repair the block-light field after the block at (ex, ey, ez) changed, reporting which sections moved. [w] is the world after the edit."
+  fn relight_block_marked(lb : NativeU8Arr, w : CubeForge.World.World, ex : Int, ey : Int, ez : Int) : Relit do
+    let r = relight_radius()
+    let cx0 = clampi(ex - r, 0, 127)
+    let cx1 = clampi(ex + r, 0, 127)
+    let cz0 = clampi(ez - r, 0, 127)
+    let cz1 = clampi(ez + r, 0, 127)
+    let cy0 = clampi(ey - r, 0, 255)
+    let cy1 = clampi(ey + r, 0, 255)
+    let sy1 = clampi(ey + r + 1, 0, 255)
+    -- Only y layers up to the scan box top are read or written, and a y range
+    -- is a contiguous prefix of the flat index, so every copy is that prefix.
+    let plen = if sy1 >= 254 do volume() else (sy1 + 2) * 16384 end
+    let before = copy_prefix(lb, plen)
+    let lb1 = zero_box_go(lb, cx0, cx1, cy0, cy1, cz0, cz1)
+    let lb2 = seed_emit_box_go(lb1, w, cx0, cx1 - cx0 + 1, cz0, cy0, cy1, 0, (cx1 - cx0 + 1) * (cz1 - cz0 + 1))
+    -- scan box: one wider, so the unchanged voxels around the edit feed inward
+    let sx0 = clampi(ex - r - 1, 0, 127)
+    let sx1 = clampi(ex + r + 1, 0, 127)
+    let sz0 = clampi(ez - r - 1, 0, 127)
+    let sz1 = clampi(ez + r + 1, 0, 127)
+    let sy0 = if cy0 <= 0 do 0 else clampi(cy0 - 1, 0, 255) end
+    let slo = sy0 * 16384
+    let swept = box_sweep_go2(copy_prefix(lb2, plen), copy_prefix(lb2, plen), w, max_level(),
+                              sx0, sx1, sy0, sy1, sz0, sz1, slo, plen - slo)
+    let out = CubeForge.Ffi.Window.u8_blit(lb2, slo, swept, slo, plen - slo)
+    Relit(out, mark_box(marks_new(), before, out, sx0, sx1, sy0, sy1, sz0, sz1))
+  end
+
+  -- The union of two marks arrays, as a fresh array: reads [a] and [b], writes
+  -- only the new one, so neither input is copied (GAPS.md G21).
+  pfn or_go(a : NativeIntArr, b : NativeIntArr, m : NativeIntArr, i : Int) : NativeIntArr do
+    if i >= 1024 do m
+    else if NativeArray.get_int(a, i) != 0 do or_go(a, b, NativeArray.set_int(m, i, 1), i + 1)
+    else if NativeArray.get_int(b, i) != 0 do or_go(a, b, NativeArray.set_int(m, i, 1), i + 1)
+    else or_go(a, b, m, i + 1) end end end
+  end
+  doc "Sections marked in either marks array."
+  fn or_marks(a : NativeIntArr, b : NativeIntArr) : NativeIntArr do or_go(a, b, marks_new(), 0) end
+
   -- ── Occupancy: the shadow ray-marcher's view of the world ─────────────────
   --
   -- The light field cannot answer "does this voxel block light": an opaque
