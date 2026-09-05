@@ -126,18 +126,11 @@ int64_t cf_win_open(int64_t w, int64_t h, march_value title) {
     if (!g_win) { fprintf(stderr, "cf: glfwCreateWindow failed\n"); glfwTerminate(); return 0; }
     glfwMakeContextCurrent(g_win);
     if (!gladLoadGL(glfwGetProcAddress)) { fprintf(stderr, "cf: gladLoadGL failed\n"); return 0; }
-    /* CF_VSYNC=0 uncaps the frame rate, so frame cost can actually be measured;
-     * with vsync on every timing is pinned to the display refresh. */
-    glfwSwapInterval(getenv("CF_VSYNC") && atoi(getenv("CF_VSYNC")) == 0 ? 0 : 1);
-    /* CF_FULLSCREEN=1 moves the window onto the primary monitor at its current
-     * video mode. Note this takes GLFW's video mode, not the panel's native
-     * backing store, so on this Retina display it is 1920x1200 rather than
-     * 3456x2234 -- CF_WIDTH/CF_HEIGHT reach a larger framebuffer than this does. */
-    if (getenv("CF_FULLSCREEN") && atoi(getenv("CF_FULLSCREEN")) == 1) {
-        GLFWmonitor *m = glfwGetPrimaryMonitor();
-        const GLFWvidmode *mode = m ? glfwGetVideoMode(m) : NULL;
-        if (mode) glfwSetWindowMonitor(g_win, m, 0, 0, mode->width, mode->height, mode->refreshRate);
-    }
+    /* Vsync and fullscreen are settings (CubeForge.Settings), applied by March
+     * through cf_win_set_vsync / cf_win_set_fullscreen right after this returns
+     * and again whenever the player changes them. The window opens vsync-on
+     * so nothing spins before that first call. */
+    glfwSwapInterval(1);
     glfwGetFramebufferSize(g_win, &g_fb_w, &g_fb_h);
     glViewport(0, 0, g_fb_w, g_fb_h);
     glfwSetFramebufferSizeCallback(g_win, on_fb_size);
@@ -157,6 +150,42 @@ int64_t cf_win_fb_w(void)         { return g_fb_w; }
 int64_t cf_win_fb_h(void)         { return g_fb_h; }
 void    cf_win_close(void)        { if (g_win) { glfwDestroyWindow(g_win); g_win = NULL; } glfwTerminate(); }
 void    cf_win_request_close(void){ if (g_win) glfwSetWindowShouldClose(g_win, 1); }
+
+/* Vsync off uncaps the frame rate, so frame cost can actually be measured;
+ * with it on every timing is pinned to the display refresh. Remembered so a
+ * monitor change (below) can re-apply it: the swap interval belongs to the
+ * context and some platforms reset it when the window moves. */
+static int g_vsync = 1;
+void cf_win_set_vsync(int64_t on) {
+    g_vsync = on ? 1 : 0;
+    if (g_win) glfwSwapInterval(g_vsync);
+}
+
+/* Fullscreen takes the primary monitor at its current video mode. Note this
+ * is GLFW's video mode, not the panel's native backing store, so on a Retina
+ * display it is 1920x1200 rather than 3456x2234 -- CF_WIDTH/CF_HEIGHT reach a
+ * larger framebuffer than this does. Leaving fullscreen restores the windowed
+ * rectangle recorded on the way in. */
+static int g_fullscreen = 0;
+static int g_win_x = 0, g_win_y = 0, g_win_w = 800, g_win_h = 600;
+void cf_win_set_fullscreen(int64_t on) {
+    int want = on ? 1 : 0;
+    if (!g_win || want == g_fullscreen) return;
+    if (want) {
+        GLFWmonitor *m = glfwGetPrimaryMonitor();
+        const GLFWvidmode *mode = m ? glfwGetVideoMode(m) : NULL;
+        if (!mode) return;
+        glfwGetWindowPos(g_win, &g_win_x, &g_win_y);
+        glfwGetWindowSize(g_win, &g_win_w, &g_win_h);
+        glfwSetWindowMonitor(g_win, m, 0, 0, mode->width, mode->height, mode->refreshRate);
+    } else {
+        glfwSetWindowMonitor(g_win, NULL, g_win_x, g_win_y, g_win_w, g_win_h, 0);
+    }
+    g_fullscreen = want;
+    glfwSwapInterval(g_vsync);
+    glfwGetFramebufferSize(g_win, &g_fb_w, &g_fb_h);
+    glViewport(0, 0, g_fb_w, g_fb_h);
+}
 
 /* ── GL: shader program + one VAO shared by every mesh ──────────────────────
  * Vertex layout (9 floats): pos.xyz, uv, layer, shade, face, fx.
