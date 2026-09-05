@@ -71,6 +71,8 @@ mod CubeForge.Chunk do
   fn gravel() : Int do 20 end
   doc "Wetland mud."
   fn clay() : Int do 21 end
+  doc "Glowing mushroom cap: the first emissive block. Placeholder until the fungus fruit blocks land; the block-light channel is verified with it."
+  fn glow_cap() : Int do 22 end
   fn is_log(id : Int) : Bool do id == oak_log() || id == pine_log() end
   fn is_foliage(id : Int) : Bool do id == oak_leaves() || id == pine_leaves() end
 

@@ -47,6 +47,14 @@ mod CubeForge.Light do
   @[no_alloc]
   fn is_opaque(id : Int) : Bool do opacity(id) >= max_level() end
 
+  @[no_alloc]
+  -- Block light a voxel of block [id] emits: 0 for everything but emissive blocks.
+  -- Levels are deliberately below max_level(): a cap at 10 lights a radius of
+  -- about nine, and keeps every relight box small.
+  fn emission(id : Int) : Int do
+    if id == C.glow_cap() do 10 else 0 end
+  end
+
   -- ── Seeding: sunlight down each column ────────────────────────────────────
   --
   -- The chunk is hoisted out of the per-voxel loop: World.block_at re-derives
