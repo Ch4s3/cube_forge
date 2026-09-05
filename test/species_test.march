@@ -81,7 +81,8 @@ mod CubeForge.Test.Species do
       Test.assert_true(S.pull_t(5) > 0.0 && S.pull_m(5) > 0.0, "Marshlight warms and wets")
       Test.assert_true(S.pull_t(6) > 0.0 && S.pull_m(6) < 0.0, "Sunshelf warms and dries")
       Test.assert_true(near(S.pull_t(0), 0.0) && near(S.pull_m(0), 0.0), "no species, no pull")
-      Test.assert_true(S.pull_m(5) <= 0.08 && S.pull_t(6) <= 0.08, "no single pull reaches a threshold from a band centre")
+      Test.assert_true(S.pull_m(5) < 0.25 && S.pull_t(6) < 0.25, "no single pull reaches a threshold from a band centre")
+      Test.assert_true(S.pull_m(2) +. S.pull_m(4) +. S.pull_m(5) > 0.25, "the three damp species together do")
     end
   end
 

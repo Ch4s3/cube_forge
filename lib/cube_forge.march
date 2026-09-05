@@ -1616,15 +1616,15 @@ mod CubeForge do
             let tb0 = Win.time()
             -- The network's climate offsets, from the field as it stands: the biome
             -- reads the network, then the network reads the climate the biome eased.
-            let cols = World.side(scene_world(scw)) * 16
-            let bonus = Myc.bonuses(scene_myc(scw), cols, int_to_float(myc_feedback) /. 100.0)
-            let bio1 = Biome.tick(scene_biome(scw), scene_world(scw), seed, Biome.default_rate() *. int_to_float(biome_rate) /. 100.0, bonus)
+            let tbo = Win.time()
+            let bio1 = Biome.tick(scene_biome(scw), scene_world(scw), seed, Biome.default_rate() *. int_to_float(biome_rate) /. 100.0,
+                                  Myc.pulls(scene_myc(scw)), Myc.pull_rows(scene_myc(scw)), int_to_float(myc_feedback) /. 100.0)
             let f1 = scene_with_biome(scw, bio1)
             -- The mycelium field reads the climate the biome tick just eased.
             let tm0 = Win.time()
             let myc1 = Myc.tick(scene_myc(f1), World.side(scene_world(f1)) * 16, Biome.temps(bio1), Biome.moists(bio1), Myc.default_rate() *. int_to_float(myc_rate) /. 100.0)
             let f2 = scene_with_myc(f1, myc1)
-            if autoflow >= 0 && frame % 100 == field_slot() do println("biome tick: " ++ ms(tm0 -. tb0) ++ "  myc tick: " ++ ms(Win.time() -. tm0) ++ " (biome active " ++ int_to_string(count_u8(Biome.active(bio1), 0, World.side(scene_world(f1)) * 16 * World.side(scene_world(f1)) * 16, 0)) ++ ", myc dirty " ++ int_to_string(Myc.dirty_count(myc1, World.side(scene_world(f1)) * 16)) ++ ")") else () end
+            if autoflow >= 0 && frame % 100 == field_slot() do println("biome tick: " ++ ms(tm0 -. tbo) ++ "  myc tick: " ++ ms(Win.time() -. tm0) ++ " (biome active " ++ int_to_string(count_u8(Biome.active(bio1), 0, World.side(scene_world(f1)) * 16 * World.side(scene_world(f1)) * 16, 0)) ++ ", myc dirty " ++ int_to_string(Myc.dirty_count(myc1, World.side(scene_world(f1)) * 16)) ++ ")") else () end
             f2
           else scw end
           -- Retexturing: the surface migrates toward the biome's palette, each

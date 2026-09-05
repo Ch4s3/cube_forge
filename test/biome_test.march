@@ -23,7 +23,7 @@ mod CubeForge.Test.Biome do
 
 
   pfn tick_k(f : CubeForge.Biome.Field, w : CubeForge.World.World, bonus : NativeF32Arr, k : Int) : CubeForge.Biome.Field do
-    if k <= 0 do f else tick_k(Biome.tick(f, w, 7, 0.05, bonus), w, bonus, k - 1) end
+    if k <= 0 do f else tick_k(Biome.tick(f, w, 7, 0.05, bonus, Biome.no_rows(Biome.cols(w)), 1.0), w, bonus, k - 1) end
   end
 
   describe "Biome.classify" do
@@ -93,7 +93,7 @@ mod CubeForge.Test.Biome do
   end
 
   pfn tick_n(f : CubeForge.Biome.Field, w : CubeForge.World.World, n : Int, rate : Float) : CubeForge.Biome.Field do
-    if n <= 0 do f else tick_n(Biome.tick(f, w, 7, rate, Biome.no_bonus(Biome.cols(w))), w, n - 1, rate) end
+    if n <= 0 do f else tick_n(Biome.tick(f, w, 7, rate, Biome.no_pulls(Biome.cols(w)), Biome.no_rows(Biome.cols(w)), 1.0), w, n - 1, rate) end
   end
 
   describe "Biome.note_edit" do
@@ -119,7 +119,7 @@ mod CubeForge.Test.Biome do
       let before = Biome.biome_of(f0, 68, 60)
       let w1 = CubeForge.World.set_block(CubeForge.World.set_block(CubeForge.World.set_block(w0, 64, 65, 58, C.water()), 64, 65, 60, C.water()), 64, 65, 62, C.water())
       let f1 = Biome.note_edit(Biome.note_edit(Biome.note_edit(f0, w1, 64, 65, 58, C.water()), w1, 64, 65, 60, C.water()), w1, 64, 65, 62, C.water())
-      let f2 = Biome.tick(f1, w1, 7, Biome.default_rate(), Biome.no_bonus(Biome.cols(w1)))
+      let f2 = Biome.tick(f1, w1, 7, Biome.default_rate(), Biome.no_pulls(Biome.cols(w1)), Biome.no_rows(Biome.cols(w1)), 1.0)
       Test.assert_eq_int(Biome.biome_of(f2, 68, 60), before, "no snap after one tick")
       let f3 = tick_n(f2, w1, 200, 0.05)
       Test.assert_true(Biome.biome_of(f3, 68, 60) != before, "the bank changed biome")
@@ -231,16 +231,18 @@ mod CubeForge.Test.Biome do
       let f0 = Biome.build(w, 7)
       let n = Biome.cols(w)
       -- inland, no water: moisture target 0; settle it first
-      let f1 = tick_k(f0, w, Biome.no_bonus(n), 40)
+      let f1 = tick_k(f0, w, Biome.no_pulls(n), 40)
       Test.assert_true(Biome.moist_of(f1, 40, 40) < 0.0001, "dry inland")
       Test.assert_eq_int(NativeArray.get_u8(Biome.active(f1), 40 + n * 40), 0, "settled")
       let bonus = NativeArray.set_f32(NativeArray.make_f32(2 * n * n, 0.0), 2 * (40 + n * 40) + 1, 0.19)
-      let f2 = Biome.tick(f1, w, 7, 0.05, bonus)
+      -- the row flag is what wakes a settled column; the pull alone would not
+      let f2 = Biome.tick(f1, w, 7, 0.05, bonus, NativeArray.set_u8(Biome.no_rows(n), 40, 1), 1.0)
       Test.assert_eq_int(NativeArray.get_u8(Biome.active(f2), 40 + n * 40), 1, "the offset woke it")
       Test.assert_true(Biome.moist_of(f2, 40, 40) > 0.04, "and moisture started moving")
       let f3 = tick_k(f2, w, bonus, 40)
       Test.assert_true(Math.abs(Biome.moist_of(f3, 40, 40) -. 0.19) < 0.0001, "settled on the offset")
       Test.assert_eq_int(NativeArray.get_u8(Biome.active(f3), 40 + n * 40), 0, "and settled again: the same offset does not keep it awake")
+      Test.assert_true(Math.abs(Biome.moist_of(tick_k(f3, w, bonus, 5), 40, 40) -. 0.19) < 0.0001, "an unflagged row keeps its offset")
       Test.assert_true(Biome.moist_of(f3, 41, 40) < 0.0001, "the neighbour got no offset")
     end
   end

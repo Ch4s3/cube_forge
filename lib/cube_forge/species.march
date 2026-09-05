@@ -111,14 +111,16 @@ mod CubeForge.Species do
   -- Every pull points at the species' own core, so a species never weakens
   -- its own footing: the feedback into the biome field only reinforces, and
   -- cannot cycle. No single pull reaches a biome threshold from the middle of
-  -- a band; a mix of species can (see Myc.bonuses and its cap).
+  -- a band (the damp threshold is 0.25 from grassland's centre, the largest
+  -- pull is 0.12); the three damp species together pull 0.28, which is what
+  -- makes a deliberate collection able to tip ground (see Myc.bonuses and its cap).
   doc "Temperature pull of a species on the columns it holds and their neighbours."
   fn pull_t(id : Int) : Float do
-    if id == 1 do 0.0 -. 0.06 else if id == 2 do 0.0 -. 0.03 else if id == 5 do 0.02 else if id == 6 do 0.06 else 0.0 end end end end
+    if id == 1 do 0.0 -. 0.09 else if id == 2 do 0.0 -. 0.04 else if id == 5 do 0.03 else if id == 6 do 0.09 else 0.0 end end end end
   end
   doc "Moisture pull of a species on the columns it holds and their neighbours."
   fn pull_m(id : Int) : Float do
-    if id == 2 do 0.05 else if id == 3 do 0.0 -. 0.06 else if id == 4 do 0.06 else if id == 5 do 0.08 else if id == 6 do 0.0 -. 0.06 else 0.0 end end end end end
+    if id == 2 do 0.07 else if id == 3 do 0.0 -. 0.09 else if id == 4 do 0.09 else if id == 5 do 0.12 else if id == 6 do 0.0 -. 0.09 else 0.0 end end end end end
   end
 
 end
