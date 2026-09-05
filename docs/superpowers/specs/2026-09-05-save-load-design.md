@@ -49,8 +49,8 @@ The menu becomes a small state machine. Two modes, two pages:
 | escape | NEW GAME, SAVE GAME, QUIT, seed   | SLOT 1..5, BACK (save)  |
 
 ```march
-type Menu = Menu(Bool, Int, Int, Int, Int, Int, Int)
--- open?, seed under edit, focused item, mode, page, status slot, status kind
+type Menu = Menu(Bool, Int, Int, Int, Int, Int, Int, Int)
+-- open?, seed under edit, focused item, mode, page, status slot, status kind, status frame
 ```
 
 - **Start mode** opens at frame zero of the first session only, with the title
