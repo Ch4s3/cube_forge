@@ -5,7 +5,7 @@
 -- ONCE into a template: ordinary 9-float vertices with cell-local positions in
 -- [0, 1], a uv pointing at one texel of the palette layer, shade 1. The
 -- mesher stamps a template into a cell by adding the cell's origin and writing
--- the cell's shade (Mesher.stamp). Every template lives in one Set -- a float
+-- the cell's shade (Mesher.stamp). Every template lives in one Templates value -- a float
 -- blob with offsets -- that rides in the World beside the shown species, so
 -- the mesher reaches it without a new parameter on every remesh call.
 --
@@ -297,28 +297,28 @@ mod CubeForge.Model do
 
   -- ── The set: every template in one blob ─────────────────────────────────
   -- All templates: a float blob and count() + 1 offsets into it.
-  type Set = Set(NativeF32Arr, NativeIntArr)
+  type Templates = Templates(NativeF32Arr, NativeIntArr)
 
-  pfn build_go(k : Int, blob : CubeForge.F32Buf.F32Buf, offs : NativeIntArr) : Set do
+  pfn build_go(k : Int, blob : CubeForge.F32Buf.F32Buf, offs : NativeIntArr) : Templates do
     if k >= count() do
       let n = B.len(blob)
-      Set(B.storage(blob), NativeArray.set_int(offs, count(), n))
+      Templates(B.storage(blob), NativeArray.set_int(offs, count(), n))
     else
       let n = B.len(blob)
       build_go(k + 1, B.append(blob, template(shape(k))), NativeArray.set_int(offs, k, n))
     end
   end
   doc "Build every template. Done once, when a World is made."
-  fn build() : Set do build_go(0, B.new(4096), NativeArray.make_int(count() + 1, 0)) end
+  fn build() : Templates do build_go(0, B.new(4096), NativeArray.make_int(count() + 1, 0)) end
 
   doc "First float of template k in the blob."
-  fn offset(s : Set, k : Int) : Int do match s do Set(_, o) -> NativeArray.get_int(o, k) end end
+  fn offset(s : Templates, k : Int) : Int do match s do Templates(_, o) -> NativeArray.get_int(o, k) end end
   doc "Floats in template k."
-  fn floats(s : Set, k : Int) : Int do match s do Set(_, o) -> NativeArray.get_int(o, k + 1) - NativeArray.get_int(o, k) end end
+  fn floats(s : Templates, k : Int) : Int do match s do Templates(_, o) -> NativeArray.get_int(o, k + 1) - NativeArray.get_int(o, k) end end
   doc "Float i of the blob."
-  fn at(s : Set, i : Int) : Float do match s do Set(d, _) -> NativeArray.get_f32(d, i) end end
-  fn blob(s : Set) : NativeF32Arr do match s do Set(d, _) -> d end end
+  fn at(s : Templates, i : Int) : Float do match s do Templates(d, _) -> NativeArray.get_f32(d, i) end end
+  fn blob(s : Templates) : NativeF32Arr do match s do Templates(d, _) -> d end end
   doc "Quads in template k."
-  fn faces(s : Set, k : Int) : Int do floats(s, k) / (6 * Vx.floats()) end
+  fn faces(s : Templates, k : Int) : Int do floats(s, k) / (6 * Vx.floats()) end
 
 end

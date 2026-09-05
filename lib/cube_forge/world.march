@@ -8,7 +8,7 @@ mod CubeForge.World do
 
   alias CubeForge.Chunk as C
 
-  type World = World(Array.PVec(CubeForge.Chunk.Chunk), NativeU8Arr, NativeU8Arr, NativeU8Arr, NativeU8Arr, Int, CubeForge.Model.Set)   -- chunks, skylight field, block-light field, occupancy field, shown species per column, side length in chunks, the model templates the mesher stamps
+  type World = World(Array.PVec(CubeForge.Chunk.Chunk), NativeU8Arr, NativeU8Arr, NativeU8Arr, NativeU8Arr, Int, CubeForge.Model.Templates)   -- chunks, skylight field, block-light field, occupancy field, shown species per column, side length in chunks, the model templates the mesher stamps
 
   doc "The world's side in chunks. The one number the world's size comes from."
   fn size() : Int do 8 end
@@ -64,7 +64,7 @@ mod CubeForge.World do
   doc "The species each column's surface currently displays (0 = none). The mesher reads it to pick mycelium textures; the fungus migration writes it in step with the block."
   fn shown(w : World) : NativeU8Arr do match w do World(_, _, _, _, sh, _, _) -> sh end end
   doc "The model templates the mesher stamps for small mushrooms, fronds and bushes: built once with the world, constant after."
-  fn models(w : World) : CubeForge.Model.Set do match w do World(_, _, _, _, _, _, mo) -> mo end end
+  fn models(w : World) : CubeForge.Model.Templates do match w do World(_, _, _, _, _, _, mo) -> mo end end
   fn shown_at(w : World, x : Int, z : Int) : Int do
     if x < 0 || z < 0 || x >= 128 || z >= 128 do 0
     else match w do World(_, _, _, _, sh, _, _) -> NativeArray.get_u8(sh, x + 128 * z) end end
