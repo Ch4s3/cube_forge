@@ -118,6 +118,8 @@ like logs do).
    testable by eye.
 3. Basalt depth band (`chunk.march` `fill_column_mat`).
 4. Mud/clay wetland hash (`biome.march` `palette`) — signature changes to
-   `palette(id, x, z)`; update its two call sites (`cube_forge.march`'s
-   `migrate_go`, and the test helpers in `test/biome_test.march`).
+   `palette(id, x, z)`; update its six call sites (`biome.march`'s
+   `migrations_go`, `cube_forge.march`'s `migrate_go`, `veg.march`'s
+   `can_grow` and `can_grow_bush`, and `biome_test.march`'s `apply_palette`
+   and `all_mismatched`).
 5. Ice altitude rule (`chunk.march`, generation-time: `plant_springs_go`).

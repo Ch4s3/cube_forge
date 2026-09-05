@@ -475,12 +475,12 @@ mod CubeForge.Biome do
 
   -- ── Surface palette and migration ─────────────────────────────────────────
   doc "Fraction of wetland columns that pick mud over clay."
-  fn mud_fraction() : Float do 0.4 end
+  pfn mud_fraction() : Float do 0.4 end
   doc "Arbitrary fixed seed for the clay/mud split: decorative, not tied to the world seed."
-  fn wetland_mix_seed() : Int do 91537 end
+  pfn wetland_mix_seed() : Int do 91537 end
 
   doc "Clay or mud for one wetland column, mixed by a fixed per-column hash."
-  fn wetland_surface(x : Int, z : Int) : Int do
+  pfn wetland_surface(x : Int, z : Int) : Int do
     if N.hash2(x, z, wetland_mix_seed()) < mud_fraction() do C.mud() else C.clay() end
   end
 

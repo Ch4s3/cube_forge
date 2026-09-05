@@ -414,7 +414,7 @@ Add to `test/terrain_test.march`, reusing the same `Trees.spring_at_cell` walk t
   end
 ```
 
-**Erratum (found during Task 4 execution):** both helpers above were originally written with one `end` too few — each has an `if seed >= 20 do ... else if ... do ... else ... end` chain (two `if`/`else if` keywords, needing two closing `end`s) but only one trailing `end` was given before the function's own closing `end`. This passed `forge check` unnoticed by the plan's author and was only caught when `forge test` silently dropped the whole file per GAPS.md G60 (a parse error in one test file drops that file's tests with no error, not a build failure) — the count is 220 with the bug, ~232 expected without it. Fixed above to `end end` where the chain closes.
+**Erratum (found during Task 4 execution):** both helpers above were originally written with one `end` too few — each has an `if seed >= 20 do ... else if ... do ... else ... end` chain (two `if`/`else if` keywords, needing two closing `end`s) but only one trailing `end` was given before the function's own closing `end`. This passed `forge check` unnoticed by the plan's author and was only caught when `forge test` silently dropped the whole file per GAPS.md G60 (a parse error in one test file drops that file's tests with no error, not a build failure) — the count is 220 with the bug, 231 expected without it. Fixed above to `end end` where the chain closes.
 
 - [ ] **Step 2: Run the test to verify it fails**
 

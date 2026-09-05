@@ -69,11 +69,11 @@ mod CubeForge.Chunk do
   fn pine_leaves() : Int do 19 end
   doc "Scree above the treeline: the alpine surface."
   fn gravel() : Int do 20 end
-  doc "Wetland mud."
+  doc "Wetland clay."
   fn clay() : Int do 21 end
-  doc "Deep volcanic rock: the material below the deep stone band (see fill_column_mat)."
+  doc "Deep volcanic rock: the material below the deep stone band."
   fn basalt() : Int do 22 end
-  doc "Frozen water: generation-time only, placed instead of a spring above the snow line."
+  doc "Frozen water: generation-time only, placed instead of a spring at or above the snow line."
   fn ice() : Int do 23 end
   doc "Wetland surface variant alongside clay, picked per column."
   fn mud() : Int do 24 end
