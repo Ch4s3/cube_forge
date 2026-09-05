@@ -269,11 +269,11 @@ mod CubeForge.Test.Flow do
       let x = 3 + i % 10
       let z = 3 + i / 10
       let l = C.level_of(C.get(c, x, 71, z))
-      let cliff = cliff_to(c, x, z, l, x + 1, z) || cliff_to(c, x, z, l, x - 1, z) || cliff_to(c, x, z, l, x, z + 1) || cliff_to(c, x, z, l, x, z - 1)
+      let cliff = cliff_to(c, l, x + 1, z) || cliff_to(c, l, x - 1, z) || cliff_to(c, l, x, z + 1) || cliff_to(c, l, x, z - 1)
       bowl_cliffs(c, i + 1, if cliff do acc + 1 else acc end)
     end
   end
-  pfn cliff_to(c : CubeForge.Chunk.Chunk, x : Int, z : Int, l : Int, nx : Int, nz : Int) : Bool do
+  pfn cliff_to(c : CubeForge.Chunk.Chunk, l : Int, nx : Int, nz : Int) : Bool do
     if nx < 3 || nx > 12 || nz < 3 || nz > 12 do false
     else C.level_of(C.get(c, nx, 71, nz)) <= l - 2 end
   end
