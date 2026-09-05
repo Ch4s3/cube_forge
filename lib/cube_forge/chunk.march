@@ -35,8 +35,8 @@ mod CubeForge.Chunk do
   end
 
   fn is_solid(id : Int) : Bool do id != 0 end
-  doc "Blocks the player collides with: everything except air and water."
-  fn is_collidable(id : Int) : Bool do id != 0 && !is_water(id) end
+  doc "Blocks the player collides with: everything except air, water and small mushrooms."
+  fn is_collidable(id : Int) : Bool do id != 0 && !is_water(id) && !is_fruit_small(id) end
   doc "Water source block (level 8)."
   fn water() : Int do 4 end
   doc "Ids 4..11 are water: 4 is a source (level 8), 5..11 are flow cells (levels 7..1)."
@@ -103,6 +103,23 @@ mod CubeForge.Chunk do
   fn myc_glow(id : Int) : Int do if is_myc(id) do (id - myc_first()) % 3 else 0 end end
   doc "The base block under a mycelium id; any other id is its own base."
   fn myc_base(id : Int) : Int do if is_myc(id) do myc_base_of_index(myc_base_index(id)) else id end end
+
+  -- ── Fruit: mushroom bodies ───────────────────────────────────────────────
+  -- Ids 45..62 encode kind x species: small 44 + sp, stem 50 + sp, cap 56 + sp.
+  -- The species IS in the id here, unlike mycelium: a cap is a block the
+  -- player carries away and places, and off the network it still has to glow
+  -- and look like what it is.
+  fn fruit_small(sp : Int) : Int do 44 + sp end
+  fn fruit_stem(sp : Int) : Int do 50 + sp end
+  fn fruit_cap(sp : Int) : Int do 56 + sp end
+  fn is_fruit_small(id : Int) : Bool do id >= 45 && id <= 50 end
+  fn is_fruit_stem(id : Int) : Bool do id >= 51 && id <= 56 end
+  fn is_fruit_cap(id : Int) : Bool do id >= 57 && id <= 62 end
+  fn is_fruit(id : Int) : Bool do id >= 45 && id <= 62 end
+  doc "The species of a fruit block, or 0."
+  fn fruit_species(id : Int) : Int do if is_fruit(id) do (id - 45) % 6 + 1 else 0 end end
+  doc "Alpha-cutout blocks: leaves and small mushrooms. Meshed in the cutout pass and see-through for face culling and light."
+  fn is_cutout(id : Int) : Bool do is_foliage(id) || is_fruit_small(id) end
   fn is_log(id : Int) : Bool do id == oak_log() || id == pine_log() end
   fn is_foliage(id : Int) : Bool do id == oak_leaves() || id == pine_leaves() end
 

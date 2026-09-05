@@ -240,19 +240,19 @@ mod CubeForge.Mesher do
 
   -- Air and water do not hide an opaque face.
   doc "Blocks you can see past: air, water and leaves (leaves are alpha-cutout)."
-  fn see_through(id : Int) : Bool do id == 0 || C.is_water(id) || C.is_foliage(id) end
+  fn see_through(id : Int) : Bool do id == 0 || C.is_water(id) || C.is_cutout(id) end
 
   -- Mesh categories: 0 = opaque (greedy), 1 = foliage (greedy, alpha-cutout).
   fn cat_opaque() : Int do 0 end
   fn cat_foliage() : Int do 1 end
   doc "Which mesh a block belongs to: opaque, or the alpha-cutout foliage pass."
-  fn category_of(id : Int) : Int do if C.is_foliage(id) do cat_foliage() else cat_opaque() end end
+  fn category_of(id : Int) : Int do if C.is_cutout(id) do cat_foliage() else cat_opaque() end end
 
   -- A face exists when the neighbour is see-through AND is not the same foliage
   -- group: leaves must not draw their shared interior faces, or a canopy becomes a
   -- solid mass of quads, but a stone face behind leaves must still render.
   fn face_visible(id : Int, nb : Int) : Bool do
-    see_through(nb) && !(C.is_foliage(id) && C.is_foliage(nb))
+    see_through(nb) && !(C.is_cutout(id) && C.is_cutout(nb))
   end
 
   -- Water block at (x, y, z) with id [id]: top against non-water at the level height, sides against

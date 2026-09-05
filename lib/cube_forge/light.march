@@ -40,7 +40,7 @@ mod CubeForge.Light do
     else if C.is_water(id) do 2
     -- Leaves attenuate rather than block: a canopy casts dappled shade and thin
     -- foliage still lets light reach the ground beneath it.
-    else if C.is_foliage(id) do 6
+    else if C.is_cutout(id) do 6
     else max_level() end end end
   end
 
@@ -56,7 +56,10 @@ mod CubeForge.Light do
     -- dim 3, bright 6: measured at 2/4 a lone bright column lifted the ground
     -- by about 25/255 at night, too faint to read as lit
     else if C.is_myc(id) do 3 * C.myc_glow(id)
-    else 0 end end
+    -- fruit: a small body 6 bright / 3 dim, a cap 10 / 5; stems never glow
+    else if C.is_fruit_small(id) do 3 * CubeForge.Species.glow(C.fruit_species(id))
+    else if C.is_fruit_cap(id) do 5 * CubeForge.Species.glow(C.fruit_species(id))
+    else 0 end end end end
   end
 
   -- ── Seeding: sunlight down each column ────────────────────────────────────

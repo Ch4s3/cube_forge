@@ -45,7 +45,7 @@ mod CubeForge.Test.MycBlock do
 
   describe "Texture mycelium layers" do
     test "one layer per (base, species), after the existing seventeen" do
-      Test.assert_eq_int(Tx.layers(), 66, "17 + 42 mycelium + 6 spore icons, with the glow cap")
+      Test.assert_eq_int(Tx.layers(), 84, "17 + 42 mycelium + 6 spore icons + 18 fruit, with the glow cap")
       Test.assert_true(near(Tx.myc_layer(0, 1), 18.0), "grass x Frostcap")
       Test.assert_true(near(Tx.myc_layer(0, 6), 23.0), "grass x Sunshelf")
       Test.assert_true(near(Tx.myc_layer(6, 6), 59.0), "stone x Sunshelf is the last")
@@ -86,10 +86,56 @@ mod CubeForge.Test.MycBlock do
 
   describe "Texture spore icons" do
     test "one icon layer per species after the mycelium layers" do
-      Test.assert_eq_int(Tx.layers(), 66, "60 + 6")
+      Test.assert_eq_int(Tx.layers(), 84, "60 + 6 + 18")
       Test.assert_true(near(Tx.spore_layer(1), 60.0), "Frostcap")
       Test.assert_true(near(Tx.icon_layer(CubeForge.Species.spore_item(6)), 65.0), "Sunshelf spores in the HUD")
       Test.assert_true(near(Tx.icon_layer(1), 0.0), "grass icon unchanged")
+    end
+  end
+
+
+  describe "Fruit blocks" do
+    test "ids encode kind and species in 45..62" do
+      Test.assert_eq_int(Ch.fruit_small(1), 45, "small Frostcap")
+      Test.assert_eq_int(Ch.fruit_stem(1), 51, "stem Frostcap")
+      Test.assert_eq_int(Ch.fruit_cap(6), 62, "cap Sunshelf is the last")
+      Test.assert_true(Ch.is_fruit_small(48), "48 is small")
+      Test.assert_true(Ch.is_fruit_stem(54), "54 is a stem")
+      Test.assert_true(Ch.is_fruit_cap(60), "60 is a cap")
+      Test.assert_true(Ch.is_fruit(60), "and fruit")
+      Test.assert_false(Ch.is_fruit(44), "44 is not")
+      Test.assert_false(Ch.is_fruit(63), "63 is not")
+      Test.assert_eq_int(Ch.fruit_species(Ch.fruit_cap(4)), 4, "species of a cap")
+      Test.assert_eq_int(Ch.fruit_species(3), 0, "stone has none")
+    end
+    test "small fruit is a cutout you walk through; stems and caps are solid" do
+      Test.assert_true(Ch.is_cutout(Ch.fruit_small(3)), "small is cutout")
+      Test.assert_true(Ch.is_cutout(Ch.oak_leaves()), "leaves still are")
+      Test.assert_false(Ch.is_cutout(Ch.fruit_cap(3)), "a cap is not")
+      Test.assert_false(Ch.is_collidable(Ch.fruit_small(3)), "walk through a small mushroom")
+      Test.assert_true(Ch.is_collidable(Ch.fruit_cap(3)), "stand on a cap")
+      Test.assert_false(Ch.is_foliage(Ch.fruit_small(3)), "not a leaf: leaf decay leaves it alone")
+      Test.assert_eq_int(Lt.opacity(Ch.fruit_small(3)), 6, "dappled like leaves")
+      Test.assert_true(Lt.is_opaque(Ch.fruit_cap(3)), "a cap blocks light")
+    end
+    test "emission follows the species glow and the kind" do
+      Test.assert_eq_int(Lt.emission(Ch.fruit_small(4)), 6, "bright small")
+      Test.assert_eq_int(Lt.emission(Ch.fruit_cap(4)), 10, "bright cap")
+      Test.assert_eq_int(Lt.emission(Ch.fruit_stem(4)), 0, "stems never glow")
+      Test.assert_eq_int(Lt.emission(Ch.fruit_small(1)), 3, "dim small")
+      Test.assert_eq_int(Lt.emission(Ch.fruit_cap(1)), 5, "dim cap")
+      Test.assert_eq_int(Lt.emission(Ch.fruit_cap(3)), 0, "no glow")
+    end
+    test "one texture layer per kind and species, and small fruit yields nothing" do
+      Test.assert_eq_int(Tx.layers(), 84, "66 + 18")
+      Test.assert_true(near(Tx.fruit_layer(0, 1), 66.0), "small Frostcap")
+      Test.assert_true(near(Tx.fruit_layer(2, 6), 83.0), "cap Sunshelf is the last")
+      Test.assert_true(near(Tx.layer_for(Ch.fruit_stem(2)), 73.0), "stem Pinewart")
+      Test.assert_eq_int(CubeForge.Inventory.yield_of(Ch.fruit_small(2)), 0, "the fell gives the spores")
+      Test.assert_eq_int(CubeForge.Inventory.yield_of(Ch.fruit_cap(2)), Ch.fruit_cap(2), "a cap is a block")
+      let a = Tx.checkerboard()
+      Test.assert_eq_int(NativeArray.get_u8(a, float_to_int(Tx.fruit_layer(0, 3)) * 1024 + 3), 0, "a small mushroom's corner texel is transparent")
+      Test.assert_eq_int(NativeArray.get_u8(a, float_to_int(Tx.fruit_layer(0, 3)) * 1024 + (8 + 16 * 12) * 4 + 3), 255, "its stem texel is opaque")
     end
   end
 
