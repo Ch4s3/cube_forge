@@ -139,4 +139,14 @@ mod CubeForge.Test.MycBlock do
     end
   end
 
+
+  describe "small mushroom faces" do
+    test "the top and bottom show the cap, the sides the silhouette" do
+      Test.assert_true(near(Tx.layer_for_face(Ch.fruit_small(3), 0), Tx.fruit_layer(2, 3)), "top is the cap")
+      Test.assert_true(near(Tx.layer_for_face(Ch.fruit_small(3), 1), Tx.fruit_layer(2, 3)), "bottom is the cap")
+      Test.assert_true(near(Tx.layer_for_face(Ch.fruit_small(3), 2), Tx.fruit_layer(0, 3)), "a side is the silhouette")
+      Test.assert_true(near(Tx.layer_for_face(Ch.fruit_cap(3), 0), Tx.fruit_layer(2, 3)), "a cap block is a cap all round")
+    end
+  end
+
 end

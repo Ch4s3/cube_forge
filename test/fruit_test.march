@@ -128,7 +128,7 @@ mod CubeForge.Test.Fruit do
 
 
   describe "Fruit.candidates" do
-    test "grows on a mature held canonical column, decays a body the network left" do
+    test "grows on a mature held canonical column; a standing body or an orphan is never a candidate" do
       let n = 128
       let w0 = flat_world()
       let f = CubeForge.Myc.plant_patch(CubeForge.Myc.build(n), n, 40, 40, 3)
@@ -139,12 +139,14 @@ mod CubeForge.Test.Fruit do
       Test.assert_true(List.length(picks) <= 100, "budget")
       let first = Fr.column_of(first_of(picks))
       Test.assert_true(Fr.is_canonical(first % n, first / n, 0, 7), "a canonical small cell column")
-      Test.assert_false(Fr.is_decay(first_of(picks)), "growth")
-      -- a body on a column the network no longer shows is a decay entry
+      -- a body already standing there takes the column out of the list
       let w1 = Fr.stamp(w0, 3, first % n, 70, first / n, 7)
+      Test.assert_false(has_entry(Fr.candidates(f, shown, w1, bio, 7, 0, n * n, 100, 1000.0), first), "occupied")
+      -- a body whose ground no longer shows a species is nobody's candidate: the migration fells it
       let none = Fr.candidates(f, Wf.shown_new(), w1, bio, 7, 0, n * n, 100, 1000.0)
-      Test.assert_true(List.length(none) > 0, "something to do")
-      Test.assert_true(has_entry(none, first + 1073741824), "that column decays")
+      Test.assert_eq_int(List.length(none), 0, "nothing shown, nothing grows")
+      -- an empty world scans without a single block read: the same answer, and fast
+      Test.assert_eq_int(List.length(Fr.candidates(CubeForge.Myc.build(n), Wf.shown_new(), w0, bio, 7, 0, n * n, 100, 1000.0)), 0, "empty field")
     end
   end
 

@@ -734,11 +734,11 @@ mod CubeForge do
         let z = ci / (n * 16)
         let h = Biome.height_of(bio, x, z)
         let base = Fruit.base_of(w, x, z, h)
-        let sp = if Fruit.is_decay(e) do Chunk.fruit_species(World.block_at(w, x, base + 1, z)) else World.shown_at(w, x, z) end
+        let sp = World.shown_at(w, x, z)
         if sp == 0 do fruit_edits(w, bio, myc, marks, seed, n, rest)
         else
           let top = base + Fruit.height_of(sp, x, z, seed)
-          let w1 = if Fruit.is_decay(e) do Fruit.felled_world(Fruit.fell(w, sp, x, base, z, seed)) else Fruit.stamp(w, sp, x, base, z, seed) end
+          let w1 = Fruit.stamp(w, sp, x, base, z, seed)
           let relit = World.relight_marked(w1, x, base + 2, z)
           let w2 = World.relit_world(relit)
           sync_occupancy(w2, x, z, base, top)
@@ -844,47 +844,58 @@ mod CubeForge do
   -- Skips wet columns and columns whose surface cannot carry mycelium.
   type MycMigrated = MycMigrated(CubeForge.World.World, NativeIntArr, Int, Int, Int)   -- world, marks, anchor x, anchor h, anchor z (x < 0: none)
   pfn migrate_myc_go(w : CubeForge.World.World, bio : CubeForge.Biome.Field, myc : CubeForge.Myc.Field, marks : NativeIntArr,
-                     n : Int, cols : List(Int), ax : Int, ah : Int, az : Int) : MycMigrated do
+                     n : Int, seed : Int, cols : List(Int), ax : Int, ah : Int, az : Int) : MycMigrated do
     match cols do
       Nil -> MycMigrated(w, marks, ax, ah, az)
       Cons(ci, rest) ->
         let x = ci % (n * 16)
         let z = ci / (n * 16)
-        let h = Biome.height_of(bio, x, z)
+        -- the ground, not the heightmap's top: a body standing here is above it
+        let h = Fruit.base_of(w, x, z, Biome.height_of(bio, x, z))
         let sfc = World.block_at(w, x, h, z)
         let want = Myc.wanted(myc, n * 16, ci)
         let base = Chunk.myc_base(sfc)
         let new_id = if want == 0 do base else Chunk.myc_id(base, Species.glow(want)) end
+        -- A body whose species the ground no longer shows goes with the
+        -- ground: felled here, so the fruit scan never has to look for it.
+        let body_sp = Chunk.fruit_species(World.block_at(w, x, h + 1, z))
+        let fell = if body_sp == 0 do false else if !Fruit.has_body(w, x, z, h) do false else body_sp != want end end
+        let body_glows = if fell do CubeForge.Light.emission(Chunk.fruit_cap(body_sp)) != 0 else false end
         -- cannot carry it (water, logs, granite, bedrock...): show nothing and move on
         if h <= 0 || Biome.is_wet(bio, x, z) || new_id == 0 do
-          migrate_myc_go(World.set_shown(w, x, z, 0), bio, myc, marks, n, rest, ax, ah, az)
+          migrate_myc_go(World.set_shown(w, x, z, 0), bio, myc, marks, n, seed, rest, ax, ah, az)
         else
-          let glow_changes = CubeForge.Light.emission(sfc) != CubeForge.Light.emission(new_id)
+          let glow_changes = CubeForge.Light.emission(sfc) != CubeForge.Light.emission(new_id) || body_glows
           let near_anchor = if ax < 0 do true else (if x - ax <= 4 && ax - x <= 4 do (z - az <= 4 && az - z <= 4) else false end) end
-          if glow_changes && !near_anchor do migrate_myc_go(w, bio, myc, marks, n, rest, ax, ah, az)
+          if glow_changes && !near_anchor do migrate_myc_go(w, bio, myc, marks, n, seed, rest, ax, ah, az)
           else
-            let w1 = World.set_shown(if new_id == sfc do w else World.set_block(w, x, h, z, new_id) end, x, z, want)
-            let marks1 = mark_geometry(marks, x, h, z, n)
-            if glow_changes && ax < 0 do migrate_myc_go(w1, bio, myc, marks1, n, rest, x, h, z)
-            else migrate_myc_go(w1, bio, myc, marks1, n, rest, ax, ah, az) end
+            let top = h + Fruit.height_of(body_sp, x, z, seed)
+            let w0 = if fell do Fruit.felled_world(Fruit.fell(w, body_sp, x, h, z, seed)) else w end
+            if fell do sync_occupancy(w0, x, z, h, top) else () end
+            let marks0 = if fell do mark_box(marks, x - 4, h, z - 4, x + 4, top, z + 4, n, 0) else marks end
+            let w1 = World.set_shown(if new_id == sfc do w0 else World.set_block(w0, x, h, z, new_id) end, x, z, want)
+            let marks1 = mark_geometry(marks0, x, h, z, n)
+            if glow_changes && ax < 0 do migrate_myc_go(w1, bio, myc, marks1, n, seed, rest, x, h, z)
+            else migrate_myc_go(w1, bio, myc, marks1, n, seed, rest, ax, ah, az) end
           end
         end
     end
   end
 
-  pfn migrate_myc(sc, cols : List(Int)) do
+  pfn migrate_myc(sc, seed : Int, cols : List(Int)) do
     match cols do
       Nil -> sc
       _ ->
         match sc do
           Scene(world, counts, outline, hit, ui, pids, flags, meshes, bio, pend, myc) ->
-            match migrate_myc_go(world, bio, myc, CubeForge.Light.marks_new(), World.side(world), cols, 0 - 1, 0, 0) do
+            match migrate_myc_go(world, bio, myc, CubeForge.Light.marks_new(), World.side(world), seed, cols, 0 - 1, 0, 0) do
               MycMigrated(w1, marks, ax, ah, az) ->
-                if ax < 0 do Scene(w1, counts, outline, hit, ui, pids, flags, meshes, bio, stage_go(pend, marks, 0, pass_opaque()), myc)
+                -- pass_solid, not pass_opaque: a felled small mushroom was in the cutout pass
+                if ax < 0 do Scene(w1, counts, outline, hit, ui, pids, flags, meshes, bio, stage_go(pend, marks, 0, pass_solid()), myc)
                 else
                   let relit = CubeForge.Light.relight_block_marked(World.block_light(w1), w1, ax, ah, az)
                   let w2 = World.set_block_light(w1, CubeForge.Light.relit_field(relit))
-                  Scene(w2, counts, outline, hit, ui, pids, flags, meshes, bio, stage_go(pend, CubeForge.Light.or_marks(marks, CubeForge.Light.relit_marks(relit)), 0, pass_opaque()), myc)
+                  Scene(w2, counts, outline, hit, ui, pids, flags, meshes, bio, stage_go(pend, CubeForge.Light.or_marks(marks, CubeForge.Light.relit_marks(relit)), 0, pass_solid()), myc)
                 end
             end
         end
@@ -1050,7 +1061,7 @@ mod CubeForge do
     let n = World.side(scene_world(sc)) * 16
     if x < 0 || z < 0 || x >= n || z >= n do false
     else
-      let h = Biome.height_of(scene_biome(sc), x, z)
+      let h = Fruit.base_of(scene_world(sc), x, z, Biome.height_of(scene_biome(sc), x, z))
       let sfc = World.block_at(scene_world(sc), x, h, z)
       if h <= 0 do false else if Biome.is_wet(scene_biome(sc), x, z) do false
       else Chunk.myc_index_of(Chunk.myc_base(sfc)) >= 0 end end
@@ -1626,7 +1637,7 @@ mod CubeForge do
           let scm2 = if is_migrate_slot(phase) do
             let tq0 = Win.time()
             let mpicks = Myc.migrations(scene_myc(scm), World.side(scene_world(scm)) * 16, World.shown(scene_world(scm)), frame / tick_period(), 2048, myc_budget / migrate_slots())
-            let m2 = migrate_myc(scm, mpicks)
+            let m2 = migrate_myc(scm, seed, mpicks)
             -- printed whenever a slot did something: the slots that hit a patch's
             -- window are not the ones a fixed frame sample lands on
             if autoflow >= 0 && List.length(mpicks) > 0 do println("myc migrate: " ++ int_to_string(List.length(mpicks)) ++ " columns in " ++ ms(Win.time() -. tq0)) else () end
@@ -1854,7 +1865,7 @@ mod CubeForge do
             println("  biome at player column (" ++ int_to_string(pcx) ++ "," ++ int_to_string(pcz) ++ "): " ++ Biome.name(Biome.biome_of(scene_biome(sc1), pcx, pcz)) ++ " height " ++ int_to_string(Biome.height_of(scene_biome(sc1), pcx, pcz)) ++ " " ++ Biome.debug_axes(scene_biome(sc1), pcx, pcz))
             println("  mycelium: " ++ myc_summary(scene_myc(sc1), World.side(scene_world(sc1)) * 16, 1, ""))
             println("  giant cells near the player: " ++ giant_cells(scene_world(sc1), scene_myc(sc1), seed, pcx, pcz, 0, ""))
-            println("  fruit: small " ++ int_to_string(Fruit.count_bodies(scene_world(sc1), scene_biome(sc1), 0)) ++ " medium " ++ int_to_string(Fruit.count_bodies(scene_world(sc1), scene_biome(sc1), 1)) ++ " giant " ++ int_to_string(Fruit.count_bodies(scene_world(sc1), scene_biome(sc1), 2)))
+            println("  fruit: small " ++ int_to_string(Fruit.count_bodies(scene_world(sc1), scene_biome(sc1), 0)) ++ " medium " ++ int_to_string(Fruit.count_bodies(scene_world(sc1), scene_biome(sc1), 1)) ++ " giant " ++ int_to_string(Fruit.count_bodies(scene_world(sc1), scene_biome(sc1), 2)) ++ " orphans " ++ int_to_string(Fruit.count_orphans(scene_world(sc1), scene_biome(sc1), World.shown(scene_world(sc1)))))
             -- the column three east of the player: where CF_AUTOPLANT plants
             let mx = pcx + 3
             let mh = Biome.height_of(scene_biome(sc1), mx, pcz)
