@@ -266,6 +266,21 @@ mod CubeForge.Myc do
   -- ── Migration: what the surface should show ──────────────────────────────
   doc "Vigour at and above which a column's surface shows its species."
   fn show_vigour() : Float do 0.15 end
+  doc "Vigour at and above which a column may fruit."
+  fn fruit_vigour() : Float do 0.8 end
+
+  doc "A felled body reseeds its column: reach back to plant_reach(), so a mature patch keeps growing without replanting. An empty column is left alone."
+  fn reseed(f : Field, n : Int, x : Int, z : Int) : Field do
+    if x < 0 || z < 0 || x >= n || z >= n do f
+    else
+      match f do
+        Field(sps, vg, rc, hd, cl) ->
+          let i = x + n * z
+          if NativeArray.get_u8(sps, i) == 0 do f
+          else Field(sps, vg, NativeArray.set_u8(copy_u8(rc, n * n), i, plant_reach()), hd, cl) end
+      end
+    end
+  end
 
   doc "The species column [i] should display: its species once vigour reaches show_vigour(), else 0."
   fn wanted(f : Field, n : Int, i : Int) : Int do
