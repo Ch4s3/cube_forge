@@ -337,12 +337,12 @@ mod CubeForge.Biome do
   -- is read at its own index before it is written.
   pfn clampb(v : Float, cap : Float) : Float do if v < 0.0 -. cap do 0.0 -. cap else if v > cap do cap else v end end end
 
-  pfn tick_go(hs : NativeU8Arr, tb : NativeFloatArr, rate : Float, d : NativeU8Arr, pulls : NativeF32Arr, prow : NativeU8Arr, scale : Float, n : Int, i : Int,
+  pfn tick_go(hs : NativeU8Arr, tb : NativeFloatArr, rate : Float, d : NativeU8Arr, pulls : NativeF32Arr, prow : NativeU8Arr, scale : Float, n : Int, i : Int, stop : Int,
               ta : NativeFloatArr, ma : NativeFloatArr, bs : NativeU8Arr, hold : NativeU8Arr, act : NativeU8Arr) : Field do
-    if i >= n * n do Field(hs, NativeArray.make_u8(0, 0), ta, ma, bs, hold, tb, NativeArray.make_u8(0, 0), act)
+    if i >= stop do Field(hs, NativeArray.make_u8(0, 0), ta, ma, bs, hold, tb, NativeArray.make_u8(0, 0), act)
     -- a row whose network pulls moved this tick is looked at whole; the
     -- offsets are constant otherwise, so a settled column stays settled
-    else if NativeArray.get_u8(act, i) == 0 && NativeArray.get_u8(prow, i / n) == 0 do tick_go(hs, tb, rate, d, pulls, prow, scale, n, i + 1, ta, ma, bs, hold, act)
+    else if NativeArray.get_u8(act, i) == 0 && NativeArray.get_u8(prow, i / n) == 0 do tick_go(hs, tb, rate, d, pulls, prow, scale, n, i + 1, stop, ta, ma, bs, hold, act)
     else
       let h = NativeArray.get_u8(hs, i)
       let dist = NativeArray.get_u8(d, i)
@@ -368,7 +368,7 @@ mod CubeForge.Biome do
       -- the network's pull on this row moving.
       let settled = if t == tt do (if m == mt do hc1 == 0 else false end) else false end
       let act1 = NativeArray.set_u8(act, i, if settled do 0 else 1 end)
-      tick_go(hs, tb, rate, d, pulls, prow, scale, n, i + 1,
+      tick_go(hs, tb, rate, d, pulls, prow, scale, n, i + 1, stop,
               NativeArray.set_float(ta, i, t), NativeArray.set_float(ma, i, m),
               NativeArray.set_u8(bs, i, b1), NativeArray.set_u8(hold, i, hc1), act1)
     end end
@@ -453,13 +453,47 @@ mod CubeForge.Biome do
   to discover that almost none of them had moved.
   """
   fn tick(f : Field, w : CubeForge.World.World, seed : Int, rate : Float, pulls : NativeF32Arr, prow : NativeU8Arr, scale : Float) : Field do
+    tick_slice(tick_begin(f, w), w, rate, pulls, prow, scale, 0, cols(w) * cols(w))
+  end
+
+  doc """
+  The whole-map half of a tick: rescan the water flags, recompute the distance
+  field, and wake every column whose distance moved. Nothing is eased here.
+
+  Split from the sweep because these three are O(map) and the sweep is O(awake),
+  and the two want different schedules: this runs once at the head of a period,
+  the sweep is spread across the period's frames a slice at a time.
+  """
+  fn tick_begin(f : Field, w : CubeForge.World.World) : Field do
     let n = cols(w)
     let f1 = match f do Field(hs, _, ta, ma, bs, hold, tb, ds, act) -> Field(hs, water_go(w, hs, n, 0, NativeArray.make_u8(n * n, 0)), ta, ma, bs, hold, tb, ds, act) end
     let d = distances(f1, w)
     match f1 do
-      Field(hs, ws, ta0, ma0, bs0, hold0, tb, ds0, act0) ->
-        match tick_go(hs, tb, rate, d, pulls, prow, scale, n, 0, ta0, ma0, bs0, hold0, mark_dist_go(d, ds0, n, 0, act0)) do
-          Field(hs1, _, ta, ma, bs, hold, tb1, _, act1) -> Field(hs1, ws, ta, ma, bs, hold, tb1, d, act1)
+      Field(hs, ws, ta, ma, bs, hold, tb, ds0, act) ->
+        Field(hs, ws, ta, ma, bs, hold, tb, d, mark_dist_go(d, ds0, n, 0, act))
+    end
+  end
+
+  doc """
+  Ease and reclassify the awake columns in [from, from + count), against the
+  distances tick_begin left in the field.
+
+  A period sweeps the whole map in slices, so each column is still visited
+  exactly once per period and the ease rate and the hold counter are unchanged.
+  What moves is only WHEN in the period a column is looked at, which matters
+  solely for an edit landing mid-period: the column ahead of the cursor sees it
+  this period, the one behind it next period. The sweep costs what the awake set
+  costs, and the fungus climate feedback keeps some four thousand columns awake,
+  so it is worth spreading.
+  """
+  fn tick_slice(f : Field, w : CubeForge.World.World, rate : Float, pulls : NativeF32Arr, prow : NativeU8Arr, scale : Float, from : Int, count : Int) : Field do
+    let n = cols(w)
+    let lo = if from < 0 do 0 else if from > n * n do n * n else from end end
+    let hi = if lo + count > n * n do n * n else lo + count end
+    match f do
+      Field(hs, ws, ta0, ma0, bs0, hold0, tb, ds, act0) ->
+        match tick_go(hs, tb, rate, ds, pulls, prow, scale, n, lo, hi, ta0, ma0, bs0, hold0, act0) do
+          Field(hs1, _, ta, ma, bs, hold, tb1, _, act1) -> Field(hs1, ws, ta, ma, bs, hold, tb1, ds, act1)
         end
     end
   end

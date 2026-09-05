@@ -140,7 +140,21 @@ mod CubeForge do
   -- phase whose work is a batch of independent columns, so it is the one that
   -- can be halved without being restructured.
   fn water_slot() : Int do 0 end
+  doc "Where the biome tick's whole-map half runs, and where its sweep starts."
   fn field_slot() : Int do 2 end
+  doc """
+  The mycelium tick, on the frame the biome's sweep finishes.
+
+  The two fields alternate -- the biome reads the network's climate pulls, then
+  the network reads the climate the biome eased -- so the sweep has to be
+  COMPLETE before Myc.tick reads it. The sweep runs a slice a frame from
+  field_slot() round to here, so this is the frame after the last slice, and the
+  slice on this frame is taken before the mycelium tick below.
+  """
+  fn myc_slot() : Int do 1 end
+  -- Which slice of the biome sweep this frame owns: 0 on field_slot(), then one
+  -- per frame round the period, ending on myc_slot().
+  pfn sweep_slice(phase : Int) : Int do (phase + tick_period() - field_slot()) % tick_period() end
   fn veg_slot() : Int do 6 end
   -- The retexture runs in halves, on two frames of the period. Quarters were
   -- measured and are worse: four batches remesh overlapping sections four
@@ -1714,22 +1728,32 @@ mod CubeForge do
           let phase = frame % tick_period()
           -- water simulation tick
           let scw = if phase == water_slot() do water_tick(sc0d, workers, autoflow >= 0) else sc0d end
-          -- The climate field.
-          let scb = if phase == field_slot() do
-            let tb0 = Win.time()
-            -- The network's climate offsets, from the field as it stands: the biome
-            -- reads the network, then the network reads the climate the biome eased.
-            let tbo = Win.time()
-            let bio1 = Biome.tick(scene_biome(scw), scene_world(scw), seed, Biome.default_rate() *. int_to_float(biome_rate) /. 100.0,
-                                  Myc.pulls(scene_myc(scw)), Myc.pull_rows(scene_myc(scw)), int_to_float(myc_feedback) /. 100.0)
-            let f1 = scene_with_biome(scw, bio1)
-            -- The mycelium field reads the climate the biome tick just eased.
+          -- The climate field. Its whole-map half -- the water flags and the
+          -- distance sweep -- runs here; its ease/reclassify sweep is spread a
+          -- slice a frame across the period, because the fungus climate feedback
+          -- keeps some four thousand columns awake and that sweep costs what the
+          -- awake set costs. Each column is still visited exactly once per
+          -- period, so the ease rate and the hold counter are unchanged.
+          let tbo = Win.time()
+          let scbegin = if phase == field_slot() do
+              scene_with_biome(scw, Biome.tick_begin(scene_biome(scw), scene_world(scw)))
+            else scw end
+          let ncols = World.side(scene_world(scbegin)) * 16
+          let slice = (ncols * ncols + tick_period() - 1) / tick_period()
+          let scb0 = scene_with_biome(scbegin,
+            Biome.tick_slice(scene_biome(scbegin), scene_world(scbegin), Biome.default_rate() *. int_to_float(biome_rate) /. 100.0,
+                             Myc.pulls(scene_myc(scbegin)), Myc.pull_rows(scene_myc(scbegin)), int_to_float(myc_feedback) /. 100.0,
+                             sweep_slice(phase) * slice, slice))
+          -- The mycelium field reads the climate the biome eased, so it goes on
+          -- the frame the sweep finishes, after this frame's slice.
+          let scb = if phase == myc_slot() do
             let tm0 = Win.time()
-            let myc1 = Myc.tick(scene_myc(f1), World.side(scene_world(f1)) * 16, Biome.temps(bio1), Biome.moists(bio1), Myc.default_rate() *. int_to_float(myc_rate) /. 100.0)
-            let f2 = scene_with_myc(f1, myc1)
-            if autoflow >= 0 && frame % 100 == field_slot() do println("biome tick: " ++ ms(tm0 -. tbo) ++ "  myc tick: " ++ ms(Win.time() -. tm0) ++ " (biome active " ++ int_to_string(count_u8(Biome.active(bio1), 0, World.side(scene_world(f1)) * 16 * World.side(scene_world(f1)) * 16, 0)) ++ ", myc dirty " ++ int_to_string(Myc.dirty_count(myc1, World.side(scene_world(f1)) * 16)) ++ ")") else () end
+            let bio1 = scene_biome(scb0)
+            let myc1 = Myc.tick(scene_myc(scb0), ncols, Biome.temps(bio1), Biome.moists(bio1), Myc.default_rate() *. int_to_float(myc_rate) /. 100.0)
+            let f2 = scene_with_myc(scb0, myc1)
+            if autoflow >= 0 && frame % 100 == myc_slot() do println("biome sweep slice: " ++ ms(tm0 -. tbo) ++ "  myc tick: " ++ ms(Win.time() -. tm0) ++ " (biome active " ++ int_to_string(count_u8(Biome.active(bio1), 0, ncols * ncols, 0)) ++ ", myc dirty " ++ int_to_string(Myc.dirty_count(myc1, ncols)) ++ ")") else () end
             f2
-          else scw end
+          else scb0 end
           -- Retexturing: the surface migrates toward the biome's palette, each
           -- column a real edit so relight, remesh and the water actors all see
           -- it. Half the budget on each of two frames. Both halves read the same
