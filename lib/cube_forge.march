@@ -1049,12 +1049,17 @@ mod CubeForge do
       println("planted " ++ Species.name(sp) ++ " at " ++ int_to_string(px) ++ "," ++ int_to_string(pz) ++ (if mature do " (mature)" else "" end))
       -- CF_AUTOPLANT_MATURE=1: a full-vigour patch at once, for fruit checks
       -- that cannot wait for growth (with CF_MYC_RATE=0 it stays whatever the climate)
-      if sp == 0 do sc
-      else if mature do scene_with_myc(sc, Myc.plant_patch(scene_myc(sc), n, px, pz, sp))
-      else scene_with_myc(sc, Myc.plant(scene_myc(sc), n, px, pz, sp)) end end
+      let sc1 = if sp == 0 do sc
+                else if mature do scene_with_myc(sc, Myc.plant_patch(scene_myc(sc), n, px, pz, sp))
+                else scene_with_myc(sc, Myc.plant(scene_myc(sc), n, px, pz, sp)) end end
+      -- CF_AUTOPLANT_SPECIES2 / 3 with CF_AUTOPLANT_MATURE: one patch interleaving
+      -- the species column by column, so every 3x3 holds the whole collection --
+      -- what the climate feedback rewards.
+      let sp2 = Env.get_int("CF_AUTOPLANT_SPECIES2", 0)
+      let sp3 = Env.get_int("CF_AUTOPLANT_SPECIES3", 0)
+      if sp <= 0 || sp2 <= 0 || !mature do sc1 else scene_with_myc(sc, Myc.plant_mix(scene_myc(sc), n, px, pz, sp, sp2, sp3)) end
     end
   end
-
   -- Plant [sp] at column (x, z) if its surface can carry mycelium and is dry.
   -- Returns the scene unchanged (and so consumes nothing) otherwise.
   pfn can_plant(sc, x : Int, z : Int) : Bool do
@@ -1879,7 +1884,10 @@ mod CubeForge do
                     ++ " shown " ++ int_to_string(World.shown_at(scene_world(sc1), mx, pcz))
                     ++ " surface " ++ int_to_string(World.block_at(scene_world(sc1), mx, mh, pcz)) ++ " at y " ++ int_to_string(mh)
                     ++ " wet " ++ (if Biome.is_wet(scene_biome(sc1), mx, pcz) do "1" else "0" end)
-                    ++ " block light above " ++ int_to_string(World.block_light_at(scene_world(sc1), mx, mh + 1, pcz)))
+                    ++ " block light above " ++ int_to_string(World.block_light_at(scene_world(sc1), mx, mh + 1, pcz))
+                    ++ " climate " ++ Biome.debug_axes(scene_biome(sc1), mx, pcz) ++ " biome " ++ Biome.name(Biome.biome_of(scene_biome(sc1), mx, pcz))
+                    ++ " offset t " ++ float_to_string(NativeArray.get_f32(Myc.bonuses(scene_myc(sc1), World.side(scene_world(sc1)) * 16, 1.0), 2 * (mx + 128 * pcz)))
+                    ++ " m " ++ float_to_string(NativeArray.get_f32(Myc.bonuses(scene_myc(sc1), World.side(scene_world(sc1)) * 16, 1.0), 2 * (mx + 128 * pcz) + 1)))
             println("  weather " ++ float_to_string(wx) ++ " (overcast " ++ float_to_string(ov) ++ ", fog " ++ float_to_string(fog_density(wx)) ++ ", bolt " ++ float_to_string(bolt) ++ ", live " ++ int_to_string(live) ++ (if snowing do " snow" else " rain" end) ++ ")")
             -- Behaviour oracle for refactors: the discrete field state and every
             -- voxel, hashed. Resolution-independent, unlike a frame dump, and it
