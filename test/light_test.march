@@ -15,7 +15,7 @@ mod CubeForge.Test.Light do
   -- An 8x8 world of entirely empty chunks (no terrain), so seeding tests see
   -- only the blocks they place themselves.
   pfn air_world() : CubeForge.World.World do
-    CubeForge.World.rebuild_occupancy(CubeForge.World.World(Array.from_list(air_chunks(63, Nil)), L.new(), L.new(), 8))
+    CubeForge.World.rebuild_occupancy(CubeForge.World.World(Array.from_list(air_chunks(63, Nil)), L.new(), L.new(), L.new(), CubeForge.World.shown_new(), 8))
   end
 
 
@@ -30,7 +30,7 @@ mod CubeForge.Test.Light do
     if i < 0 do acc else slab_chunks(i - 1, y, Cons(slab_cells(C.new(), 0, y), acc)) end
   end
   pfn slab_world(y : Int) : CubeForge.World.World do
-    CubeForge.World.rebuild_occupancy(CubeForge.World.World(Array.from_list(slab_chunks(63, y, Nil)), L.new(), L.new(), 8))
+    CubeForge.World.rebuild_occupancy(CubeForge.World.World(Array.from_list(slab_chunks(63, y, Nil)), L.new(), L.new(), L.new(), CubeForge.World.shown_new(), 8))
   end
 
 
@@ -242,26 +242,32 @@ mod CubeForge.Test.Light do
   end
 
   describe "Mesher corner packing" do
-    test "light and AO round-trip through the six-bit corner" do
-      Test.assert_eq_int(CubeForge.Mesher.pack_corner(15, 3), 63, "brightest, unoccluded")
-      Test.assert_eq_int(CubeForge.Mesher.pack_corner(0, 0), 0, "darkest, fully occluded")
-      Test.assert_eq_int(CubeForge.Mesher.pack_corner(11, 2) % 16, 11, "light in the low nibble")
-      Test.assert_eq_int(CubeForge.Mesher.pack_corner(11, 2) / 16, 2, "AO above it")
+    test "light, AO and block light round-trip through the ten-bit corner" do
+      Test.assert_eq_int(CubeForge.Mesher.pack_corner(15, 3, 0), 63, "brightest sky, unoccluded, no glow")
+      Test.assert_eq_int(CubeForge.Mesher.pack_corner(0, 0, 0), 0, "darkest, fully occluded")
+      Test.assert_eq_int(CubeForge.Mesher.pack_corner(11, 2, 0) % 16, 11, "light in the low nibble")
+      Test.assert_eq_int(CubeForge.Mesher.pack_corner(11, 2, 0) / 16, 2, "AO above it")
+      Test.assert_eq_int(CubeForge.Mesher.pack_corner(11, 2, 9) / 64, 9, "block light above that")
+      Test.assert_eq_int(CubeForge.Mesher.pack_corner(15, 3, 15), 1023, "everything full is ten set bits")
     end
 
-    test "the key round-trips a block id and four corners" do
-      let k = CubeForge.Mesher.key_of(3, 63, 0, 17, 40)
+    test "the key round-trips a block id and four ten-bit corners" do
+      let k = CubeForge.Mesher.key_of(3, 1023, 0, 17, 640, 5)
       Test.assert_eq_int(CubeForge.Mesher.key_id(k), 3, "id")
-      Test.assert_eq_int(CubeForge.Mesher.key_c0(k), 63, "c0")
+      Test.assert_eq_int(CubeForge.Mesher.key_sp(k), 5, "species")
+      Test.assert_eq_int(CubeForge.Mesher.key_c0(k), 1023, "c0")
       Test.assert_eq_int(CubeForge.Mesher.key_c1(k), 0, "c1")
       Test.assert_eq_int(CubeForge.Mesher.key_c2(k), 17, "c2")
-      Test.assert_eq_int(CubeForge.Mesher.key_c3(k), 40, "c3")
+      Test.assert_eq_int(CubeForge.Mesher.key_c3(k), 640, "c3")
     end
 
-    test "full sky and no occlusion is full brightness" do
-      Test.assert_true(near(CubeForge.Mesher.corner_shade(CubeForge.Mesher.pack_corner(15, 3)), 1.0), "1.0")
-      Test.assert_true(near(CubeForge.Mesher.corner_shade(CubeForge.Mesher.pack_corner(0, 3)), 0.0), "dark stays dark")
-      Test.assert_true(near(CubeForge.Mesher.corner_shade(CubeForge.Mesher.pack_corner(15, 0)), 0.55), "fully occluded corner")
+    test "corner shades split sky from block light, both scaled by AO" do
+      Test.assert_true(near(CubeForge.Mesher.corner_sky(CubeForge.Mesher.pack_corner(15, 3, 0)), 1.0), "full sky, open corner")
+      Test.assert_true(near(CubeForge.Mesher.corner_sky(CubeForge.Mesher.pack_corner(0, 3, 10)), 0.0), "dark sky stays dark sky")
+      Test.assert_true(near(CubeForge.Mesher.corner_sky(CubeForge.Mesher.pack_corner(15, 0, 0)), 0.55), "fully occluded corner")
+      Test.assert_true(near(CubeForge.Mesher.corner_blk(CubeForge.Mesher.pack_corner(0, 3, 15)), 1.0), "full glow, open corner")
+      Test.assert_true(near(CubeForge.Mesher.corner_blk(CubeForge.Mesher.pack_corner(0, 0, 15)), 0.55), "full glow, closed corner")
+      Test.assert_true(near(CubeForge.Mesher.corner_blk(CubeForge.Mesher.pack_corner(15, 3, 0)), 0.0), "no glow")
     end
   end
 
@@ -286,7 +292,7 @@ mod CubeForge.Test.Light do
       -- sideways: above the slab is open sky, below it is sealed.
       let w = CubeForge.World.relight_all(slab_world(8))
       let c = CubeForge.World.chunk_at(w, 2, 2)
-      let b = CubeForge.Mesher.mesh_section_opaque(c, c, c, c, c, CubeForge.World.light(w), CubeForge.World.occupancy(w), 0, 32.0, 32.0)
+      let b = CubeForge.Mesher.mesh_section_opaque(c, c, c, c, c, CubeForge.World.light(w), CubeForge.World.block_light(w), CubeForge.World.shown(w), CubeForge.World.occupancy(w), 0, 32.0, 32.0)
       let n = CubeForge.Mesher.vertex_count(b)
       Test.assert_true(n > 0, "the slab meshed to something")
       -- face 0 is +y (the sunlit top), face 1 is -y (the sealed underside)
@@ -297,7 +303,7 @@ mod CubeForge.Test.Light do
     test "opening a shaft lights the ceiling around it" do
       let w0 = CubeForge.World.relight_all(CubeForge.World.set_block(slab_world(8), 34, 8, 34, 0))
       let c = CubeForge.World.chunk_at(w0, 2, 2)
-      let b = CubeForge.Mesher.mesh_section_opaque(c, c, c, c, c, CubeForge.World.light(w0), CubeForge.World.occupancy(w0), 0, 32.0, 32.0)
+      let b = CubeForge.Mesher.mesh_section_opaque(c, c, c, c, c, CubeForge.World.light(w0), CubeForge.World.block_light(w0), CubeForge.World.shown(w0), CubeForge.World.occupancy(w0), 0, 32.0, 32.0)
       let n = CubeForge.Mesher.vertex_count(b)
       -- the underside is no longer uniformly black: light now reaches it
       Test.assert_true(shade_of_face(b, 1.0, 0, n) >= 0.0, "underside still meshes")
@@ -390,6 +396,123 @@ mod CubeForge.Test.Light do
       -- 14, not 13: the open columns beside the lake are at 15 and spread
       -- sideways underneath it, which beats the 13 arriving down through water.
       Test.assert_eq_int(L.get(la, 40, 99, 40), 14, "lateral light under the lake beats the attenuated column")
+    end
+  end
+
+
+  describe "World block light field" do
+    test "a fresh world has a dark block-light field that reads back what is written" do
+      let w0 = air_world()
+      Test.assert_eq_int(CubeForge.World.block_light_at(w0, 40, 100, 40), 0, "dark at birth")
+      let lb = NativeArray.set_u8(L.new(), L.index(40, 100, 40), 9)
+      let w1 = CubeForge.World.set_block_light(w0, lb)
+      Test.assert_eq_int(CubeForge.World.block_light_at(w1, 40, 100, 40), 9, "written value")
+      Test.assert_eq_int(CubeForge.World.light_at(w1, 40, 100, 40), 0, "skylight untouched")
+    end
+  end
+
+
+  describe "Light.emission" do
+    test "only the glow cap emits, at level 10" do
+      Test.assert_eq_int(L.emission(C.glow_cap()), 10, "glow cap")
+      Test.assert_eq_int(L.emission(0), 0, "air")
+      Test.assert_eq_int(L.emission(3), 0, "stone")
+      Test.assert_eq_int(L.emission(C.water()), 0, "water")
+      Test.assert_eq_int(L.emission(C.oak_leaves()), 0, "leaves")
+      Test.assert_true(L.is_opaque(C.glow_cap()), "a glow cap is a solid block")
+    end
+    test "the glow cap has its own texture layer" do
+      Test.assert_eq_int(CubeForge.Texture.layers(), 87, "layer count")
+      Test.assert_true(near(CubeForge.Texture.layer_for(C.glow_cap()), 20.0), "layer 20")
+    end
+  end
+
+
+  describe "Light.flood_block" do
+    test "a glow cap in the open lights a sphere that falls off one per step" do
+      let w = CubeForge.World.set_block(air_world(), 40, 100, 40, C.glow_cap())
+      let lb = L.flood_block(w)
+      Test.assert_eq_int(L.get(lb, 40, 100, 40), 10, "the emitter itself")
+      Test.assert_eq_int(L.get(lb, 41, 100, 40), 9, "one step")
+      Test.assert_eq_int(L.get(lb, 40, 105, 40), 5, "five steps up")
+      Test.assert_eq_int(L.get(lb, 49, 100, 40), 1, "nine steps, the last light")
+      Test.assert_eq_int(L.get(lb, 50, 100, 40), 0, "ten steps, dark")
+      Test.assert_eq_int(L.get(lb, 43, 100, 43), 4, "manhattan six")
+    end
+
+    test "block light does not pass through stone but rounds a corner" do
+      let w0 = slab_world(100)
+      let w1 = CubeForge.World.set_block(w0, 40, 100, 40, 0)
+      let w2 = CubeForge.World.set_block(w1, 40, 101, 40, C.glow_cap())
+      let lb = L.flood_block(w2)
+      Test.assert_eq_int(L.get(lb, 40, 99, 40), 8, "down the shaft, two steps")
+      Test.assert_eq_int(L.get(lb, 41, 99, 40), 7, "along the gallery")
+      Test.assert_eq_int(L.get(lb, 41, 100, 40), 0, "inside the slab")
+    end
+
+    test "a world with no emitters is dark everywhere" do
+      let w = CubeForge.World.relight_all(CubeForge.World.generate(8, 1, 1))
+      Test.assert_eq_int(first_difference(CubeForge.World.block_light(w), L.new()), -1, "all zero")
+    end
+  end
+
+
+  describe "Light.relight_block_marked" do
+    test "placing a glow cap matches a full re-flood and marks its sections" do
+      let w0 = CubeForge.World.relight_all(CubeForge.World.generate(8, 1, 1))
+      let w1 = CubeForge.World.set_block(w0, 40, 90, 40, C.glow_cap())
+      let r = L.relight_block_marked(CubeForge.World.block_light(w1), w1, 40, 90, 40)
+      let full = L.flood_block(w1)
+      Test.assert_eq_int(first_difference(L.relit_field(r), full), -1, "incremental equals full re-flood")
+      Test.assert_eq_int(unmarked_go(CubeForge.World.block_light(w0), full, L.relit_marks(r), 0), -1, "every changed section is marked")
+      Test.assert_true(marked_count(L.relit_marks(r), 0, 0) > 0, "something was marked")
+    end
+
+    test "removing a glow cap darkens what it lit" do
+      let w0 = CubeForge.World.relight_all(CubeForge.World.set_block(air_world(), 40, 100, 40, C.glow_cap()))
+      Test.assert_eq_int(CubeForge.World.block_light_at(w0, 44, 100, 40), 6, "lit before removal")
+      let w1 = CubeForge.World.set_block(w0, 40, 100, 40, 0)
+      let inc = L.relit_field(L.relight_block_marked(CubeForge.World.block_light(w1), w1, 40, 100, 40))
+      Test.assert_eq_int(first_difference(inc, L.flood_block(w1)), -1, "incremental equals full re-flood")
+      Test.assert_eq_int(L.get(inc, 44, 100, 40), 0, "dark after removal")
+    end
+
+    test "walling off an emitter with stone matches a full re-flood" do
+      let w0 = CubeForge.World.relight_all(CubeForge.World.set_block(air_world(), 40, 100, 40, C.glow_cap()))
+      let w1 = CubeForge.World.set_block(w0, 42, 100, 40, 3)
+      let inc = L.relit_field(L.relight_block_marked(CubeForge.World.block_light(w1), w1, 42, 100, 40))
+      Test.assert_eq_int(first_difference(inc, L.flood_block(w1)), -1, "incremental equals full re-flood")
+      Test.assert_eq_int(L.get(inc, 43, 100, 40), 5, "behind the wall, light arrives around it two steps longer")
+    end
+
+    test "an edit at the world edge matches a full re-flood" do
+      let w0 = CubeForge.World.relight_all(air_world())
+      let w1 = CubeForge.World.set_block(w0, 0, 80, 127, C.glow_cap())
+      let inc = L.relit_field(L.relight_block_marked(CubeForge.World.block_light(w1), w1, 0, 80, 127))
+      Test.assert_eq_int(first_difference(inc, L.flood_block(w1)), -1, "incremental equals full re-flood")
+    end
+
+    test "an emitter just outside the relight box still feeds it" do
+      -- Two caps 20 apart: editing beside one must not lose the other's light.
+      let wa = CubeForge.World.set_block(air_world(), 40, 100, 40, C.glow_cap())
+      let w0 = CubeForge.World.relight_all(CubeForge.World.set_block(wa, 60, 100, 40, C.glow_cap()))
+      let w1 = CubeForge.World.set_block(w0, 41, 100, 40, 3)
+      let inc = L.relit_field(L.relight_block_marked(CubeForge.World.block_light(w1), w1, 41, 100, 40))
+      Test.assert_eq_int(first_difference(inc, L.flood_block(w1)), -1, "incremental equals full re-flood")
+      Test.assert_eq_int(L.get(inc, 55, 100, 40), 5, "the far cap still lights its own ground")
+    end
+  end
+
+  describe "World.relight_marked" do
+    test "repairs both fields and unions the marks" do
+      let w0 = CubeForge.World.relight_all(CubeForge.World.generate(8, 1, 1))
+      let w1 = CubeForge.World.set_block(w0, 40, 90, 40, C.glow_cap())
+      let r = CubeForge.World.relight_marked(w1, 40, 90, 40)
+      let w2 = CubeForge.World.relit_world(r)
+      Test.assert_eq_int(first_difference(CubeForge.World.light(w2), L.flood(w1)), -1, "skylight equals full re-flood")
+      Test.assert_eq_int(first_difference(CubeForge.World.block_light(w2), L.flood_block(w1)), -1, "block light equals full re-flood")
+      Test.assert_eq_int(unmarked_go(CubeForge.World.block_light(w0), CubeForge.World.block_light(w2), CubeForge.World.relit_marks(r), 0), -1, "block-light changes are marked")
+      Test.assert_eq_int(unmarked_go(CubeForge.World.light(w0), CubeForge.World.light(w2), CubeForge.World.relit_marks(r), 0), -1, "skylight changes are marked")
     end
   end
 

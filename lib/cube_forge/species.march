@@ -1,0 +1,109 @@
+-- Species — the fungus table. One row per species: a temperature band, a
+-- moisture band, a fruit tier, a glow level, a spore yield and a colour.
+-- Adding a species is adding a row here (and, in phase 3, seven textures).
+--
+-- Bands overlap at their edges on purpose, so transitional ground is contested:
+-- the edges line up with Biome.classify's thresholds (cold < 0.33, hot >= 0.66,
+-- damp >= 0.5) and reach past them by a little.
+mod CubeForge.Species do
+
+  fn count() : Int do 6 end
+
+  doc "Species ids are 1-based; 0 is no fungus."
+  fn name(id : Int) : String do
+    if id == 1 do "Frostcap" else if id == 2 do "Pinewart" else if id == 3 do "Meadowbell"
+    else if id == 4 do "Lanterncap" else if id == 5 do "Marshlight" else if id == 6 do "Sunshelf"
+    else "none" end end end end end end
+  end
+
+  -- Temperature band.
+  fn t_lo(id : Int) : Float do
+    if id == 1 do 0.0 else if id == 2 do 0.0 else if id == 3 do 0.30
+    else if id == 4 do 0.30 else if id == 5 do 0.60 else if id == 6 do 0.62 else 0.0 end end end end end end
+  end
+  fn t_hi(id : Int) : Float do
+    if id == 1 do 0.36 else if id == 2 do 0.42 else if id == 3 do 0.68
+    else if id == 4 do 0.70 else if id == 5 do 1.0 else if id == 6 do 1.0 else 0.0 end end end end end end
+  end
+  -- Moisture band.
+  fn m_lo(id : Int) : Float do
+    if id == 1 do 0.0 else if id == 2 do 0.42 else if id == 3 do 0.0
+    else if id == 4 do 0.44 else if id == 5 do 0.44 else if id == 6 do 0.0 else 0.0 end end end end end end
+  end
+  fn m_hi(id : Int) : Float do
+    if id == 1 do 0.6 else if id == 2 do 1.0 else if id == 3 do 0.56
+    else if id == 4 do 1.0 else if id == 5 do 1.0 else if id == 6 do 0.56 else 0.0 end end end end end end
+  end
+
+  doc "Fruit tier: 0 small, 1 medium, 2 giant."
+  fn tier(id : Int) : Int do
+    if id == 1 do 0 else if id == 2 do 1 else if id == 3 do 0
+    else if id == 4 do 1 else if id == 5 do 2 else if id == 6 do 2 else 0 end end end end end end
+  end
+  doc "Glow: 0 none, 1 dim, 2 bright."
+  fn glow(id : Int) : Int do
+    if id == 1 do 1 else if id == 4 do 2 else if id == 5 do 2 else 0 end end end
+  end
+  doc "Spores a fruit body of this species yields: 1 small, 3 medium, 8 giant."
+  fn spores(id : Int) : Int do
+    let t = tier(id)
+    if t == 0 do 1 else if t == 1 do 3 else 8 end end
+  end
+
+  -- Colour, for the map overlay and the phase 3 textures.
+  fn colour_r(id : Int) : Int do
+    if id == 1 do 200 else if id == 2 do 120 else if id == 3 do 230 else if id == 4 do 255 else if id == 5 do 80 else if id == 6 do 240 else 0 end end end end end end
+  end
+  fn colour_g(id : Int) : Int do
+    if id == 1 do 230 else if id == 2 do 90 else if id == 3 do 200 else if id == 4 do 200 else if id == 5 do 220 else if id == 6 do 140 else 0 end end end end end end
+  end
+  fn colour_b(id : Int) : Int do
+    if id == 1 do 255 else if id == 2 do 60 else if id == 3 do 90 else if id == 4 do 80 else if id == 5 do 200 else if id == 6 do 60 else 0 end end end end end end
+  end
+
+  doc "Width of the linear falloff inside each band edge."
+  fn edge() : Float do 0.06 end
+
+  doc "Fitness below which a species cannot hold a column."
+  fn viable() : Float do 0.2 end
+
+  pfn clamp01(v : Float) : Float do if v < 0.0 do 0.0 else if v > 1.0 do 1.0 else v end end end
+
+  -- 1 well inside [lo, hi], 0 outside, linear over edge() at each end. A band
+  -- that starts at 0 or ends at 1 has no falloff at that end: the axis itself
+  -- stops there.
+  pfn axis_fit(v : Float, lo : Float, hi : Float) : Float do
+    let a = if v < lo do 0.0 else if v > hi do 0.0 else 1.0 end end
+    if a <= 0.0 do 0.0
+    else
+      let up = if lo <= 0.0 do 1.0 else clamp01((v -. lo) /. edge()) end
+      let down = if hi >= 1.0 do 1.0 else clamp01((hi -. v) /. edge()) end
+      if up < down do up else down end
+    end
+  end
+
+  doc "How well a species fits a column's eased climate, 0..1: the product of its two axis fits."
+  fn fitness(id : Int, temp : Float, moist : Float) : Float do
+    if id <= 0 || id > count() do 0.0
+    else axis_fit(temp, t_lo(id), t_hi(id)) *. axis_fit(moist, m_lo(id), m_hi(id)) end
+  end
+
+  pfn best_go(temp : Float, moist : Float, id : Int, best : Int, bf : Float) : Int do
+    if id > count() do best
+    else
+      let f = fitness(id, temp, moist)
+      if f > bf do best_go(temp, moist, id + 1, id, f) else best_go(temp, moist, id + 1, best, bf) end
+    end
+  end
+  doc "The fittest species for a climate, or 0 when none reaches viable()."
+  fn best_for(temp : Float, moist : Float) : Int do best_go(temp, moist, 1, 0, viable()) end
+
+
+  -- ── Spores: the item that plants a species ──────────────────────────────
+  doc "Item id of a species' spores: 200 + species. Items share the block-id space; nothing else lives above 199."
+  fn spore_item(sp : Int) : Int do 200 + sp end
+  fn is_spore(id : Int) : Bool do id >= 201 && id <= 200 + count() end
+  doc "The species a spore item plants, or 0 when [id] is not a spore."
+  fn species_of_item(id : Int) : Int do if is_spore(id) do id - 200 else 0 end end
+
+end

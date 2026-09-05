@@ -1,0 +1,396 @@
+-- Myc — the mycelium field, one entry per world column beside the biome field.
+--
+-- species: 0 for none, else a Species id.   vigour: 0..1, how established.
+-- reach: hops this column may still spread.  hold: consecutive ticks the same
+-- claimant has wanted this column.           claimant: that claimant's species.
+--
+-- Recomputed whole every tick, like the biome field, and for the same reason.
+-- The tick is PULL-based: each column reads its eight neighbours from the
+-- previous tick's arrays and writes only its own entry into fresh arrays, so
+-- no array is ever read and then written in one pass (GAPS G21/G63) and the
+-- Scene's shared reference never forces a copy (GAPS G68).
+mod CubeForge.Myc do
+
+  alias CubeForge.Species as S
+  alias CubeForge.Noise as N
+
+  type Field = Field(NativeU8Arr, NativeFloatArr, NativeU8Arr, NativeU8Arr, NativeU8Arr)
+
+  -- ── Tuning ────────────────────────────────────────────────────────────────
+  doc "Columns a planting can spread along an axis."
+  fn plant_radius() : Int do 8 end
+  doc "Reach a planting starts with, in half-hops: a straight hop costs 2 and a diagonal 3, so the patch is an octagon of radius plant_radius()."
+  fn plant_reach() : Int do 2 * plant_radius() end
+  doc "Vigour a newly claimed or planted column starts at."
+  fn seed_vigour() : Float do 0.25 end
+  doc "A column spreads once its vigour reaches this."
+  fn spread_vigour() : Float do 0.6 end
+  doc "Minimum fitness to claim an empty column."
+  fn claim_floor() : Float do 0.2 end
+  doc "A challenger needs this much more fitness than the incumbent to contest."
+  fn contest_margin() : Float do 0.15 end
+  doc "Consecutive ticks a claim must persist before the column flips."
+  fn hold_ticks() : Int do 30 end
+  doc "Vigour moved per tick toward its target: the full range in ~540 ticks."
+  fn default_rate() : Float do 1.0 /. 540.0 end
+  doc "How much faster a contested incumbent loses vigour than it would ease."
+  fn contest_factor() : Float do 3.0 end
+
+  -- ── Build, plant, read ────────────────────────────────────────────────────
+  doc "An empty field of n x n columns."
+  fn build(n : Int) : Field do
+    Field(NativeArray.make_u8(n * n, 0), NativeArray.make_float(n * n, 0.0), NativeArray.make_u8(n * n, 0), NativeArray.make_u8(n * n, 0), NativeArray.make_u8(n * n, 0))
+  end
+
+  pfn copy_u8_go(src : NativeU8Arr, dst : NativeU8Arr, i : Int, n : Int) : NativeU8Arr do
+    if i >= n do dst else copy_u8_go(src, NativeArray.set_u8(dst, i, NativeArray.get_u8(src, i)), i + 1, n) end
+  end
+  pfn copy_u8(a : NativeU8Arr, n : Int) : NativeU8Arr do copy_u8_go(a, NativeArray.make_u8(n, 0), 0, n) end
+  pfn copy_f_go(src : NativeFloatArr, dst : NativeFloatArr, i : Int, n : Int) : NativeFloatArr do
+    if i >= n do dst else copy_f_go(src, NativeArray.set_float(dst, i, NativeArray.get_float(src, i)), i + 1, n) end
+  end
+  pfn copy_f(a : NativeFloatArr, n : Int) : NativeFloatArr do copy_f_go(a, NativeArray.make_float(n, 0.0), 0, n) end
+
+  doc "Plant species [sp] at column (x, z): seed vigour, full reach, claim cleared. Copies the arrays (the Scene shares them, GAPS G68); plantings are rare."
+  fn plant(f : Field, n : Int, x : Int, z : Int, sp : Int) : Field do
+    if x < 0 || z < 0 || x >= n || z >= n do f
+    else
+      match f do
+        Field(sps, vg, rc, hd, cl) ->
+          let i = x + n * z
+          Field(NativeArray.set_u8(copy_u8(sps, n * n), i, sp),
+                NativeArray.set_float(copy_f(vg, n * n), i, seed_vigour()),
+                NativeArray.set_u8(copy_u8(rc, n * n), i, plant_reach()),
+                NativeArray.set_u8(copy_u8(hd, n * n), i, 0),
+                NativeArray.set_u8(copy_u8(cl, n * n), i, 0))
+      end
+    end
+  end
+
+  fn species_of(f : Field, n : Int, x : Int, z : Int) : Int do
+    match f do Field(sps, _, _, _, _) -> NativeArray.get_u8(sps, x + n * z) end
+  end
+  fn vigour_of(f : Field, n : Int, x : Int, z : Int) : Float do
+    match f do Field(_, vg, _, _, _) -> NativeArray.get_float(vg, x + n * z) end
+  end
+  fn reach_of(f : Field, n : Int, x : Int, z : Int) : Int do
+    match f do Field(_, _, rc, _, _) -> NativeArray.get_u8(rc, x + n * z) end
+  end
+  fn field_species(f : Field) : NativeU8Arr do match f do Field(sps, _, _, _, _) -> sps end end
+  fn field_vigour(f : Field) : NativeFloatArr do match f do Field(_, vg, _, _, _) -> vg end end
+
+  pfn u8_go(vg : NativeFloatArr, out : NativeU8Arr, i : Int, n : Int) : NativeU8Arr do
+    if i >= n do out
+    else u8_go(vg, NativeArray.set_u8(out, i, float_to_int(NativeArray.get_float(vg, i) *. 255.0 +. 0.5)), i + 1, n) end
+  end
+  doc "Vigour as 0..255 bytes, a fresh array for the map upload."
+  fn vigour_u8(f : Field, n : Int) : NativeU8Arr do
+    match f do Field(_, vg, _, _, _) -> u8_go(vg, NativeArray.make_u8(n * n, 0), 0, n * n) end
+  end
+
+  pfn count_go(sps : NativeU8Arr, sp : Int, i : Int, n : Int, acc : Int) : Int do
+    if i >= n do acc
+    else count_go(sps, sp, i + 1, n, if NativeArray.get_u8(sps, i) == sp do acc + 1 else acc end) end
+  end
+  doc "Columns held by species [sp]."
+  fn count_species(f : Field, n : Int, sp : Int) : Int do
+    match f do Field(sps, _, _, _, _) -> count_go(sps, sp, 0, n * n, 0) end
+  end
+
+  pfn hash_u8(a : NativeU8Arr, n : Int, i : Int, h : Int) : Int do
+    if i >= n do h
+    else hash_u8(a, n, i + 1, (h * 131 + NativeArray.get_u8(a, i)) % 1073741789) end
+  end
+  doc "A hash of species and reach, the discrete state: an oracle for 'the field evolved the same way'."
+  fn state_hash(f : Field, n : Int) : Int do
+    match f do Field(sps, _, rc, _, _) -> hash_u8(rc, n * n, 0, hash_u8(sps, n * n, 0, 11)) end
+  end
+
+
+  -- ── The tick ──────────────────────────────────────────────────────────────
+
+  pfn ease(cur : Float, target : Float, rate : Float) : Float do
+    let d = target -. cur
+    if d > rate do cur +. rate else if d < 0.0 -. rate do cur -. rate else target end end
+  end
+
+  -- dx, dz for neighbour k of 8: the 3x3 ring minus the centre, row by row.
+  pfn ndx(k : Int) : Int do
+    let kk = if k >= 4 do k + 1 else k end
+    kk % 3 - 1
+  end
+  pfn ndz(k : Int) : Int do
+    let kk = if k >= 4 do k + 1 else k end
+    kk / 3 - 1
+  end
+
+  -- The claimant search returns three numbers packed in one Int so the loop
+  -- threads a single accumulator: species * 65536 + reach * 256 + round(fitness * 255).
+  pfn pack_claim(sp : Int, rc : Int, fit : Float) : Int do sp * 65536 + rc * 256 + float_to_int(fit *. 255.0 +. 0.5) end
+  pfn claim_sp(c : Int) : Int do c / 65536 end
+  pfn claim_rc(c : Int) : Int do (c / 256) % 256 end
+  pfn claim_fit(c : Int) : Float do int_to_float(c % 256) /. 255.0 end
+
+  -- Best qualifying neighbour of column (x, z). [own] is the column's species and
+  -- [ownfit] its fitness; a neighbour of the same species never claims.
+  pfn claimant_go(sps : NativeU8Arr, vg : NativeFloatArr, rc : NativeU8Arr, n : Int, x : Int, z : Int,
+                  t : Float, m : Float, own : Int, ownfit : Float, k : Int, best : Int) : Int do
+    if k >= 8 do best
+    else
+      let nx = x + ndx(k)
+      let nz = z + ndz(k)
+      if nx < 0 || nz < 0 || nx >= n || nz >= n do claimant_go(sps, vg, rc, n, x, z, t, m, own, ownfit, k + 1, best)
+      else
+        let i = nx + n * nz
+        let c = NativeArray.get_u8(sps, i)
+        -- Reach is in half-hops: a straight hop costs 2 and a diagonal 3 (about
+        -- sqrt 2), so a patch grows as an octagon rather than the square that
+        -- Chebyshev spread gives or the diamond that Manhattan gives.
+        let hop = if ndx(k) != 0 do (if ndz(k) != 0 do 3 else 2 end) else 2 end
+        let r = NativeArray.get_u8(rc, i) - hop + 1
+        let strong = if c == 0 do false else if r <= 0 do false else NativeArray.get_float(vg, i) >= spread_vigour() end end
+        if !strong do claimant_go(sps, vg, rc, n, x, z, t, m, own, ownfit, k + 1, best)
+        else if c == own do claimant_go(sps, vg, rc, n, x, z, t, m, own, ownfit, k + 1, best)
+        else
+          let fc = S.fitness(c, t, m)
+          let ok = if own == 0 do fc >= claim_floor() else fc >= ownfit +. contest_margin() end
+          if !ok do claimant_go(sps, vg, rc, n, x, z, t, m, own, ownfit, k + 1, best)
+          else
+            -- better fitness wins; the same species at equal fitness keeps the larger reach
+            let take = if best == 0 do true
+                       else if fc > claim_fit(best) +. 0.002 do true
+                       else if claim_sp(best) == c do r - 1 > claim_rc(best)
+                       else false end end end
+            claimant_go(sps, vg, rc, n, x, z, t, m, own, ownfit, k + 1, if take do pack_claim(c, r - 1, fc) else best end)
+          end
+        end end
+      end
+    end
+  end
+
+  -- One column. Reads the old arrays, writes index i of the new ones.
+  pfn tick_col(sps : NativeU8Arr, vg : NativeFloatArr, rc : NativeU8Arr, hd : NativeU8Arr, cl : NativeU8Arr,
+               ta : NativeFloatArr, ma : NativeFloatArr, n : Int, rate : Float, i : Int,
+               nsps : NativeU8Arr, nvg : NativeFloatArr, nrc : NativeU8Arr, nhd : NativeU8Arr, ncl : NativeU8Arr) : Field do
+    let x = i % n
+    let z = i / n
+    let sp = NativeArray.get_u8(sps, i)
+    let t = NativeArray.get_float(ta, i)
+    let m = NativeArray.get_float(ma, i)
+    let fit = S.fitness(sp, t, m)
+    let claim = claimant_go(sps, vg, rc, n, x, z, t, m, sp, fit, 0, 0)
+    let c = claim_sp(claim)
+    let hd0 = NativeArray.get_u8(hd, i)
+    let hd1 = if c == 0 do 0 else if c == NativeArray.get_u8(cl, i) do hd0 + 1 else 1 end end
+    let hd2 = if hd1 > 255 do 255 else hd1 end
+    let matured = if c == 0 do false else hd2 >= hold_ticks() end
+    if sp == 0 do
+      if matured do
+        Field(NativeArray.set_u8(nsps, i, c), NativeArray.set_float(nvg, i, seed_vigour()), NativeArray.set_u8(nrc, i, claim_rc(claim)), NativeArray.set_u8(nhd, i, 0), NativeArray.set_u8(ncl, i, 0))
+      else
+        Field(nsps, nvg, nrc, NativeArray.set_u8(nhd, i, hd2), NativeArray.set_u8(ncl, i, c))
+      end
+    else
+      let v0 = NativeArray.get_float(vg, i)
+      let v1 = if c != 0 do v0 -. contest_factor() *. rate else ease(v0, fit, rate) end
+      let dies = if v1 <= 0.0 do (if c != 0 do true else fit < S.viable() end) else false end
+      if dies do
+        if matured do
+          Field(NativeArray.set_u8(nsps, i, c), NativeArray.set_float(nvg, i, seed_vigour()), NativeArray.set_u8(nrc, i, claim_rc(claim)), NativeArray.set_u8(nhd, i, 0), NativeArray.set_u8(ncl, i, 0))
+        else
+          Field(NativeArray.set_u8(nsps, i, 0), NativeArray.set_float(nvg, i, 0.0), NativeArray.set_u8(nrc, i, 0), NativeArray.set_u8(nhd, i, hd2), NativeArray.set_u8(ncl, i, c))
+        end
+      else
+        let v2 = if v1 < 0.0 do 0.0 else v1 end
+        Field(NativeArray.set_u8(nsps, i, sp), NativeArray.set_float(nvg, i, v2), NativeArray.set_u8(nrc, i, NativeArray.get_u8(rc, i)), NativeArray.set_u8(nhd, i, hd2), NativeArray.set_u8(ncl, i, c))
+      end
+    end
+  end
+
+  -- Anything in the 3x3 neighbourhood of (x, z)? A cheap pre-test so an empty
+  -- world's tick is 16k byte reads and no fitness arithmetic. A skipped column
+  -- keeps the fresh arrays' zeros, which is exactly its new state.
+  pfn any_near(sps : NativeU8Arr, n : Int, x : Int, z : Int, k : Int) : Bool do
+    if k >= 9 do false
+    else
+      let nx = x + k % 3 - 1
+      let nz = z + k / 3 - 1
+      if nx < 0 || nz < 0 || nx >= n || nz >= n do any_near(sps, n, x, z, k + 1)
+      else if NativeArray.get_u8(sps, nx + n * nz) != 0 do true
+      else any_near(sps, n, x, z, k + 1) end end
+    end
+  end
+
+  -- Which rows hold anything: one byte per row, from one pass over the field.
+  -- Most of the world is empty most of the time, and a row with nothing in it
+  -- or beside it can skip the 3x3 test for all n of its columns: the tick on an
+  -- empty field is then 16k reads and nothing else.
+  pfn rows_go(sps : NativeU8Arr, n : Int, i : Int, rows : NativeU8Arr) : NativeU8Arr do
+    if i >= n * n do rows
+    else if NativeArray.get_u8(sps, i) != 0 do rows_go(sps, n, i + 1, NativeArray.set_u8(rows, i / n, 1))
+    else rows_go(sps, n, i + 1, rows) end end
+  end
+  pfn row_band(rows : NativeU8Arr, n : Int, z : Int) : Bool do
+    let a = if z > 0 do NativeArray.get_u8(rows, z - 1) != 0 else false end
+    let b = NativeArray.get_u8(rows, z) != 0
+    let c = if z < n - 1 do NativeArray.get_u8(rows, z + 1) != 0 else false end
+    a || b || c
+  end
+
+  pfn tick_go(sps : NativeU8Arr, vg : NativeFloatArr, rc : NativeU8Arr, hd : NativeU8Arr, cl : NativeU8Arr,
+              ta : NativeFloatArr, ma : NativeFloatArr, n : Int, rate : Float, rows : NativeU8Arr, i : Int,
+              nsps : NativeU8Arr, nvg : NativeFloatArr, nrc : NativeU8Arr, nhd : NativeU8Arr, ncl : NativeU8Arr) : Field do
+    if i >= n * n do Field(nsps, nvg, nrc, nhd, ncl)
+    else if !row_band(rows, n, i / n) do tick_go(sps, vg, rc, hd, cl, ta, ma, n, rate, rows, i + n, nsps, nvg, nrc, nhd, ncl)
+    else if !any_near(sps, n, i % n, i / n, 0) do tick_go(sps, vg, rc, hd, cl, ta, ma, n, rate, rows, i + 1, nsps, nvg, nrc, nhd, ncl)
+    else
+      match tick_col(sps, vg, rc, hd, cl, ta, ma, n, rate, i, nsps, nvg, nrc, nhd, ncl) do
+        Field(a, b, c, d, e) -> tick_go(sps, vg, rc, hd, cl, ta, ma, n, rate, rows, i + 1, a, b, c, d, e)
+      end
+    end end end
+  end
+
+  doc """
+  One tick against the eased climate arrays [ta] and [ma] (one entry per column,
+  the biome field's `temps` and `moists`). Every column pulls from its eight
+  neighbours in the previous state and writes its own entry into fresh arrays.
+  """
+  fn tick(f : Field, n : Int, ta : NativeFloatArr, ma : NativeFloatArr, rate : Float) : Field do
+    match f do
+      Field(sps, vg, rc, hd, cl) ->
+        tick_go(sps, vg, rc, hd, cl, ta, ma, n, rate, rows_go(sps, n, 0, NativeArray.make_u8(n, 0)), 0,
+                NativeArray.make_u8(n * n, 0), NativeArray.make_float(n * n, 0.0), NativeArray.make_u8(n * n, 0), NativeArray.make_u8(n * n, 0), NativeArray.make_u8(n * n, 0))
+    end
+  end
+
+
+  -- ── Migration: what the surface should show ──────────────────────────────
+  doc "Vigour at and above which a column's surface shows its species."
+  fn show_vigour() : Float do 0.15 end
+  doc "Vigour at and above which a column may fruit."
+  fn fruit_vigour() : Float do 0.8 end
+
+  doc "A felled body reseeds its column: reach back to plant_reach(), so a mature patch keeps growing without replanting. An empty column is left alone."
+  fn reseed(f : Field, n : Int, x : Int, z : Int) : Field do
+    if x < 0 || z < 0 || x >= n || z >= n do f
+    else
+      match f do
+        Field(sps, vg, rc, hd, cl) ->
+          let i = x + n * z
+          if NativeArray.get_u8(sps, i) == 0 do f
+          else Field(sps, vg, NativeArray.set_u8(copy_u8(rc, n * n), i, plant_reach()), hd, cl) end
+      end
+    end
+  end
+
+  doc "The species column [i] should display: its species once vigour reaches show_vigour(), else 0."
+  fn wanted(f : Field, n : Int, i : Int) : Int do
+    match f do
+      Field(sps, vg, _, _, _) ->
+        let sp = NativeArray.get_u8(sps, i)
+        if sp == 0 do 0 else if NativeArray.get_float(vg, i) >= show_vigour() do sp else 0 end end
+    end
+  end
+
+  pfn migrations_go(sps : NativeU8Arr, vg : NativeFloatArr, shown : NativeU8Arr, n : Int, i : Int, left : Int, budget : Int, acc : List(Int)) : List(Int) do
+    if left <= 0 || budget <= 0 do acc
+    else
+      let ci = i % (n * n)
+      let sp = NativeArray.get_u8(sps, ci)
+      let want = if sp == 0 do 0 else if NativeArray.get_float(vg, ci) >= show_vigour() do sp else 0 end end
+      if want != NativeArray.get_u8(shown, ci) do migrations_go(sps, vg, shown, n, i + 1, left - 1, budget - 1, Cons(ci, acc))
+      else migrations_go(sps, vg, shown, n, i + 1, left - 1, budget, acc) end
+    end
+  end
+
+  doc "Column indices whose surface should change: wanted species differs from [shown]. Scans [scan] columns from where tick [tick] leaves off (a stateless cursor), returns at most [budget]. Destructures the field once (GAPS G68)."
+  fn migrations(f : Field, n : Int, shown : NativeU8Arr, tick : Int, scan : Int, budget : Int) : List(Int) do
+    match f do
+      Field(sps, vg, _, _, _) -> migrations_go(sps, vg, shown, n, (tick * scan) % (n * n), scan, budget, Nil)
+    end
+  end
+
+
+  -- ── Mature patches, wild fungus, spores ────────────────────────────────
+  -- Octagonal distance in half-hops: straight steps cost 2, diagonal 3, the
+  -- same metric the spread uses, so a patch written here is exactly the one
+  -- a planting would have grown into.
+  pfn oct_cost(dx : Int, dz : Int) : Int do
+    let ax = if dx < 0 do 0 - dx else dx end
+    let az = if dz < 0 do 0 - dz else dz end
+    let hi = if ax > az do ax else az end
+    let lo = if ax > az do az else ax end
+    2 * hi + lo
+  end
+
+  pfn patch_go(sps : NativeU8Arr, vg : NativeFloatArr, rc : NativeU8Arr, n : Int, x : Int, z : Int, sp : Int, r : Int, i : Int) : Field do
+    let span = 2 * r + 1
+    if i >= span * span do Field(sps, vg, rc, NativeArray.make_u8(0, 0), NativeArray.make_u8(0, 0))
+    else
+      let dx = i % span - r
+      let dz = i / span - r
+      let cx = x + dx
+      let cz = z + dz
+      let cost = oct_cost(dx, dz)
+      if cx < 0 || cz < 0 || cx >= n || cz >= n || cost > plant_reach() do patch_go(sps, vg, rc, n, x, z, sp, r, i + 1)
+      else
+        let j = cx + n * cz
+        patch_go(NativeArray.set_u8(sps, j, sp), NativeArray.set_float(vg, j, 1.0), NativeArray.set_u8(rc, j, plant_reach() - cost), n, x, z, sp, r, i + 1)
+      end
+    end
+  end
+
+  doc "A mature patch of [sp] centred on (x, z): the octagon a planting grows into, at full vigour, reach falling with distance. Copies the arrays once."
+  fn plant_patch(f : Field, n : Int, x : Int, z : Int, sp : Int) : Field do
+    match f do
+      Field(sps, vg, rc, hd, cl) ->
+        match patch_go(copy_u8(sps, n * n), copy_f(vg, n * n), copy_u8(rc, n * n), n, x, z, sp, plant_radius(), 0) do
+          Field(s1, v1, r1, _, _) -> Field(s1, v1, r1, hd, cl)
+        end
+    end
+  end
+
+  doc "Fraction of 16x16 cells that hold a wild patch."
+  fn wild_density() : Float do 0.12 end
+  fn wild_cell() : Int do 16 end
+
+  pfn wild_go(f : Field, n : Int, ta : NativeFloatArr, ma : NativeFloatArr, seed : Int, c : Int, cells : Int) : Field do
+    if c >= cells * cells do f
+    else
+      let cx = c % cells
+      let cz = c / cells
+      if N.hash2(cx * 31, cz * 17, seed + 9001) >= wild_density() do wild_go(f, n, ta, ma, seed, c + 1, cells)
+      else
+        let x = cx * wild_cell() + wild_cell() / 2
+        let z = cz * wild_cell() + wild_cell() / 2
+        let i = x + n * z
+        let sp = S.best_for(NativeArray.get_float(ta, i), NativeArray.get_float(ma, i))
+        if sp == 0 do wild_go(f, n, ta, ma, seed, c + 1, cells)
+        else wild_go(plant_patch(f, n, x, z, sp), n, ta, ma, seed, c + 1, cells) end
+      end
+    end
+  end
+
+  doc "Seed the world's wild fungus: one mature patch of the fittest species per 16x16 cell the hash picks, against the climate arrays. Seeded, so a world's wild fungus is stable across runs."
+  fn wild(f : Field, n : Int, ta : NativeFloatArr, ma : NativeFloatArr, seed : Int) : Field do
+    wild_go(f, n, ta, ma, seed, 0, n / wild_cell())
+  end
+
+  doc "Whether digging the mycelium block at (x, y, z) yields a spore: about one in four, by a position hash so it cannot be farmed by re-placing."
+  fn dig_spore(x : Int, y : Int, z : Int, seed : Int) : Bool do
+    N.hash2(x * 3 + y, z * 5 + y, seed + 77) < 0.25
+  end
+
+  pfn pct(v : Float) : String do int_to_string(float_to_int(v *. 100.0 +. 0.5)) ++ "%" end
+  doc "One line for the HUD: what the column holds, or what would grow there."
+  fn readout(f : Field, n : Int, x : Int, z : Int, temp : Float, moist : Float) : String do
+    let sp = species_of(f, n, x, z)
+    if sp != 0 do S.name(sp) ++ " " ++ pct(vigour_of(f, n, x, z))
+    else
+      let best = S.best_for(temp, moist)
+      if best == 0 do "bare: nothing grows here"
+      else "bare: " ++ S.name(best) ++ " " ++ pct(S.fitness(best, temp, moist)) ++ " would grow" end
+    end
+  end
+
+end

@@ -460,6 +460,14 @@ mod CubeForge.Biome do
   fn temp_of(f : Field, wx : Int, wz : Int) : Float do
     match f do Field(_, _, ta, _, _, _, _, _, _) -> NativeArray.get_float(ta, wx + 128 * wz) end
   end
+  doc "Eased moisture 0..1 of one column."
+  fn moist_of(f : Field, wx : Int, wz : Int) : Float do
+    match f do Field(_, _, _, ma, _, _, _, _, _) -> NativeArray.get_float(ma, wx + 128 * wz) end
+  end
+  doc "The eased temperature array, one entry per column: the climate the mycelium field reads."
+  fn temps(f : Field) : NativeFloatArr do match f do Field(_, _, ta, _, _, _, _, _, _) -> ta end end
+  doc "The eased moisture array, one entry per column."
+  fn moists(f : Field) : NativeFloatArr do match f do Field(_, _, _, ma, _, _, _, _, _) -> ma end end
 
   doc "How much of a storm actually falls here, as a multiplier on the particle count. Deserts stay dry under the same storm that soaks a wetland; the sea and the mountains sit in between."
   fn precip_scale(id : Int) : Float do

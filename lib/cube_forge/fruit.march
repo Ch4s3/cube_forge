@@ -1,0 +1,195 @@
+-- Fruit — mushroom bodies on mature mycelium. Three tiers of cube structure,
+-- each a pure function of (species, its canonical column, the seed), placed on
+-- a cell grid per tier so bodies are spaced and a column is a candidate at
+-- most once. The same shape function stamps a body and fells it, so what
+-- grows is exactly what goes.
+mod CubeForge.Fruit do
+
+  alias CubeForge.Chunk as C
+  alias CubeForge.World as W
+  alias CubeForge.Noise as N
+  alias CubeForge.Species as S
+
+  doc "Side of a fruit cell for tier 0 small, 1 medium, 2 giant."
+  fn cell_size(tier : Int) : Int do if tier == 0 do 3 else if tier == 1 do 6 else 16 end end end
+  doc "Columns either side of the canonical column a body can reach."
+  fn footprint() : Int do 4 end
+
+  pfn hash(a : Int, b : Int, seed : Int, salt : Int) : Float do N.hash2(a * 7907 + salt * 104729, b * 6277 + salt * 15485863, seed + 3251) end
+
+  doc "The one column of cell (cx, cz) at tier [tier] a body may stand on, packed x + 4096 * z."
+  fn canonical(cx : Int, cz : Int, tier : Int, seed : Int) : Int do
+    let s = cell_size(tier)
+    let ox = float_to_int(hash(cx, cz, seed, 20 + tier) *. int_to_float(s))
+    let oz = float_to_int(hash(cx, cz, seed, 30 + tier) *. int_to_float(s))
+    (cx * s + ox) + 4096 * (cz * s + oz)
+  end
+  pfn floor_div(a : Int, b : Int) : Int do if a >= 0 do a / b else (a - b + 1) / b end end
+  doc "Is (x, z) its cell's canonical column at this tier?"
+  fn is_canonical(x : Int, z : Int, tier : Int, seed : Int) : Bool do
+    let s = cell_size(tier)
+    canonical(floor_div(x, s), floor_div(z, s), tier, seed) == x + 4096 * z
+  end
+
+  doc "Stem height: 0 small, 2..3 medium, 5..9 giant."
+  fn stem_height(x : Int, z : Int, tier : Int, seed : Int) : Int do
+    if tier == 0 do 0
+    else if tier == 1 do 2 + float_to_int(hash(x, z, seed, 40) *. 2.0)
+    else 5 + float_to_int(hash(x, z, seed, 41) *. 5.0) end end
+  end
+  doc "Cap radius: 0 small, 1 medium, 3..4 giant."
+  fn radius(x : Int, z : Int, tier : Int, seed : Int) : Int do
+    if tier == 0 do 0 else if tier == 1 do 1 else 3 + float_to_int(hash(x, z, seed, 42) *. 2.0) end end
+  end
+  doc "Giant caps of this species carry a second, smaller layer."
+  fn dome(sp : Int) : Bool do sp == 5 end
+  doc "Blocks above the ground a body of this species at (bx, bz) can occupy."
+  fn height_of(sp : Int, bx : Int, bz : Int, seed : Int) : Int do stem_height(bx, bz, S.tier(sp), seed) + 3 end
+
+  pfn abs_i(v : Int) : Int do if v < 0 do 0 - v else v end end
+
+  doc "The block the body of [sp] rooted on ground [base] at (bx, bz) puts at (x, y, z), or 0."
+  fn block_of_body(sp : Int, bx : Int, base : Int, bz : Int, seed : Int, x : Int, y : Int, z : Int) : Int do
+    let tier = S.tier(sp)
+    let dx = x - bx
+    let dz = z - bz
+    let dy = y - base
+    if tier == 0 do
+      if dx == 0 && dz == 0 && dy == 1 do C.fruit_small(sp) else 0 end
+    else
+      let s = stem_height(bx, bz, tier, seed)
+      let r = radius(bx, bz, tier, seed)
+      if dx == 0 && dz == 0 && dy >= 1 && dy <= s do C.fruit_stem(sp)
+      else if dy == s + 1 do
+        -- the cap: a square for medium, a disc for giant
+        if tier == 1 do (if abs_i(dx) <= 1 && abs_i(dz) <= 1 do C.fruit_cap(sp) else 0 end)
+        else (if dx * dx + dz * dz <= r * r do C.fruit_cap(sp) else 0 end) end
+      else if dy == s + 2 && tier == 2 && dome(sp) do
+        let r2 = r - 2
+        if dx * dx + dz * dz <= r2 * r2 do C.fruit_cap(sp) else 0 end
+      else 0 end end end
+    end
+  end
+
+  -- ── Reading bodies off the world ─────────────────────────────────────────
+  doc "The ground under a fruit column: from the heightmap's top [h] down past any fruit blocks."
+  fn base_of(w : CubeForge.World.World, x : Int, z : Int, h : Int) : Int do
+    if h <= 0 do 0
+    else if C.is_fruit(W.block_at(w, x, h, z)) do base_of(w, x, z, h - 1)
+    else h end end
+  end
+  doc "Does a body stand on ground [base] at (x, z)? Its first block is a small or a stem."
+  fn has_body(w : CubeForge.World.World, x : Int, z : Int, base : Int) : Bool do
+    let id = W.block_at(w, x, base + 1, z)
+    C.is_fruit_small(id) || C.is_fruit_stem(id)
+  end
+
+  -- ── World edits ──────────────────────────────────────────────────────────
+  pfn stamp_go(w : CubeForge.World.World, sp : Int, bx : Int, base : Int, bz : Int, seed : Int, i : Int, rows : Int) : CubeForge.World.World do
+    if i >= 81 * rows do w
+    else
+      let x = bx - 4 + i % 9
+      let z = bz - 4 + (i / 9) % 9
+      let y = base + 1 + i / 81
+      let id = block_of_body(sp, bx, base, bz, seed, x, y, z)
+      let w1 = if id != 0 && y < 256 && W.block_at(w, x, y, z) == 0 do W.set_occupied(W.set_block(w, x, y, z, id), x, y, z, CubeForge.Light.occludes(id)) else w end
+      stamp_go(w1, sp, bx, base, bz, seed, i + 1, rows)
+    end
+  end
+  doc "Stamp the body of [sp] on ground [base] at (bx, bz), only into air."
+  fn stamp(w : CubeForge.World.World, sp : Int, bx : Int, base : Int, bz : Int, seed : Int) : CubeForge.World.World do
+    stamp_go(w, sp, bx, base, bz, seed, 0, height_of(sp, bx, bz, seed))
+  end
+
+  type Felled = Felled(CubeForge.World.World, Int, Int)
+  fn felled_world(f : Felled) : CubeForge.World.World do match f do Felled(w, _, _) -> w end end
+  fn felled_stems(f : Felled) : Int do match f do Felled(_, s, _) -> s end end
+  fn felled_caps(f : Felled) : Int do match f do Felled(_, _, c) -> c end end
+
+  pfn fell_go(w : CubeForge.World.World, sp : Int, bx : Int, base : Int, bz : Int, seed : Int, i : Int, rows : Int, stems : Int, caps : Int) : Felled do
+    if i >= 81 * rows do Felled(w, stems, caps)
+    else
+      let x = bx - 4 + i % 9
+      let z = bz - 4 + (i / 9) % 9
+      let y = base + 1 + i / 81
+      let want = block_of_body(sp, bx, base, bz, seed, x, y, z)
+      let there = if want != 0 && y < 256 do W.block_at(w, x, y, z) == want else false end
+      if !there do fell_go(w, sp, bx, base, bz, seed, i + 1, rows, stems, caps)
+      else
+        let w1 = W.set_occupied(W.set_block(w, x, y, z, 0), x, y, z, false)
+        fell_go(w1, sp, bx, base, bz, seed, i + 1, rows, if C.is_fruit_stem(want) do stems + 1 else stems end, if C.is_fruit_cap(want) do caps + 1 else caps end)
+      end
+    end
+  end
+  doc "Remove exactly the blocks the body's shape owns, counting the stems and caps that were actually there."
+  fn fell(w : CubeForge.World.World, sp : Int, bx : Int, base : Int, bz : Int, seed : Int) : Felled do
+    fell_go(w, sp, bx, base, bz, seed, 0, height_of(sp, bx, bz, seed), 0, 0)
+  end
+
+
+  -- ── Growth and decay candidates ──────────────────────────────────────────
+  doc "Chance per visit that an eligible cell fruits: small, medium, giant."
+  fn rate(tier : Int) : Float do if tier == 0 do 0.05 else if tier == 1 do 0.02 else 0.005 end end end
+  doc "The growth roll for a cell's column on tick [tick], scaled by CF_FRUIT_RATE / 100."
+  fn rolls(x : Int, z : Int, tick : Int, seed : Int, tier : Int, scale : Float) : Bool do
+    N.hash2(x * 13 + tick, z * 17 - tick, seed + 91) < rate(tier) *. scale
+  end
+  fn is_decay(entry : Int) : Bool do entry >= 1073741824 end
+  fn column_of(entry : Int) : Int do entry % 1073741824 end
+
+  -- One column: a body that the network has left decays; an empty canonical
+  -- column of a mature, shown species may grow when its roll passes.
+  pfn scan_go(sps : NativeU8Arr, vg : NativeFloatArr, shown : NativeU8Arr, w : CubeForge.World.World, bio : CubeForge.Biome.Field, seed : Int, tick : Int,
+              n : Int, i : Int, left : Int, budget : Int, scale : Float, acc : List(Int)) : List(Int) do
+    if left <= 0 || budget <= 0 do acc
+    else
+      let ci = i % (n * n)
+      let x = ci % n
+      let z = ci / n
+      let h = CubeForge.Biome.height_of(bio, x, z)
+      let base = base_of(w, x, z, h)
+      let body = has_body(w, x, z, base)
+      let sp = NativeArray.get_u8(sps, ci)
+      if body do
+        let bsp = C.fruit_species(W.block_at(w, x, base + 1, z))
+        if NativeArray.get_u8(shown, ci) != bsp do scan_go(sps, vg, shown, w, bio, seed, tick, n, i + 1, left - 1, budget - 1, scale, Cons(ci + 1073741824, acc))
+        else scan_go(sps, vg, shown, w, bio, seed, tick, n, i + 1, left - 1, budget, scale, acc) end
+      else if sp == 0 do scan_go(sps, vg, shown, w, bio, seed, tick, n, i + 1, left - 1, budget, scale, acc)
+      else
+        let tier = S.tier(sp)
+        let ok = if NativeArray.get_float(vg, ci) < CubeForge.Myc.fruit_vigour() do false
+                 else if NativeArray.get_u8(shown, ci) != sp do false
+                 else if !is_canonical(x, z, tier, seed) do false
+                 else if base <= 0 || base + height_of(sp, x, z, seed) >= 255 do false
+                 else rolls(x, z, tick, seed, tier, scale) end end end end
+        if ok do scan_go(sps, vg, shown, w, bio, seed, tick, n, i + 1, left - 1, budget - 1, scale, Cons(ci, acc))
+        else scan_go(sps, vg, shown, w, bio, seed, tick, n, i + 1, left - 1, budget, scale, acc) end
+      end end
+    end
+  end
+
+  doc "Columns to act on this tick: growth entries are column indices, decay entries have bit 30 set. At most [budget], scanning [scan] columns from where tick [tick] leaves off."
+  fn candidates(f : CubeForge.Myc.Field, shown : NativeU8Arr, w : CubeForge.World.World, bio : CubeForge.Biome.Field, seed : Int, tick : Int, scan : Int, budget : Int, scale : Float) : List(Int) do
+    let n = CubeForge.Biome.cols(w)
+    scan_go(CubeForge.Myc.field_species(f), CubeForge.Myc.field_vigour(f), shown, w, bio, seed, tick, n, (tick * scan) % (n * n), scan, budget, scale, Nil)
+  end
+
+  -- ── Counting, for the dump summary ───────────────────────────────────────
+  pfn count_go(w : CubeForge.World.World, bio : CubeForge.Biome.Field, n : Int, tier : Int, i : Int, acc : Int) : Int do
+    if i >= n * n do acc
+    else
+      let x = i % n
+      let z = i / n
+      let base = base_of(w, x, z, CubeForge.Biome.height_of(bio, x, z))
+      let id = W.block_at(w, x, base + 1, z)
+      let hit = if C.is_fruit_small(id) || C.is_fruit_stem(id) do S.tier(C.fruit_species(id)) == tier else false end
+      count_go(w, bio, n, tier, i + 1, if hit do acc + 1 else acc end)
+    end
+  end
+  doc "Bodies of [tier] standing in the world, by their first block. A diagnostic: 16k columns of block reads."
+  fn count_bodies(w : CubeForge.World.World, bio : CubeForge.Biome.Field, tier : Int) : Int do
+    let n = CubeForge.Biome.cols(w)
+    count_go(w, bio, n, tier, 0, 0)
+  end
+
+end

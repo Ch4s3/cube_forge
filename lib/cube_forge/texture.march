@@ -103,10 +103,12 @@ mod CubeForge.Texture do
   16x16 RGBA texture array, layer-major: 0 grass, 1 water, 2 dirt, 3 stone,
   4 sand, 5 snow, 6 granite, 7 bedrock, 8 oak bark, 9 cut end, 10 oak leaves,
   11 pine leaves, 12 pine bark, 13 gravel, 14 clay, 15 spring (icon only), 16 foam,
-  17 basalt, 18 ice, 19 mud.
+  17 basalt, 18 ice, 19 mud, 20 glow cap, 21..62 mycelium over (grass, dirt, sand, snow,
+  gravel, clay, stone) x six species, 63..68 spore icons per species, 69..86 fruit
+  (small, stem, cap) x six species.
   """
   fn checkerboard() : NativeU8Arr do
-    let a0 = checker_go(NativeArray.make_u8(20 * 16 * 16 * 4, 0), 0)
+    let a0 = checker_go(NativeArray.make_u8(87 * 16 * 16 * 4, 0), 0)
     let a1 = water_go(a0, 0)
     let a2 = speckle_go(a1, 2, 0, 134, 96, 67)
     let a3 = speckle_go(a2, 3, 0, 128, 128, 132)
@@ -125,7 +127,9 @@ mod CubeForge.Texture do
     let a16 = speckle_go(a15, 16, 0, 226, 236, 246)
     let a17 = speckle_go(a16, 17, 0, 40, 38, 42)
     let a18 = speckle_go(a17, 18, 0, 205, 225, 240)
-    speckle_go(a18, 19, 0, 70, 48, 38)
+    let a19 = speckle_go(a18, 19, 0, 70, 48, 38)
+    let a20 = speckle_go(a19, 20, 0, 250, 214, 120)
+    fruit_all_go(spore_all_go(myc_all_go(a20, 0), 1), 0)
   end
 
   -- Layer 15: the spring ITEM's icon -- water blue with a pale ring, so a spring in
@@ -142,9 +146,9 @@ mod CubeForge.Texture do
   end
 
   doc "Texture layer for an item's HUD icon: as layer_for, except the spring item (id 4) shows its ring. The sea is also id 4 and must keep rendering as water, which is why this is not layer_for."
-  fn icon_layer(id : Int) : Float do if id == 4 do 15.0 else layer_for(id) end end
+  fn icon_layer(id : Int) : Float do if id == 4 do 15.0 else if CubeForge.Species.is_spore(id) do spore_layer(CubeForge.Species.species_of_item(id)) else layer_for(id) end end end
 
-  fn layers() : Int do 20 end
+  fn layers() : Int do 87 end
   fn water_layer() : Float do 1.0 end
   doc "Texture layer for a block id on face direction [d] (0 +y, 1 -y, 2 +x, 3 -x, 4 +z, 5 -z)."
   fn layer_for_face(id : Int, d : Int) : Float do
@@ -171,7 +175,121 @@ mod CubeForge.Texture do
     else if id == 22 do 17.0
     else if id == 23 do 18.0
     else if id == 24 do 19.0
-    else 0.0 end end end end end end end end end end end end end end end end
+    else if id == 25 do 20.0
+    else if CubeForge.Chunk.is_myc(id) do layer_for(CubeForge.Chunk.myc_base(id))
+    else if CubeForge.Chunk.is_fruit(id) do fruit_layer(fruit_kind(id), CubeForge.Chunk.fruit_species(id))
+    else 0.0 end end end end end end end end end end end end end end end end end end end
+  end
+
+
+  -- ── Mycelium layers: the base's pattern with threads over it ─────────────
+  -- Layer 21 + 6 * base_index + (species - 1). Each layer REPRODUCES its base
+  -- from the base's formula rather than copying the base layer: reading the
+  -- array while writing it would copy all 60 KB per texel (GAPS G21).
+  doc "Texture layer for mycelium over base index [k] (0..6) in species [sp] (1..6)."
+  fn myc_layer(k : Int, sp : Int) : Float do int_to_float(21 + 6 * k + (sp - 1)) end
+
+  -- The base colour for base index k, by the same numbers as the plain layers:
+  -- grass is the checker (handled inline), everything else a speckle.
+  pfn myc_base_r(k : Int) : Int do if k == 1 do 134 else if k == 2 do 219 else if k == 3 do 242 else if k == 4 do 112 else if k == 5 do 158 else 128 end end end end end end
+  pfn myc_base_g(k : Int) : Int do if k == 1 do 96 else if k == 2 do 203 else if k == 3 do 246 else if k == 4 do 110 else if k == 5 do 142 else 128 end end end end end end
+  pfn myc_base_b(k : Int) : Int do if k == 1 do 67 else if k == 2 do 146 else if k == 3 do 250 else if k == 4 do 106 else if k == 5 do 124 else 132 end end end end end end
+
+  pfn myc_go(a : NativeU8Arr, layer : Int, k : Int, sp : Int, i : Int) : NativeU8Arr do
+    if i >= 256 do a
+    else
+      let x = i % 16
+      let y = i / 16
+      let light = (x / 2 + y / 2) % 2 == 0
+      let d = ((x * 7 + y * 13 + x * y) % 5) * 6 - 12
+      let br = if k == 0 do (if light do 110 else 70 end) else myc_base_r(k) + d end
+      let bg = if k == 0 do (if light do 190 else 140 end) else myc_base_g(k) + d end
+      let bb = if k == 0 do (if light do 80 else 60 end) else myc_base_b(k) + d end
+      -- the threads: a sparse branching lattice, about a third of the texels
+      let t = (x * 3 + y * 5 + (x * y) % 7 + sp) % 9
+      let thread = t < 3
+      let sr = CubeForge.Species.colour_r(sp)
+      let sg = CubeForge.Species.colour_g(sp)
+      let sb = CubeForge.Species.colour_b(sp)
+      -- a thread texel is two-thirds species colour; the rest of the layer is
+      -- the base pulled a sixth of the way toward it, so the tint reads at a distance
+      let r = if thread do (br + 2 * sr) / 3 else (5 * br + sr) / 6 end
+      let g = if thread do (bg + 2 * sg) / 3 else (5 * bg + sg) / 6 end
+      let b = if thread do (bb + 2 * sb) / 3 else (5 * bb + sb) / 6 end
+      myc_go(put_rgba(a, layer * 1024 + i * 4, r, g, b, 255), layer, k, sp, i + 1)
+    end
+  end
+
+  -- All 42 layers: j runs over base index x species.
+  pfn myc_all_go(a : NativeU8Arr, j : Int) : NativeU8Arr do
+    if j >= 42 do a
+    else myc_all_go(myc_go(a, 21 + j, j / 6, j % 6 + 1, 0), j + 1) end
+  end
+
+
+  -- ── Spore icons: a dark disc dusted with the species colour ─────────────
+  doc "HUD icon layer for a species' spores."
+  fn spore_layer(sp : Int) : Float do int_to_float(62 + sp) end
+  pfn spore_go(a : NativeU8Arr, sp : Int, i : Int) : NativeU8Arr do
+    if i >= 256 do a
+    else
+      let x = i % 16 - 8
+      let y = i / 16 - 8
+      let d2 = x * x + y * y
+      let dust = (x * 5 + y * 3 + x * y) % 4 == 0
+      let sr = CubeForge.Species.colour_r(sp)
+      let sg = CubeForge.Species.colour_g(sp)
+      let sb = CubeForge.Species.colour_b(sp)
+      let inside = d2 <= 36
+      let r = if !inside do 30 else if dust do sr else sr / 3 end end
+      let g = if !inside do 30 else if dust do sg else sg / 3 end end
+      let b = if !inside do 30 else if dust do sb else sb / 3 end end
+      spore_go(put_rgba(a, (62 + sp) * 1024 + i * 4, r, g, b, 255), sp, i + 1)
+    end
+  end
+  pfn spore_all_go(a : NativeU8Arr, sp : Int) : NativeU8Arr do
+    if sp > 6 do a else spore_all_go(spore_go(a, sp, 0), sp + 1) end
+  end
+
+
+  -- ── Fruit layers: 69 + 6 * kind + (species - 1); kind 0 small, 1 stem, 2 cap ──
+  fn fruit_layer(kind : Int, sp : Int) : Float do int_to_float(69 + 6 * kind + (sp - 1)) end
+  pfn fruit_kind(id : Int) : Int do
+    if CubeForge.Chunk.is_fruit_small(id) do 0 else if CubeForge.Chunk.is_fruit_stem(id) do 1 else 2 end end
+  end
+
+  -- Small: a mushroom silhouette on a transparent ground -- a domed cap in the
+  -- species colour over a pale stem. Stem: pale, vertically streaked, faintly
+  -- tinted. Cap: the species colour, speckled, darker at the rim.
+  pfn fruit_go(a : NativeU8Arr, kind : Int, sp : Int, i : Int) : NativeU8Arr do
+    if i >= 256 do a
+    else
+      let x = i % 16
+      let y = i / 16
+      let sr = CubeForge.Species.colour_r(sp)
+      let sg = CubeForge.Species.colour_g(sp)
+      let sb = CubeForge.Species.colour_b(sp)
+      let d = ((x * 7 + y * 13 + x * y) % 5) * 6 - 12
+      let layer = 69 + 6 * kind + (sp - 1)
+      if kind == 0 do
+        -- cap: rows 2..7 as a dome; stem: rows 8..15, columns 6..9; else clear
+        let cx = if x >= 8 do x - 8 else 8 - x end
+        let in_cap = y >= 2 && y <= 7 && cx <= y - 1
+        let in_stem = y >= 8 && x >= 6 && x <= 9
+        if in_cap do fruit_go(put_rgba(a, layer * 1024 + i * 4, sr + d, sg + d, sb + d, 255), kind, sp, i + 1)
+        else if in_stem do fruit_go(put_rgba(a, layer * 1024 + i * 4, 225 + d / 2, 215 + d / 2, 195 + d / 2, 255), kind, sp, i + 1)
+        else fruit_go(put_rgba(a, layer * 1024 + i * 4, 0, 0, 0, 0), kind, sp, i + 1) end end
+      else if kind == 1 do
+        let s = (x * 7 + (y / 3) * 3) % 24 - 12
+        fruit_go(put_rgba(a, layer * 1024 + i * 4, (5 * 220 + sr) / 6 + s, (5 * 210 + sg) / 6 + s, (5 * 190 + sb) / 6 + s, 255), kind, sp, i + 1)
+      else
+        let rim = if x == 0 || x == 15 || y == 0 || y == 15 do 0 - 30 else 0 end
+        fruit_go(put_rgba(a, layer * 1024 + i * 4, sr + d + rim, sg + d + rim, sb + d + rim, 255), kind, sp, i + 1)
+      end end
+    end
+  end
+  pfn fruit_all_go(a : NativeU8Arr, j : Int) : NativeU8Arr do
+    if j >= 18 do a else fruit_all_go(fruit_go(a, j / 6, j % 6 + 1, 0), j + 1) end
   end
 
 end

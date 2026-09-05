@@ -1,0 +1,151 @@
+-- Fruit bodies: cells, shapes, stamping and felling.
+mod CubeForge.Test.Fruit do
+
+  needs IO.Spawn
+  import Test
+  alias CubeForge.Fruit as Fr
+  alias CubeForge.Chunk as Cf
+  alias CubeForge.World as Wf
+
+  -- A flat stone world at height 70 (8x8 chunks).
+  pfn flat_cells(c : CubeForge.Chunk.Chunk, i : Int) : CubeForge.Chunk.Chunk do
+    if i >= 256 * 71 do c else flat_cells(Cf.set(c, i % 16, i / 256, (i / 16) % 16, 3), i + 1) end
+  end
+  pfn flat_chunks(i : Int, acc : List(CubeForge.Chunk.Chunk)) : List(CubeForge.Chunk.Chunk) do
+    if i < 0 do acc else flat_chunks(i - 1, Cons(flat_cells(Cf.new(), 0), acc)) end
+  end
+  pfn flat_world() : CubeForge.World.World do
+    CubeForge.World.World(Array.from_list(flat_chunks(63, Nil)), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), Wf.shown_new(), 8)
+  end
+
+  -- Count fruit blocks in the 9x9x12 box above (bx, base, bz).
+  pfn count_go(w : CubeForge.World.World, bx : Int, base : Int, bz : Int, i : Int, acc : Int) : Int do
+    if i >= 81 * 12 do acc
+    else
+      let x = bx - 4 + i % 9
+      let z = bz - 4 + (i / 9) % 9
+      let y = base + 1 + i / 81
+      count_go(w, bx, base, bz, i + 1, if Cf.is_fruit(Wf.block_at(w, x, y, z)) do acc + 1 else acc end)
+    end
+  end
+
+
+  -- shown follows the field: every held column shows its species
+  pfn shown_of(f : CubeForge.Myc.Field, n : Int, i : Int, sh : NativeU8Arr) : NativeU8Arr do
+    if i >= n * n do sh
+    else shown_of(f, n, i + 1, NativeArray.set_u8(sh, i, CubeForge.Myc.species_of(f, n, i % n, i / n))) end
+  end
+  pfn first_of(l : List(Int)) : Int do
+    match l do
+      Nil -> 0 - 1
+      Cons(v, _) -> v
+    end
+  end
+  pfn has_entry(l : List(Int), e : Int) : Bool do
+    match l do
+      Nil -> false
+      Cons(v, rest) -> if v == e do true else has_entry(rest, e) end
+    end
+  end
+
+  describe "Fruit cells" do
+    test "cell sizes by tier and one canonical column per cell" do
+      Test.assert_eq_int(Fr.cell_size(0), 3, "small")
+      Test.assert_eq_int(Fr.cell_size(1), 6, "medium")
+      Test.assert_eq_int(Fr.cell_size(2), 16, "giant")
+      let c = Fr.canonical(3, 5, 2, 7)
+      let x = c % 4096
+      let z = c / 4096
+      Test.assert_true(x >= 48 && x < 64 && z >= 80 && z < 96, "inside its 16x16 cell")
+      Test.assert_true(Fr.is_canonical(x, z, 2, 7), "that column is canonical")
+      Test.assert_false(Fr.is_canonical(x + 1, z, 2, 7), "its neighbour is not")
+      Test.assert_true(Fr.canonical(3, 5, 2, 8) != c, "seeded")
+    end
+  end
+
+  describe "Fruit shapes" do
+    test "a small body is one cutout block on the ground" do
+      Test.assert_eq_int(Fr.block_of_body(3, 40, 70, 40, 7, 40, 71, 40), Cf.fruit_small(3), "the block")
+      Test.assert_eq_int(Fr.block_of_body(3, 40, 70, 40, 7, 40, 72, 40), 0, "nothing above")
+      Test.assert_eq_int(Fr.block_of_body(3, 40, 70, 40, 7, 41, 71, 40), 0, "nothing beside")
+    end
+    test "a medium body is a stem of two or three and a 3x3 cap" do
+      let s = Fr.stem_height(40, 40, 1, 7)
+      Test.assert_true(s >= 2 && s <= 3, "stem 2..3")
+      Test.assert_eq_int(Fr.block_of_body(4, 40, 70, 40, 7, 40, 71, 40), Cf.fruit_stem(4), "stem bottom")
+      Test.assert_eq_int(Fr.block_of_body(4, 40, 70, 40, 7, 40, 70 + s, 40), Cf.fruit_stem(4), "stem top")
+      Test.assert_eq_int(Fr.block_of_body(4, 40, 70, 40, 7, 41, 71 + s, 41), Cf.fruit_cap(4), "cap corner")
+      Test.assert_eq_int(Fr.block_of_body(4, 40, 70, 40, 7, 40, 71 + s, 40), Cf.fruit_cap(4), "cap centre")
+      Test.assert_eq_int(Fr.block_of_body(4, 40, 70, 40, 7, 42, 71 + s, 40), 0, "not two out")
+      Test.assert_eq_int(Fr.block_of_body(4, 40, 70, 40, 7, 41, 71, 40), 0, "nothing beside the stem")
+    end
+    test "a giant body has a tall stem and a wide disc, domed for Marshlight" do
+      let s = Fr.stem_height(40, 40, 2, 7)
+      let r = Fr.radius(40, 40, 2, 7)
+      Test.assert_true(s >= 5 && s <= 9, "stem 5..9")
+      Test.assert_true(r >= 3 && r <= 4, "radius 3..4")
+      Test.assert_eq_int(Fr.block_of_body(6, 40, 70, 40, 7, 40 + r, 71 + s, 40), Cf.fruit_cap(6), "disc edge on the axis")
+      Test.assert_eq_int(Fr.block_of_body(6, 40, 70, 40, 7, 40 + r, 71 + s, 40 + r), 0, "disc corner is cut")
+      Test.assert_eq_int(Fr.block_of_body(6, 40, 70, 40, 7, 40, 72 + s, 40), 0, "Sunshelf is flat")
+      Test.assert_eq_int(Fr.block_of_body(5, 40, 70, 40, 7, 40, 72 + s, 40), Cf.fruit_cap(5), "Marshlight has a dome layer")
+      Test.assert_true(Fr.dome(5), "dome")
+      Test.assert_false(Fr.dome(6), "flat")
+    end
+  end
+
+  describe "Fruit.stamp and fell" do
+    test "stamps only into air and fells exactly its own blocks, counting stems and caps" do
+      let w0 = flat_world()
+      let w1 = Fr.stamp(w0, 4, 40, 70, 40, 7)
+      let s = Fr.stem_height(40, 40, 1, 7)
+      Test.assert_eq_int(count_go(w1, 40, 70, 40, 0, 0), s + 9, "stem blocks plus a 3x3 cap")
+      Test.assert_true(Fr.has_body(w1, 40, 40, 70), "a body stands there")
+      Test.assert_eq_int(Fr.base_of(w1, 40, 40, 70 + s + 1), 70, "the ground under the heightmap's top")
+      let w2 = Fr.stamp(Wf.set_block(w0, 41, 70 + s + 1, 41, 3), 4, 40, 70, 40, 7)
+      Test.assert_eq_int(Wf.block_at(w2, 41, 70 + s + 1, 41), 3, "not overwritten")
+      Test.assert_eq_int(count_go(w2, 40, 70, 40, 0, 0), s + 8, "one cap block fewer")
+      let r = Fr.fell(w1, 4, 40, 70, 40, 7)
+      let w3 = Fr.felled_world(r)
+      Test.assert_eq_int(count_go(w3, 40, 70, 40, 0, 0), 0, "all gone")
+      Test.assert_eq_int(Fr.felled_stems(r), s, "stems counted")
+      Test.assert_eq_int(Fr.felled_caps(r), 9, "caps counted")
+      Test.assert_false(Fr.has_body(w3, 40, 40, 70), "no body")
+      let w4 = Fr.stamp(Fr.stamp(w0, 4, 40, 70, 40, 7), 4, 43, 70, 40, 7)
+      let w5 = Fr.felled_world(Fr.fell(w4, 4, 40, 70, 40, 7))
+      Test.assert_true(Fr.has_body(w5, 43, 40, 70), "the neighbour still stands")
+    end
+  end
+
+  describe "Myc.reseed" do
+    test "resets reach on a held column and ignores an empty one" do
+      let n = 32
+      let f = CubeForge.Myc.plant_patch(CubeForge.Myc.build(n), n, 16, 16, 3)
+      Test.assert_eq_int(CubeForge.Myc.reach_of(f, n, 22, 16), CubeForge.Myc.plant_reach() - 12, "before")
+      Test.assert_eq_int(CubeForge.Myc.reach_of(CubeForge.Myc.reseed(f, n, 22, 16), n, 22, 16), CubeForge.Myc.plant_reach(), "after")
+      Test.assert_eq_int(CubeForge.Myc.reach_of(CubeForge.Myc.reseed(f, n, 0, 0), n, 0, 0), 0, "empty stays empty")
+    end
+  end
+
+
+  describe "Fruit.candidates" do
+    test "grows on a mature held canonical column, decays a body the network left" do
+      let n = 128
+      let w0 = flat_world()
+      let f = CubeForge.Myc.plant_patch(CubeForge.Myc.build(n), n, 40, 40, 3)
+      let bio = CubeForge.Biome.build(w0, 7)
+      let shown = shown_of(f, n, 0, Wf.shown_new())
+      let picks = Fr.candidates(f, shown, w0, bio, 7, 0, n * n, 100, 1000.0)
+      Test.assert_true(List.length(picks) > 0, "at scale 1000 every eligible cell rolls")
+      Test.assert_true(List.length(picks) <= 100, "budget")
+      let first = Fr.column_of(first_of(picks))
+      Test.assert_true(Fr.is_canonical(first % n, first / n, 0, 7), "a canonical small cell column")
+      Test.assert_false(Fr.is_decay(first_of(picks)), "growth")
+      -- a body on a column the network no longer shows is a decay entry
+      let w1 = Fr.stamp(w0, 3, first % n, 70, first / n, 7)
+      let none = Fr.candidates(f, Wf.shown_new(), w1, bio, 7, 0, n * n, 100, 1000.0)
+      Test.assert_true(List.length(none) > 0, "something to do")
+      Test.assert_true(has_entry(none, first + 1073741824), "that column decays")
+    end
+  end
+
+end
