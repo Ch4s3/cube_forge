@@ -55,8 +55,10 @@ mod CubeForge.World do
     match w do World(_, _, lb, _, _) -> CubeForge.Light.get(lb, x, y, z) end
   end
 
-  doc "Recompute the whole skylight field from scratch."
-  fn relight_all(w : World) : World do set_light(w, CubeForge.Light.flood(w)) end
+  doc "Recompute both light fields from scratch."
+  fn relight_all(w : World) : World do
+    set_block_light(set_light(w, CubeForge.Light.flood(w)), CubeForge.Light.flood_block(w))
+  end
 
   doc "Repair the skylight field after an edit at a world coordinate."
   fn relight_at(w : World, x : Int, y : Int, z : Int) : World do

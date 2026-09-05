@@ -229,6 +229,40 @@ mod CubeForge.Light do
     spread(seed_all(new(), w), w)
   end
 
+  -- ── Block light: the same sweep, seeded from emissive blocks ─────────────
+  --
+  -- The sweep does not care where light came from: a voxel at level L gives
+  -- L - 1 - opacity to its neighbours whatever seeded it. So block light is
+  -- the skylight machinery with a different seed pass -- every voxel whose
+  -- block emits is written at its emission level, and spread() does the rest.
+  -- Emission is capped below max_level(), so the sweep's top levels are no-ops.
+
+  -- Seed one chunk's emitters. Write-only on [lb]; the chunk is fetched once (G64).
+  pfn seed_emit_chunk_go(lb : NativeU8Arr, c : CubeForge.Chunk.Chunk, cx : Int, cz : Int, i : Int, stop : Int) : NativeU8Arr do
+    if i >= stop do lb
+    else
+      let e = emission(C.get_idx(c, i))
+      if e <= 0 do seed_emit_chunk_go(lb, c, cx, cz, i + 1, stop)
+      else seed_emit_chunk_go(NativeArray.set_u8(lb, index(16 * cx + i % 16, i / 256, 16 * cz + (i / 16) % 16), e), c, cx, cz, i + 1, stop) end
+    end
+  end
+
+  pfn seed_emit_go(lb : NativeU8Arr, w : CubeForge.World.World, ci : Int, n : Int, stop : Int) : NativeU8Arr do
+    if ci >= n * n do lb
+    else seed_emit_go(seed_emit_chunk_go(lb, CubeForge.World.chunk_at(w, ci % n, ci / n), ci % n, ci / n, 0, stop), w, ci + 1, n, stop) end
+  end
+
+  doc "Write every emissive block's emission level into [lb]. Scans only up to the highest non-air layer."
+  fn seed_emitters(lb : NativeU8Arr, w : CubeForge.World.World) : NativeU8Arr do
+    seed_emit_go(lb, w, 0, CubeForge.World.side(w), (sky_floor(w) + 1) * 256)
+  end
+
+  doc "Compute the world's block light from scratch: seed every emitter, then spread. The sweep scans max_level() layers above the sky floor: skylight has nothing to do up there, but block light climbs into the open air."
+  fn flood_block(w : CubeForge.World.World) : NativeU8Arr do
+    let top = clampi(sky_floor(w) + 1 + max_level(), 0, 256)
+    sweep_go(seed_emitters(new(), w), w, max_level(), top * 16384)
+  end
+
   -- ── Incremental relight ───────────────────────────────────────────────────
   --
   -- The design doc called for an add/remove BFS pair. G63 rules that out: a

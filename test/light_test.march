@@ -421,4 +421,33 @@ mod CubeForge.Test.Light do
     end
   end
 
+
+  describe "Light.flood_block" do
+    test "a glow cap in the open lights a sphere that falls off one per step" do
+      let w = CubeForge.World.set_block(air_world(), 40, 100, 40, C.glow_cap())
+      let lb = L.flood_block(w)
+      Test.assert_eq_int(L.get(lb, 40, 100, 40), 10, "the emitter itself")
+      Test.assert_eq_int(L.get(lb, 41, 100, 40), 9, "one step")
+      Test.assert_eq_int(L.get(lb, 40, 105, 40), 5, "five steps up")
+      Test.assert_eq_int(L.get(lb, 49, 100, 40), 1, "nine steps, the last light")
+      Test.assert_eq_int(L.get(lb, 50, 100, 40), 0, "ten steps, dark")
+      Test.assert_eq_int(L.get(lb, 43, 100, 43), 4, "manhattan six")
+    end
+
+    test "block light does not pass through stone but rounds a corner" do
+      let w0 = slab_world(100)
+      let w1 = CubeForge.World.set_block(w0, 40, 100, 40, 0)
+      let w2 = CubeForge.World.set_block(w1, 40, 101, 40, C.glow_cap())
+      let lb = L.flood_block(w2)
+      Test.assert_eq_int(L.get(lb, 40, 99, 40), 8, "down the shaft, two steps")
+      Test.assert_eq_int(L.get(lb, 41, 99, 40), 7, "along the gallery")
+      Test.assert_eq_int(L.get(lb, 41, 100, 40), 0, "inside the slab")
+    end
+
+    test "a world with no emitters is dark everywhere" do
+      let w = CubeForge.World.relight_all(CubeForge.World.generate(8, 1, 1))
+      Test.assert_eq_int(first_difference(CubeForge.World.block_light(w), L.new()), -1, "all zero")
+    end
+  end
+
 end
