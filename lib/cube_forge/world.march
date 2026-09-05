@@ -219,7 +219,9 @@ mod CubeForge.World do
 
   doc "Stage 1: generate every chunk in parallel. Chunks are independent, so this is a plain pmap."
   fn generate(n : Int, seed : Int, workers : Int) : World do
-    let chunks = List.pmap_n(coords(n), fn i -> C.generate(16 * (i % n), 16 * (i / n), seed), workers)
+    -- the lake table once, read by every chunk (a read only: no copy -- GAPS G68)
+    let lk = CubeForge.Lakes.levels(seed, n)
+    let chunks = List.pmap_n(coords(n), fn i -> C.generate_lakes(16 * (i % n), 16 * (i / n), seed, lk, n), workers)
     World(Array.from_list(chunks), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), shown_new(), n, CubeForge.Model.build())
   end
 

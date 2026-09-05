@@ -45,8 +45,8 @@ mod CubeForge.Biome do
 
   doc "Columns from water at which moisture reaches zero."
   fn reach() : Int do 24 end
-  doc "Temperature lost per block above sea level."
-  fn lapse() : Float do 0.012 end
+  doc "Temperature lost per block above sea level (Noise.lapse: the height paths read the same climate)."
+  fn lapse() : Float do N.lapse() end
   doc "Surface height at and above which a column is alpine, whatever the axes say."
   fn alpine_line() : Int do 95 end
   doc "Columns beside water this low are beach."
@@ -80,17 +80,11 @@ mod CubeForge.Biome do
     clamp01(1.0 -. int_to_float(dist_of(v)) /. int_to_float(r))
   end
 
-  doc "Temperature 0..1: one low-frequency octave (regions, not noise -- see Noise.ruggedness for why one octave), minus the lapse for height above sea level."
-  fn temp_target(wx : Int, wz : Int, seed : Int, h : Int) : Float do
-    temp_from_base(temp_base(wx, wz, seed), h)
-  end
+  doc "Temperature 0..1: one low-frequency octave (regions, not noise -- see Noise.ruggedness for why one octave), minus the lapse for height above sea level. Noise.temperature, so the generator's dunes and glaciers read the climate the field will have."
+  fn temp_target(wx : Int, wz : Int, seed : Int, h : Int) : Float do N.temperature(wx, wz, seed, h) end
   doc "The seeded octave alone, before the lapse: what the field caches."
-  fn temp_base(wx : Int, wz : Int, seed : Int) : Float do
-    N.value2(int_to_float(wx) *. 0.018, int_to_float(wz) *. 0.018, seed + 1700)
-  end
-  fn temp_from_base(base : Float, h : Int) : Float do
-    clamp01(base -. lapse() *. int_to_float(h - N.sea_level()))
-  end
+  fn temp_base(wx : Int, wz : Int, seed : Int) : Float do N.temp_base(wx, wz, seed) end
+  fn temp_from_base(base : Float, h : Int) : Float do N.temp_from_base(base, int_to_float(h)) end
 
   doc "The Whittaker lookup with the gates in front of it, for a column with no small water and no network. Thresholds: cold below 0.33, hot from 0.66; damp from 0.5."
   fn classify(temp : Float, moist : Float, h : Int, dist_water : Int) : Int do

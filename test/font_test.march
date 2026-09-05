@@ -9,9 +9,11 @@ mod CubeForge.Test.Font do
   alias CubeForge.Hud as Hud
   alias CubeForge.F32Buf as B
 
-  -- ASCII code of the [i]th printable glyph we claim to support: 0-9 then A-Z.
-  pfn code_of(i : Int) : Int do if i < 10 do 48 + i else 65 + (i - 10) end end
-  fn glyph_count() : Int do 36 end
+  -- ASCII code of the [i]th printable glyph we claim to support: 0-9, A-Z, then < and >.
+  pfn code_of(i : Int) : Int do
+    if i < 10 do 48 + i else if i < 36 do 65 + (i - 10) else if i == 36 do 60 else 62 end end end
+  end
+  fn glyph_count() : Int do 38 end
 
   pfn all_nonzero(i : Int) : Bool do
     if i >= glyph_count() do true

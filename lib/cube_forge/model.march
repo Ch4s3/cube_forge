@@ -36,7 +36,7 @@ mod CubeForge.Model do
 
   -- ── The palette: one texture layer, texel k is colour k ─────────────────
   doc "The texture layer whose 256 texels are the model colours."
-  fn palette_layer() : Float do 89.0 end
+  fn palette_layer() : Float do 91.0 end
   doc "uv of the centre of palette texel k."
   fn palette_u(k : Int) : Float do (int_to_float(k % 16) +. 0.5) /. 16.0 end
   fn palette_v(k : Int) : Float do (int_to_float(k / 16) +. 0.5) /. 16.0 end

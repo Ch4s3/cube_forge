@@ -19,6 +19,8 @@ mod CubeForge.Ffi.Window do
     fn x_win_fb_h(): Int = "cf_win_fb_h"
     fn x_win_close(): Unit = "cf_win_close"
     fn x_win_request_close(): Unit = "cf_win_request_close"
+    fn x_win_set_vsync(flag: Int): Unit = "cf_win_set_vsync"
+    fn x_win_set_fullscreen(flag: Int): Unit = "cf_win_set_fullscreen"
     fn x_gfx_init(): Int = "cf_gfx_init"
     fn x_gfx_upload(slot: Int, verts: NativeF32Arr, nfloats: Int): Unit = "cf_gfx_upload"
     fn x_gfx_upload_begin(slot: Int, nfloats: Int): Unit = "cf_gfx_upload_begin"
@@ -66,6 +68,10 @@ mod CubeForge.Ffi.Window do
   fn fb_height() : Int do x_win_fb_h() end
   fn close() : Unit do x_win_close() end
   fn request_close() : Unit do x_win_request_close() end
+  doc "Swap interval 1 or 0. A no-op without a window (headless)."
+  fn set_vsync(flag : Bool) : Unit do x_win_set_vsync(if flag do 1 else 0 end) end
+  doc "Move the window onto the primary monitor, or back to where it was. A no-op without a window or when already there."
+  fn set_fullscreen(flag : Bool) : Unit do x_win_set_fullscreen(if flag do 1 else 0 end) end
 
   doc "Compile the shader program and create the shared VAO. 1 on success."
   fn gfx_init() : Int do x_gfx_init() end

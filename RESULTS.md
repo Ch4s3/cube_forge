@@ -1731,6 +1731,72 @@ where the mycelium is established.
   outside that frame.
 - 349 tests (329 before).
 
+
+## Perf pass over the fungus features, on March origin/main 9ca8a98d (2026-09-05)
+
+**Toolchain.** `.march-version` moves from `watch-ac782d80` to `watch-9ca8a98d`,
+March origin/main at the time: 21 commits, among them aggregate reference
+counting and deep drop, owned aggregate parameters, record FBIP reuse, and a
+scheduler count that follows the CPUs. Built with `make install
+PREFIX=~/.march/versions/watch-9ca8a98d` from a detached checkout; dune puts
+the stdlib under `share/march`, and the toolchain layout forge expects wants
+it at `<version>/stdlib`, so that is a symlink (without it every module fails
+with "Unknown module `Array`", which reads like a project bug). The project
+builds, lints and passes 365 tests on it unchanged. Paired runs on a machine
+carrying other sessions' benchmarks (load average 15-20; every number below
+is from such pairs, back to back): startup, fps, the allocation gauge (132
+live objects per frame) and the budget all within noise of the old pin. The
+new runtime changed nothing this project can measure.
+
+**Where a body's cost was.** A fruit body growing cost 6-8 ms and a tree 7-8;
+instrumented, a body was stamp 0.7 ms, relight 6-10 ms, occupancy sync 0.5,
+biome rescan 0.3. The relight was skylight 4.6 ms + block light 2.5 ms on
+average, and the block pass's "nothing glows here" exit almost never fired
+near a wild patch, because glowing mycelium is everywhere. Both channels ran
+the same sweep: fourteen level passes, each visiting every voxel of the
+33-wide scan box and each preceded by a slice copy.
+
+**The worklist sweep.** Per-level lists of the voxels that hold each level,
+gathered in one pass after seeding and appended to as writes happen, so a
+level costs its own list and not the box; and in place on one buffer, no
+slice copies. `Light.sweep_box_lists`, shared by both relights; the old
+two-buffer sweep is gone. The "incremental equals a full flood" tests for
+both channels are the oracle and pass unchanged.
+
+| | before | after |
+|---|---|---|
+| skylight relight, median of 112 | 4.6 ms | **3.5 ms** |
+| block-light relight, median | 2.5 ms | **1.5 ms** |
+| a body, both relights | ~7 ms | **5.2 ms** |
+| the sweep alone, skylight | ~4 ms | 1.1-2.1 ms |
+| the sweep alone, block light | ~2 ms | 0.15-0.2 ms |
+
+What is left of a relight is the clear, the seed, the before-copy and the
+section diff, each a pass over the box; the sweep is no longer the biggest.
+
+**Two traps on the way, both worth a GAPS entry (G70).** The first version
+returned a two-field pair per level and cost 1.2 s a relight: while that cell
+held both arrays every in-place write copied the 4 MB field. The second
+version, one return at the very end, still cost 2.4 s -- in the GATHER, where
+12-22k pushes each copied the ~700 KB worklist. The push read the free slot
+and the list head and then wrote, in one function. The rule this project
+already had (G21/G67) is sharper than it was written: a NativeArray read
+inside the function that goes on to write the array -- or that hands it to a
+writer -- holds the refcount up until that function returns, and the write
+copies; a read in a leaf callee that only reads is released on return and
+costs nothing. Every read of the pool and of the light field in the walk is
+now a leaf (`wl_head`, `wl_entry_index`, `at_level`, `give_level`), and the
+gather went from 2.7 s to 0.1-0.4 ms.
+
+**The ground readout** is rebuilt only when a key of its inputs moves (the
+target column, its species, its vigour to the byte); the string was built
+every frame the crosshair rested on a block. The allocation gauge did not
+move (132 per frame), so that string was not what the gauge counts either.
+
+Budget on the loaded machine: 13.3 ms best of 3 against 16 (13.9 before the
+pass, same load). fps in the pinned scenario 224 against 207-209.
+
+
 ## Micro-voxel models (2026-09-05)
 
 `docs/superpowers/specs/2026-09-05-micro-voxel-models-design.md`, plan

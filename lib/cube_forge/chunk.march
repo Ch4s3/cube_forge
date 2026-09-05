@@ -46,12 +46,25 @@ mod CubeForge.Chunk do
   doc "Ids 4..11 are water: 4 is a source (level 8), 5..11 are flow cells (levels 7..1)."
   fn is_water(id : Int) : Bool do id >= 4 && id <= 11 end
   fn is_source(id : Int) : Bool do id == 4 end
+  doc "A cell a source could give into: air, or water that is not itself a source. What makes a source above sea level a SPRING rather than a lake's interior."
+  fn open_for_spring(id : Int) : Bool do id == 0 || (is_water(id) && !is_source(id)) end
   fn level_of(id : Int) : Int do if is_water(id) do 12 - id else 0 end end
   fn id_of_level(l : Int) : Int do 12 - l end
 
   pfn count_water_go(a : NativeU8Arr, i : Int, acc : Int) : Int do
     if i >= 65536 do acc else count_water_go(a, i + 1, if is_water(NativeArray.get_u8(a, i)) do acc + 1 else acc end) end
   end
+  -- Flowing water: cells that are water but not a source -- the finite units a
+  -- spring has given, so a brook's length. The sea and the lakes are sources.
+  pfn count_flow_go(a : NativeU8Arr, i : Int, acc : Int) : Int do
+    if i >= 65536 do acc
+    else
+      let id = NativeArray.get_u8(a, i)
+      count_flow_go(a, i + 1, if is_water(id) && !is_source(id) do acc + 1 else acc end)
+    end
+  end
+  doc "Number of flowing (non-source) water cells in the chunk: what springs have given and evaporation not yet taken."
+  fn count_flow(c : Chunk) : Int do match c do Chunk(a) -> count_flow_go(a, 0, 0) end end
   doc "Number of water cells in the chunk (test/verification helper)."
   fn count_water(c : Chunk) : Int do match c do Chunk(a) -> count_water_go(a, 0, 0) end end
   doc "Raw cell by flat index."
@@ -83,6 +96,9 @@ mod CubeForge.Chunk do
   fn mud() : Int do 24 end
   doc "Glowing mushroom cap: the first emissive block. Placeholder until the fungus fruit blocks land; the block-light channel is verified with it."
   fn glow_cap() : Int do 25 end
+  doc "Sandstone and shale: two of the rock strata's bands (see rock_id). Both harvest as stone."
+  fn sandstone() : Int do 67 end
+  fn shale() : Int do 68 end
   doc "Palm trunk and frond: the oasis tree. Fronds are foliage in every sense leaves are."
   fn palm_log() : Int do 65 end
   fn palm_frond() : Int do 66 end
@@ -148,17 +164,31 @@ mod CubeForge.Chunk do
   Surface block for a column of height [h] whose steepest neighbour differs by
   [slope]. Ordered so a rock face beats altitude, and a cliff beats a beach.
   """
-  fn surface_id(h : Int, slope : Int) : Int do
+  fn surface_id(h : Int, slope : Int) : Int do surface_id_at(h, slope, sea_level()) end
+  doc "surface_id against a local water level: a lake's shore is sand and its bed dirt exactly as the sea's are."
+  fn surface_id_at(h : Int, slope : Int, level : Int) : Int do
     if slope >= CubeForge.Noise.cliff_slope() do granite()
     else if h >= CubeForge.Noise.snow_line() do snow()
-    else if h <= sea_level() + 1 && h >= sea_level() - 5 && slope <= 1 do sand()
-    else if h < sea_level() - 5 do 2      -- lake and sea bed below the sandy shallows
+    else if h <= level + 1 && h >= level - 5 && slope <= 1 do sand()
+    else if h < level - 5 do 2      -- lake and sea bed below the sandy shallows
     else 1 end end end end
   end
 
   doc "Block directly beneath the surface (4 deep); stone below that."
   fn subsurface_id(surface : Int) : Int do
     if surface == sand() do sand() else if surface == granite() do granite() else 2 end end
+  end
+  doc """
+  The subsurface of a generated column: sand and granite follow their surface;
+  on a floodplain ([river] at Noise.plain_edge or more) the river's sediment,
+  mud where the floor is wet (at or under sea level + 1) and clay where it is
+  dry; dirt elsewhere. The surface stays the biome's; sediment lies under it,
+  on riverbank faces and under the spade.
+  """
+  fn sediment_id(surface : Int, river : Float, h : Int, level : Int, seed : Int) : Int do
+    if surface == sand() || surface == granite() do subsurface_id(surface)
+    else if river >= CubeForge.Noise.plain_edge(CubeForge.Noise.age_frac(seed)) do (if h <= level + 1 do mud() else clay() end)
+    else 2 end end
   end
 
   -- ── M2 test terrain: a bumpy surface so every face direction is exercised ──
@@ -168,10 +198,65 @@ mod CubeForge.Chunk do
     64 + float_to_int(3.0 *. Math.sin(fx *. 0.5) +. 2.0 *. Math.cos(fz *. 0.7)) + (if (x + z) % 7 == 0 do 2 else 0 end)
   end
 
+  -- ── Rock strata ─────────────────────────────────────────────────────────────
+  -- Under the four-block subsurface the rock is bedded: bands band_thickness()
+  -- blocks tall, dipping a few degrees across the world (a fixed tilt from the
+  -- seed) and folded gently by a low-frequency warp, so a cliff shows bands at
+  -- an angle and two cliffs do not show the same stripes. The material of a
+  -- band is a hash of its index and a 64-block region, so the sequence changes
+  -- across the map. A material rule only: nothing here moves a height.
+  doc "Blocks per band."
+  fn band_thickness() : Int do 4 end
+  doc "The per-column offset the bands are read against: tilt plus warp, in blocks. One noise sample per column."
+  fn band_offset(wx : Int, wz : Int, seed : Int) : Float do
+    let tilt_x = (CubeForge.Noise.hash2(3, 7, seed + 1202) -. 0.5) *. 0.16
+    let tilt_z = (CubeForge.Noise.hash2(11, 5, seed + 1203) -. 0.5) *. 0.16
+    tilt_x *. int_to_float(wx) +. tilt_z *. int_to_float(wz)
+      +. 6.0 *. (CubeForge.Noise.value2(int_to_float(wx) *. 0.02, int_to_float(wz) *. 0.02, seed + 1200) -. 0.5)
+  end
+  doc "Band index of height [y] in a column with band offset [off]."
+  fn band_of(y : Int, off : Float) : Int do
+    float_to_int(Math.floor((int_to_float(y) +. off) /. int_to_float(band_thickness())))
+  end
+  doc "The rock of band [k] in region (rx, rz): stone 55%, basalt 20%, granite 10%, sandstone 7.5%, shale 7.5%. Never bedrock."
+  fn band_material(k : Int, rx : Int, rz : Int, seed : Int) : Int do
+    let h = CubeForge.Noise.hash2(k * 31 + rx, rz * 17 + k, seed + 1201)
+    if h < 0.55 do 3 else if h < 0.75 do basalt() else if h < 0.85 do granite()
+    else if h < 0.925 do sandstone() else shale() end end end end
+  end
+  doc "The rock at (wx, y, wz): band_material of the band the column's offset puts [y] in. What fills a column between its subsurface and the deep stone band."
+  fn rock_id(wx : Int, y : Int, wz : Int, seed : Int) : Int do
+    band_material(band_of(y, band_offset(wx, wz, seed)), wx / 64, wz / 64, seed)
+  end
+
+  -- Fill terrain up to [top] with [surface] on top, [sub] for four beneath it,
+  -- the strata below that (bedded rock by band; the deep basalt band and the
+  -- bedrock floor keep their depths), then water from top+1 up to sea level.
+  -- The band and its material are carried down the column and rehashed only
+  -- when the band changes: one hash per band crossed, not per block.
+  pfn fill_column_strata(c : Chunk, x : Int, z : Int, y : Int, top : Int, surface : Int, sub : Int,
+                         off : Float, rx : Int, rz : Int, seed : Int, band : Int, rock : Int, level : Int) : Chunk do
+    if y > top do fill_water(c, x, z, top + 1, level)
+    else
+      let k = band_of(y, off)
+      let rock1 = if k == band do rock else band_material(k, rx, rz, seed) end
+      let id = if y < bedrock_depth() do bedrock()
+               else if y == top do surface
+               else if y > top - 4 do sub
+               else if y < deep_stone_depth() do basalt()
+               else rock1 end end end end
+      fill_column_strata(set(c, x, y, z, id), x, z, y + 1, top, surface, sub, off, rx, rz, seed, k, rock1, level)
+    end
+  end
+  doc "A generated column: [surface], four of [sub], then the strata of world column (wx, wz); water from the top to [level] (sea level, or a lake's surface)."
+  fn fill_column_world(c : Chunk, x : Int, z : Int, wx : Int, wz : Int, seed : Int, top : Int, surface : Int, sub : Int, level : Int) : Chunk do
+    fill_column_strata(c, x, z, 0, top, surface, sub, band_offset(wx, wz, seed), wx / 64, wz / 64, seed, -99999, 3, level)
+  end
+
   -- Fill terrain up to [top] with [surface] on top and [sub] just beneath it, then
-  -- water from top+1 up to sea level.
+  -- water from top+1 up to sea level. The M2 test terrain: plain stone, no strata.
   pfn fill_column_mat(c : Chunk, x : Int, z : Int, y : Int, top : Int, surface : Int, sub : Int) : Chunk do
-    if y > top do fill_water(c, x, z, top + 1)
+    if y > top do fill_water(c, x, z, top + 1, sea_level())
     else
       let id = if y < bedrock_depth() do bedrock()
                else if y == top do surface
@@ -190,11 +275,12 @@ mod CubeForge.Chunk do
   -- One generated column: height and slope decide the materials.
   pfn fill_terrain_column(c : Chunk, x : Int, z : Int, wx : Int, wz : Int, seed : Int, h : Int) : Chunk do
     let sfc = surface_id(h, CubeForge.Noise.slope(wx, wz, seed))
-    fill_column_mat(c, x, z, 0, h, sfc, subsurface_id(sfc))
+    fill_column_world(c, x, z, wx, wz, seed, h, sfc, sediment_id(sfc, CubeForge.Noise.river_at(wx, wz, seed), h, sea_level(), seed), sea_level())
   end
 
-  pfn fill_water(c : Chunk, x : Int, z : Int, y : Int) : Chunk do
-    if y > sea_level() do c else fill_water(set(c, x, y, z, water()), x, z, y + 1) end
+  -- Source blocks from [y] up to [level]: the sea, or a lake.
+  pfn fill_water(c : Chunk, x : Int, z : Int, y : Int, level : Int) : Chunk do
+    if y > level do c else fill_water(set(c, x, y, z, water()), x, z, y + 1, level) end
   end
 
   pfn fill_go(c : Chunk, i : Int) : Chunk do
@@ -209,23 +295,202 @@ mod CubeForge.Chunk do
   doc "A chunk filled with the M2 test terrain."
   fn test_terrain() : Chunk do fill_go(new(), 0) end
 
-  -- ── M4: fill from the noise heightmap, four columns at a time ─────────────
-  pfn fill_noise_go(c : Chunk, i : Int, wx0 : Int, wz0 : Int, seed : Int) : Chunk do
+  -- ── M4: fill from the noise heightmap ───────────────────────────────────
+  -- The heightmap is computed ONCE per chunk, with an apron of apron() columns
+  -- on every side, and every per-column rule (slope now; talus, sediment and
+  -- the shore test later) reads it. Before, each column asked Noise.height
+  -- five times -- once for itself and four for its neighbours inside
+  -- Noise.slope -- and that was the whole of the world build.
+  --
+  -- The array is filled by the SCALAR Noise.height, not height_x4. Measured
+  -- on the layered generator, the 4-wide path is five times slower per chunk
+  -- and does not scale across workers: every F32x4 temporary is a heap box,
+  -- and the layered height makes hundreds of them per call (RESULTS.md).
+  -- height_x4 stays as the benchmark and the lanes test's reference. One
+  -- path also means a chunk and its neighbour agree on shared columns
+  -- exactly, and the surface materials agree with Noise.slope everywhere.
+  doc "Columns of heightmap kept beyond the chunk on every side: talus_reach() at its widest, plus the one column slope needs around the piled ring."
+  fn apron() : Int do 4 end
+  doc "Side of the heightmap array: 16 + 2 * apron(). A literal, like the world's strides."
+  fn heights_side() : Int do 24 end
+  doc "Index of local column (lx, lz), each in [-apron(), 16 + apron()), in a heightmap array."
+  fn height_index(lx : Int, lz : Int) : Int do (lx + apron()) + heights_side() * (lz + apron()) end
+  doc "Height of local column (lx, lz) from a chunk heightmap (see heights). height_at is the M2 test terrain."
+  fn hmap_at(hs : NativeIntArr, lx : Int, lz : Int) : Int do NativeArray.get_int(hs, height_index(lx, lz)) end
+
+  pfn heights_go(hs : NativeIntArr, wx0 : Int, wz0 : Int, seed : Int, i : Int) : NativeIntArr do
+    if i >= heights_side() * heights_side() do hs
+    else
+      let lx = i % heights_side() - apron()
+      let lz = i / heights_side() - apron()
+      heights_go(NativeArray.set_int(hs, i, CubeForge.Noise.height(wx0 + lx, wz0 + lz, seed)), wx0, wz0, seed, i + 1)
+    end
+  end
+  doc "The heightmap of the chunk at world origin (wx0, wz0) with its apron."
+  fn heights(wx0 : Int, wz0 : Int, seed : Int) : NativeIntArr do
+    heights_go(NativeArray.make_int(heights_side() * heights_side(), 0), wx0, wz0, seed, 0)
+  end
+
+  -- ── Talus ───────────────────────────────────────────────────────────────────
+  -- A cliff sheds rock, and it piles at the foot at the angle it comes to rest.
+  -- A column under a face gets a pile of gravel whose depth grows with the
+  -- world's age: none in a young world, three blocks when ancient. The pile
+  -- is the surface (gravel over gravel), so the cliff's foot is a short ramp
+  -- of scree rather than a right angle, and it reads the heightmap, so it is a
+  -- pure function of the world column like every other rule.
+  doc "How far (columns) a cliff sheds: the adjacent column until the world is old, two columns when ancient. Reach 2 at mid-age put scree on a seventh of the world."
+  fn talus_reach(a : Float) : Int do if a >= 0.75 do 2 else 1 end end
+  doc "The deepest pile, in blocks: 0 young, 1 mid-age, 3 ancient."
+  fn talus_depth(a : Float) : Int do float_to_int(3.0 *. a) end
+  doc "Blocks of rise per column at which rock rests: a neighbour this much higher per column away sheds nothing."
+  fn talus_angle() : Int do 2 end
+  doc "The least drop that sheds: one more than cliff_slope(), so a single terrace lip stays clean and a face piles. At cliff_slope() itself a fifth of the world was scree."
+  fn talus_min_drop() : Int do CubeForge.Noise.cliff_slope() + 1 end
+
+  -- The largest drop onto (lx, lz) from the ring within [r], less the angle
+  -- of rest for every column of distance beyond the first (the adjacent
+  -- face sheds straight down). k walks the (2r + 1)^2 offsets.
+  pfn drop_go(hs : NativeIntArr, lx : Int, lz : Int, h : Int, r : Int, k : Int, best : Int) : Int do
+    let side = 2 * r + 1
+    if k >= side * side do best
+    else
+      let dx = k % side - r
+      let dz = k / side - r
+      let dist = Math.max_int(abs_int(dx), abs_int(dz))
+      let d = if dist == 0 do 0 else hmap_at(hs, lx + dx, lz + dz) - h - (dist - 1) * talus_angle() end
+      drop_go(hs, lx, lz, h, r, k + 1, if d > best do d else best end)
+    end
+  end
+  doc """
+  Blocks of gravel piled on local column (lx, lz) at age fraction [a]: 0
+  unless something within talus_reach(a) stands talus_min_drop() or more above
+  it after the angle of rest, then (drop - 2) / 2 capped at talus_depth(a).
+  """
+  fn pile_at(hs : NativeIntArr, lx : Int, lz : Int, a : Float) : Int do
+    let depth = talus_depth(a)
+    if depth <= 0 do 0
+    else
+      let drop = drop_go(hs, lx, lz, hmap_at(hs, lx, lz), talus_reach(a), 0, 0)
+      if drop < talus_min_drop() do 0 else Math.min_int(depth, (drop - 2) / 2) end
+    end
+  end
+
+  -- The PILED heightmap: height plus pile for the chunk and a one-column ring,
+  -- laid out with piled_index. Slope and the surface rules read this one, so a
+  -- pile counts as ground for its neighbours too.
+  fn piled_side() : Int do 18 end
+  fn piled_index(lx : Int, lz : Int) : Int do (lx + 1) + piled_side() * (lz + 1) end
+  doc "Piled height of local column (lx, lz) in [-1, 17)."
+  fn piled_at(ps : NativeIntArr, lx : Int, lz : Int) : Int do NativeArray.get_int(ps, piled_index(lx, lz)) end
+  pfn piled_go(hs : NativeIntArr, ps : NativeIntArr, a : Float, i : Int) : NativeIntArr do
+    if i >= piled_side() * piled_side() do ps
+    else
+      let lx = i % piled_side() - 1
+      let lz = i / piled_side() - 1
+      piled_go(hs, NativeArray.set_int(ps, i, hmap_at(hs, lx, lz) + pile_at(hs, lx, lz, a)), a, i + 1)
+    end
+  end
+  doc "The piled heightmap over [hs] at age fraction [a]."
+  fn piled(hs : NativeIntArr, a : Float) : NativeIntArr do
+    piled_go(hs, NativeArray.make_int(piled_side() * piled_side(), 0), a, 0)
+  end
+
+  pfn abs_int(v : Int) : Int do if v < 0 do 0 - v else v end end
+  doc "Largest height difference between local column (lx, lz) and its four neighbours, from the heightmap: Noise.slope over the array."
+  fn slope_at(hs : NativeIntArr, lx : Int, lz : Int) : Int do
+    let h = hmap_at(hs, lx, lz)
+    let d0 = abs_int(hmap_at(hs, lx + 1, lz) - h)
+    let d1 = abs_int(hmap_at(hs, lx - 1, lz) - h)
+    let d2 = abs_int(hmap_at(hs, lx, lz + 1) - h)
+    let d3 = abs_int(hmap_at(hs, lx, lz - 1) - h)
+    Math.max_int(Math.max_int(d0, d1), Math.max_int(d2, d3))
+  end
+  doc "slope_at over the piled heightmap."
+  fn piled_slope_at(ps : NativeIntArr, lx : Int, lz : Int) : Int do
+    let h = piled_at(ps, lx, lz)
+    let d0 = abs_int(piled_at(ps, lx + 1, lz) - h)
+    let d1 = abs_int(piled_at(ps, lx - 1, lz) - h)
+    let d2 = abs_int(piled_at(ps, lx, lz + 1) - h)
+    let d3 = abs_int(piled_at(ps, lx, lz - 1) - h)
+    Math.max_int(Math.max_int(d0, d1), Math.max_int(d2, d3))
+  end
+
+  -- ── Climate-shaped ground ───────────────────────────────────────────────
+  -- Dunes are sand through (the biome finds sand and keeps it); a glacier
+  -- column is filled with ice from its carved floor back up to the relief,
+  -- gravel at the tongue's warm end (a moraine); a bog is a wet flat near
+  -- sea level with mud and clay and one column in bog_pit() dug to a pool.
+  doc "A dune column: the dune mask at or above this."
+  fn dune_min() : Float do 0.35 end
+  doc "One column in this many of a bog is a pool."
+  fn bog_pit() : Int do 7 end
+  doc "Fraction of bog columns that are mud rather than clay, on the same fixed hash Biome.wetland_surface uses, so a dug bank matches its surface."
+  fn bog_surface(x : Int, z : Int) : Int do
+    if CubeForge.Noise.hash2(x, z, 91537) < 0.4 do mud() else clay() end
+  end
+  doc "Is a column bog: at or within three of sea level, flat, on a river's plain, and not under a lake."
+  fn is_bog(h : Int, slope : Int, river : Float, lake : Int, seed : Int) : Bool do
+    lake == 0 && h >= sea_level() && h <= sea_level() + 3 && slope <= 1
+      && river >= CubeForge.Noise.plain_edge(CubeForge.Noise.age_frac(seed))
+  end
+  doc "Is a bog column one of its pools."
+  fn bog_pool(wx : Int, wz : Int, seed : Int) : Bool do
+    CubeForge.Noise.hash2(wx, wz, seed + 1400) *. int_to_float(bog_pit()) < 1.0
+  end
+  -- Ice from [y] up to [top]: the glacier's fill.
+  pfn fill_ice(c : Chunk, x : Int, z : Int, y : Int, top : Int) : Chunk do
+    if y > top || y >= 255 do c else fill_ice(set(c, x, y, z, ice()), x, z, y + 1, top) end
+  end
+
+  -- A column with a pile is gravel over gravel: the pile IS the surface, and
+  -- its slope is read from the piled map, so the foot of a cliff is scree at
+  -- a walkable angle while the face above it keeps its granite.
+  pfn fill_noise_go(c : Chunk, i : Int, hs : NativeIntArr, ps : NativeIntArr, wx0 : Int, wz0 : Int, seed : Int, lk : NativeU8Arr, n : Int) : Chunk do
     if i >= 256 do c
     else
       let x = i % 16
       let z = i / 16
-      let hs = CubeForge.Noise.height_x4(wx0 + x, wz0 + z, seed)
-      let c1 = fill_terrain_column(c, x, z, wx0 + x, wz0 + z, seed, float_to_int(Simd.extract_f32x4(hs, 0)))
-      let c2 = fill_terrain_column(c1, x + 1, z, wx0 + x + 1, wz0 + z, seed, float_to_int(Simd.extract_f32x4(hs, 1)))
-      let c3 = fill_terrain_column(c2, x + 2, z, wx0 + x + 2, wz0 + z, seed, float_to_int(Simd.extract_f32x4(hs, 2)))
-      let c4 = fill_terrain_column(c3, x + 3, z, wx0 + x + 3, wz0 + z, seed, float_to_int(Simd.extract_f32x4(hs, 3)))
-      fill_noise_go(c4, i + 4, wx0, wz0, seed)
+      let top = piled_at(ps, x, z)
+      let piled_up = top > hmap_at(hs, x, z)
+      -- the water level this column is under: a lake's surface, or the sea's
+      let lake = CubeForge.Lakes.level_at(lk, n, wx0 + x, wz0 + z)
+      let level = if lake > 0 do lake else sea_level() end
+      let wx = wx0 + x
+      let wz = wz0 + z
+      let river = CubeForge.Noise.river_at(wx, wz, seed)
+      let slope = piled_slope_at(ps, x, z)
+      let bog = is_bog(top, slope, river, lake, seed)
+      let pool = bog && bog_pool(wx, wz, seed)
+      -- a lake's pour point is dug one block down: the notch its outlet runs over
+      let notch = CubeForge.Lakes.notch_at(lk, n, wx, wz)
+      let dune = !piled_up && !bog && CubeForge.Noise.dune_mask_at(wx, wz, seed) >= dune_min()
+      let glacier = !piled_up && lake == 0 && CubeForge.Noise.glacier_at(wx, wz, seed)
+      let moraine = glacier && CubeForge.Noise.moraine_at(wx, wz, seed)
+      let top1 = if pool do sea_level() - 1 else if notch do top - 1 else top end end
+      let sfc = if piled_up || moraine do gravel()
+                else if dune do sand()
+                else if bog && !pool do bog_surface(wx, wz)
+                else surface_id_at(top1, slope, level) end end end
+      let sub = if piled_up || moraine do gravel()
+                else if dune do sand()
+                else if bog do mud()
+                else sediment_id(sfc, river, top1, level, seed) end end end
+      let c1 = fill_column_world(c, x, z, wx, wz, seed, top1, sfc, sub, level)
+      let c2 = if glacier && !moraine do fill_ice(c1, x, z, top1 + 1, CubeForge.Noise.relief(wx, wz, seed)) else c1 end
+      fill_noise_go(c2, i + 1, hs, ps, wx0, wz0, seed, lk, n)
     end
   end
 
-  doc "Generate the chunk whose world origin is (wx0, wz0) from the noise heightmap."
-  fn generate(wx0 : Int, wz0 : Int, seed : Int) : Chunk do plant(fill_noise_go(new(), 0, wx0, wz0, seed), wx0, wz0, seed) end
+  doc "Generate the chunk whose world origin is (wx0, wz0) from the noise heightmap, with no lakes (see generate_lakes)."
+  fn generate(wx0 : Int, wz0 : Int, seed : Int) : Chunk do generate_lakes(wx0, wz0, seed, CubeForge.Lakes.none(), 0) end
+
+  doc "Generate the chunk at (wx0, wz0) against the world's lake table [lk] (Lakes.levels for [n] chunks a side): lake columns fill to their surface, and no tree or bush stands under one."
+  fn generate_lakes(wx0 : Int, wz0 : Int, seed : Int, lk : NativeU8Arr, n : Int) : Chunk do
+    let hs = heights(wx0, wz0, seed)
+    let ps = piled(hs, CubeForge.Noise.age_frac(seed))
+    -- the caves are carved last: through the strata, under the trees, never through water
+    CubeForge.Caves.carve(plant_lakes(fill_noise_go(new(), 0, hs, ps, wx0, wz0, seed, lk, n), wx0, wz0, seed, lk, n), wx0, wz0, seed, lk, n)
+  end
 
   -- ── Vegetation ──────────────────────────────────────────────────────────────
   -- A tree near a chunk edge spills its canopy into the neighbour, so a chunk
@@ -275,41 +540,46 @@ mod CubeForge.Chunk do
   end
 
   -- Every tree cell overlapping this chunk expanded by the canopy radius.
-  pfn plant_trees_go(c : Chunk, wx0 : Int, wz0 : Int, seed : Int, i : Int, cx0 : Int, cz0 : Int, span : Int) : Chunk do
+  -- A cell's tree or bush is skipped when its column is under a lake: the cell
+  -- test is pure in the cell, and the lake table is the same in every chunk,
+  -- so both chunks a canopy spans agree.
+  pfn plant_trees_go(c : Chunk, wx0 : Int, wz0 : Int, seed : Int, i : Int, cx0 : Int, cz0 : Int, span : Int, lk : NativeU8Arr, n : Int) : Chunk do
     if i >= span * span do c
     else
       let cx = cx0 + i % span
       let cz = cz0 + i / span
       let col = CubeForge.Trees.tree_at_cell(cx, cz, seed)
-      if col < 0 do plant_trees_go(c, wx0, wz0, seed, i + 1, cx0, cz0, span)
+      if col < 0 || CubeForge.Lakes.level_at(lk, n, col % 4096, col / 4096) > 0 do plant_trees_go(c, wx0, wz0, seed, i + 1, cx0, cz0, span, lk, n)
       else
         let tx = col % 4096
         let tz = col / 4096
         let base = CubeForge.Noise.height(tx, tz, seed)
         let trunk = CubeForge.Trees.trunk_height(tx, tz, seed)
         let species = CubeForge.Trees.species_at(base)
-        plant_trees_go(stamp_tree(c, wx0, wz0, tx, tz, base, trunk, species, 0), wx0, wz0, seed, i + 1, cx0, cz0, span)
+        plant_trees_go(stamp_tree(c, wx0, wz0, tx, tz, base, trunk, species, 0), wx0, wz0, seed, i + 1, cx0, cz0, span, lk, n)
       end
     end
   end
 
-  pfn plant_bushes_go(c : Chunk, wx0 : Int, wz0 : Int, seed : Int, i : Int, cx0 : Int, cz0 : Int, span : Int) : Chunk do
+  pfn plant_bushes_go(c : Chunk, wx0 : Int, wz0 : Int, seed : Int, i : Int, cx0 : Int, cz0 : Int, span : Int, lk : NativeU8Arr, n : Int) : Chunk do
     if i >= span * span do c
     else
       let cx = cx0 + i % span
       let cz = cz0 + i / span
       let col = CubeForge.Trees.bush_at_cell(cx, cz, seed)
-      if col < 0 do plant_bushes_go(c, wx0, wz0, seed, i + 1, cx0, cz0, span)
+      if col < 0 || CubeForge.Lakes.level_at(lk, n, col % 4096, col / 4096) > 0 do plant_bushes_go(c, wx0, wz0, seed, i + 1, cx0, cz0, span, lk, n)
       else
         let bx = col % 4096
         let bz = col / 4096
-        plant_bushes_go(stamp_bush(c, wx0, wz0, bx, bz, CubeForge.Noise.height(bx, bz, seed), 0), wx0, wz0, seed, i + 1, cx0, cz0, span)
+        plant_bushes_go(stamp_bush(c, wx0, wz0, bx, bz, CubeForge.Noise.height(bx, bz, seed), 0), wx0, wz0, seed, i + 1, cx0, cz0, span, lk, n)
       end
     end
   end
 
-  doc "Plant the trees and bushes that reach into the chunk at world origin (wx0, wz0)."
-  fn plant(c : Chunk, wx0 : Int, wz0 : Int, seed : Int) : Chunk do
+  doc "Plant the trees and bushes that reach into the chunk at world origin (wx0, wz0), with no lakes."
+  fn plant(c : Chunk, wx0 : Int, wz0 : Int, seed : Int) : Chunk do plant_lakes(c, wx0, wz0, seed, CubeForge.Lakes.none(), 0) end
+  doc "plant against the world's lake table: nothing is planted under a lake."
+  fn plant_lakes(c : Chunk, wx0 : Int, wz0 : Int, seed : Int, lk : NativeU8Arr, n : Int) : Chunk do
     let r = CubeForge.Trees.max_radius()
     let ts = CubeForge.Trees.cell_size()
     let tc0 = floor_div(wx0 - r, ts)
@@ -319,7 +589,7 @@ mod CubeForge.Chunk do
     let bc0 = floor_div(wx0 - 1, bs)
     let bcz0 = floor_div(wz0 - 1, bs)
     let bspan = floor_div(wx0 + 16, bs) - bc0 + 1
-    plant_springs_go(plant_bushes_go(plant_trees_go(c, wx0, wz0, seed, 0, tc0, tcz0, tspan), wx0, wz0, seed, 0, bc0, bcz0, bspan), wx0, wz0, seed, 0, floor_div(wx0, ts), floor_div(wz0, ts), floor_div(wx0 + 15, ts) - floor_div(wx0, ts) + 1)
+    plant_springs_go(plant_bushes_go(plant_trees_go(c, wx0, wz0, seed, 0, tc0, tcz0, tspan, lk, n), wx0, wz0, seed, 0, bc0, bcz0, bspan, lk, n), wx0, wz0, seed, 0, floor_div(wx0, ts), floor_div(wz0, ts), floor_div(wx0 + 15, ts) - floor_div(wx0, ts) + 1)
   end
 
   -- A spring is one source block at the surface of its cell's column. Only cells
