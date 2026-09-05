@@ -213,16 +213,33 @@ mod CubeForge.Myc do
     end
   end
 
+  -- Which rows hold anything: one byte per row, from one pass over the field.
+  -- Most of the world is empty most of the time, and a row with nothing in it
+  -- or beside it can skip the 3x3 test for all n of its columns: the tick on an
+  -- empty field is then 16k reads and nothing else.
+  pfn rows_go(sps : NativeU8Arr, n : Int, i : Int, rows : NativeU8Arr) : NativeU8Arr do
+    if i >= n * n do rows
+    else if NativeArray.get_u8(sps, i) != 0 do rows_go(sps, n, i + 1, NativeArray.set_u8(rows, i / n, 1))
+    else rows_go(sps, n, i + 1, rows) end end
+  end
+  pfn row_band(rows : NativeU8Arr, n : Int, z : Int) : Bool do
+    let a = if z > 0 do NativeArray.get_u8(rows, z - 1) != 0 else false end
+    let b = NativeArray.get_u8(rows, z) != 0
+    let c = if z < n - 1 do NativeArray.get_u8(rows, z + 1) != 0 else false end
+    a || b || c
+  end
+
   pfn tick_go(sps : NativeU8Arr, vg : NativeFloatArr, rc : NativeU8Arr, hd : NativeU8Arr, cl : NativeU8Arr,
-              ta : NativeFloatArr, ma : NativeFloatArr, n : Int, rate : Float, i : Int,
+              ta : NativeFloatArr, ma : NativeFloatArr, n : Int, rate : Float, rows : NativeU8Arr, i : Int,
               nsps : NativeU8Arr, nvg : NativeFloatArr, nrc : NativeU8Arr, nhd : NativeU8Arr, ncl : NativeU8Arr) : Field do
     if i >= n * n do Field(nsps, nvg, nrc, nhd, ncl)
-    else if !any_near(sps, n, i % n, i / n, 0) do tick_go(sps, vg, rc, hd, cl, ta, ma, n, rate, i + 1, nsps, nvg, nrc, nhd, ncl)
+    else if !row_band(rows, n, i / n) do tick_go(sps, vg, rc, hd, cl, ta, ma, n, rate, rows, i + n, nsps, nvg, nrc, nhd, ncl)
+    else if !any_near(sps, n, i % n, i / n, 0) do tick_go(sps, vg, rc, hd, cl, ta, ma, n, rate, rows, i + 1, nsps, nvg, nrc, nhd, ncl)
     else
       match tick_col(sps, vg, rc, hd, cl, ta, ma, n, rate, i, nsps, nvg, nrc, nhd, ncl) do
-        Field(a, b, c, d, e) -> tick_go(sps, vg, rc, hd, cl, ta, ma, n, rate, i + 1, a, b, c, d, e)
+        Field(a, b, c, d, e) -> tick_go(sps, vg, rc, hd, cl, ta, ma, n, rate, rows, i + 1, a, b, c, d, e)
       end
-    end end
+    end end end
   end
 
   doc """
@@ -233,7 +250,7 @@ mod CubeForge.Myc do
   fn tick(f : Field, n : Int, ta : NativeFloatArr, ma : NativeFloatArr, rate : Float) : Field do
     match f do
       Field(sps, vg, rc, hd, cl) ->
-        tick_go(sps, vg, rc, hd, cl, ta, ma, n, rate, 0,
+        tick_go(sps, vg, rc, hd, cl, ta, ma, n, rate, rows_go(sps, n, 0, NativeArray.make_u8(n, 0)), 0,
                 NativeArray.make_u8(n * n, 0), NativeArray.make_float(n * n, 0.0), NativeArray.make_u8(n * n, 0), NativeArray.make_u8(n * n, 0), NativeArray.make_u8(n * n, 0))
     end
   end
