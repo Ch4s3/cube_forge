@@ -93,7 +93,8 @@ mod CubeForge.Inventory do
     else if C.is_source(id) do C.water()
     else if C.is_water(id) do C.id_of_level(7)
     else if C.is_foliage(id) do 0         -- leaves crumble
-    else id end end end end
+    else if C.is_myc(id) do C.myc_base(id) -- the network dies with the block; the ground survives
+    else id end end end end end
   end
 
   -- First slot in [lo, hi) already holding [item], or -1.

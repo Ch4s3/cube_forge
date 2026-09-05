@@ -75,4 +75,12 @@ mod CubeForge.Test.MycBlock do
     end
   end
 
+
+  describe "Inventory yield for mycelium" do
+    test "digging mycelium yields the base block" do
+      Test.assert_eq_int(CubeForge.Inventory.yield_of(Ch.myc_id(Ch.sand(), 2)), Ch.sand(), "sand")
+      Test.assert_eq_int(CubeForge.Inventory.yield_of(Ch.myc_id(1, 0)), 1, "grass")
+    end
+  end
+
 end

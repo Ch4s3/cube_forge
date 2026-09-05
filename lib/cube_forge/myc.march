@@ -261,4 +261,36 @@ mod CubeForge.Myc do
     end
   end
 
+
+  -- ── Migration: what the surface should show ──────────────────────────────
+  doc "Vigour at and above which a column's surface shows its species."
+  fn show_vigour() : Float do 0.15 end
+
+  doc "The species column [i] should display: its species once vigour reaches show_vigour(), else 0."
+  fn wanted(f : Field, n : Int, i : Int) : Int do
+    match f do
+      Field(sps, vg, _, _, _) ->
+        let sp = NativeArray.get_u8(sps, i)
+        if sp == 0 do 0 else if NativeArray.get_float(vg, i) >= show_vigour() do sp else 0 end end
+    end
+  end
+
+  pfn migrations_go(sps : NativeU8Arr, vg : NativeFloatArr, shown : NativeU8Arr, n : Int, i : Int, left : Int, budget : Int, acc : List(Int)) : List(Int) do
+    if left <= 0 || budget <= 0 do acc
+    else
+      let ci = i % (n * n)
+      let sp = NativeArray.get_u8(sps, ci)
+      let want = if sp == 0 do 0 else if NativeArray.get_float(vg, ci) >= show_vigour() do sp else 0 end end
+      if want != NativeArray.get_u8(shown, ci) do migrations_go(sps, vg, shown, n, i + 1, left - 1, budget - 1, Cons(ci, acc))
+      else migrations_go(sps, vg, shown, n, i + 1, left - 1, budget, acc) end
+    end
+  end
+
+  doc "Column indices whose surface should change: wanted species differs from [shown]. Scans [scan] columns from where tick [tick] leaves off (a stateless cursor), returns at most [budget]. Destructures the field once (GAPS G68)."
+  fn migrations(f : Field, n : Int, shown : NativeU8Arr, tick : Int, scan : Int, budget : Int) : List(Int) do
+    match f do
+      Field(sps, vg, _, _, _) -> migrations_go(sps, vg, shown, n, (tick * scan) % (n * n), scan, budget, Nil)
+    end
+  end
+
 end
