@@ -102,4 +102,140 @@ mod CubeForge.Myc do
     match f do Field(sps, _, rc, _, _) -> hash_u8(rc, n * n, 0, hash_u8(sps, n * n, 0, 11)) end
   end
 
+
+  -- ── The tick ──────────────────────────────────────────────────────────────
+
+  pfn ease(cur : Float, target : Float, rate : Float) : Float do
+    let d = target -. cur
+    if d > rate do cur +. rate else if d < 0.0 -. rate do cur -. rate else target end end
+  end
+
+  -- dx, dz for neighbour k of 8: the 3x3 ring minus the centre, row by row.
+  pfn ndx(k : Int) : Int do
+    let kk = if k >= 4 do k + 1 else k end
+    kk % 3 - 1
+  end
+  pfn ndz(k : Int) : Int do
+    let kk = if k >= 4 do k + 1 else k end
+    kk / 3 - 1
+  end
+
+  -- The claimant search returns three numbers packed in one Int so the loop
+  -- threads a single accumulator: species * 65536 + reach * 256 + round(fitness * 255).
+  pfn pack_claim(sp : Int, rc : Int, fit : Float) : Int do sp * 65536 + rc * 256 + float_to_int(fit *. 255.0 +. 0.5) end
+  pfn claim_sp(c : Int) : Int do c / 65536 end
+  pfn claim_rc(c : Int) : Int do (c / 256) % 256 end
+  pfn claim_fit(c : Int) : Float do int_to_float(c % 256) /. 255.0 end
+
+  -- Best qualifying neighbour of column (x, z). [own] is the column's species and
+  -- [ownfit] its fitness; a neighbour of the same species never claims.
+  pfn claimant_go(sps : NativeU8Arr, vg : NativeFloatArr, rc : NativeU8Arr, n : Int, x : Int, z : Int,
+                  t : Float, m : Float, own : Int, ownfit : Float, k : Int, best : Int) : Int do
+    if k >= 8 do best
+    else
+      let nx = x + ndx(k)
+      let nz = z + ndz(k)
+      if nx < 0 || nz < 0 || nx >= n || nz >= n do claimant_go(sps, vg, rc, n, x, z, t, m, own, ownfit, k + 1, best)
+      else
+        let i = nx + n * nz
+        let c = NativeArray.get_u8(sps, i)
+        let r = NativeArray.get_u8(rc, i)
+        let strong = if c == 0 do false else if r <= 0 do false else NativeArray.get_float(vg, i) >= spread_vigour() end end
+        if !strong do claimant_go(sps, vg, rc, n, x, z, t, m, own, ownfit, k + 1, best)
+        else if c == own do claimant_go(sps, vg, rc, n, x, z, t, m, own, ownfit, k + 1, best)
+        else
+          let fc = S.fitness(c, t, m)
+          let ok = if own == 0 do fc >= claim_floor() else fc >= ownfit +. contest_margin() end
+          if !ok do claimant_go(sps, vg, rc, n, x, z, t, m, own, ownfit, k + 1, best)
+          else
+            -- better fitness wins; the same species at equal fitness keeps the larger reach
+            let take = if best == 0 do true
+                       else if fc > claim_fit(best) +. 0.002 do true
+                       else if claim_sp(best) == c do r - 1 > claim_rc(best)
+                       else false end end end
+            claimant_go(sps, vg, rc, n, x, z, t, m, own, ownfit, k + 1, if take do pack_claim(c, r - 1, fc) else best end)
+          end
+        end end
+      end
+    end
+  end
+
+  -- One column. Reads the old arrays, writes index i of the new ones.
+  pfn tick_col(sps : NativeU8Arr, vg : NativeFloatArr, rc : NativeU8Arr, hd : NativeU8Arr, cl : NativeU8Arr,
+               ta : NativeFloatArr, ma : NativeFloatArr, n : Int, rate : Float, i : Int,
+               nsps : NativeU8Arr, nvg : NativeFloatArr, nrc : NativeU8Arr, nhd : NativeU8Arr, ncl : NativeU8Arr) : Field do
+    let x = i % n
+    let z = i / n
+    let sp = NativeArray.get_u8(sps, i)
+    let t = NativeArray.get_float(ta, i)
+    let m = NativeArray.get_float(ma, i)
+    let fit = S.fitness(sp, t, m)
+    let claim = claimant_go(sps, vg, rc, n, x, z, t, m, sp, fit, 0, 0)
+    let c = claim_sp(claim)
+    let hd0 = NativeArray.get_u8(hd, i)
+    let hd1 = if c == 0 do 0 else if c == NativeArray.get_u8(cl, i) do hd0 + 1 else 1 end end
+    let hd2 = if hd1 > 255 do 255 else hd1 end
+    let matured = if c == 0 do false else hd2 >= hold_ticks() end
+    if sp == 0 do
+      if matured do
+        Field(NativeArray.set_u8(nsps, i, c), NativeArray.set_float(nvg, i, seed_vigour()), NativeArray.set_u8(nrc, i, claim_rc(claim)), NativeArray.set_u8(nhd, i, 0), NativeArray.set_u8(ncl, i, 0))
+      else
+        Field(nsps, nvg, nrc, NativeArray.set_u8(nhd, i, hd2), NativeArray.set_u8(ncl, i, c))
+      end
+    else
+      let v0 = NativeArray.get_float(vg, i)
+      let v1 = if c != 0 do v0 -. contest_factor() *. rate else ease(v0, fit, rate) end
+      let dies = if v1 <= 0.0 do (if c != 0 do true else fit < S.viable() end) else false end
+      if dies do
+        if matured do
+          Field(NativeArray.set_u8(nsps, i, c), NativeArray.set_float(nvg, i, seed_vigour()), NativeArray.set_u8(nrc, i, claim_rc(claim)), NativeArray.set_u8(nhd, i, 0), NativeArray.set_u8(ncl, i, 0))
+        else
+          Field(NativeArray.set_u8(nsps, i, 0), NativeArray.set_float(nvg, i, 0.0), NativeArray.set_u8(nrc, i, 0), NativeArray.set_u8(nhd, i, hd2), NativeArray.set_u8(ncl, i, c))
+        end
+      else
+        let v2 = if v1 < 0.0 do 0.0 else v1 end
+        Field(NativeArray.set_u8(nsps, i, sp), NativeArray.set_float(nvg, i, v2), NativeArray.set_u8(nrc, i, NativeArray.get_u8(rc, i)), NativeArray.set_u8(nhd, i, hd2), NativeArray.set_u8(ncl, i, c))
+      end
+    end
+  end
+
+  -- Anything in the 3x3 neighbourhood of (x, z)? A cheap pre-test so an empty
+  -- world's tick is 16k byte reads and no fitness arithmetic. A skipped column
+  -- keeps the fresh arrays' zeros, which is exactly its new state.
+  pfn any_near(sps : NativeU8Arr, n : Int, x : Int, z : Int, k : Int) : Bool do
+    if k >= 9 do false
+    else
+      let nx = x + k % 3 - 1
+      let nz = z + k / 3 - 1
+      if nx < 0 || nz < 0 || nx >= n || nz >= n do any_near(sps, n, x, z, k + 1)
+      else if NativeArray.get_u8(sps, nx + n * nz) != 0 do true
+      else any_near(sps, n, x, z, k + 1) end end
+    end
+  end
+
+  pfn tick_go(sps : NativeU8Arr, vg : NativeFloatArr, rc : NativeU8Arr, hd : NativeU8Arr, cl : NativeU8Arr,
+              ta : NativeFloatArr, ma : NativeFloatArr, n : Int, rate : Float, i : Int,
+              nsps : NativeU8Arr, nvg : NativeFloatArr, nrc : NativeU8Arr, nhd : NativeU8Arr, ncl : NativeU8Arr) : Field do
+    if i >= n * n do Field(nsps, nvg, nrc, nhd, ncl)
+    else if !any_near(sps, n, i % n, i / n, 0) do tick_go(sps, vg, rc, hd, cl, ta, ma, n, rate, i + 1, nsps, nvg, nrc, nhd, ncl)
+    else
+      match tick_col(sps, vg, rc, hd, cl, ta, ma, n, rate, i, nsps, nvg, nrc, nhd, ncl) do
+        Field(a, b, c, d, e) -> tick_go(sps, vg, rc, hd, cl, ta, ma, n, rate, i + 1, a, b, c, d, e)
+      end
+    end end
+  end
+
+  doc """
+  One tick against the eased climate arrays [ta] and [ma] (one entry per column,
+  the biome field's `temps` and `moists`). Every column pulls from its eight
+  neighbours in the previous state and writes its own entry into fresh arrays.
+  """
+  fn tick(f : Field, n : Int, ta : NativeFloatArr, ma : NativeFloatArr, rate : Float) : Field do
+    match f do
+      Field(sps, vg, rc, hd, cl) ->
+        tick_go(sps, vg, rc, hd, cl, ta, ma, n, rate, 0,
+                NativeArray.make_u8(n * n, 0), NativeArray.make_float(n * n, 0.0), NativeArray.make_u8(n * n, 0), NativeArray.make_u8(n * n, 0), NativeArray.make_u8(n * n, 0))
+    end
+  end
+
 end

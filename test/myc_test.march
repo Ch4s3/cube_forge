@@ -38,4 +38,82 @@ mod CubeForge.Test.Myc do
     end
   end
 
+
+  pfn tick_n(f : CubeForge.Myc.Field, n : Int, ta : NativeFloatArr, ma : NativeFloatArr, rate : Float, k : Int) : CubeForge.Myc.Field do
+    if k <= 0 do f else tick_n(Myc.tick(f, n, ta, ma, rate), n, ta, ma, rate, k - 1) end
+  end
+
+  -- Chebyshev radius of species [sp] around (cx, cz): the farthest held column.
+  pfn radius_go(f : CubeForge.Myc.Field, n : Int, sp : Int, cx : Int, cz : Int, i : Int, best : Int) : Int do
+    if i >= n * n do best
+    else
+      let x = i % n
+      let z = i / n
+      let dx = if x > cx do x - cx else cx - x end
+      let dz = if z > cz do z - cz else cz - z end
+      let d = if dx > dz do dx else dz end
+      if Myc.species_of(f, n, x, z) == sp do radius_go(f, n, sp, cx, cz, i + 1, if d > best do d else best end)
+      else radius_go(f, n, sp, cx, cz, i + 1, best) end
+    end
+  end
+
+  describe "Myc.tick" do
+    test "vigour eases toward fitness and a planting in the wrong climate withers" do
+      let n = 32
+      -- Meadowbell (3) planted in a hot, wet climate: fitness 0
+      let f0 = Myc.plant(Myc.build(n), n, 16, 16, 3)
+      let f1 = tick_n(f0, n, uniform(n, 0.9), uniform(n, 0.9), Myc.default_rate(), 200)
+      Test.assert_eq_int(Myc.species_of(f1, n, 16, 16), 0, "withered")
+      Test.assert_eq_int(Myc.count_species(f1, n, 3), 0, "and spread nowhere")
+    end
+
+    test "on ideal ground a planting grows to full vigour" do
+      let n = 32
+      let f0 = Myc.plant(Myc.build(n), n, 16, 16, 3)
+      let f1 = tick_n(f0, n, uniform(n, 0.5), uniform(n, 0.3), Myc.default_rate(), 600)
+      Test.assert_true(near(Myc.vigour_of(f1, n, 16, 16), 1.0), "full vigour")
+    end
+
+    test "a planting spreads, and no further than its reach" do
+      let n = 40
+      let f0 = Myc.plant(Myc.build(n), n, 20, 20, 3)
+      -- fast rate so vigour is not the limit; enough ticks for every hop's hold to mature
+      let f1 = tick_n(f0, n, uniform(n, 0.5), uniform(n, 0.3), 0.1, (Myc.plant_reach() + 2) * (Myc.hold_ticks() + 12))
+      Test.assert_eq_int(radius_go(f1, n, 3, 20, 20, 0, 0), Myc.plant_reach(), "exactly the reach")
+      Test.assert_eq_int(Myc.reach_of(f1, n, 20 + Myc.plant_reach(), 20), 0, "the rim has no reach left")
+      Test.assert_true(Myc.count_species(f1, n, 3) > 100, "a real patch")
+    end
+
+    test "nothing spreads where the species is unfit" do
+      let n = 32
+      let f0 = Myc.plant(Myc.build(n), n, 16, 16, 3)
+      let f1 = tick_n(f0, n, uniform(n, 0.5), uniform(n, 0.9), 0.1, 100)
+      Test.assert_eq_int(Myc.count_species(f1, n, 3), 0, "withered without claiming a neighbour")
+    end
+
+    test "two species: the fitter one takes the contested ground, but only within its reach" do
+      let n = 40
+      -- warm forest edge, 0.68 / 0.7: Lanterncap (4) is fading out, Marshlight (5) is in its core
+      let ta = uniform(n, 0.68)
+      let ma = uniform(n, 0.7)
+      Test.assert_true(Sp.fitness(5, 0.68, 0.7) > Sp.fitness(4, 0.68, 0.7) +. Myc.contest_margin(), "the margin holds at this climate")
+      Test.assert_true(Sp.fitness(4, 0.68, 0.7) >= Sp.viable(), "but Lanterncap can still hold ground here")
+      -- six columns apart: inside Marshlight's reach of eight
+      let f0 = Myc.plant(Myc.plant(Myc.build(n), n, 20, 20, 4), n, 26, 20, 5)
+      let f1 = tick_n(f0, n, ta, ma, 0.05, 1200)
+      Test.assert_eq_int(Myc.species_of(f1, n, 23, 20), 5, "the column between them ended Marshlight")
+      Test.assert_eq_int(Myc.species_of(f1, n, 20, 20), 5, "so did the Lanterncap planting itself")
+      Test.assert_eq_int(Myc.species_of(f1, n, 14, 20), 0, "beyond Marshlight's reach nothing grows: Lanterncap is too weak here to spread")
+      Test.assert_true(Myc.count_species(f1, n, 5) > Myc.count_species(f1, n, 4), "Marshlight holds more ground")
+    end
+
+    test "a settled field is stable" do
+      let n = 32
+      let f0 = Myc.plant(Myc.build(n), n, 16, 16, 3)
+      let f1 = tick_n(f0, n, uniform(n, 0.5), uniform(n, 0.3), 0.1, 600)
+      let f2 = Myc.tick(f1, n, uniform(n, 0.5), uniform(n, 0.3), 0.1)
+      Test.assert_eq_int(Myc.state_hash(f2, n), Myc.state_hash(f1, n), "one more tick changes nothing")
+    end
+  end
+
 end
