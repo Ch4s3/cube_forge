@@ -102,10 +102,11 @@ mod CubeForge.Texture do
   doc """
   16x16 RGBA texture array, layer-major: 0 grass, 1 water, 2 dirt, 3 stone,
   4 sand, 5 snow, 6 granite, 7 bedrock, 8 oak bark, 9 cut end, 10 oak leaves,
-  11 pine leaves, 12 pine bark, 13 gravel, 14 clay, 15 spring (icon only), 16 foam.
+  11 pine leaves, 12 pine bark, 13 gravel, 14 clay, 15 spring (icon only), 16 foam,
+  17 basalt, 18 ice, 19 mud.
   """
   fn checkerboard() : NativeU8Arr do
-    let a0 = checker_go(NativeArray.make_u8(17 * 16 * 16 * 4, 0), 0)
+    let a0 = checker_go(NativeArray.make_u8(20 * 16 * 16 * 4, 0), 0)
     let a1 = water_go(a0, 0)
     let a2 = speckle_go(a1, 2, 0, 134, 96, 67)
     let a3 = speckle_go(a2, 3, 0, 128, 128, 132)
@@ -121,7 +122,10 @@ mod CubeForge.Texture do
     let a13 = speckle_go(a12, 13, 0, 112, 110, 106)
     let a14 = speckle_go(a13, 14, 0, 158, 142, 124)
     let a15 = spring_go(a14, 0)
-    speckle_go(a15, 16, 0, 226, 236, 246)
+    let a16 = speckle_go(a15, 16, 0, 226, 236, 246)
+    let a17 = speckle_go(a16, 17, 0, 40, 38, 42)
+    let a18 = speckle_go(a17, 18, 0, 205, 225, 240)
+    speckle_go(a18, 19, 0, 70, 48, 38)
   end
 
   -- Layer 15: the spring ITEM's icon -- water blue with a pale ring, so a spring in
@@ -140,7 +144,7 @@ mod CubeForge.Texture do
   doc "Texture layer for an item's HUD icon: as layer_for, except the spring item (id 4) shows its ring. The sea is also id 4 and must keep rendering as water, which is why this is not layer_for."
   fn icon_layer(id : Int) : Float do if id == 4 do 15.0 else layer_for(id) end end
 
-  fn layers() : Int do 17 end
+  fn layers() : Int do 20 end
   fn water_layer() : Float do 1.0 end
   doc "Texture layer for a block id on face direction [d] (0 +y, 1 -y, 2 +x, 3 -x, 4 +z, 5 -z)."
   fn layer_for_face(id : Int, d : Int) : Float do
@@ -164,7 +168,10 @@ mod CubeForge.Texture do
     else if id == 19 do 11.0
     else if id == 20 do 13.0
     else if id == 21 do 14.0
-    else 0.0 end end end end end end end end end end end end end
+    else if id == 22 do 17.0
+    else if id == 23 do 18.0
+    else if id == 24 do 19.0
+    else 0.0 end end end end end end end end end end end end end end end end
   end
 
 end
