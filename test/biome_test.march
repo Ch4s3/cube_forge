@@ -204,6 +204,16 @@ mod CubeForge.Test.Biome do
       Test.assert_eq_int(Biome.palette(Biome.b_alpine(), 0, 0), C.gravel(), "alpine still gravel")
       Test.assert_eq_int(Biome.palette(Biome.b_alpine(), 99, 99), C.gravel(), "alpine ignores column")
     end
+    test "both clay and mud actually occur across sampled columns" do
+      Test.assert_true(any_clay_and_mud(0, false, false), "at least one clay and at least one mud among sampled columns")
+    end
+  end
+  pfn any_clay_and_mud(i : Int, saw_clay : Bool, saw_mud : Bool) : Bool do
+    if i >= 64 do saw_clay && saw_mud
+    else
+      let p = Biome.palette(Biome.b_wetland(), i, i * 3 + 1)
+      any_clay_and_mud(i + 1, saw_clay || p == C.clay(), saw_mud || p == C.mud())
+    end
   end
   pfn grass_top16(w : CubeForge.World.World, i : Int, h : Int) : CubeForge.World.World do
     if i >= 256 do w else grass_top16(CubeForge.World.set_block(w, i % 16, h - 1, i / 16, 1), i + 1, h) end
