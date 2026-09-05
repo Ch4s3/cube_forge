@@ -23,6 +23,7 @@ mod CubeForge do
   alias CubeForge.Player as Player
   alias CubeForge.Hud as Hud
   alias CubeForge.Menu as Menu
+  alias CubeForge.Settings as Settings
   alias CubeForge.Raycast as Ray
   alias CubeForge.Outline as Outline
   alias CubeForge.Marker as Marker
@@ -55,6 +56,8 @@ mod CubeForge do
 
   -- What the next session starts from: a seed, a save slot, or nothing (keep playing / stop).
   type Start = FromSeed(Int) | FromSlot(Int) | NoStart
+  -- What a session hands the next one: where to start, and the settings as they stand.
+  type Next = Next(Start, CubeForge.Settings.Settings)
   pfn is_no_start(s : Start) : Bool do
     match s do
       NoStart -> true
@@ -1491,7 +1494,7 @@ mod CubeForge do
 
   -- Frame loop. `max_frames < 0` means run until the window closes.
   -- Run-time knobs read once, outside the frame loop (an Env read allocates).
-  type Knobs = Knobs(Int, Int, String, Bool, Float, Int, Bool, Int, Int, Int, Float, Int, Float, Bool, Int, Int, Int, Int, Int, Bool, Int, Int, Int, Int, Int, Int, Int, Bool, Bool, Int, Int, Bool, Int, Int, Int, Int, Int, Int, Bool, Int, Int, Int, Int, Int, Int)   -- max_frames, dump_frame, dump_path, autowalk, autospin, autoedit frame (<0 = off), autoswim, autoflow frame (<0 = off), workers, automap frame (<0 = off; forces map view on from this frame, for headless verification), day length in seconds, sun angle override in degrees (<0 = follow the clock), shadow reach in blocks (0 = off), soft shadow edges, autobreak frame (<0 = off): break the column under the player every 20 frames, for a repeatable edit benchmark, weather pin 0..100 (<0 = follow the actor), precipitation pool capacity, biome ease rate in percent (100 = one CF_DAY per full swing), draw the biome map in map view, autocanal frame (<0 = off): lay a 9-block line of water three columns east of the player, aim-independent, for the biome end-to-end test, biome migration budget: surface columns retextured per tick, vegetation budget: trees grown or felled per tick, time pin in seconds (<0 = live clock) for the water animation, remesh-all frame (<0 = off): rebuild every section of every chunk at that frame, a ground truth for stale-mesh hunts, automenu frame (<0 = off): open the escape menu at that frame and start a new game five frames later, for the restart test, audio mode (0 off, 1 device, 2 null device -- render a tick per push straight into the WAV, for reproducible headless dumps), audio log, autodive, autoglow frame (<0 = off): place a glow cap three columns east of the player, through edit_block, for the block-light end-to-end check, myc rate in percent, draw the mycelium map overlay in map view, autoplant frame (<0 = off): plant the fittest species three columns east of the player, myc migration budget (surface columns per retexture slot; glow changes batch under one relight per slot), autoplant species override (0 = fittest), autospore frame (<0 = off): give three spores and plant one through the item path thirty frames later, fruit budget (bodies per fruit slot), fruit rate in percent, autostart (skip the start screen), autosave frame (<0 = off) and slot, autoload frame (<0 = off, first session only) and slot, autoslots frame (<0 = off): open the slots page at that frame, for a headless look at it, climate feedback from the network in percent (0 = none)
+  type Knobs = Knobs(Int, Int, String, Bool, Float, Int, Bool, Int, Int, Int, Float, Int, Int, Int, Int, Int, Int, Bool, Int, Int, Int, Int, Int, Int, Int, Bool, Bool, Int, Int, Bool, Int, Int, Int, Int, Int, Int, Bool, Int, Int, Int, Int, Int, Int, Int, CubeForge.Settings.Settings, Int)   -- max_frames, dump_frame, dump_path, autowalk, autospin, autoedit frame (<0 = off), autoswim, autoflow frame (<0 = off), workers, automap frame (<0 = off; forces map view on from this frame, for headless verification), day length in seconds, sun angle override in degrees (<0 = follow the clock), autobreak frame (<0 = off): break the column under the player every 20 frames, for a repeatable edit benchmark, weather pin 0..100 (<0 = follow the actor), CF_PRECIP raw cap override (<0 = the precipitation setting), biome ease rate in percent (100 = one CF_DAY per full swing), draw the biome map in map view, autocanal frame (<0 = off): lay a 9-block line of water three columns east of the player, aim-independent, for the biome end-to-end test, biome migration budget: surface columns retextured per tick, vegetation budget: trees grown or felled per tick, time pin in seconds (<0 = live clock) for the water animation, remesh-all frame (<0 = off): rebuild every section of every chunk at that frame, a ground truth for stale-mesh hunts, automenu frame (<0 = off): open the escape menu at that frame and start a new game five frames later, for the restart test, audio mode (0 off, 1 device, 2 null device -- render a tick per push straight into the WAV, for reproducible headless dumps), audio log, autodive, autoglow frame (<0 = off): place a glow cap three columns east of the player, through edit_block, for the block-light end-to-end check, myc rate in percent, draw the mycelium map overlay in map view, autoplant frame (<0 = off): plant the fittest species three columns east of the player, myc migration budget (surface columns per retexture slot; glow changes batch under one relight per slot), autoplant species override (0 = fittest), autospore frame (<0 = off): give three spores and plant one through the item path thirty frames later, fruit budget (bodies per fruit slot), fruit rate in percent, autostart (skip the start screen), autosave frame (<0 = off) and slot, autoload frame (<0 = off, first session only) and slot, autoslots frame (<0 = off): open the slots page at that frame, for a headless look at it, climate feedback from the network in percent (0 = none), autosettings frame (<0 = off): open the settings page at that frame and click the shadow row's right arrow five frames later, for the settings file end-to-end check, the settings as read from disk and the mask of fields an environment variable overrides (both for writing the file, see Settings.merge)
 
   doc "Write the session into [slot]. Prints the outcome; true on success."
   pfn save_game(slot : Int, w : CubeForge.World.World, p : CubeForge.Player.Player, inv : CubeForge.Inventory.Inv, seed : Int, day : Float, wxpid) : Bool do
@@ -1547,7 +1550,7 @@ mod CubeForge do
     match f do
       Frame(frame, last_t, player, sample, view, vp, map_mode, marker, flash, wcache, bcache, inv_open, drag_from, menu, menubuf, next_seed, worst, worst_at, sched) ->
         match k do
-        Knobs(max_frames, dump_frame, dump_path, autowalk, autospin, autoedit, autoswim, autoflow, workers, automap, day_len, sun_deg, shadow_dist, soft_shadows, autoinv, autobreak, weather_pin, precip_cap, biome_rate, biome_map, autocanal, biome_budget, veg_budget, time_pin, remesh_all_at, automenu, audio_mode, audio_log, autodive, autoglow, myc_rate, myc_map, autoplant, myc_budget, autoplant_species, autospore, fruit_budget, fruit_rate, autostart, autosave, autosave_slot, autoload, autoload_slot, autoslots, myc_feedback) ->
+        Knobs(max_frames, dump_frame, dump_path, autowalk, autospin, autoedit, autoswim, autoflow, workers, automap, day_len, sun_deg, autoinv, autobreak, weather_pin, precip_cap, biome_rate, biome_map, autocanal, biome_budget, veg_budget, time_pin, remesh_all_at, automenu, audio_mode, audio_log, autodive, autoglow, myc_rate, myc_map, autoplant, myc_budget, autoplant_species, autospore, fruit_budget, fruit_rate, autostart, autosave, autosave_slot, autoload, autoload_slot, autoslots, myc_feedback, autosettings, settings_disk, settings_mask) ->
         if Win.should_close() || (max_frames >= 0 && frame >= max_frames) || !is_no_start(next_seed) do
           Frame(frame, last_t, player, sample, view, vp, map_mode, marker, flash, wcache, bcache, inv_open, drag_from, menu, menubuf, next_seed, worst, worst_at, sched)
         else
@@ -1571,9 +1574,11 @@ mod CubeForge do
           let scripted_menu = automenu >= 0 && seed != automenu_seed()
           let menu1a = if scripted_menu && frame == automenu do Menu.set_seed(Menu.set_open(menu0, true), automenu_seed()) else menu0 end
           -- CF_AUTOSLOTS=<frame>: open the slots page at that frame (headless look at the page).
-          let menu1 = if autoslots >= 0 && frame == autoslots do
+          let menu1b = if autoslots >= 0 && frame == autoslots do
                         Menu.set_slots(Menu.set_page(Menu.set_open(menu1a, true), Menu.page_slots()), Save.list(Save.dir(), World.side(scene_world(sc))))
                       else menu1a end
+          -- CF_AUTOSETTINGS=<frame>: open the settings page at that frame; the click comes five frames later.
+          let menu1 = if autosettings >= 0 && frame == autosettings do Menu.set_page(Menu.set_open(menu1b, true), Menu.page_settings()) else menu1b end
           -- Either panel releases the cursor; with both closed the mouse looks around again.
           let ui_open = inv_open2 || Menu.is_open(menu1)
           if esc do CubeForge.Ffi.Input.capture_cursor(!ui_open) else () end
@@ -1627,6 +1632,24 @@ mod CubeForge do
           let on_main = Menu.page(menu2) == Menu.page_main()
           let m_click = Menu.is_open(menu2) && In.button_pressed(In.button_left()) && m_hover >= 0
           if m_click && on_main && m_hover == Menu.item_quit() do Win.request_close() else () end
+          -- ── Settings ──────────────────────────────────────────────────────
+          -- An arrow click steps its row. Vsync and fullscreen are window calls,
+          -- made only on the frame a field changes; shadows and precipitation are
+          -- read from the settings every frame further down. Every change is
+          -- written at once, so a crash never loses a choice; an environment
+          -- override is applied but never written (Settings.merge).
+          let on_settings = Menu.page(menu2) == Menu.page_settings()
+          let s_item = if autosettings >= 0 && frame == autosettings + 5 && on_settings do Menu.settings_item(Settings.field_shadow_dist(), Menu.part_right())
+                       else if m_click && on_settings do m_hover else -1 end end
+          let menu2s = Menu.click(menu2, s_item)
+          let s_old = Menu.settings(menu2)
+          let s_new = Menu.settings(menu2s)
+          let s_changed = Settings.first_diff(s_old, s_new)
+          if s_changed == Settings.field_vsync() do Win.set_vsync(Settings.value(s_new, Settings.field_vsync()) == 1) else () end
+          if s_changed == Settings.field_fullscreen() do Win.set_fullscreen(Settings.value(s_new, Settings.field_fullscreen()) == 1) else () end
+          let s_stored = if s_changed >= 0 do Settings.store(Save.dir(), Settings.merge(s_new, settings_disk, settings_mask)) else true end
+          if s_changed >= 0 do println("settings: " ++ Settings.name(s_changed) ++ " " ++ Settings.label(s_new, s_changed) ++ (if s_stored do "" else " (write failed)" end)) else () end
+          let menu2b = if s_stored do menu2s else Menu.set_status(menu2s, s_changed, Menu.status_failed(), frame) end
           -- Enter starts too, so the seed can be typed and committed without the mouse.
           let start = (m_click && on_main && m_hover == Menu.item_new_game())
                       || (Menu.is_open(menu2) && on_main && In.key_pressed(In.key_enter()))
@@ -1635,16 +1658,18 @@ mod CubeForge do
           -- world": the menu closes and becomes the escape menu. A changed seed restarts.
           let play_here = start && Menu.is_start(menu2) && Menu.seed(menu2) == seed
           let side = World.side(scene_world(sc_drag))
-          let menu3 = if play_here do Menu.set_mode(Menu.set_open(menu2, false), Menu.mode_escape())
+          let menu3 = if play_here do Menu.set_mode(Menu.set_open(menu2b, false), Menu.mode_escape())
                       else if m_click && on_main && m_hover == Menu.item_second() do
-                        Menu.set_slots(Menu.set_page(menu2, Menu.page_slots()), Save.list(Save.dir(), side))
-                      else if m_click && !on_main && m_hover == Menu.item_back() do Menu.set_page(menu2, Menu.page_main())
-                      else menu2 end end end
+                        Menu.set_slots(Menu.set_page(menu2b, Menu.page_slots()), Save.list(Save.dir(), side))
+                      else if m_click && on_main && m_hover == Menu.item_settings() do Menu.set_page(menu2b, Menu.page_settings())
+                      else if m_click && !on_main && m_hover == Menu.item_back(menu2b) do Menu.set_page(menu2b, Menu.page_main())
+                      else menu2b end end end end
           let next_a = if start && !play_here do FromSeed(Menu.seed(menu2)) else next_seed end
           if start && !play_here do println("new game, seed " ++ int_to_string(Menu.seed(menu2))) else () end
           -- Slot rows: save in escape mode, load on the start screen. CF_AUTOSAVE and
           -- CF_AUTOLOAD drive the same two paths for the headless round-trip test.
-          let slot_click = if m_click && !on_main && m_hover < Menu.item_back() do Menu.slot_of_item(m_hover) else 0 end
+          let on_slots = Menu.page(menu2) == Menu.page_slots()
+          let slot_click = if m_click && on_slots && m_hover < Menu.item_back(menu2) do Menu.slot_of_item(m_hover) else 0 end
           let save_slot = if autosave >= 0 && frame == autosave do autosave_slot
                           else if slot_click > 0 && !Menu.is_start(menu3) do slot_click else 0 end end
           let load_slot = if first && autoload >= 0 && frame == autoload do autoload_slot
@@ -1858,8 +1883,9 @@ mod CubeForge do
           let bcx = float_to_int(V.x(Player.position(player1)))
           let bcz = float_to_int(V.z(Player.position(player1)))
           let pscale = Biome.precip_scale(Biome.biome_of(scene_biome(sc1), bcx, bcz))
-          let live0 = float_to_int(int_to_float(precip_cap) *. wx *. pscale)
-          let live = if live0 > precip_cap do precip_cap else live0 end
+          let pcap = if precip_cap >= 0 do precip_cap else Settings.value(Menu.settings(menu5), Settings.field_precip()) end
+          let live0 = float_to_int(int_to_float(pcap) *. wx *. pscale)
+          let live = if live0 > pcap do pcap else live0 end
           let snowmix = Precip.snow_mix(Biome.temp_of(scene_biome(sc1), bcx, bcz))
           let snowing = snowmix > 0.5
           -- Camera right, flattened to the horizontal plane and normalised.
@@ -1920,7 +1946,8 @@ mod CubeForge do
             end end
           -- The map view is an overhead diagnostic; shadows there would only
           -- obscure the terrain it exists to show.
-          Win.gfx_set_shadow(if map_mode1 do 0.0 else shadow_dist end, soft_shadows)
+          let s_now = Menu.settings(menu5)
+          Win.gfx_set_shadow(if map_mode1 do 0.0 else int_to_float(Settings.value(s_now, Settings.field_shadow_dist())) end, Settings.value(s_now, Settings.field_soft_shadows()) == 1)
           Win.gfx_set_light(sun, V.x(eye), V.y(eye), V.z(eye), V.x(look), V.y(look), V.z(look), flash_now)
           Win.gfx_set_time(if time_pin >= 0 do int_to_float(time_pin) else now end)
           Win.gfx_set_view_proj(render_vp)
@@ -2227,6 +2254,13 @@ mod CubeForge do
     end
   end
 
+  doc "Field [f] taken from the environment variable [name] when it is set."
+  pfn env_setting(s : CubeForge.Settings.Settings, f : Int, name : String) : CubeForge.Settings.Settings do
+    if Env.get(name, "") == "" do s else Settings.with_value(s, f, Env.get_int(name, 0)) end
+  end
+  doc "The bit of field [f] when [name] is set, else 0: the fields the file must not take from a scripted run."
+  pfn env_mask(f : Int, name : String) : Int do if Env.get(name, "") == "" do 0 else Settings.bit(f) end end
+
   fn main(cap : Cap(IO)) : Unit do
     let max_frames = Env.get_int("CF_FRAMES", -1)
     let n = World.size()
@@ -2236,13 +2270,32 @@ mod CubeForge do
     let seed_env = Env.get_int("CF_SEED", -1)
     let seed = if seed_env >= 0 do seed_env else int_and(System.monotonic_time() * 2654435761 + unix_time_ms(), 1073741823) end
     let headless = Env.get_int("CF_HEADLESS", 0) == 1
+    -- Graphics settings: the file, then any environment override on top. The
+    -- overridden fields are remembered so they are never written back.
+    let settings_disk = Settings.load(Save.dir())
+    let settings0 = settings_disk
+      |> env_setting(Settings.field_fullscreen(), "CF_FULLSCREEN")
+      |> env_setting(Settings.field_vsync(), "CF_VSYNC")
+      |> env_setting(Settings.field_shadow_dist(), "CF_SHADOW_DIST")
+      |> env_setting(Settings.field_soft_shadows(), "CF_SHADOW_SOFT")
+      |> env_setting(Settings.field_precip(), "CF_PRECIP")
+    let settings_mask = env_mask(Settings.field_fullscreen(), "CF_FULLSCREEN") + env_mask(Settings.field_vsync(), "CF_VSYNC")
+      + env_mask(Settings.field_shadow_dist(), "CF_SHADOW_DIST") + env_mask(Settings.field_soft_shadows(), "CF_SHADOW_SOFT")
+      + env_mask(Settings.field_precip(), "CF_PRECIP")
     -- `&&` does not short-circuit (GAPS.md G33), so the window open is gated with a nested if.
     let opened = if headless do 1 else Win.open(Env.get_int("CF_WIDTH", 800), Env.get_int("CF_HEIGHT", 600), "cube_forge") end
     if opened == 0 do
       println("failed to open window")
     else
+      if !headless do
+        Win.set_vsync(Settings.value(settings0, Settings.field_vsync()) == 1)
+        Win.set_fullscreen(Settings.value(settings0, Settings.field_fullscreen()) == 1)
+      else () end
       if !headless do (if Win.gfx_init() == 0 do println("gfx init failed") else () end) else () end
-      if !headless do Win.precip_init(Env.get_int("CF_PRECIP", 4000)) else () end
+      -- One pool, sized for the largest choice; a setting is a clamp on it. CF_PRECIP can still ask for more.
+      let precip_pool = Env.get_int("CF_PRECIP", 0)
+      let precip_max = Settings.choice_value(Settings.field_precip(), Settings.choices(Settings.field_precip()) - 1)
+      if !headless do Win.precip_init(if precip_pool > precip_max do precip_pool else precip_max end) else () end
       -- Session-invariant GL state: uploaded once and reused by every session.
       if !headless do
         Win.spray_init(Env.get_int("CF_SPRAY", 512))
@@ -2272,10 +2325,10 @@ mod CubeForge do
         else () end
       else () end
       let knobs = Knobs(max_frames, Env.get_int("CF_DUMP_FRAME", 30), Env.get("CF_DUMP", ""), Env.get_int("CF_AUTOWALK", 0) == 1,
-                        int_to_float(Env.get_int("CF_AUTOSPIN", 0)) /. 1000.0 /. Player.mouse_sens(), Env.get_int("CF_AUTOEDIT", -1), autoswim, Env.get_int("CF_AUTOFLOW", -1), workers, Env.get_int("CF_AUTOMAP", -1), int_to_float(Env.get_int("CF_DAY", 1800)), Env.get_int("CF_SUN", -1), int_to_float(Env.get_int("CF_SHADOW_DIST", 64)), Env.get_int("CF_SHADOW_SOFT", 1) == 1, Env.get_int("CF_AUTOINV", -1), Env.get_int("CF_AUTOBREAK", -1), Env.get_int("CF_WEATHER", -1), Env.get_int("CF_PRECIP", 4000), Env.get_int("CF_BIOME_RATE", 100), Env.get_int("CF_BIOME_MAP", 0) == 1, Env.get_int("CF_AUTOCANAL", -1), Env.get_int("CF_BIOME_BUDGET", 32), Env.get_int("CF_VEG_BUDGET", 1), Env.get_int("CF_TIME", -1), Env.get_int("CF_REMESH_ALL_AT", -1), Env.get_int("CF_AUTOMENU", -1), audio_mode, Env.get_int("CF_AUDIO_LOG", 0) == 1, Env.get_int("CF_AUTODIVE", 0) == 1, Env.get_int("CF_AUTOGLOW", -1), Env.get_int("CF_MYC_RATE", 100), Env.get_int("CF_MYC_MAP", 0) == 1, Env.get_int("CF_AUTOPLANT", -1), Env.get_int("CF_MYC_BUDGET", 64), Env.get_int("CF_AUTOPLANT_SPECIES", 0), Env.get_int("CF_AUTOSPORE", -1), Env.get_int("CF_FRUIT_BUDGET", 1), Env.get_int("CF_FRUIT_RATE", 100), Env.get_int("CF_AUTOSTART", 0) == 1, Env.get_int("CF_AUTOSAVE", -1), Env.get_int("CF_AUTOSAVE_SLOT", 1), Env.get_int("CF_AUTOLOAD", -1), Env.get_int("CF_AUTOLOAD_SLOT", 1), Env.get_int("CF_AUTOSLOTS", -1), Env.get_int("CF_MYC_FEEDBACK", 100))
+                        int_to_float(Env.get_int("CF_AUTOSPIN", 0)) /. 1000.0 /. Player.mouse_sens(), Env.get_int("CF_AUTOEDIT", -1), autoswim, Env.get_int("CF_AUTOFLOW", -1), workers, Env.get_int("CF_AUTOMAP", -1), int_to_float(Env.get_int("CF_DAY", 1800)), Env.get_int("CF_SUN", -1), Env.get_int("CF_AUTOINV", -1), Env.get_int("CF_AUTOBREAK", -1), Env.get_int("CF_WEATHER", -1), Env.get_int("CF_PRECIP", -1), Env.get_int("CF_BIOME_RATE", 100), Env.get_int("CF_BIOME_MAP", 0) == 1, Env.get_int("CF_AUTOCANAL", -1), Env.get_int("CF_BIOME_BUDGET", 32), Env.get_int("CF_VEG_BUDGET", 1), Env.get_int("CF_TIME", -1), Env.get_int("CF_REMESH_ALL_AT", -1), Env.get_int("CF_AUTOMENU", -1), audio_mode, Env.get_int("CF_AUDIO_LOG", 0) == 1, Env.get_int("CF_AUTODIVE", 0) == 1, Env.get_int("CF_AUTOGLOW", -1), Env.get_int("CF_MYC_RATE", 100), Env.get_int("CF_MYC_MAP", 0) == 1, Env.get_int("CF_AUTOPLANT", -1), Env.get_int("CF_MYC_BUDGET", 64), Env.get_int("CF_AUTOPLANT_SPECIES", 0), Env.get_int("CF_AUTOSPORE", -1), Env.get_int("CF_FRUIT_BUDGET", 1), Env.get_int("CF_FRUIT_RATE", 100), Env.get_int("CF_AUTOSTART", 0) == 1, Env.get_int("CF_AUTOSAVE", -1), Env.get_int("CF_AUTOSAVE_SLOT", 1), Env.get_int("CF_AUTOLOAD", -1), Env.get_int("CF_AUTOLOAD_SLOT", 1), Env.get_int("CF_AUTOSLOTS", -1), Env.get_int("CF_MYC_FEEDBACK", 100), Env.get_int("CF_AUTOSETTINGS", -1), settings_disk, settings_mask)
       let pids = Array.from_list(spawn_water(n * n - 1, n, Nil))
       let wxpid = Weather.spawn_weather()
-      session_loop(FromSeed(seed), true, n, workers, headless, seed_env >= 0, knobs, proj, map_proj, pids, wxpid, autoswim)
+      session_loop(FromSeed(seed), settings0, true, n, workers, headless, seed_env >= 0, knobs, proj, map_proj, pids, wxpid, autoswim)
       if audio_mode > 0 do Aud.close() else () end
       Win.close()
     end
@@ -2314,8 +2367,8 @@ mod CubeForge do
       end
     end
   end
-  pfn run_session(start : Start, first : Bool, n : Int, workers : Int, headless : Bool, from_env : Bool, k : Knobs,
-                  proj : NativeFloatArr, map_proj : NativeFloatArr, pids, wxpid, autoswim : Bool) : Start do
+  pfn run_session(start : Start, settings0 : CubeForge.Settings.Settings, first : Bool, n : Int, workers : Int, headless : Bool, from_env : Bool, k : Knobs,
+                  proj : NativeFloatArr, map_proj : NativeFloatArr, pids, wxpid, autoswim : Bool) : Next do
     -- A slot is read first; everything after "terrain" is the same for both.
     let loaded = match start do
       FromSlot(slot) -> load_slot(slot, n)
@@ -2383,7 +2436,7 @@ mod CubeForge do
             ++ int_to_string(Env.get_int("MARCH_NUM_SCHEDULERS", 4)) ++ " scheduler threads (MARCH_NUM_SCHEDULERS)")
     println("  terrain scalar noise: " ++ int_to_string(t1 - t0) ++ " ms   terrain F32x4 noise: " ++ int_to_string(t2 - t1) ++ " ms")
     println("  mesh all (greedy sections): " ++ int_to_string(t3 - t2) ++ " ms wall, " ++ float_to_string(int_to_float(t3 - t2) /. int_to_float(n * n)) ++ " ms per chunk (wall / chunks), " ++ int_to_string(nverts) ++ " vertices (" ++ int_to_string(count_water_verts(meshes, 0)) ++ " water)")
-    if headless do NoStart
+    if headless do Next(NoStart, settings0)
     else
       let counts = upload_meshes(meshes, 0, NativeArray.make_int(3 * water_slot_base(), 0))
       let water_col = World.find_water(world)
@@ -2435,23 +2488,26 @@ mod CubeForge do
         Loaded(h, _) -> Save.h_day(h)
         NoLoad -> t4
       end
-      let menu0 = if first && Env.get_int("CF_AUTOSTART", 0) == 0 do Menu.new_start(seed) else Menu.new(seed) end
+      let menu0 = if first && Env.get_int("CF_AUTOSTART", 0) == 0 do Menu.new_start(seed, settings0) else Menu.new(seed, settings0) end
       match frame_loop(Frame(0, t4, player, 0, NativeArray.make_float(16, 0.0), NativeArray.make_f32(16, 0.0), false, F32Buf.new(64), Env.get_int("CF_FLASH", 0) == 1, 0.0, 0.0, false, -1, menu0, F32Buf.new(2048), NoStart, 0.0, -1, Audio.sched_start(0)), k, scene, n * n, proj, map_proj, fps0, wxpid, seed, first, t4, day0) do
-        Frame(frames, _, p, _, _, _, _, _, _, _, _, _, _, _, _, ns, worst, worst_at, _) ->
+        Frame(frames, _, p, _, _, _, _, _, _, _, _, _, _, mfin, _, ns, worst, worst_at, _) ->
           let t5 = Win.time()
           println("ran " ++ int_to_string(frames) ++ " frames in " ++ ms(t5 -. t4) ++ " (" ++ float_to_string(int_to_float(frames) /. (t5 -. t4)) ++ " fps, vsync on); player ended at " ++ V.to_string(Player.position(p)))
           println("worst frame after warmup: " ++ ms(worst) ++ " at frame " ++ int_to_string(worst_at))
-          ns
+          Next(ns, Menu.settings(mfin))
       end
     end
   end
 
   -- Run sessions until one asks to stop.
-  pfn session_loop(start : Start, first : Bool, n : Int, workers : Int, headless : Bool, from_env : Bool, k : Knobs,
+  -- Settings outlive a session: a new game reseeds the world, not the options.
+  pfn session_loop(start : Start, settings0 : CubeForge.Settings.Settings, first : Bool, n : Int, workers : Int, headless : Bool, from_env : Bool, k : Knobs,
                    proj : NativeFloatArr, map_proj : NativeFloatArr, pids, wxpid, autoswim : Bool) : Unit do
-    let next = run_session(start, first, n, workers, headless, from_env, k, proj, map_proj, pids, wxpid, autoswim)
-    if is_no_start(next) do ()
-    else session_loop(next, false, n, workers, headless, false, k, proj, map_proj, pids, wxpid, autoswim) end
+    match run_session(start, settings0, first, n, workers, headless, from_env, k, proj, map_proj, pids, wxpid, autoswim) do
+      Next(next, s1) ->
+        if is_no_start(next) do ()
+        else session_loop(next, s1, false, n, workers, headless, false, k, proj, map_proj, pids, wxpid, autoswim) end
+    end
   end
 
 end

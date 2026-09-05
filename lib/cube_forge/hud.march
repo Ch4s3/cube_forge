@@ -56,6 +56,9 @@ mod CubeForge.Hud do
       88 -> 23213   -- X  101 101 010 101 101
       89 -> 23186   -- Y  101 101 010 010 010
       90 -> 29351   -- Z  111 001 010 100 111
+      -- The settings page's arrow buttons.
+      60 -> 5393    -- <  001 010 100 010 001
+      62 -> 17492   -- >  100 010 001 010 100
       _ -> 0
     end
   end
@@ -304,24 +307,34 @@ mod CubeForge.Hud do
   pfn menu_items_go(b : CubeForge.F32Buf.F32Buf, m : CubeForge.Menu.Menu, i : Int) : CubeForge.F32Buf.F32Buf do
     if i >= Menu.items(m) do b
     else
-      let x0 = Menu.item_x0(m)
+      let x0 = Menu.item_x0(m, i)
       let y0 = Menu.item_y0(m, i)
       let h = Menu.item_h(m)
-      let w = Menu.item_w(m)
+      let w = Menu.item_w(m, i)
       let hot = Menu.focused(m) == i
+      -- A settings body is not a button: it never lights up.
+      let body = Menu.page(m) == Menu.page_settings() && i < Menu.item_back(m) && Menu.settings_part(i) == Menu.part_body()
+      let lit = hot && !body
       let b1 = arect(b, x0, y0, x0 +. w, y0 +. h,
-                     if hot do 0.30 else 0.15 end, if hot do 0.35 else 0.17 end,
-                     if hot do 0.42 else 0.21 end, 0.98)
+                     if lit do 0.30 else 0.15 end, if lit do 0.35 else 0.17 end,
+                     if lit do 0.42 else 0.21 end, 0.98)
       let lbl = Menu.label(m, i)
       let sub = Menu.sublabel(m, i)
-      -- Slot rows are set smaller: SLOT 5 SEED plus ten digits must fit the row.
-      let px = if Menu.page(m) == Menu.page_slots() do slot_px() else menu_px() end
+      let val = Menu.value_label(m, i)
+      -- The sub-pages are set smaller: SLOT 5 SEED plus ten digits must fit a
+      -- slot row, PRECIPITATION MEDIUM plus two arrows a settings row.
+      let px = if Menu.page(m) == Menu.page_slots() do slot_px()
+               else if Menu.page(m) == Menu.page_settings() do settings_px()
+               else menu_px() end end
       let py = px *. 1.4
       let tw = text_width(lbl, px)
       -- A one-line row centres its label; a two-line row puts the label at the
-      -- top and the date under it. Text y is the glyph's top edge.
+      -- top and the date under it; a settings body sets its name at the left
+      -- and its value at the right. Text y is the glyph's top edge.
       let ly = if sub == "" do y0 +. h /. 2.0 +. 2.5 *. py else y0 +. h -. 0.012 end
-      let b2 = emit_text(b1, lbl, x0 +. (w -. tw) /. 2.0, ly, px, py)
+      let b2 = if val == "" do emit_text(b1, lbl, x0 +. (w -. tw) /. 2.0, ly, px, py)
+               else emit_text(emit_text(b1, lbl, x0 +. settings_pad(), ly, px, py),
+                              val, x0 +. w -. settings_pad() -. text_width(val, px), ly, px, py) end
       let b3 = if sub == "" do b2
                else emit_text(b2, sub, x0 +. (w -. text_width(sub, sub_px())) /. 2.0, y0 +. 0.012 +. 5.0 *. sub_py(), sub_px(), sub_py()) end
       menu_items_go(b3, m, i + 1)
@@ -331,6 +344,9 @@ mod CubeForge.Hud do
   fn menu_px() : Float do 0.010 end
   fn menu_py() : Float do 0.014 end
   fn slot_px() : Float do 0.007 end
+  fn settings_px() : Float do 0.006 end
+  doc "Inset of a settings body's name and value from the box edges."
+  fn settings_pad() : Float do 0.014 end
   fn sub_px() : Float do 0.005 end
   fn sub_py() : Float do 0.007 end
   fn title_px() : Float do 0.018 end
@@ -353,7 +369,7 @@ mod CubeForge.Hud do
     else
       let sx = Menu.seed_x0(m)
       let sy = Menu.seed_y0(m)
-      let b4 = arect(b3, sx, sy, sx +. Menu.item_w(m), sy +. Menu.item_h(m), 0.05, 0.06, 0.08, 0.98)
+      let b4 = arect(b3, sx, sy, sx +. Menu.item_w(m, 0), sy +. Menu.item_h(m), 0.05, 0.06, 0.08, 0.98)
       let b5 = emit_text(b4, "SEED", sx +. 0.014, sy +. Menu.item_h(m) -. 0.010, 0.006, 0.009)
       emit_digits(b5, digits_of(Menu.seed(m), Nil), sx +. 0.014, sy +. 0.062, 0.008, 0.011)
     end

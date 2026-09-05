@@ -171,7 +171,9 @@ is a no-op. The existing framebuffer-size callback handles viewport and
 projection; nothing else in March needs to know.
 
 Headless runs (`CF_HEADLESS=1`) skip both window calls, as they skip
-`Win.open`.
+`Win.open`. As built, `CF_PRECIP` stays a raw particle cap rather than going
+through `nearest`: scripted runs use values the choice list does not offer,
+and the pool is sized to the larger of the cap and the largest choice.
 
 ### 4. Persistence
 
@@ -236,7 +238,8 @@ saved.
   page lands on main.
 - **`test/font_test.march`**: `<` and `>` are defined, non-zero, distinct from
   each other and from every digit and letter.
-- **Headless end-to-end**: a `CF_AUTOSETTINGS=<frame>` knob opens the settings
+- **Scripted end-to-end** (windowed with `CF_FRAMES`, since headless mode
+  returns before the frame loop): a `CF_AUTOSETTINGS=<frame>` knob opens the settings
   page at that frame and clicks the shadow row's right arrow five frames
   later, the way `CF_AUTOMENU` scripts the restart. The run asserts by reading
   `settings.txt` back: `shadow_dist 128`. Run with a scratch `CF_SAVE_DIR`.
