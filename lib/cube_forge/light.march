@@ -52,7 +52,9 @@ mod CubeForge.Light do
   -- Levels are deliberately below max_level(): a cap at 10 lights a radius of
   -- about nine, and keeps every relight box small.
   fn emission(id : Int) : Int do
-    if id == C.glow_cap() do 10 else 0 end
+    if id == C.glow_cap() do 10
+    else if C.is_myc(id) do 2 * C.myc_glow(id)
+    else 0 end end
   end
 
   -- ── Seeding: sunlight down each column ────────────────────────────────────

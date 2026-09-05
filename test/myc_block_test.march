@@ -1,0 +1,65 @@
+-- Mycelium blocks: ids that encode base and glow, their emission, and their layers.
+mod CubeForge.Test.MycBlock do
+
+  import Test
+  alias CubeForge.Chunk as Ch
+  alias CubeForge.Light as Lt
+  alias CubeForge.Texture as Tx
+
+  pfn near(a : Float, b : Float) : Bool do Math.abs(a -. b) < 0.0001 end
+
+  describe "Chunk mycelium ids" do
+    test "encode seven bases and three glow levels in 23..43" do
+      Test.assert_eq_int(Ch.myc_id(1, 0), 23, "grass, no glow, is the first")
+      Test.assert_eq_int(Ch.myc_id(3, 2), 43, "stone, bright, is the last")
+      Test.assert_eq_int(Ch.myc_first(), 23, "first")
+      Test.assert_eq_int(Ch.myc_last(), 43, "last")
+      Test.assert_true(Ch.is_myc(30), "30 is mycelium")
+      Test.assert_false(Ch.is_myc(22), "the glow cap is not")
+      Test.assert_false(Ch.is_myc(44), "44 is not")
+      Test.assert_eq_int(Ch.myc_id(16, 0), 0, "a log is not a base")
+    end
+    test "round-trip base and glow" do
+      Test.assert_eq_int(Ch.myc_base(Ch.myc_id(Ch.snow(), 1)), Ch.snow(), "snow")
+      Test.assert_eq_int(Ch.myc_glow(Ch.myc_id(Ch.snow(), 1)), 1, "dim")
+      Test.assert_eq_int(Ch.myc_base(Ch.myc_id(Ch.clay(), 2)), Ch.clay(), "clay")
+      Test.assert_eq_int(Ch.myc_glow(Ch.myc_id(Ch.clay(), 2)), 2, "bright")
+      Test.assert_eq_int(Ch.myc_base_index(Ch.myc_id(Ch.gravel(), 0)), 4, "gravel is base 4")
+      Test.assert_eq_int(Ch.myc_base_of_index(4), Ch.gravel(), "and back")
+      Test.assert_eq_int(Ch.myc_base(1), 1, "a non-mycelium id is its own base")
+    end
+    test "mycelium is solid, opaque and not a palette block" do
+      Test.assert_true(Ch.is_collidable(Ch.myc_id(1, 0)), "collidable")
+      Test.assert_true(Lt.is_opaque(Ch.myc_id(1, 0)), "opaque")
+      Test.assert_false(CubeForge.Biome.is_palette_block(Ch.myc_id(1, 0)), "not migrated by the biome")
+    end
+  end
+
+  describe "Light.emission for mycelium" do
+    test "dim glows at 2, bright at 4, none at 0" do
+      Test.assert_eq_int(Lt.emission(Ch.myc_id(2, 0)), 0, "none")
+      Test.assert_eq_int(Lt.emission(Ch.myc_id(2, 1)), 2, "dim")
+      Test.assert_eq_int(Lt.emission(Ch.myc_id(2, 2)), 4, "bright")
+    end
+  end
+
+  describe "Texture mycelium layers" do
+    test "one layer per (base, species), after the existing seventeen" do
+      Test.assert_eq_int(Tx.layers(), 60, "17 + 42 + the glow cap")
+      Test.assert_true(near(Tx.myc_layer(0, 1), 18.0), "grass x Frostcap")
+      Test.assert_true(near(Tx.myc_layer(0, 6), 23.0), "grass x Sunshelf")
+      Test.assert_true(near(Tx.myc_layer(6, 6), 59.0), "stone x Sunshelf is the last")
+      Test.assert_true(near(Tx.layer_for(Ch.myc_id(Ch.sand(), 0)), 4.0), "without a species, the base layer")
+    end
+    test "a mycelium layer differs from its base and carries the species colour" do
+      let a = Tx.checkerboard()
+      -- texel (3, 3) of grass x Lanterncap against plain grass
+      let off = float_to_int(Tx.myc_layer(0, 4)) * 1024 + (3 + 16 * 3) * 4
+      let base = (3 + 16 * 3) * 4
+      let differs = NativeArray.get_u8(a, off) != NativeArray.get_u8(a, base) || NativeArray.get_u8(a, off + 1) != NativeArray.get_u8(a, base + 1)
+      Test.assert_true(differs, "not the plain base")
+      Test.assert_eq_int(NativeArray.get_u8(a, off + 3), 255, "opaque")
+    end
+  end
+
+end

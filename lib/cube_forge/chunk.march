@@ -73,6 +73,36 @@ mod CubeForge.Chunk do
   fn clay() : Int do 21 end
   doc "Glowing mushroom cap: the first emissive block. Placeholder until the fungus fruit blocks land; the block-light channel is verified with it."
   fn glow_cap() : Int do 22 end
+
+  -- ── Mycelium: a surface block wearing the network ─────────────────────────
+  -- Ids 23..43 encode base x glow: id = 23 + 3 * base_index + glow. The base
+  -- is in the id so the surface can be restored when the network leaves; the
+  -- glow is in the id so Light.emission stays a function of the block alone.
+  -- The SPECIES is not in the id: it lives in the field, and the mesher reads
+  -- it from World.shown to pick the texture. Seven bases, in index order:
+  -- grass, dirt, sand, snow, gravel, clay, stone.
+  fn myc_first() : Int do 23 end
+  fn myc_last() : Int do 43 end
+  fn is_myc(id : Int) : Bool do id >= myc_first() && id <= myc_last() end
+  doc "Base index 0..6 for a base block id, or -1 when the block cannot carry mycelium."
+  fn myc_index_of(base : Int) : Int do
+    if base == 1 do 0 else if base == 2 do 1 else if base == sand() do 2 else if base == snow() do 3
+    else if base == gravel() do 4 else if base == clay() do 5 else if base == 3 do 6 else -1 end end end end end end end
+  end
+  doc "The base block id for base index 0..6."
+  fn myc_base_of_index(k : Int) : Int do
+    if k == 0 do 1 else if k == 1 do 2 else if k == 2 do sand() else if k == 3 do snow()
+    else if k == 4 do gravel() else if k == 5 do clay() else 3 end end end end end end
+  end
+  doc "Mycelium over [base] at glow 0..2, or 0 when the base cannot carry it."
+  fn myc_id(base : Int, glow : Int) : Int do
+    let k = myc_index_of(base)
+    if k < 0 do 0 else myc_first() + 3 * k + glow end
+  end
+  fn myc_base_index(id : Int) : Int do (id - myc_first()) / 3 end
+  fn myc_glow(id : Int) : Int do if is_myc(id) do (id - myc_first()) % 3 else 0 end end
+  doc "The base block under a mycelium id; any other id is its own base."
+  fn myc_base(id : Int) : Int do if is_myc(id) do myc_base_of_index(myc_base_index(id)) else id end end
   fn is_log(id : Int) : Bool do id == oak_log() || id == pine_log() end
   fn is_foliage(id : Int) : Bool do id == oak_leaves() || id == pine_leaves() end
 
