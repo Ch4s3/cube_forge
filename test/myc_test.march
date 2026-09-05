@@ -1,0 +1,41 @@
+-- The mycelium field: build, plant, spread, contest, wither.
+mod CubeForge.Test.Myc do
+
+  import Test
+  alias CubeForge.Myc as Myc
+  alias CubeForge.Species as Sp
+
+  pfn near(a : Float, b : Float) : Bool do Math.abs(a -. b) < 0.0001 end
+
+  -- A uniform synthetic climate over an n x n field.
+  pfn uniform(n : Int, v : Float) : NativeFloatArr do NativeArray.make_float(n * n, v) end
+
+  describe "Myc.build and plant" do
+    test "a fresh field is empty and hashes stably" do
+      let f = Myc.build(32)
+      Test.assert_eq_int(Myc.species_of(f, 32, 5, 5), 0, "empty")
+      Test.assert_eq_int(Myc.count_species(f, 32, 3), 0, "none of species 3")
+      Test.assert_eq_int(Myc.state_hash(f, 32), Myc.state_hash(Myc.build(32), 32), "same hash twice")
+    end
+    test "planting seeds one column at seed vigour and full reach" do
+      let f = Myc.plant(Myc.build(32), 32, 10, 12, 3)
+      Test.assert_eq_int(Myc.species_of(f, 32, 10, 12), 3, "species")
+      Test.assert_true(near(Myc.vigour_of(f, 32, 10, 12), Myc.seed_vigour()), "seed vigour")
+      Test.assert_eq_int(Myc.reach_of(f, 32, 10, 12), Myc.plant_reach(), "full reach")
+      Test.assert_eq_int(Myc.species_of(f, 32, 11, 12), 0, "the neighbour is untouched")
+      Test.assert_eq_int(Myc.count_species(f, 32, 3), 1, "one column")
+      Test.assert_true(Myc.state_hash(f, 32) != Myc.state_hash(Myc.build(32), 32), "hash moved")
+    end
+    test "planting outside the field is a no-op" do
+      let f = Myc.plant(Myc.build(32), 32, -1, 40, 3)
+      Test.assert_eq_int(Myc.count_species(f, 32, 3), 0, "nothing planted")
+    end
+    test "vigour_u8 scales 0..1 to 0..255" do
+      let f = Myc.plant(Myc.build(32), 32, 10, 12, 3)
+      let v = Myc.vigour_u8(f, 32)
+      Test.assert_eq_int(NativeArray.get_u8(v, 10 + 32 * 12), float_to_int(Myc.seed_vigour() *. 255.0 +. 0.5), "scaled")
+      Test.assert_eq_int(NativeArray.get_u8(v, 0), 0, "empty is 0")
+    end
+  end
+
+end

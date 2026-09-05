@@ -1,0 +1,105 @@
+-- Myc — the mycelium field, one entry per world column beside the biome field.
+--
+-- species: 0 for none, else a Species id.   vigour: 0..1, how established.
+-- reach: hops this column may still spread.  hold: consecutive ticks the same
+-- claimant has wanted this column.           claimant: that claimant's species.
+--
+-- Recomputed whole every tick, like the biome field, and for the same reason.
+-- The tick is PULL-based: each column reads its eight neighbours from the
+-- previous tick's arrays and writes only its own entry into fresh arrays, so
+-- no array is ever read and then written in one pass (GAPS G21/G63) and the
+-- Scene's shared reference never forces a copy (GAPS G68).
+mod CubeForge.Myc do
+
+  alias CubeForge.Species as S
+
+  type Field = Field(NativeU8Arr, NativeFloatArr, NativeU8Arr, NativeU8Arr, NativeU8Arr)
+
+  -- ── Tuning ────────────────────────────────────────────────────────────────
+  doc "Hops a planting can spread."
+  fn plant_reach() : Int do 8 end
+  doc "Vigour a newly claimed or planted column starts at."
+  fn seed_vigour() : Float do 0.25 end
+  doc "A column spreads once its vigour reaches this."
+  fn spread_vigour() : Float do 0.6 end
+  doc "Minimum fitness to claim an empty column."
+  fn claim_floor() : Float do 0.2 end
+  doc "A challenger needs this much more fitness than the incumbent to contest."
+  fn contest_margin() : Float do 0.15 end
+  doc "Consecutive ticks a claim must persist before the column flips."
+  fn hold_ticks() : Int do 30 end
+  doc "Vigour moved per tick toward its target: the full range in ~540 ticks."
+  fn default_rate() : Float do 1.0 /. 540.0 end
+  doc "How much faster a contested incumbent loses vigour than it would ease."
+  fn contest_factor() : Float do 3.0 end
+
+  -- ── Build, plant, read ────────────────────────────────────────────────────
+  doc "An empty field of n x n columns."
+  fn build(n : Int) : Field do
+    Field(NativeArray.make_u8(n * n, 0), NativeArray.make_float(n * n, 0.0), NativeArray.make_u8(n * n, 0), NativeArray.make_u8(n * n, 0), NativeArray.make_u8(n * n, 0))
+  end
+
+  pfn copy_u8_go(src : NativeU8Arr, dst : NativeU8Arr, i : Int, n : Int) : NativeU8Arr do
+    if i >= n do dst else copy_u8_go(src, NativeArray.set_u8(dst, i, NativeArray.get_u8(src, i)), i + 1, n) end
+  end
+  pfn copy_u8(a : NativeU8Arr, n : Int) : NativeU8Arr do copy_u8_go(a, NativeArray.make_u8(n, 0), 0, n) end
+  pfn copy_f_go(src : NativeFloatArr, dst : NativeFloatArr, i : Int, n : Int) : NativeFloatArr do
+    if i >= n do dst else copy_f_go(src, NativeArray.set_float(dst, i, NativeArray.get_float(src, i)), i + 1, n) end
+  end
+  pfn copy_f(a : NativeFloatArr, n : Int) : NativeFloatArr do copy_f_go(a, NativeArray.make_float(n, 0.0), 0, n) end
+
+  doc "Plant species [sp] at column (x, z): seed vigour, full reach, claim cleared. Copies the arrays (the Scene shares them, GAPS G68); plantings are rare."
+  fn plant(f : Field, n : Int, x : Int, z : Int, sp : Int) : Field do
+    if x < 0 || z < 0 || x >= n || z >= n do f
+    else
+      match f do
+        Field(sps, vg, rc, hd, cl) ->
+          let i = x + n * z
+          Field(NativeArray.set_u8(copy_u8(sps, n * n), i, sp),
+                NativeArray.set_float(copy_f(vg, n * n), i, seed_vigour()),
+                NativeArray.set_u8(copy_u8(rc, n * n), i, plant_reach()),
+                NativeArray.set_u8(copy_u8(hd, n * n), i, 0),
+                NativeArray.set_u8(copy_u8(cl, n * n), i, 0))
+      end
+    end
+  end
+
+  fn species_of(f : Field, n : Int, x : Int, z : Int) : Int do
+    match f do Field(sps, _, _, _, _) -> NativeArray.get_u8(sps, x + n * z) end
+  end
+  fn vigour_of(f : Field, n : Int, x : Int, z : Int) : Float do
+    match f do Field(_, vg, _, _, _) -> NativeArray.get_float(vg, x + n * z) end
+  end
+  fn reach_of(f : Field, n : Int, x : Int, z : Int) : Int do
+    match f do Field(_, _, rc, _, _) -> NativeArray.get_u8(rc, x + n * z) end
+  end
+  fn field_species(f : Field) : NativeU8Arr do match f do Field(sps, _, _, _, _) -> sps end end
+
+  pfn u8_go(vg : NativeFloatArr, out : NativeU8Arr, i : Int, n : Int) : NativeU8Arr do
+    if i >= n do out
+    else u8_go(vg, NativeArray.set_u8(out, i, float_to_int(NativeArray.get_float(vg, i) *. 255.0 +. 0.5)), i + 1, n) end
+  end
+  doc "Vigour as 0..255 bytes, a fresh array for the map upload."
+  fn vigour_u8(f : Field, n : Int) : NativeU8Arr do
+    match f do Field(_, vg, _, _, _) -> u8_go(vg, NativeArray.make_u8(n * n, 0), 0, n * n) end
+  end
+
+  pfn count_go(sps : NativeU8Arr, sp : Int, i : Int, n : Int, acc : Int) : Int do
+    if i >= n do acc
+    else count_go(sps, sp, i + 1, n, if NativeArray.get_u8(sps, i) == sp do acc + 1 else acc end) end
+  end
+  doc "Columns held by species [sp]."
+  fn count_species(f : Field, n : Int, sp : Int) : Int do
+    match f do Field(sps, _, _, _, _) -> count_go(sps, sp, 0, n * n, 0) end
+  end
+
+  pfn hash_u8(a : NativeU8Arr, n : Int, i : Int, h : Int) : Int do
+    if i >= n do h
+    else hash_u8(a, n, i + 1, (h * 131 + NativeArray.get_u8(a, i)) % 1073741789) end
+  end
+  doc "A hash of species and reach, the discrete state: an oracle for 'the field evolved the same way'."
+  fn state_hash(f : Field, n : Int) : Int do
+    match f do Field(sps, _, rc, _, _) -> hash_u8(rc, n * n, 0, hash_u8(sps, n * n, 0, 11)) end
+  end
+
+end
