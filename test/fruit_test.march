@@ -41,6 +41,12 @@ mod CubeForge.Test.Fruit do
       Cons(v, _) -> v
     end
   end
+  pfn first_not_in(l : List(Int), other : List(Int)) : Int do
+    match l do
+      Nil -> 0 - 1
+      Cons(v, rest) -> if List.member(other, v) do first_not_in(rest, other) else v end
+    end
+  end
   pfn has_entry(l : List(Int), e : Int) : Bool do
     match l do
       Nil -> false
@@ -147,6 +153,23 @@ mod CubeForge.Test.Fruit do
       Test.assert_eq_int(List.length(none), 0, "nothing shown, nothing grows")
       -- an empty world scans without a single block read: the same answer, and fast
       Test.assert_eq_int(List.length(Fr.candidates(CubeForge.Myc.build(n), Wf.shown_new(), w0, bio, 7, 0, n * n, 100, 1000.0)), 0, "empty field")
+    end
+    test "a grove fruits three times as fast" do
+      Test.assert_true(Math.abs(Fr.biome_rate(CubeForge.Biome.b_grove()) -. 3.0) < 0.0001, "grove 3x")
+      Test.assert_true(Math.abs(Fr.biome_rate(CubeForge.Biome.b_forest()) -. 1.0) < 0.0001, "forest 1x")
+      let n = 128
+      let w0 = flat_world()
+      let f = CubeForge.Myc.plant_patch(CubeForge.Myc.build(n), n, 40, 40, 3)
+      let shown = shown_of(f, n, 0, Wf.shown_new())
+      let bio = CubeForge.Biome.build(w0, 7)
+      -- at scale 20 every small cell rolls (0.05 * 20 = 1); at a third of that some do not.
+      -- A column that rolls at 20 and not at 20/3, forced grove, rolls at 20/3.
+      let full = Fr.candidates(f, shown, w0, bio, 7, 3, n * n, 1000, 20.0)
+      let third = Fr.candidates(f, shown, w0, bio, 7, 3, n * n, 1000, 20.0 /. 3.0)
+      let col = first_not_in(full, third)
+      Test.assert_true(col >= 0, "some column rolls at 20 and not at 20/3")
+      let gb = CubeForge.Biome.force_biome(bio, n, col % n, col / n, CubeForge.Biome.b_grove())
+      Test.assert_true(has_entry(Fr.candidates(f, shown, w0, gb, 7, 3, n * n, 1000, 20.0 /. 3.0), col), "as a grove it rolls at a third of the scale")
     end
   end
 

@@ -130,7 +130,9 @@ mod CubeForge.Fruit do
   -- ── Growth and decay candidates ──────────────────────────────────────────
   doc "Chance per visit that an eligible cell fruits: small, medium, giant."
   fn rate(tier : Int) : Float do if tier == 0 do 0.05 else if tier == 1 do 0.02 else 0.005 end end end
-  doc "The growth roll for a cell's column on tick [tick], scaled by CF_FRUIT_RATE / 100."
+  doc "How much faster fruit comes up in a biome: a grove fruits at three times the rate."
+  fn biome_rate(b : Int) : Float do if b == CubeForge.Biome.b_grove() do 3.0 else 1.0 end end
+  doc "The growth roll for a cell's column on tick [tick], scaled by CF_FRUIT_RATE / 100 and the biome's rate."
   fn rolls(x : Int, z : Int, tick : Int, seed : Int, tier : Int, scale : Float) : Bool do
     N.hash2(x * 13 + tick, z * 17 - tick, seed + 91) < rate(tier) *. scale
   end
@@ -169,7 +171,7 @@ mod CubeForge.Fruit do
           let cheap = if NativeArray.get_f32(vg, ci) < CubeForge.Myc.fruit_vigour() do false
                       else if NativeArray.get_u8(shown, ci) != sp do false
                       else if !is_canonical(x, z, tier, seed) do false
-                      else rolls(x, z, tick, seed, tier, scale) end end end
+                      else rolls(x, z, tick, seed, tier, scale *. biome_rate(CubeForge.Biome.biome_of(bio, x, z))) end end end
           if !cheap do scan_go(sps, vg, shown, w, bio, seed, tick, n, rows, i + 1, left - 1, budget, scale, acc)
           else
             -- only now the block reads: the ground and whether a body already stands

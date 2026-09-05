@@ -31,11 +31,16 @@ mod CubeForge.Biome do
   fn b_wetland() : Int do 5 end
   fn b_beach() : Int do 6 end
   fn b_alpine() : Int do 7 end
+  doc "Hot and damp beside a SMALL body of water: a well in the desert, ringed by palms."
+  fn b_oasis() : Int do 8 end
+  doc "Ground the mycelium network holds outright: established in five of nine columns."
+  fn b_grove() : Int do 9 end
+  fn count() : Int do 10 end
 
   fn name(id : Int) : String do
     if id == 0 do "tundra" else if id == 1 do "taiga" else if id == 2 do "grassland"
     else if id == 3 do "forest" else if id == 4 do "desert" else if id == 5 do "wetland"
-    else if id == 6 do "beach" else "alpine" end end end end end end end
+    else if id == 6 do "beach" else if id == 7 do "alpine" else if id == 8 do "oasis" else "grove" end end end end end end end end end
   end
 
   doc "Columns from water at which moisture reaches zero."
@@ -46,12 +51,33 @@ mod CubeForge.Biome do
   fn alpine_line() : Int do 95 end
   doc "Columns beside water this low are beach."
   fn beach_max_height() : Int do 64 end
+  doc "A body of water at or under this many columns is small: a pool or a brook, not a lake or the sea."
+  fn small_body() : Int do 48 end
+  doc "Columns from a small body at which moisture reaches zero. A well in the desert wets a ring, not a marsh."
+  fn small_reach() : Int do 4 end
+  doc "The distance byte's top bit: set when the nearest water is a small body. Distances stay under 128."
+  fn small_bit() : Int do 128 end
+  doc "Vigour at and above which a column counts as established for the grove: the fruiting line."
+  fn grove_vigour() : Float do CubeForge.Myc.fruit_vigour() end
+  doc "Established columns in a 3x3 (itself included) that make a grove: one column inside the patch's edge."
+  fn grove_neighbours() : Int do 5 end
+  doc "A distance byte saying the kept distances no longer match the water flags: an edit moved a flag since the last sweep. Never produced by the sweep itself (distances stay under 128 and the flag adds 128, so 255 is free)."
+  fn stale() : Int do 255 end
+  doc "The distance in a distance byte."
+  fn dist_of(v : Int) : Int do v % 128 end
+  doc "Whether a distance byte says the nearest water is small."
+  fn is_small(v : Int) : Bool do v >= 128 end
 
   pfn clamp01(v : Float) : Float do if v < 0.0 do 0.0 else if v > 1.0 do 1.0 else v end end end
 
-  doc "Moisture 0..1 for a column [dist] away from the nearest water: linear, zero at the reach."
+  doc "Moisture 0..1 for a column [dist] away from a large body of water: linear, zero at the reach."
   fn moisture_target(dist : Int) : Float do
     clamp01(1.0 -. int_to_float(dist) /. int_to_float(reach()))
+  end
+  doc "Moisture 0..1 from a distance byte: the large-body curve, or the small_reach() curve when the small bit is set."
+  fn moisture_target_of(v : Int) : Float do
+    let r = if is_small(v) do small_reach() else reach() end
+    clamp01(1.0 -. int_to_float(dist_of(v)) /. int_to_float(r))
   end
 
   doc "Temperature 0..1: one low-frequency octave (regions, not noise -- see Noise.ruggedness for why one octave), minus the lapse for height above sea level."
@@ -66,16 +92,28 @@ mod CubeForge.Biome do
     clamp01(base -. lapse() *. int_to_float(h - N.sea_level()))
   end
 
-  doc "The Whittaker lookup with two gates in front of it. Thresholds: cold below 0.33, hot from 0.66; damp from 0.5."
+  doc "The Whittaker lookup with the gates in front of it, for a column with no small water and no network. Thresholds: cold below 0.33, hot from 0.66; damp from 0.5."
   fn classify(temp : Float, moist : Float, h : Int, dist_water : Int) : Int do
-    if h >= alpine_line() do b_alpine()
+    classify_full(temp, moist, h, dist_water, false, false)
+  end
+
+  doc """
+  The full lookup. Gates in order: grove (the network is established here,
+  whatever else is true), alpine, oasis (hot, damp, and the nearest water is a
+  small body -- before beach, so a low pool rim in the desert is palms, not
+  sand), beach, then the Whittaker table.
+  """
+  fn classify_full(temp : Float, moist : Float, h : Int, dist_water : Int, small : Bool, grove : Bool) : Int do
+    let damp = moist >= 0.5
+    if grove do b_grove()
+    else if h >= alpine_line() do b_alpine()
+    else if temp >= 0.66 && damp && small do b_oasis()
     else if dist_water <= 1 && h <= beach_max_height() do b_beach()
     else
-      let damp = moist >= 0.5
       if temp < 0.33 do (if damp do b_taiga() else b_tundra() end)
       else if temp < 0.66 do (if damp do b_forest() else b_grassland() end)
       else (if damp do b_wetland() else b_desert() end) end end
-    end end
+    end end end end
   end
 
 
@@ -121,10 +159,107 @@ mod CubeForge.Biome do
   -- unvisited 8-neighbours of every column at distance lv as lv + 1. Edges are
   -- unit cost, so the first visit is the exact Chebyshev distance. Unvisited
   -- columns keep reach(), which is also the cap -- the two are the same value.
-  pfn seed_go(ws : NativeU8Arr, n : Int, i : Int, d : NativeU8Arr) : NativeU8Arr do
+  -- ── Water bodies: connected components of the water flags ───────────────
+  -- lab: NativeIntArr(n * n + 1). A water column starts as its own index + 1,
+  -- every other column 0, and slot n * n counts the writes of the current
+  -- round. A round is min-propagation (each water column takes the least label
+  -- in its 3x3) then pointer jumping (lab[i] = lab[lab[i] - 1]); rounds run
+  -- until one writes nothing, and every body then carries its least column
+  -- index. One threaded array, reads before the write (the mark8 shape): a
+  -- queue is out (GAPS G63), and pointer jumping keeps the rounds to a handful
+  -- even for the sea.
+  pfn label_seed_go(ws : NativeU8Arr, n : Int, i : Int, lab : NativeIntArr) : NativeIntArr do
+    if i >= n * n do lab
+    else if NativeArray.get_u8(ws, i) == 1 do label_seed_go(ws, n, i + 1, NativeArray.set_int(lab, i, i + 1))
+    else label_seed_go(ws, n, i + 1, lab) end end
+  end
+  pfn min8_go(lab : NativeIntArr, n : Int, x : Int, z : Int, k : Int, best : Int) : Int do
+    if k >= 8 do best
+    else
+      let nx = x + ndx(k)
+      let nz = z + ndz(k)
+      if nx < 0 || nz < 0 || nx >= n || nz >= n do min8_go(lab, n, x, z, k + 1, best)
+      else
+        let l = NativeArray.get_int(lab, nx + n * nz)
+        min8_go(lab, n, x, z, k + 1, if l != 0 && l < best do l else best end)
+      end
+    end
+  end
+  pfn relabel_go(lab : NativeIntArr, n : Int, i : Int) : NativeIntArr do
+    if i >= n * n do lab
+    else
+      let l = NativeArray.get_int(lab, i)
+      if l == 0 do relabel_go(lab, n, i + 1)
+      else
+        let m = min8_go(lab, n, i % n, i / n, 0, l)
+        if m < l do
+          let c = NativeArray.get_int(lab, n * n)
+          relabel_go(NativeArray.set_int(NativeArray.set_int(lab, i, m), n * n, c + 1), n, i + 1)
+        else relabel_go(lab, n, i + 1) end
+      end
+    end
+  end
+  pfn jump_go(lab : NativeIntArr, n : Int, i : Int) : NativeIntArr do
+    if i >= n * n do lab
+    else
+      let l = NativeArray.get_int(lab, i)
+      if l == 0 do jump_go(lab, n, i + 1)
+      else
+        let r = NativeArray.get_int(lab, l - 1)
+        if r < l do
+          let c = NativeArray.get_int(lab, n * n)
+          jump_go(NativeArray.set_int(NativeArray.set_int(lab, i, r), n * n, c + 1), n, i + 1)
+        else jump_go(lab, n, i + 1) end
+      end
+    end
+  end
+  -- The same pass scanned backward: the forward pass carries a label toward
+  -- +x and +z within one pass, the backward one toward -x and -z, so a body
+  -- without holes settles in a round or two rather than one per column of span.
+  pfn relabel_back_go(lab : NativeIntArr, n : Int, i : Int) : NativeIntArr do
+    if i < 0 do lab
+    else
+      let l = NativeArray.get_int(lab, i)
+      if l == 0 do relabel_back_go(lab, n, i - 1)
+      else
+        let m = min8_go(lab, n, i % n, i / n, 0, l)
+        if m < l do
+          let c = NativeArray.get_int(lab, n * n)
+          relabel_back_go(NativeArray.set_int(NativeArray.set_int(lab, i, m), n * n, c + 1), n, i - 1)
+        else relabel_back_go(lab, n, i - 1) end
+      end
+    end
+  end
+  pfn rounds_go(lab : NativeIntArr, n : Int) : NativeIntArr do
+    let lab1 = jump_go(relabel_back_go(relabel_go(NativeArray.set_int(lab, n * n, 0), n, 0), n, n * n - 1), n, 0)
+    let c = NativeArray.get_int(lab1, n * n)
+    if c == 0 do lab1 else rounds_go(lab1, n) end
+  end
+  doc "Body labels for the water flags: for each water column, one plus the least column index in its 8-connected body; 0 elsewhere. Length n * n + 1."
+  fn bodies(ws : NativeU8Arr, n : Int) : NativeIntArr do
+    rounds_go(label_seed_go(ws, n, 0, NativeArray.make_int(n * n + 1, 0)), n)
+  end
+  -- Columns per body, indexed by the body's root (its least column index).
+  pfn counts_go(ws : NativeU8Arr, lab : NativeIntArr, n : Int, i : Int, counts : NativeIntArr) : NativeIntArr do
+    if i >= n * n do counts
+    else if NativeArray.get_u8(ws, i) == 1 do
+      let root = NativeArray.get_int(lab, i) - 1
+      let c = NativeArray.get_int(counts, root)
+      counts_go(ws, lab, n, i + 1, NativeArray.set_int(counts, root, c + 1))
+    else counts_go(ws, lab, n, i + 1, counts) end end
+  end
+  doc "The size of the body column [i] belongs to, or 0 when it is not water."
+  fn body_size(ws : NativeU8Arr, lab : NativeIntArr, counts : NativeIntArr, i : Int) : Int do
+    if NativeArray.get_u8(ws, i) == 1 do NativeArray.get_int(counts, NativeArray.get_int(lab, i) - 1) else 0 end
+  end
+
+  -- Seed the sweep: a water column is at distance 0, flagged when its body is small.
+  pfn seed_go(ws : NativeU8Arr, lab : NativeIntArr, counts : NativeIntArr, n : Int, i : Int, d : NativeU8Arr) : NativeU8Arr do
     if i >= n * n do d
-    else if NativeArray.get_u8(ws, i) == 1 do seed_go(ws, n, i + 1, NativeArray.set_u8(d, i, 0))
-    else seed_go(ws, n, i + 1, d) end end
+    else if NativeArray.get_u8(ws, i) == 1 do
+      let small = NativeArray.get_int(counts, NativeArray.get_int(lab, i) - 1) <= small_body()
+      seed_go(ws, lab, counts, n, i + 1, NativeArray.set_u8(d, i, if small do small_bit() else 0 end))
+    else seed_go(ws, lab, counts, n, i + 1, d) end end
   end
 
   -- dx, dz for neighbour k of 8: the 3x3 ring minus the centre, row by row.
@@ -137,7 +272,9 @@ mod CubeForge.Biome do
     kk / 3 - 1
   end
 
-  -- Mark the unvisited neighbours of (x, z) with [nd].
+  -- Mark the unvisited neighbours of (x, z) with [nd]: the distance plus the
+  -- marker's small bit, so the flag travels with the distance. Unvisited is a
+  -- distance of reach() with no flag; the sweep never writes reach() itself.
   pfn mark8(d : NativeU8Arr, n : Int, x : Int, z : Int, nd : Int, k : Int) : NativeU8Arr do
     if k >= 8 do d
     else
@@ -154,8 +291,11 @@ mod CubeForge.Biome do
 
   pfn level_go(d : NativeU8Arr, n : Int, lv : Int, i : Int) : NativeU8Arr do
     if i >= n * n do d
-    else if NativeArray.get_u8(d, i) != lv do level_go(d, n, lv, i + 1)
-    else level_go(mark8(d, n, i % n, i / n, lv + 1, 0), n, lv, i + 1) end end
+    else
+      let v = NativeArray.get_u8(d, i)
+      if dist_of(v) != lv do level_go(d, n, lv, i + 1)
+      else level_go(mark8(d, n, i % n, i / n, lv + 1 + (if is_small(v) do small_bit() else 0 end), 0), n, lv, i + 1) end
+    end
   end
 
   pfn sweep_go(d : NativeU8Arr, n : Int, lv : Int) : NativeU8Arr do
@@ -163,11 +303,14 @@ mod CubeForge.Biome do
     else sweep_go(level_go(d, n, lv, 0), n, lv + 1) end
   end
 
-  doc "Chebyshev distance to the nearest water column, capped at reach(). A fresh array every call, threaded through every write (GAPS G68)."
+  doc "Chebyshev distance to the nearest water column, capped at reach(), with small_bit() set where that water is a small body (see dist_of, is_small). A fresh array every call, threaded through every write (GAPS G68)."
   fn distances(f : Field, w : CubeForge.World.World) : NativeU8Arr do
     let n = cols(w)
     match f do
-      Field(_, ws, _, _, _, _, _, _, _) -> sweep_go(seed_go(ws, n, 0, NativeArray.make_u8(n * n, reach())), n, 0)
+      Field(_, ws, _, _, _, _, _, _, _) ->
+        let lab = bodies(ws, n)
+        let counts = counts_go(ws, lab, n, 0, NativeArray.make_int(n * n, 0))
+        sweep_go(seed_go(ws, lab, counts, n, 0, NativeArray.make_u8(n * n, reach())), n, 0)
     end
   end
 
@@ -182,11 +325,11 @@ mod CubeForge.Biome do
     if i >= n * n do Field(hs, NativeArray.make_u8(0, 0), ta, ma, bs, NativeArray.make_u8(n * n, 0), tb, d, NativeArray.make_u8(n * n, 0))
     else
       let h = NativeArray.get_u8(hs, i)
-      let dist = NativeArray.get_u8(d, i)
+      let dv = NativeArray.get_u8(d, i)
       let base = temp_base(i % n, i / n, seed)
       let t = temp_from_base(base, h)
-      let m = moisture_target(dist)
-      let b = classify(t, m, h, dist)
+      let m = moisture_target_of(dv)
+      let b = classify_full(t, m, h, dist_of(dv), is_small(dv), false)
       classify_all(hs, seed, d, n, i + 1, NativeArray.set_float(ta, i, t), NativeArray.set_float(ma, i, m), NativeArray.set_u8(bs, i, b), NativeArray.set_float(tb, i, base))
     end
   end
@@ -234,9 +377,12 @@ mod CubeForge.Biome do
                    else if y == cur && id == 0 do surface_go(w, x, z, y - 1)
                    else cur end end
           let hs1 = NativeArray.set_u8(copy_u8(hs, n * n), i, h1)
-          let ws1 = NativeArray.set_u8(copy_u8(ws, n * n), i, if wet_at(w, x, z, h1) do 1 else 0 end)
+          let wet1 = if wet_at(w, x, z, h1) do 1 else 0 end
+          let ws1 = NativeArray.set_u8(copy_u8(ws, n * n), i, wet1)
+          -- a water flag that moved makes the kept distances stale (see stale())
+          let ds1 = if wet1 != NativeArray.get_u8(ws, i) do NativeArray.set_u8(copy_u8(ds, n * n), i, stale()) else ds end
           -- the surface moved, so this column's temperature target moved: wake it
-          Field(hs1, ws1, ta, ma, bs, hold, tb, ds, NativeArray.set_u8(copy_u8(act, n * n), i, 1))
+          Field(hs1, ws1, ta, ma, bs, hold, tb, ds1, NativeArray.set_u8(copy_u8(act, n * n), i, 1))
       end
     end
   end
@@ -314,14 +460,31 @@ mod CubeForge.Biome do
     else wake_box_go(n, x0, z0, x1, z1, x + 1, z, NativeArray.set_u8(act, x + n * z, 1)) end end end
   end
 
+  -- Mark the kept distances stale at every edited column whose water flag moved.
+  pfn stale_go(n : Int, cells : List(Int), ws0 : NativeU8Arr, ws1 : NativeU8Arr, ds : NativeU8Arr) : NativeU8Arr do
+    match cells do
+      Nil -> ds
+      Cons(v, rest) ->
+        let x = edit_x(v)
+        let z = edit_z(v)
+        if x < 0 || z < 0 || x >= n || z >= n do stale_go(n, rest, ws0, ws1, ds)
+        else
+          let i = x + n * z
+          if NativeArray.get_u8(ws0, i) != NativeArray.get_u8(ws1, i) do stale_go(n, rest, ws0, ws1, NativeArray.set_u8(ds, i, stale()))
+          else stale_go(n, rest, ws0, ws1, ds) end
+        end
+    end
+  end
+
   doc "Apply a batch of single-column edits (see pack_edit) to the field, copying its arrays once for the whole batch rather than once per edit."
   fn note_edits(f : Field, w : CubeForge.World.World, cells : List(Int)) : Field do
     let n = cols(w)
     match f do
       Field(hs, ws, ta, ma, bs, hold, tb, ds, act) ->
         let hs1 = heights_go(w, n, cells, copy_u8(hs, n * n))
-        Field(hs1, wets_go(w, n, cells, hs1, copy_u8(ws, n * n)), ta, ma, bs, hold, tb, ds,
-              wake_go(n, cells, copy_u8(act, n * n)))
+        let ws1 = wets_go(w, n, cells, hs1, copy_u8(ws, n * n))
+        let ds1 = stale_go(n, cells, ws, ws1, copy_u8(ds, n * n))
+        Field(hs1, ws1, ta, ma, bs, hold, tb, ds1, wake_go(n, cells, copy_u8(act, n * n)))
     end
   end
 
@@ -337,24 +500,59 @@ mod CubeForge.Biome do
   -- is read at its own index before it is written.
   pfn clampb(v : Float, cap : Float) : Float do if v < 0.0 -. cap do 0.0 -. cap else if v > cap do cap else v end end end
 
-  pfn tick_go(hs : NativeU8Arr, tb : NativeFloatArr, rate : Float, d : NativeU8Arr, pulls : NativeF32Arr, prow : NativeU8Arr, scale : Float, n : Int, i : Int, stop : Int,
+  -- Established columns in the 3x3 of (x, z), the field's edge clipping the box.
+  pfn established_go(sps : NativeU8Arr, vg : NativeF32Arr, n : Int, x : Int, z : Int, k : Int, acc : Int) : Int do
+    if k >= 9 do acc
+    else
+      let nx = x + k % 3 - 1
+      let nz = z + k / 3 - 1
+      if nx < 0 || nz < 0 || nx >= n || nz >= n do established_go(sps, vg, n, x, z, k + 1, acc)
+      else
+        let j = nx + n * nz
+        let est = if NativeArray.get_u8(sps, j) == 0 do false else NativeArray.get_f32(vg, j) >= grove_vigour() end
+        established_go(sps, vg, n, x, z, k + 1, if est do acc + 1 else acc end)
+      end
+    end
+  end
+  doc "Is column (x, z) a grove: at least grove_neighbours() of its 3x3 hold a species at grove_vigour() or more."
+  fn is_grove(sps : NativeU8Arr, vg : NativeF32Arr, n : Int, x : Int, z : Int) : Bool do
+    -- the centre first: a column with nothing on it is never a grove, and
+    -- that rejects almost every column before the eight neighbour reads
+    if NativeArray.get_u8(sps, x + n * z) == 0 do false
+    else established_go(sps, vg, n, x, z, 0, 0) >= grove_neighbours() end
+  end
+
+  -- Is column i looked at this tick? Active columns and rows whose network pulls
+  -- moved, as before. A row the network is dirty in is looked at only where the
+  -- grove test disagrees with the stored biome: the network eases vigour for
+  -- hundreds of ticks after a planting, and evaluating every column of every
+  -- such row for all of that was 5 ms a tick. Once the two agree the column
+  -- is settled again and stays so until they differ, which they can only do
+  -- in a dirty row. Nested, not `&&`: G33.
+  pfn must_look(act : NativeU8Arr, prow : NativeU8Arr, drow : NativeU8Arr, sps : NativeU8Arr, vg : NativeF32Arr, bs : NativeU8Arr, n : Int, i : Int) : Bool do
+    if NativeArray.get_u8(act, i) != 0 do true
+    else if NativeArray.get_u8(prow, i / n) != 0 do true
+    else if NativeArray.get_u8(drow, i / n) == 0 do false
+    else is_grove(sps, vg, n, i % n, i / n) != (NativeArray.get_u8(bs, i) == b_grove()) end end end
+  end
+
+  pfn tick_go(hs : NativeU8Arr, tb : NativeFloatArr, rate : Float, d : NativeU8Arr, pulls : NativeF32Arr, prow : NativeU8Arr, scale : Float,
+              sps : NativeU8Arr, vg : NativeF32Arr, drow : NativeU8Arr, n : Int, i : Int, stop : Int,
               ta : NativeFloatArr, ma : NativeFloatArr, bs : NativeU8Arr, hold : NativeU8Arr, act : NativeU8Arr) : Field do
     if i >= stop do Field(hs, NativeArray.make_u8(0, 0), ta, ma, bs, hold, tb, NativeArray.make_u8(0, 0), act)
-    -- a row whose network pulls moved this tick is looked at whole; the
-    -- offsets are constant otherwise, so a settled column stays settled
-    else if NativeArray.get_u8(act, i) == 0 && NativeArray.get_u8(prow, i / n) == 0 do tick_go(hs, tb, rate, d, pulls, prow, scale, n, i + 1, stop, ta, ma, bs, hold, act)
+    else if !must_look(act, prow, drow, sps, vg, bs, n, i) do tick_go(hs, tb, rate, d, pulls, prow, scale, sps, vg, drow, n, i + 1, stop, ta, ma, bs, hold, act)
     else
       let h = NativeArray.get_u8(hs, i)
-      let dist = NativeArray.get_u8(d, i)
+      let dv = NativeArray.get_u8(d, i)
       -- the network's offset: its raw pull scaled by CF_MYC_FEEDBACK and capped
       let cap = CubeForge.Myc.cap()
       let bt = clampb(NativeArray.get_f32(pulls, 2 * i) *. scale, cap)
       let bm = clampb(NativeArray.get_f32(pulls, 2 * i + 1) *. scale, cap)
       let tt = clamp01(temp_from_base(NativeArray.get_float(tb, i), h) +. bt)
-      let mt = clamp01(moisture_target(dist) +. bm)
+      let mt = clamp01(moisture_target_of(dv) +. bm)
       let t = ease(NativeArray.get_float(ta, i), tt, rate)
       let m = ease(NativeArray.get_float(ma, i), mt, rate)
-      let raw = classify(t, m, h, dist)
+      let raw = classify_full(t, m, h, dist_of(dv), is_small(dv), is_grove(sps, vg, n, i % n, i / n))
       let cur = NativeArray.get_u8(bs, i)
       -- The hold counter: flip only after hold_ticks() consecutive disagreements,
       -- so a column parked on a threshold cannot alternate every tick.
@@ -368,7 +566,7 @@ mod CubeForge.Biome do
       -- the network's pull on this row moving.
       let settled = if t == tt do (if m == mt do hc1 == 0 else false end) else false end
       let act1 = NativeArray.set_u8(act, i, if settled do 0 else 1 end)
-      tick_go(hs, tb, rate, d, pulls, prow, scale, n, i + 1, stop,
+      tick_go(hs, tb, rate, d, pulls, prow, scale, sps, vg, drow, n, i + 1, stop,
               NativeArray.set_float(ta, i, t), NativeArray.set_float(ma, i, m),
               NativeArray.set_u8(bs, i, b1), NativeArray.set_u8(hold, i, hc1), act1)
     end end
@@ -455,6 +653,11 @@ mod CubeForge.Biome do
   fn tick(f : Field, w : CubeForge.World.World, seed : Int, rate : Float, pulls : NativeF32Arr, prow : NativeU8Arr, scale : Float) : Field do
     tick_slice(tick_begin(f, w), w, rate, pulls, prow, scale, 0, cols(w) * cols(w))
   end
+  doc "The whole tick with the network in view (see tick_slice_net): for tests."
+  fn tick_net(f : Field, w : CubeForge.World.World, seed : Int, rate : Float, pulls : NativeF32Arr, prow : NativeU8Arr, scale : Float,
+              sps : NativeU8Arr, vg : NativeF32Arr, drow : NativeU8Arr) : Field do
+    tick_slice_net(tick_begin(f, w), w, rate, pulls, prow, scale, 0, cols(w) * cols(w), sps, vg, drow)
+  end
 
   doc """
   The whole-map half of a tick: rescan the water flags, recompute the distance
@@ -466,12 +669,29 @@ mod CubeForge.Biome do
   """
   fn tick_begin(f : Field, w : CubeForge.World.World) : Field do
     let n = cols(w)
-    let f1 = match f do Field(hs, _, ta, ma, bs, hold, tb, ds, act) -> Field(hs, water_go(w, hs, n, 0, NativeArray.make_u8(n * n, 0)), ta, ma, bs, hold, tb, ds, act) end
-    let d = distances(f1, w)
-    match f1 do
-      Field(hs, ws, ta, ma, bs, hold, tb, ds0, act) ->
+    -- The distances (and the bodies behind them) are a function of the water
+    -- flags alone, so when this period's flags equal the flags the kept
+    -- distances were swept from -- last period's, and no edit has moved one
+    -- since (stale()) -- the kept distances are the answer, and the sweep and
+    -- the body labelling are skipped. Settled water is the common case;
+    -- flowing water pays the full cost.
+    match f do
+      Field(hs, ws0, ta, ma, bs, hold, tb, ds0, act) ->
+        let ws = water_go(w, hs, n, 0, NativeArray.make_u8(n * n, 0))
+        let same = same_u8(ws0, ws, ds0, n * n, 0)
+        let d = if same do ds0 else distances(Field(hs, ws, ta, ma, bs, hold, tb, ds0, act), w) end
         Field(hs, ws, ta, ma, bs, hold, tb, d, mark_dist_go(d, ds0, n, 0, act))
     end
+  end
+
+  doc """
+  Ease and reclassify the awake columns in [from, from + count), against the
+  distances tick_begin left in the field, with no network in view. See
+  tick_slice_net.
+  """
+  fn tick_slice(f : Field, w : CubeForge.World.World, rate : Float, pulls : NativeF32Arr, prow : NativeU8Arr, scale : Float, from : Int, count : Int) : Field do
+    let n = cols(w)
+    tick_slice_net(f, w, rate, pulls, prow, scale, from, count, no_species(n), no_vigour(n), no_rows(n))
   end
 
   doc """
@@ -485,23 +705,42 @@ mod CubeForge.Biome do
   this period, the one behind it next period. The sweep costs what the awake set
   costs, and the fungus climate feedback keeps some four thousand columns awake,
   so it is worth spreading.
+
+  The network in view: [sps] and [vg] are Myc.field_species and
+  Myc.field_vigour, read to find groves, and [drow] is Myc.dirty_rows, whose
+  rows are looked at where the grove test disagrees with the stored biome. The
+  biome reads the network as it stood at the end of the previous period; the
+  network then reads the climate the sweep eased. The grove cannot feed back:
+  the network never reads the biome id.
   """
-  fn tick_slice(f : Field, w : CubeForge.World.World, rate : Float, pulls : NativeF32Arr, prow : NativeU8Arr, scale : Float, from : Int, count : Int) : Field do
+  fn tick_slice_net(f : Field, w : CubeForge.World.World, rate : Float, pulls : NativeF32Arr, prow : NativeU8Arr, scale : Float, from : Int, count : Int,
+                    sps : NativeU8Arr, vg : NativeF32Arr, drow : NativeU8Arr) : Field do
     let n = cols(w)
     let lo = if from < 0 do 0 else if from > n * n do n * n else from end end
     let hi = if lo + count > n * n do n * n else lo + count end
     match f do
       Field(hs, ws, ta0, ma0, bs0, hold0, tb, ds, act0) ->
-        match tick_go(hs, tb, rate, ds, pulls, prow, scale, n, lo, hi, ta0, ma0, bs0, hold0, act0) do
+        match tick_go(hs, tb, rate, ds, pulls, prow, scale, sps, vg, drow, n, lo, hi, ta0, ma0, bs0, hold0, act0) do
           Field(hs1, _, ta, ma, bs, hold, tb1, _, act1) -> Field(hs1, ws, ta, ma, bs, hold, tb1, ds, act1)
         end
     end
+  end
+
+  -- Equal flags, and no stale distance anywhere.
+  pfn same_u8(a : NativeU8Arr, b : NativeU8Arr, ds : NativeU8Arr, n : Int, i : Int) : Bool do
+    if i >= n do true
+    else if NativeArray.get_u8(a, i) != NativeArray.get_u8(b, i) do false
+    else if NativeArray.get_u8(ds, i) == stale() do false
+    else same_u8(a, b, ds, n, i + 1) end end end
   end
 
   doc "Pulls saying the network does nothing, for callers without one and for tests: zeros, with no row moved."
   fn no_pulls(n : Int) : NativeF32Arr do NativeArray.make_f32(2 * n * n, 0.0) end
   fn no_rows(n : Int) : NativeU8Arr do NativeArray.make_u8(n, 0) end
   fn all_rows(n : Int) : NativeU8Arr do NativeArray.make_u8(n, 1) end
+  doc "An empty network, for callers without one and for tests: no species, no vigour."
+  fn no_species(n : Int) : NativeU8Arr do NativeArray.make_u8(n * n, 0) end
+  fn no_vigour(n : Int) : NativeF32Arr do NativeArray.make_f32(n * n, 0.0) end
 
 
   -- ── Save and load: the eased axes ────────────────────────────────────────
@@ -577,7 +816,9 @@ mod CubeForge.Biome do
     else if id == b_grassland() do 0.9
     else if id == b_alpine() do 0.9
     else if id == b_wetland() do 1.3
-    else 1.0 end end end end end end
+    else if id == b_oasis() do 0.3
+    else if id == b_grove() do 1.1
+    else 1.0 end end end end end end end end
   end
 
 
@@ -592,14 +833,15 @@ mod CubeForge.Biome do
     if N.hash2(x, z, wetland_mix_seed()) < mud_fraction() do C.mud() else C.clay() end
   end
 
-  doc "The surface block a biome wants. Granite is absent on purpose: cliff faces stay on the slope rule in every biome."
+  doc "The surface block a biome wants, or 0 for none: a grove's surface is the network's mycelium block, which the migration never touches. Granite is absent on purpose: cliff faces stay on the slope rule in every biome."
   fn palette(id : Int, x : Int, z : Int) : Int do
-    if id == b_tundra() do C.snow()
+    if id == b_grove() do 0
+    else if id == b_tundra() do C.snow()
     else if id == b_taiga() do 2                       -- dirt
     else if id == b_desert() || id == b_beach() do C.sand()
     else if id == b_wetland() do wetland_surface(x, z)
     else if id == b_alpine() do C.gravel()
-    else 1 end end end end end                         -- grass: grassland, forest
+    else 1 end end end end end end                     -- grass: grassland, forest, oasis
   end
 
   doc "Only these ever migrate: the natural surface blocks. Granite, stone, water, logs, leaves and bedrock are never rewritten."
@@ -617,7 +859,7 @@ mod CubeForge.Biome do
       let wet = match f do Field(_, ws, _, _, _, _, _, _, _) -> NativeArray.get_u8(ws, ci) == 1 end
       let sfc = W.block_at(w, x, h, z)
       let want = palette(biome_of(f, x, z), x, z)
-      if h > 0 && !wet && is_palette_block(sfc) && sfc != want do migrations_go(f, w, n, i + 1, left - 1, budget - 1, Cons(ci, acc))
+      if h > 0 && !wet && want != 0 && is_palette_block(sfc) && sfc != want do migrations_go(f, w, n, i + 1, left - 1, budget - 1, Cons(ci, acc))
       else migrations_go(f, w, n, i + 1, left - 1, budget, acc) end
     end
   end
@@ -628,6 +870,13 @@ mod CubeForge.Biome do
     migrations_go(f, w, n, (tick * scan) % (n * n), scan, budget, Nil)
   end
 
+
+  doc "The field with column (x, z) forced to biome [id]: for tests that need a biome the terrain would not give. Copies the array (GAPS G68)."
+  fn force_biome(f : Field, n : Int, x : Int, z : Int, id : Int) : Field do
+    match f do
+      Field(hs, ws, ta, ma, bs, hold, tb, ds, act) -> Field(hs, ws, ta, ma, NativeArray.set_u8(copy_u8(bs, n * n), x + n * z, id), hold, tb, ds, act)
+    end
+  end
 
   doc "The column's water flag."
   fn is_wet(f : Field, wx : Int, wz : Int) : Bool do

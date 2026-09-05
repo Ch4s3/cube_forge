@@ -901,10 +901,12 @@ void cf_precip_frame(void *light, int64_t live, int64_t snow,
 #define CF_BIOME_SLOT 248
 #define CF_BIOME_Y    259.0f
 /* Order matches CubeForge.Biome: tundra, taiga, grassland, forest, desert,
- * wetland, beach, alpine. */
-static const float CF_BIOME_RGB[8][3] = {
+ * wetland, beach, alpine, oasis, grove. */
+#define CF_BIOME_COUNT 10
+static const float CF_BIOME_RGB[CF_BIOME_COUNT][3] = {
     {0.86f, 0.90f, 0.95f}, {0.25f, 0.45f, 0.35f}, {0.55f, 0.75f, 0.30f}, {0.15f, 0.50f, 0.15f},
     {0.90f, 0.80f, 0.45f}, {0.35f, 0.55f, 0.50f}, {0.95f, 0.90f, 0.70f}, {0.60f, 0.60f, 0.62f},
+    {0.30f, 0.85f, 0.35f}, {0.55f, 0.30f, 0.70f},
 };
 static float  *g_biome_vtx = NULL;
 static int64_t g_biome_cap = 0;
@@ -919,7 +921,7 @@ void cf_biome_map_upload(void *biomes, int64_t n) {
     const unsigned char *b = (const unsigned char *)narr_data(biomes);
     for (int64_t i = 0; i < cells; i++) {
         float x0 = (float)(i % n), z0 = (float)(i / n), x1 = x0 + 1.0f, z1 = z0 + 1.0f;
-        const float *c = CF_BIOME_RGB[b[i] & 7];
+        const float *c = CF_BIOME_RGB[b[i] < CF_BIOME_COUNT ? b[i] : 0];
         float *v = g_biome_vtx + i * 6 * CF_VERT_FLOATS;
         /* winding matches the mesher's top face: (x0,z0)->(x0,z1)->(x1,z1)->(x1,z0) */
         pcl_vert(v + 0 * CF_VERT_FLOATS, x0, CF_BIOME_Y, z0, c[0], c[1], c[2], 255.0f);

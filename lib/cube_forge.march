@@ -107,7 +107,9 @@ mod CubeForge do
   -- While the inventory is open the icons follow the cursor, so the key check is
   -- skipped and both buffers are rebuilt every frame. Closed, it rebuilds only
   -- when the inventory actually changed, as before.
-  pfn refresh_hud(u : Ui, open : Bool, drag_from : Int, nx : Float, ny : Float, text : String, fx : String) : Ui do
+  -- [tint]: the species under the crosshair, folded into the rebuild key so the
+  -- reticle recolours only when the target's species changes.
+  pfn refresh_hud(u : Ui, open : Bool, drag_from : Int, nx : Float, ny : Float, text : String, fx : String, tint : Int) : Ui do
     match u do
       Ui(inv, hb, ic, key, rb, last, ef, _) ->
         -- the readout rebuilds only when its string changed
@@ -117,16 +119,24 @@ mod CubeForge do
                     Win.gfx_upload(readout_slot(), F32Buf.storage(b), F32Buf.len(b))
                     b
                   end
-        let k = Inv.hud_key(inv) * 4 + (if open do 2 else 0 end) + (if drag_from >= 0 do 1 else 0 end)
+        let k = (Inv.hud_key(inv) * 4 + (if open do 2 else 0 end) + (if drag_from >= 0 do 1 else 0 end)) * 8 + tint
         if k == key && !open do Ui(inv, hb, ic, key, rb1, text, ef, fx)
         else
-          let hb1 = Hud.build_hotbar(hb, inv, Inv.progress(inv), open, drag_from)
+          let hb1 = Hud.build_hotbar(hb, inv, Inv.progress(inv), open, drag_from, tint)
           Win.gfx_upload(252, F32Buf.storage(hb1), F32Buf.len(hb1))
           let ic1 = Hud.build_icons(ic, inv, open, drag_from, nx, ny)
           Win.gfx_upload(251, F32Buf.storage(ic1), F32Buf.len(ic1))
           Ui(inv, hb1, ic1, k, rb1, text, ef, fx)
         end
     end
+  end
+  -- The species a targeted block belongs to: a fruit block carries its own, a
+  -- mycelium block shows its column's. 0 for anything else.
+  pfn target_species(w : CubeForge.World.World, x : Int, y : Int, z : Int) : Int do
+    let id = World.block_at(w, x, y, z)
+    if Chunk.is_fruit(id) do Chunk.fruit_species(id)
+    else if Chunk.is_myc(id) do World.shown_at(w, x, z)
+    else 0 end end
   end
   pfn hud_verts(u : Ui) : Int do match u do Ui(_, hb, _, _, _, _, _, _) -> F32Buf.len(hb) / Vx.floats() end end
   pfn icon_verts(u : Ui) : Int do match u do Ui(_, _, ic, _, _, _, _, _) -> F32Buf.len(ic) / Vx.floats() end end
@@ -683,12 +693,20 @@ mod CubeForge do
         let relit = World.relight_marked(w0, x, y, z)
         let world1 = World.relit_world(relit)
         let marks = mark_geometry(World.relit_marks(relit), x, y, z, n)
-        match remesh_marked(world1, marks, 0, n, counts, meshes, Chunk.new(), pass_all()) do
+        -- The edited section is rebuilt here and now, so the block appears or
+        -- vanishes under the cursor in the same frame the click landed. Its
+        -- neighbours -- the chunk over a boundary, the sections the relight
+        -- moved -- go through the queue like everything else: they are the
+        -- larger half of the work and nobody can see them lag by a frame.
+        let hot = CubeForge.Light.mark_slot(World.floor_div16(x), World.floor_div16(z), y / 16)
+        let just_here = NativeArray.set_int(CubeForge.Light.marks_new(), hot, 1)
+        let rest = NativeArray.set_int(marks, hot, 0)
+        match remesh_marked(world1, just_here, 0, n, counts, meshes, Chunk.new(), pass_all()) do
           Remeshed(c1, m1) ->
             let t1 = Win.time()
             println((if id == 0 do "broke" else "placed" end) ++ " block at " ++ int_to_string(x) ++ "," ++ int_to_string(y) ++ "," ++ int_to_string(z)
                     ++ " — edit + section remesh " ++ ms(t1 -. t0))
-            notify_edit(Scene(world1, c1, outline, hit, ui, pids, flags, m1, bio1, pend, myc), x, y, z, id)
+            notify_edit(Scene(world1, c1, outline, hit, ui, pids, flags, m1, bio1, stage_go(pend, rest, 0, pass_all()), myc), x, y, z, id)
         end
     end
   end
@@ -712,11 +730,12 @@ mod CubeForge do
         let base = if !Veg.is_decay(e) do h else if bush do h - 1 else Veg.trunk_base(w, x, z, h) end end
         let b = Biome.biome_of(bio, x, z)
         -- the box above ground the edit can touch: a trunk and canopy, or one layer of leaves
-        let trunk = if bush do 0 - 1 else if Veg.pine_for(b) do 7 else 5 end end
+        let sp = Veg.species_for(b)
+        let trunk = if bush do 0 - 1 else CubeForge.Trees.grown_trunk(sp) end
         let w1 = if bush do
           if Veg.is_decay(e) do Veg.unbush(w, x, z, base) else Veg.plant_bush(w, x, z, base) end
         else
-          if Veg.is_decay(e) do Veg.fell(w, x, z, base) else Veg.plant(w, x, z, base, trunk, Veg.pine_for(b)) end
+          if Veg.is_decay(e) do Veg.fell(w, x, z, base) else Veg.plant(w, x, z, base, trunk, sp) end
         end
         -- relight_marked, not relight_at: the relight can change baked light in
         -- sections the tree's box never touched, and a section whose light moved
@@ -1790,9 +1809,10 @@ mod CubeForge do
           let ncols = World.side(scene_world(scbegin)) * 16
           let slice = (ncols * ncols + tick_period() - 1) / tick_period()
           let scb0 = scene_with_biome(scbegin,
-            Biome.tick_slice(scene_biome(scbegin), scene_world(scbegin), Biome.default_rate() *. int_to_float(biome_rate) /. 100.0,
+            Biome.tick_slice_net(scene_biome(scbegin), scene_world(scbegin), Biome.default_rate() *. int_to_float(biome_rate) /. 100.0,
                              Myc.pulls(scene_myc(scbegin)), Myc.pull_rows(scene_myc(scbegin)), int_to_float(myc_feedback) /. 100.0,
-                             sweep_slice(phase) * slice, slice))
+                             sweep_slice(phase) * slice, slice,
+                             Myc.field_species(scene_myc(scbegin)), Myc.field_vigour(scene_myc(scbegin)), Myc.dirty_rows(scene_myc(scbegin), ncols)))
           -- The mycelium field reads the climate the biome eased, so it goes on
           -- the frame the sweep finishes, after this frame's slice.
           let scb = if phase == myc_slot() do
@@ -2036,7 +2056,9 @@ mod CubeForge do
           let ef = ui_effects(scene_ui(sc1))
           let fx_line = if Effects.stamp(ef, now) != Effects.stamp(ef, last_t) do Effects.summary(ef, now) else ui_fx(scene_ui(sc1)) end
           let readout = if fx_line == "" do ground else if ground == "" do fx_line else ground ++ "   " ++ fx_line end end
-          let sc2 = scene_with_ui(sc1, refresh_hud(scene_ui(sc1), inv_open2, drag2, ndc_x, ndc_y, readout, fx_line))
+          -- the species under the crosshair: a fruit block's own, a mycelium block's column
+          let tint = if Ray.is_hit(hit_now) && !map_mode1 do target_species(scene_world(sc1), Ray.bx(hit_now), Ray.by_(hit_now), Ray.bz(hit_now)) else 0 end
+          let sc2 = scene_with_ui(sc1, refresh_hud(scene_ui(sc1), inv_open2, drag2, ndc_x, ndc_y, readout, fx_line, tint))
           Win.gfx_draw_hud(252, hud_verts(scene_ui(sc2)), false)
           Win.gfx_draw_hud(251, icon_verts(scene_ui(sc2)), true)
           if readout != "" do Win.gfx_draw_hud(readout_slot(), readout_verts(scene_ui(sc2)), false) else () end
@@ -2547,7 +2569,7 @@ mod CubeForge do
         -- CF_SPAWN_Y=<y>: start at a chosen height (inspection aid, e.g. to look at the bedrock floor)
         let forced_y = Env.get_int("CF_SPAWN_Y", -1)
         let y0 = if forced_y >= 0 do int_to_float(forced_y) else ground_y end
-        Player.with_pitch(Player.new(int_to_float(spawn_x) +. 0.5, y0, int_to_float(spawn_z) +. 0.5), -0.25)
+        Player.with_pitch(Player.new(int_to_float(spawn_x) +. 0.5, y0, int_to_float(spawn_z) +. 0.5), int_to_float(Env.get_int("CF_PITCH", -25)) /. 100.0)   -- CF_PITCH: spawn pitch in hundredths of a radian, for headless looks at the ground
       end
       let player = match loaded do
         Loaded(h, _) -> Player.of_floats(Save.h_player(h))

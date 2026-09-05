@@ -45,7 +45,7 @@ mod CubeForge.Test.MycBlock do
 
   describe "Texture mycelium layers" do
     test "one layer per (base, species), after the existing seventeen" do
-      Test.assert_eq_int(Tx.layers(), 87, "20 base + 1 glow cap + 42 mycelium + 6 spore icons + 18 fruit")
+      Test.assert_eq_int(Tx.layers(), 89, "20 base + 1 glow cap + 42 mycelium + 6 spore icons + 18 fruit + 2 palm")
       Test.assert_true(near(Tx.myc_layer(0, 1), 21.0), "grass x Frostcap")
       Test.assert_true(near(Tx.myc_layer(0, 6), 26.0), "grass x Sunshelf")
       Test.assert_true(near(Tx.myc_layer(6, 6), 62.0), "stone x Sunshelf is the last")
@@ -86,7 +86,7 @@ mod CubeForge.Test.MycBlock do
 
   describe "Texture spore icons" do
     test "one icon layer per species after the mycelium layers" do
-      Test.assert_eq_int(Tx.layers(), 87, "63 + 6 + 18")
+      Test.assert_eq_int(Tx.layers(), 89, "63 + 6 + 18 + 2 palm")
       Test.assert_true(near(Tx.spore_layer(1), 63.0), "Frostcap")
       Test.assert_true(near(Tx.icon_layer(CubeForge.Species.spore_item(6)), 68.0), "Sunshelf spores in the HUD")
       Test.assert_true(near(Tx.icon_layer(1), 0.0), "grass icon unchanged")
@@ -127,7 +127,7 @@ mod CubeForge.Test.MycBlock do
       Test.assert_eq_int(Lt.emission(Ch.fruit_cap(3)), 0, "no glow")
     end
     test "one texture layer per kind and species, and small fruit yields nothing" do
-      Test.assert_eq_int(Tx.layers(), 87, "69 + 18")
+      Test.assert_eq_int(Tx.layers(), 89, "69 + 18 + 2 palm")
       Test.assert_true(near(Tx.fruit_layer(0, 1), 69.0), "small Frostcap")
       Test.assert_true(near(Tx.fruit_layer(2, 6), 86.0), "cap Sunshelf is the last")
       Test.assert_true(near(Tx.layer_for(Ch.fruit_stem(2)), 76.0), "stem Pinewart")
