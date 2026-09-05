@@ -78,9 +78,11 @@ mod CubeForge.Test.Biome do
     test "distance to water is Chebyshev and capped at the reach" do
       let w = CubeForge.World.set_block(flat_world(70), 64, 70, 64, C.water())
       let d = Biome.distances(Biome.build(w, 7), w)
-      Test.assert_eq_int(NativeArray.get_u8(d, 64 + 128 * 64), 0, "on the water")
-      Test.assert_eq_int(NativeArray.get_u8(d, 67 + 128 * 66), 3, "Chebyshev: max(3, 2)")
-      Test.assert_eq_int(NativeArray.get_u8(d, 0), Biome.reach(), "far away is capped")
+      Test.assert_eq_int(Biome.dist_of(NativeArray.get_u8(d, 64 + 128 * 64)), 0, "on the water")
+      Test.assert_eq_int(Biome.dist_of(NativeArray.get_u8(d, 67 + 128 * 66)), 3, "Chebyshev: max(3, 2)")
+      Test.assert_true(Biome.is_small(NativeArray.get_u8(d, 64 + 128 * 64)), "one block is a small body")
+      Test.assert_true(Biome.is_small(NativeArray.get_u8(d, 67 + 128 * 66)), "and the flag rides out with the distance")
+      Test.assert_eq_int(NativeArray.get_u8(d, 0), Biome.reach(), "far away is capped, with no flag")
     end
 
     test "a dry temperate flat world is grassland; beside water it is beach" do
@@ -116,13 +118,14 @@ mod CubeForge.Test.Biome do
     test "a canal turns its banks from dry to wet, gradually" do
       let w0 = flat_world(66)
       let f0 = Biome.build(w0, 7)
-      let before = Biome.biome_of(f0, 68, 60)
+      -- three blocks of water are a small body: they wet two columns, not twelve
+      let before = Biome.biome_of(f0, 66, 60)
       let w1 = CubeForge.World.set_block(CubeForge.World.set_block(CubeForge.World.set_block(w0, 64, 65, 58, C.water()), 64, 65, 60, C.water()), 64, 65, 62, C.water())
       let f1 = Biome.note_edit(Biome.note_edit(Biome.note_edit(f0, w1, 64, 65, 58, C.water()), w1, 64, 65, 60, C.water()), w1, 64, 65, 62, C.water())
       let f2 = Biome.tick(f1, w1, 7, Biome.default_rate(), Biome.no_pulls(Biome.cols(w1)), Biome.no_rows(Biome.cols(w1)), 1.0)
-      Test.assert_eq_int(Biome.biome_of(f2, 68, 60), before, "no snap after one tick")
+      Test.assert_eq_int(Biome.biome_of(f2, 66, 60), before, "no snap after one tick")
       let f3 = tick_n(f2, w1, 200, 0.05)
-      Test.assert_true(Biome.biome_of(f3, 68, 60) != before, "the bank changed biome")
+      Test.assert_true(Biome.biome_of(f3, 66, 60) != before, "the bank changed biome")
     end
 
     test "levelling a peak leaves alpine" do
@@ -244,6 +247,46 @@ mod CubeForge.Test.Biome do
       Test.assert_eq_int(NativeArray.get_u8(Biome.active(f3), 40 + n * 40), 0, "and settled again: the same offset does not keep it awake")
       Test.assert_true(Math.abs(Biome.moist_of(tick_k(f3, w, bonus, 5), 40, 40) -. 0.19) < 0.0001, "an unflagged row keeps its offset")
       Test.assert_true(Biome.moist_of(f3, 41, 40) < 0.0001, "the neighbour got no offset")
+    end
+  end
+
+  -- ── Water bodies ──────────────────────────────────────────────────────────
+  pfn water_line(w : CubeForge.World.World, x : Int, z0 : Int, z1 : Int, y : Int) : CubeForge.World.World do
+    if z0 > z1 do w else water_line(CubeForge.World.set_block(w, x, y, z0, C.water()), x, z0 + 1, z1, y) end
+  end
+  pfn water_row(w : CubeForge.World.World, x0 : Int, x1 : Int, z : Int, y : Int) : CubeForge.World.World do
+    if x0 > x1 do w else water_row(CubeForge.World.set_block(w, x0, y, z, C.water()), x0 + 1, x1, z, y) end
+  end
+  pfn near(a : Float, b : Float) : Bool do Math.abs(a -. b) < 0.0001 end
+
+  describe "Biome water bodies" do
+    test "a long trench is a large body and wets the full reach" do
+      let w = water_line(flat_world(70), 64, 30, 89, 70)
+      let d = Biome.distances(Biome.build(w, 7), w)
+      Test.assert_false(Biome.is_small(NativeArray.get_u8(d, 67 + 128 * 60)), "sixty columns are not small")
+      Test.assert_true(near(Biome.moisture_target_of(NativeArray.get_u8(d, 67 + 128 * 60)), 0.875), "three columns out: 1 - 3/24")
+    end
+    test "a puddle is a small body and wets only small_reach columns" do
+      let w = water_row(flat_world(70), 64, 68, 64, 70)
+      let d = Biome.distances(Biome.build(w, 7), w)
+      Test.assert_true(Biome.is_small(NativeArray.get_u8(d, 66 + 128 * 66)), "five columns are small")
+      Test.assert_true(near(Biome.moisture_target_of(NativeArray.get_u8(d, 66 + 128 * 66)), 0.5), "two out: 1 - 2/4")
+      Test.assert_true(Biome.moisture_target_of(NativeArray.get_u8(d, 66 + 128 * 68)) < 0.0001, "four out: dry")
+      Test.assert_true(Biome.moisture_target_of(NativeArray.get_u8(d, 66 + 128 * 69)) < 0.0001, "five out: dry")
+      Test.assert_eq_int(Biome.dist_of(NativeArray.get_u8(d, 66 + 128 * 69)), 5, "but the distance is still carried")
+    end
+    test "a pool touching a large body is part of it" do
+      let w0 = water_row(flat_world(70), 10, 79, 20, 70)
+      let w = water_row(water_row(w0, 80, 81, 20, 70), 80, 81, 21, 70)
+      let d = Biome.distances(Biome.build(w, 7), w)
+      Test.assert_false(Biome.is_small(NativeArray.get_u8(d, 81 + 128 * 21)), "the pool joined the body")
+      Test.assert_false(Biome.is_small(NativeArray.get_u8(d, 83 + 128 * 22)), "and so did its shore")
+    end
+    test "the small-body threshold and reach are the knobs" do
+      Test.assert_eq_int(Biome.small_body(), 48, "48 columns")
+      Test.assert_eq_int(Biome.small_reach(), 4, "4 columns")
+      Test.assert_true(near(Biome.moisture_target_of(Biome.small_bit() + 0), 1.0), "on small water")
+      Test.assert_true(near(Biome.moisture_target_of(12), 0.5), "large: unchanged curve")
     end
   end
 

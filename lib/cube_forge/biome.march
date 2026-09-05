@@ -46,12 +46,27 @@ mod CubeForge.Biome do
   fn alpine_line() : Int do 95 end
   doc "Columns beside water this low are beach."
   fn beach_max_height() : Int do 64 end
+  doc "A body of water at or under this many columns is small: a pool or a brook, not a lake or the sea."
+  fn small_body() : Int do 48 end
+  doc "Columns from a small body at which moisture reaches zero. A well in the desert wets a ring, not a marsh."
+  fn small_reach() : Int do 4 end
+  doc "The distance byte's top bit: set when the nearest water is a small body. Distances stay under 128."
+  fn small_bit() : Int do 128 end
+  doc "The distance in a distance byte."
+  fn dist_of(v : Int) : Int do v % 128 end
+  doc "Whether a distance byte says the nearest water is small."
+  fn is_small(v : Int) : Bool do v >= 128 end
 
   pfn clamp01(v : Float) : Float do if v < 0.0 do 0.0 else if v > 1.0 do 1.0 else v end end end
 
-  doc "Moisture 0..1 for a column [dist] away from the nearest water: linear, zero at the reach."
+  doc "Moisture 0..1 for a column [dist] away from a large body of water: linear, zero at the reach."
   fn moisture_target(dist : Int) : Float do
     clamp01(1.0 -. int_to_float(dist) /. int_to_float(reach()))
+  end
+  doc "Moisture 0..1 from a distance byte: the large-body curve, or the small_reach() curve when the small bit is set."
+  fn moisture_target_of(v : Int) : Float do
+    let r = if is_small(v) do small_reach() else reach() end
+    clamp01(1.0 -. int_to_float(dist_of(v)) /. int_to_float(r))
   end
 
   doc "Temperature 0..1: one low-frequency octave (regions, not noise -- see Noise.ruggedness for why one octave), minus the lapse for height above sea level."
@@ -113,10 +128,90 @@ mod CubeForge.Biome do
   -- unvisited 8-neighbours of every column at distance lv as lv + 1. Edges are
   -- unit cost, so the first visit is the exact Chebyshev distance. Unvisited
   -- columns keep reach(), which is also the cap -- the two are the same value.
-  pfn seed_go(ws : NativeU8Arr, n : Int, i : Int, d : NativeU8Arr) : NativeU8Arr do
+  -- ── Water bodies: connected components of the water flags ───────────────
+  -- lab: NativeIntArr(n * n + 1). A water column starts as its own index + 1,
+  -- every other column 0, and slot n * n counts the writes of the current
+  -- round. A round is min-propagation (each water column takes the least label
+  -- in its 3x3) then pointer jumping (lab[i] = lab[lab[i] - 1]); rounds run
+  -- until one writes nothing, and every body then carries its least column
+  -- index. One threaded array, reads before the write (the mark8 shape): a
+  -- queue is out (GAPS G63), and pointer jumping keeps the rounds to a handful
+  -- even for the sea.
+  pfn label_seed_go(ws : NativeU8Arr, n : Int, i : Int, lab : NativeIntArr) : NativeIntArr do
+    if i >= n * n do lab
+    else if NativeArray.get_u8(ws, i) == 1 do label_seed_go(ws, n, i + 1, NativeArray.set_int(lab, i, i + 1))
+    else label_seed_go(ws, n, i + 1, lab) end end
+  end
+  pfn min8_go(lab : NativeIntArr, n : Int, x : Int, z : Int, k : Int, best : Int) : Int do
+    if k >= 8 do best
+    else
+      let nx = x + ndx(k)
+      let nz = z + ndz(k)
+      if nx < 0 || nz < 0 || nx >= n || nz >= n do min8_go(lab, n, x, z, k + 1, best)
+      else
+        let l = NativeArray.get_int(lab, nx + n * nz)
+        min8_go(lab, n, x, z, k + 1, if l != 0 && l < best do l else best end)
+      end
+    end
+  end
+  pfn relabel_go(lab : NativeIntArr, n : Int, i : Int) : NativeIntArr do
+    if i >= n * n do lab
+    else
+      let l = NativeArray.get_int(lab, i)
+      if l == 0 do relabel_go(lab, n, i + 1)
+      else
+        let m = min8_go(lab, n, i % n, i / n, 0, l)
+        if m < l do
+          let c = NativeArray.get_int(lab, n * n)
+          relabel_go(NativeArray.set_int(NativeArray.set_int(lab, i, m), n * n, c + 1), n, i + 1)
+        else relabel_go(lab, n, i + 1) end
+      end
+    end
+  end
+  pfn jump_go(lab : NativeIntArr, n : Int, i : Int) : NativeIntArr do
+    if i >= n * n do lab
+    else
+      let l = NativeArray.get_int(lab, i)
+      if l == 0 do jump_go(lab, n, i + 1)
+      else
+        let r = NativeArray.get_int(lab, l - 1)
+        if r < l do
+          let c = NativeArray.get_int(lab, n * n)
+          jump_go(NativeArray.set_int(NativeArray.set_int(lab, i, r), n * n, c + 1), n, i + 1)
+        else jump_go(lab, n, i + 1) end
+      end
+    end
+  end
+  pfn rounds_go(lab : NativeIntArr, n : Int) : NativeIntArr do
+    let lab1 = jump_go(relabel_go(NativeArray.set_int(lab, n * n, 0), n, 0), n, 0)
+    let c = NativeArray.get_int(lab1, n * n)
+    if c == 0 do lab1 else rounds_go(lab1, n) end
+  end
+  doc "Body labels for the water flags: for each water column, one plus the least column index in its 8-connected body; 0 elsewhere. Length n * n + 1."
+  fn bodies(ws : NativeU8Arr, n : Int) : NativeIntArr do
+    rounds_go(label_seed_go(ws, n, 0, NativeArray.make_int(n * n + 1, 0)), n)
+  end
+  -- Columns per body, indexed by the body's root (its least column index).
+  pfn counts_go(ws : NativeU8Arr, lab : NativeIntArr, n : Int, i : Int, counts : NativeIntArr) : NativeIntArr do
+    if i >= n * n do counts
+    else if NativeArray.get_u8(ws, i) == 1 do
+      let root = NativeArray.get_int(lab, i) - 1
+      let c = NativeArray.get_int(counts, root)
+      counts_go(ws, lab, n, i + 1, NativeArray.set_int(counts, root, c + 1))
+    else counts_go(ws, lab, n, i + 1, counts) end end
+  end
+  doc "The size of the body column [i] belongs to, or 0 when it is not water."
+  fn body_size(ws : NativeU8Arr, lab : NativeIntArr, counts : NativeIntArr, i : Int) : Int do
+    if NativeArray.get_u8(ws, i) == 1 do NativeArray.get_int(counts, NativeArray.get_int(lab, i) - 1) else 0 end
+  end
+
+  -- Seed the sweep: a water column is at distance 0, flagged when its body is small.
+  pfn seed_go(ws : NativeU8Arr, lab : NativeIntArr, counts : NativeIntArr, n : Int, i : Int, d : NativeU8Arr) : NativeU8Arr do
     if i >= n * n do d
-    else if NativeArray.get_u8(ws, i) == 1 do seed_go(ws, n, i + 1, NativeArray.set_u8(d, i, 0))
-    else seed_go(ws, n, i + 1, d) end end
+    else if NativeArray.get_u8(ws, i) == 1 do
+      let small = NativeArray.get_int(counts, NativeArray.get_int(lab, i) - 1) <= small_body()
+      seed_go(ws, lab, counts, n, i + 1, NativeArray.set_u8(d, i, if small do small_bit() else 0 end))
+    else seed_go(ws, lab, counts, n, i + 1, d) end end
   end
 
   -- dx, dz for neighbour k of 8: the 3x3 ring minus the centre, row by row.
@@ -129,7 +224,9 @@ mod CubeForge.Biome do
     kk / 3 - 1
   end
 
-  -- Mark the unvisited neighbours of (x, z) with [nd].
+  -- Mark the unvisited neighbours of (x, z) with [nd]: the distance plus the
+  -- marker's small bit, so the flag travels with the distance. Unvisited is a
+  -- distance of reach() with no flag; the sweep never writes reach() itself.
   pfn mark8(d : NativeU8Arr, n : Int, x : Int, z : Int, nd : Int, k : Int) : NativeU8Arr do
     if k >= 8 do d
     else
@@ -146,8 +243,11 @@ mod CubeForge.Biome do
 
   pfn level_go(d : NativeU8Arr, n : Int, lv : Int, i : Int) : NativeU8Arr do
     if i >= n * n do d
-    else if NativeArray.get_u8(d, i) != lv do level_go(d, n, lv, i + 1)
-    else level_go(mark8(d, n, i % n, i / n, lv + 1, 0), n, lv, i + 1) end end
+    else
+      let v = NativeArray.get_u8(d, i)
+      if dist_of(v) != lv do level_go(d, n, lv, i + 1)
+      else level_go(mark8(d, n, i % n, i / n, lv + 1 + (if is_small(v) do small_bit() else 0 end), 0), n, lv, i + 1) end
+    end
   end
 
   pfn sweep_go(d : NativeU8Arr, n : Int, lv : Int) : NativeU8Arr do
@@ -155,11 +255,14 @@ mod CubeForge.Biome do
     else sweep_go(level_go(d, n, lv, 0), n, lv + 1) end
   end
 
-  doc "Chebyshev distance to the nearest water column, capped at reach(). A fresh array every call, threaded through every write (GAPS G68)."
+  doc "Chebyshev distance to the nearest water column, capped at reach(), with small_bit() set where that water is a small body (see dist_of, is_small). A fresh array every call, threaded through every write (GAPS G68)."
   fn distances(f : Field, w : CubeForge.World.World) : NativeU8Arr do
     let n = cols(w)
     match f do
-      Field(_, ws, _, _, _, _, _, _, _) -> sweep_go(seed_go(ws, n, 0, NativeArray.make_u8(n * n, reach())), n, 0)
+      Field(_, ws, _, _, _, _, _, _, _) ->
+        let lab = bodies(ws, n)
+        let counts = counts_go(ws, lab, n, 0, NativeArray.make_int(n * n, 0))
+        sweep_go(seed_go(ws, lab, counts, n, 0, NativeArray.make_u8(n * n, reach())), n, 0)
     end
   end
 
@@ -174,11 +277,11 @@ mod CubeForge.Biome do
     if i >= n * n do Field(hs, NativeArray.make_u8(0, 0), ta, ma, bs, NativeArray.make_u8(n * n, 0), tb, d, NativeArray.make_u8(n * n, 0))
     else
       let h = NativeArray.get_u8(hs, i)
-      let dist = NativeArray.get_u8(d, i)
+      let dv = NativeArray.get_u8(d, i)
       let base = temp_base(i % n, i / n, seed)
       let t = temp_from_base(base, h)
-      let m = moisture_target(dist)
-      let b = classify(t, m, h, dist)
+      let m = moisture_target_of(dv)
+      let b = classify(t, m, h, dist_of(dv))
       classify_all(hs, seed, d, n, i + 1, NativeArray.set_float(ta, i, t), NativeArray.set_float(ma, i, m), NativeArray.set_u8(bs, i, b), NativeArray.set_float(tb, i, base))
     end
   end
@@ -337,16 +440,16 @@ mod CubeForge.Biome do
     else if NativeArray.get_u8(act, i) == 0 && NativeArray.get_u8(prow, i / n) == 0 do tick_go(hs, tb, rate, d, pulls, prow, scale, n, i + 1, ta, ma, bs, hold, act)
     else
       let h = NativeArray.get_u8(hs, i)
-      let dist = NativeArray.get_u8(d, i)
+      let dv = NativeArray.get_u8(d, i)
       -- the network's offset: its raw pull scaled by CF_MYC_FEEDBACK and capped
       let cap = CubeForge.Myc.cap()
       let bt = clampb(NativeArray.get_f32(pulls, 2 * i) *. scale, cap)
       let bm = clampb(NativeArray.get_f32(pulls, 2 * i + 1) *. scale, cap)
       let tt = clamp01(temp_from_base(NativeArray.get_float(tb, i), h) +. bt)
-      let mt = clamp01(moisture_target(dist) +. bm)
+      let mt = clamp01(moisture_target_of(dv) +. bm)
       let t = ease(NativeArray.get_float(ta, i), tt, rate)
       let m = ease(NativeArray.get_float(ma, i), mt, rate)
-      let raw = classify(t, m, h, dist)
+      let raw = classify(t, m, h, dist_of(dv))
       let cur = NativeArray.get_u8(bs, i)
       -- The hold counter: flip only after hold_ticks() consecutive disagreements,
       -- so a column parked on a threshold cannot alternate every tick.
