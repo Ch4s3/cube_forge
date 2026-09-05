@@ -43,6 +43,55 @@ mod CubeForge.Test.Terrain do
     end
   end
 
+
+  -- The new layers: masks stay in range, and a terrace is flat where it claims to be.
+  pfn masks_in_range(i : Int) : Bool do
+    if i >= 400 do true
+    else
+      let x = int_to_float(i) *. 1.7
+      let z = int_to_float(i) *. 0.9
+      let a = N.ridged_fbm(x *. 0.028, z *. 0.028, 3)
+      let b = N.plateau_mask(x, z, 3)
+      let c = N.river_mask(x, z, 3)
+      let ok = a >= 0.0 && a <= 1.0 && b >= 0.0 && b <= 1.0 && c >= 0.0 && c <= 1.0
+      if ok do masks_in_range(i + 1) else false end
+    end
+  end
+
+  pfn terrace_bounded(i : Int) : Bool do
+    if i >= 400 do true
+    else
+      let v = int_to_float(i) *. 0.37
+      let d = Math.abs(N.terrace(v, 2.5) -. v)
+      if d <= N.plateau_step() *. 0.5 +. 0.000001 do terrace_bounded(i + 1) else false end
+    end
+  end
+
+  pfn near(a : Float, b : Float) : Bool do Math.abs(a -. b) < 0.000001 end
+
+  -- Age: the same base seed at two ages. The noise underneath is identical; only
+  -- the erosion knobs move, so heights differ but the lattice does not.
+  pfn noise_age_blind(i : Int) : Bool do
+    if i >= 100 do true
+    else
+      let x = int_to_float(i) *. 0.83
+      let z = int_to_float(i) *. 0.29
+      if N.value2(x, z, N.with_age(5, 0)) == N.value2(x, z, N.with_age(5, 90)) do noise_age_blind(i + 1) else false end
+    end
+  end
+  pfn heights_differ_by_age(i : Int) : Bool do
+    if i >= 200 do false
+    else if N.height(i * 3 % 128, i * 7 % 128, N.with_age(7, 0)) != N.height(i * 3 % 128, i * 7 % 128, N.with_age(7, 100)) do true
+    else heights_differ_by_age(i + 1) end end
+  end
+  pfn max_height(i : Int, seed : Int, hi : Int) : Int do
+    if i >= 1024 do hi
+    else
+      let h = N.height(i % 32 * 4, i / 32 * 4, seed)
+      max_height(i + 1, seed, if h > hi do h else hi end)
+    end
+  end
+
   describe "ridged noise" do
     test "stays within [0, 1]" do
       Test.assert_true(ridged_in_range(0, 1.0, 0.0), "ridged noise in range")
@@ -56,6 +105,49 @@ mod CubeForge.Test.Terrain do
     end
     test "spans a range that brackets sea level" do
       Test.assert_true(height_span(0, 999, 0), "terrain reaches above and below sea level")
+    end
+  end
+
+
+  describe "world age" do
+    test "the age rides in the seed's high bits and round-trips" do
+      Test.assert_eq_int(N.age_of(N.with_age(12345, 42)), 42, "age back out")
+      Test.assert_eq_int(N.base_seed(N.with_age(12345, 42)), 12345, "base back out")
+      Test.assert_eq_int(N.age_of(7), 0, "a plain seed is age 0")
+      Test.assert_eq_int(N.age_of(N.with_age(7, 500)), N.max_age(), "age is clamped high")
+      Test.assert_eq_int(N.age_of(N.with_age(7, -3)), 0, "and low")
+      Test.assert_eq_int(N.base_seed(N.with_age(N.with_age(9, 10), 20)), 9, "re-aging replaces, it does not stack")
+      Test.assert_eq_int(N.age_of(N.with_age(N.with_age(9, 10), 20)), 20, "the later age wins")
+    end
+    test "the noise underneath is age-blind, the terrain is not" do
+      Test.assert_true(noise_age_blind(0), "value2 ignores the age bits")
+      Test.assert_true(heights_differ_by_age(0), "height does not")
+    end
+    test "erosion grows with age" do
+      Test.assert_true(N.river_depth(1.0) > N.river_depth(0.0), "valleys cut deeper")
+      Test.assert_true(N.river_edge(1.0) < N.river_edge(0.0), "and wider")
+      Test.assert_true(N.mountain_amp(1.0) < N.mountain_amp(0.0), "peaks wear down")
+      Test.assert_true(N.terrace_sharpness(1.0) < N.terrace_sharpness(0.0), "rims slump")
+      Test.assert_true(N.warp_amp(1.0) > N.warp_amp(0.0), "the land bends further")
+      Test.assert_true(N.detail_weight(1.0) < N.detail_weight(0.0), "roughness smooths")
+      Test.assert_true(max_height(0, N.with_age(7, 100), 0) < max_height(0, N.with_age(7, 0), 0), "an ancient world's highest point is lower than a young one's")
+    end
+  end
+
+  describe "plateaus and rivers" do
+    test "ridged_fbm and the plateau and river masks stay within [0, 1]" do
+      Test.assert_true(masks_in_range(0), "every layer mask in range")
+    end
+    test "a terrace never moves a height more than half a step" do
+      Test.assert_true(terrace_bounded(0), "terrace stays within half a step of the input")
+    end
+    test "a terrace is flat across the middle of a step and rises to the next one at its edge" do
+      let s = N.plateau_step()
+      Test.assert_true(near(N.terrace(3.0 *. s, 2.5), 3.0 *. s), "a step multiple is its own terrace")
+      Test.assert_true(near(N.terrace(3.0 *. s +. 0.1 *. s, 2.5), 3.0 *. s), "just above the multiple is still flat")
+      Test.assert_true(near(N.terrace(3.0 *. s +. 0.29 *. s, 2.5), 3.0 *. s), "flat for the first 30% of the step")
+      Test.assert_true(near(N.terrace(3.0 *. s +. 0.75 *. s, 2.5), 4.0 *. s), "the top 30% has already reached the next terrace")
+      Test.assert_true(N.terrace(3.5 *. s, 2.5) > 3.0 *. s && N.terrace(3.5 *. s, 2.5) < 4.0 *. s, "the middle is the ramp between them")
     end
   end
 

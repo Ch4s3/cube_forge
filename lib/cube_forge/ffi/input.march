@@ -67,6 +67,8 @@ mod CubeForge.Ffi.Input do
   fn key_r() : Int do 82 end
   fn key_enter() : Int do 257 end
   fn key_backspace() : Int do 259 end
+  fn key_minus() : Int do 45 end
+  fn key_equal() : Int do 61 end
   fn button_left() : Int do 0 end
   fn button_right() : Int do 1 end
 
