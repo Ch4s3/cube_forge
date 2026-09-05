@@ -223,6 +223,16 @@ Measurements in `RESULTS.md`.
   planting withered.
 - **Fruit blocks** in the hotbar for building, as in §4.
 
+*As built (phase 4, 2026-09-05):* spores are items `200 + species` with a
+per-species icon layer; `Inventory.give` adds them. Digging mycelium yields a
+spore of the shown species one time in four by a position hash. Wild patches
+are `Myc.plant_patch` octagons at full vigour, one per 16x16 cell at 12%
+density, of the fittest species for the cell's climate, applied to the world
+as blocks before the light flood. Using a spore on a block plants the block's
+column if it can carry mycelium and is dry, and consumes one; otherwise
+nothing happens. The readout is a HUD text line, uppercase, rebuilt on change.
+`CF_WILD`, `CF_AUTOSPORE`. Measurements in `RESULTS.md`.
+
 ## 8. Map view
 
 The map gains a mycelium overlay under `CF_MYC_MAP=1`: species colour,

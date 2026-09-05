@@ -1315,3 +1315,41 @@ to the run without the planting. The column had been shown and then migrated
 back, so the blocks matched again -- the hash cannot see a change that undoes
 itself. The `mycelium at <column>` line in the dump summary (species, vigour,
 wanted, shown, surface id, block light) is what settled it; it stays.
+
+## Spores and planting (fungus phase 4, 2026-09-05)
+
+The loop closes. Plan `docs/superpowers/plans/2026-09-05-fungus-phase4-spores.md`.
+
+| | cost |
+|---|---|
+| startup, seed 7, debug: `Biome.build` | 675 ms (unchanged; it now runs before the light flood instead of after meshing) |
+| startup: `Myc.wild` — 14 patches, 2,527 columns across six species | **8 ms** |
+| startup: applying those as blocks and `shown`, one batched write per chunk | **5 ms** (700 ms through `World.set_block`, one 64 KB chunk copy per column) |
+| `scratch/frame_budget.sh`, 12 ms budget, release, wild fungus live at seed 7 | **9.24 ms** best of 3 (9.37 and 12.09 seen), drained mesh equals full rebuild |
+
+Wild patches are written before the light flood on purpose: glowing wild
+mycelium is lit by the flood for free, where relighting it column by column at
+the glow budget would take a ten-second sunrise on every new world.
+
+The budget's worst run moved from 8.8 to 12.1 ms with fungus live. The pinned
+scenario now migrates real patches on its retexture slots, one glow relight per
+slot among them, and a phase frame that already carried the biome retexture
+can now carry that too. Best-of-3 still clears, which is what the script
+asserts, but the headroom the budget was built on is spent; the fruit phase
+measures before it adds anything to a phase frame.
+
+`docs/fungus-wild-map.png`: the wild patches on the map at seed 7 -- Meadowbell
+on the grassland, Frostcap on the snow, Marshlight on the wetland, Lanterncap
+in the forest, Sunshelf on the sand. `docs/fungus-spores.png`: the item path end
+to end (`CF_WILD=0 CF_AUTOSPORE=100 CF_MYC_RATE=5000`, frame 2000): three
+Meadowbell spores given, one used on the column three east through the same
+function a hotbar spore takes, the hotbar showing the spore icon with a count
+of 2, the patch grown, and the ground readout `MEADOWBELL 100` at the top left.
+
+The readout is uppercase because the HUD glyph set is; punctuation renders
+blank, so `Lanterncap 25%` reads `LANTERNCAP 25`. Its buffer rebuilds only when
+the string changes, in `refresh_hud` beside the hotbar, which already had the
+right shape for "rebuild on change and upload".
+
+The "nothing grows here" readout is unreachable with six species: every
+climate has at least one band over it. It stays for a roster that leaves gaps.
