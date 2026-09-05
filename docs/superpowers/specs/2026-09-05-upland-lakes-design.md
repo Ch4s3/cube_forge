@@ -107,6 +107,16 @@ columns, worst frame 14.6 ms, flowing water 85 cells at frame 800 (the
 outlets' brooks). The map draws lakes as `~`: a cirque under the snowfields,
 a plateau lake, lowland ponds strung along the valleys.
 
+**Outlets on an ancient world.** Seed 1234 at age 100, 1,500 frames,
+windowed: with valley springs off (lake outlets alone, 25 spray springs)
+flowing water climbs 52 -> 1,100 cells and is still creeping at +40 per 100
+frames at the end; with valley springs too, 63 -> 1,544. Frame rate 105 and
+98 fps against 109 at age 50 (where flow plateaus at ~430); worst frames
+29-37 ms, remesh bursts. An outlet brook that reaches a flat terrace top
+spreads into a sheet whose interior never thins enough to evaporate, which
+is why it plateaus so slowly. Open: a lower rate for lake outlets than for
+springs, or evaporation that reaches a sheet's interior (todos.md).
+
 ## 7. Tests
 
 - Priority flood on a synthetic 8x8 heightmap with one bowl: the bowl's
