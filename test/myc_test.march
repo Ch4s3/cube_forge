@@ -291,4 +291,22 @@ mod CubeForge.Test.Myc do
     end
   end
 
+
+  describe "Myc export and import" do
+    test "species, reach and vigour round-trip and the pulls come back" do
+      let n = 32
+      let f0 = Myc.plant_patch(Myc.plant(Myc.build(n), n, 5, 5, 4), n, 20, 20, 3)
+      let f1 = tick_n(f0, n, uniform(n, 0.5), uniform(n, 0.3), 0.01, 7)
+      let bytes = Myc.to_bytes(f1, n, NativeArray.make_u8(3 * n * n + 10, 0), 10)
+      let g = Myc.of_bytes(bytes, 10, n)
+      Test.assert_eq_int(Myc.state_hash(g, n), Myc.state_hash(f1, n), "species and reach")
+      Test.assert_true(Math.abs(Myc.vigour_of(g, n, 5, 5) -. Myc.vigour_of(f1, n, 5, 5)) < 0.005, "vigour within a byte")
+      Test.assert_true(Math.abs(Myc.vigour_of(g, n, 22, 20) -. 1.0) < 0.005, "patch vigour")
+      let pb = Myc.bonuses(g, n, 1.0)
+      let pa = Myc.bonuses(f1, n, 1.0)
+      Test.assert_true(near(NativeArray.get_f32(pb, 2 * (5 + n * 5) + 1), NativeArray.get_f32(pa, 2 * (5 + n * 5) + 1)), "pulls recomputed")
+      Test.assert_eq_int(Myc.dirty_count(g, n), n * n, "everything looked at on the first tick after a load")
+    end
+  end
+
 end

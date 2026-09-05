@@ -183,6 +183,9 @@ mod CubeForge.Save do
     slot_dir(d, slot) ++ "/chunk_" ++ (if i < 10 do "0" else "" end) ++ int_to_string(i) ++ ".bin"
   end
   fn chunk_bytes() : Int do 65536 end
+  doc "The fungus and climate fields of a slot, one blob: species, vigour, reach, shown (one byte per column each), then the eased temperature and moisture (two bytes each). Optional: a slot without it loads its fields from the seed."
+  fn fields_path(d : String, slot : Int) : String do slot_dir(d, slot) ++ "/fields.bin" end
+  fn fields_bytes(side : Int) : Int do 8 * (side * 16) * (side * 16) end
 
   -- FileError is private to the stdlib, so the message names the path, not the cause.
   pfn err_text(what : String, path : String) : String do "cannot " ++ what ++ " " ++ path end
@@ -197,19 +200,49 @@ mod CubeForge.Save do
     end
   end
 
-  doc "Write a slot: the directory, every chunk file, then the header last. Stops at the first failure."
-  fn write(d : String, slot : Int, chunks : Array.PVec(CubeForge.Chunk.Chunk), side : Int, h : Header) : Result(Unit, String) do
+  pfn write_fields(d : String, slot : Int, fields : NativeU8Arr) : Result(Unit, String) do
+    if NativeArray.length_u8(fields) == 0 do Ok(())
+    else
+      match File.write(fields_path(d, slot), Bytes.to_string(Bytes.from_u8_arr(fields))) do
+        Ok(_) -> Ok(())
+        Err(_) -> Err(err_text("write", fields_path(d, slot)))
+      end
+    end
+  end
+
+  doc "Write a slot: the directory, every chunk file, the fields blob (when [fields] is not empty), then the header last. Stops at the first failure."
+  fn write_with_fields(d : String, slot : Int, chunks : Array.PVec(CubeForge.Chunk.Chunk), side : Int, h : Header, fields : NativeU8Arr) : Result(Unit, String) do
     match Dir.mkdir_p(slot_dir(d, slot)) do
       Err(_) -> Err(err_text("create", slot_dir(d, slot)))
       Ok(_) ->
         match write_chunks_go(d, slot, chunks, 0, side * side) do
           Err(e) -> Err(e)
           Ok(_) ->
-            match File.write(header_path(d, slot), encode_header(h, side)) do
-              Ok(_) -> Ok(())
-              Err(_) -> Err(err_text("write", header_path(d, slot)))
+            match write_fields(d, slot, fields) do
+              Err(e) -> Err(e)
+              Ok(_) ->
+                match File.write(header_path(d, slot), encode_header(h, side)) do
+                  Ok(_) -> Ok(())
+                  Err(_) -> Err(err_text("write", header_path(d, slot)))
+                end
             end
         end
+    end
+  end
+
+  doc "Write a slot without a fields blob."
+  fn write(d : String, slot : Int, chunks : Array.PVec(CubeForge.Chunk.Chunk), side : Int, h : Header) : Result(Unit, String) do
+    write_with_fields(d, slot, chunks, side, h, NativeArray.make_u8(0, 0))
+  end
+
+  doc "Read a slot's fields blob; an error when it is missing or not exactly fields_bytes(side)."
+  fn read_fields(d : String, slot : Int, side : Int) : Result(NativeU8Arr, String) do
+    match File.read(fields_path(d, slot)) do
+      Err(_) -> Err(err_text("read", fields_path(d, slot)))
+      Ok(str) ->
+        let a = Bytes.to_u8_arr(Bytes.from_string(str))
+        if NativeArray.length_u8(a) != fields_bytes(side) do Err("fields blob is " ++ int_to_string(NativeArray.length_u8(a)) ++ " bytes, expected " ++ int_to_string(fields_bytes(side)))
+        else Ok(a) end
     end
   end
 

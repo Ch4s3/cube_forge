@@ -342,6 +342,39 @@ mod CubeForge.Myc do
     end
   end
 
+  -- ── Save and load ─────────────────────────────────────────────────────────
+  -- Three bytes per column, three arrays in a row: species, vigour (0..255),
+  -- reach. Hold, claimant, climate memory and the pulls are rebuilt: the first
+  -- tick after a load looks at every column.
+  pfn export_go(sps : NativeU8Arr, vg : NativeF32Arr, rc : NativeU8Arr, n2 : Int, i : Int, out : NativeU8Arr, off : Int) : NativeU8Arr do
+    if i >= n2 do out
+    else
+      let o1 = NativeArray.set_u8(out, off + i, NativeArray.get_u8(sps, i))
+      let o2 = NativeArray.set_u8(o1, off + n2 + i, float_to_int(NativeArray.get_f32(vg, i) *. 255.0 +. 0.5))
+      export_go(sps, vg, rc, n2, i + 1, NativeArray.set_u8(o2, off + 2 * n2 + i, NativeArray.get_u8(rc, i)), off)
+    end
+  end
+  doc "Write species, vigour and reach into [out] at [off]: 3 * n * n bytes."
+  fn to_bytes(f : Field, n : Int, out : NativeU8Arr, off : Int) : NativeU8Arr do
+    match f do Field(sps, vg, rc, _, _, _, _, _, _) -> export_go(sps, vg, rc, n * n, 0, out, off) end
+  end
+  pfn import_go(b : NativeU8Arr, off : Int, n2 : Int, i : Int, sps : NativeU8Arr, vg : NativeF32Arr, rc : NativeU8Arr) : Field do
+    if i >= n2 do Field(sps, vg, rc, NativeArray.make_u8(0, 0), NativeArray.make_u8(0, 0), NativeArray.make_u8(0, 0), NativeArray.make_f32(0, 0.0), NativeArray.make_f32(0, 0.0), NativeArray.make_u8(0, 0))
+    else
+      import_go(b, off, n2, i + 1, NativeArray.set_u8(sps, i, NativeArray.get_u8(b, off + i)),
+                NativeArray.set_f32(vg, i, int_to_float(NativeArray.get_u8(b, off + n2 + i)) /. 255.0),
+                NativeArray.set_u8(rc, i, NativeArray.get_u8(b, off + 2 * n2 + i)))
+    end
+  end
+  doc "A field from the bytes `export` wrote at [off]: everything dirty, the pulls recomputed."
+  fn of_bytes(b : NativeU8Arr, off : Int, n : Int) : Field do
+    match import_go(b, off, n * n, 0, NativeArray.make_u8(n * n, 0), NativeArray.make_f32(n * n, 0.0), NativeArray.make_u8(n * n, 0)) do
+      Field(sps, vg, rc, _, _, _, _, _, _) ->
+        Field(sps, vg, rc, NativeArray.make_u8(n * n, 0), NativeArray.make_u8(n * n, 0), NativeArray.make_u8(n * n, 1), NativeArray.make_f32(2 * n * n, -1.0),
+              repull_box(sps, NativeArray.make_f32(2 * n * n, 0.0), n, 0, 0, n - 1, n - 1), NativeArray.make_u8(n, 1))
+    end
+  end
+
   -- ── Climate feedback: what the network does to the ground ───────────────
   doc "Largest offset the network can put on either climate axis of a column."
   fn cap() : Float do 0.3 end

@@ -41,6 +41,7 @@ mod CubeForge do
   alias CubeForge.Myc as Myc
   alias CubeForge.Species as Species
   alias CubeForge.Fruit as Fruit
+  alias CubeForge.Effects as Effects
   alias CubeForge.Save as Save
 
   fn ms(seconds : Float) : String do float_to_string(seconds *. 1000.0) ++ "ms" end
@@ -88,12 +89,15 @@ mod CubeForge do
   type Scene(p) = Scene(CubeForge.World.World, NativeIntArr, CubeForge.F32Buf.F32Buf, CubeForge.Raycast.Hit, Ui, Array.PVec(p), NativeIntArr, Array.PVec(CubeForge.ChunkMesh.ChunkMesh), CubeForge.Biome.Field, NativeIntArr, CubeForge.Myc.Field)   -- ..., and the sections whose mesh is owed a rebuild (pass bitmask per section slot)
   -- inventory + hotbar buffers (untextured, textured icons) + last built HUD key
   -- + the ground readout's buffer and the text it was last built from
-  type Ui = Ui(CubeForge.Inventory.Inv, CubeForge.F32Buf.F32Buf, CubeForge.F32Buf.F32Buf, Int, CubeForge.F32Buf.F32Buf, String)
-  fn ui_inv(u : Ui) : CubeForge.Inventory.Inv do match u do Ui(i, _, _, _, _, _) -> i end end
+  -- + the food effects (see CubeForge.Effects)
+  type Ui = Ui(CubeForge.Inventory.Inv, CubeForge.F32Buf.F32Buf, CubeForge.F32Buf.F32Buf, Int, CubeForge.F32Buf.F32Buf, String, CubeForge.Effects.Effects)
+  fn ui_inv(u : Ui) : CubeForge.Inventory.Inv do match u do Ui(i, _, _, _, _, _, _) -> i end end
   @[no_alloc]
-  fn ui_with_inv(u : Ui, i : CubeForge.Inventory.Inv) : Ui do match u do Ui(_, a, b, k, r, t) -> Ui(i, a, b, k, r, t) end end
-  fn ui_readout(u : Ui) : String do match u do Ui(_, _, _, _, _, t) -> t end end
-  pfn readout_verts(u : Ui) : Int do match u do Ui(_, _, _, _, r, _) -> F32Buf.len(r) / Vx.floats() end end
+  fn ui_with_inv(u : Ui, i : CubeForge.Inventory.Inv) : Ui do match u do Ui(_, a, b, k, r, t, e) -> Ui(i, a, b, k, r, t, e) end end
+  fn ui_readout(u : Ui) : String do match u do Ui(_, _, _, _, _, t, _) -> t end end
+  fn ui_effects(u : Ui) : CubeForge.Effects.Effects do match u do Ui(_, _, _, _, _, _, e) -> e end end
+  fn ui_with_effects(u : Ui, e : CubeForge.Effects.Effects) : Ui do match u do Ui(i, a, b, k, r, t, _) -> Ui(i, a, b, k, r, t, e) end end
+  pfn readout_verts(u : Ui) : Int do match u do Ui(_, _, _, _, r, _, _) -> F32Buf.len(r) / Vx.floats() end end
   doc "VBO slot of the ground readout line."
   fn readout_slot() : Int do 245 end
 
@@ -103,7 +107,7 @@ mod CubeForge do
   -- when the inventory actually changed, as before.
   pfn refresh_hud(u : Ui, open : Bool, drag_from : Int, nx : Float, ny : Float, text : String) : Ui do
     match u do
-      Ui(inv, hb, ic, key, rb, last) ->
+      Ui(inv, hb, ic, key, rb, last, ef) ->
         -- the readout rebuilds only when its string changed
         let rb1 = if text == last do rb
                   else
@@ -112,18 +116,18 @@ mod CubeForge do
                     b
                   end
         let k = Inv.hud_key(inv) * 4 + (if open do 2 else 0 end) + (if drag_from >= 0 do 1 else 0 end)
-        if k == key && !open do Ui(inv, hb, ic, key, rb1, text)
+        if k == key && !open do Ui(inv, hb, ic, key, rb1, text, ef)
         else
           let hb1 = Hud.build_hotbar(hb, inv, Inv.progress(inv), open, drag_from)
           Win.gfx_upload(252, F32Buf.storage(hb1), F32Buf.len(hb1))
           let ic1 = Hud.build_icons(ic, inv, open, drag_from, nx, ny)
           Win.gfx_upload(251, F32Buf.storage(ic1), F32Buf.len(ic1))
-          Ui(inv, hb1, ic1, k, rb1, text)
+          Ui(inv, hb1, ic1, k, rb1, text, ef)
         end
     end
   end
-  pfn hud_verts(u : Ui) : Int do match u do Ui(_, hb, _, _, _, _) -> F32Buf.len(hb) / Vx.floats() end end
-  pfn icon_verts(u : Ui) : Int do match u do Ui(_, _, ic, _, _, _) -> F32Buf.len(ic) / Vx.floats() end end
+  pfn hud_verts(u : Ui) : Int do match u do Ui(_, hb, _, _, _, _, _) -> F32Buf.len(hb) / Vx.floats() end end
+  pfn icon_verts(u : Ui) : Int do match u do Ui(_, _, ic, _, _, _, _) -> F32Buf.len(ic) / Vx.floats() end end
   -- VBO slot map. 0..63 opaque chunks, 64..127 water, 128..191 foliage, and the
   -- named slots below. They are all one array in the shim (CF_MAX_MESHES = 256),
   -- so a slot used twice silently overwrites; keep this list complete.
@@ -1243,7 +1247,7 @@ mod CubeForge do
   -- Per-frame: raycast from the eye, refresh the outline, apply the break-hold and placement.
   -- [break_held] is the button level (or scripted), [place_now] an edge, [new_sel] a slot 1..4 or 0.
   -- [place_id] > 0 forces a block id for scripted edits.
-  pfn interact(sc, p : CubeForge.Player.Player, break_held : Bool, place_now : Bool, place_id : Int, new_sel : Int, dt : Float, seed : Int) do
+  pfn interact(sc, p : CubeForge.Player.Player, break_held : Bool, place_now : Bool, place_id : Int, new_sel : Int, dt : Float, seed : Int, now : Float) do
     match sc do
       Scene(world, counts, outline, _, ui0, pids, flags, meshes, bio, pend, myc) ->
         let inv0 = if new_sel > 0 do Inv.select(ui_inv(ui0), new_sel) else ui_inv(ui0) end
@@ -1279,6 +1283,10 @@ mod CubeForge do
                        if sp > 0 do Inv.give(inv2, Species.spore_item(sp), 1) else inv2 end
                      else inv2 end
           set_inv(sc3, Inv.release(inv3))
+        else if place_now && !Ray.is_hit(hit) && Chunk.is_fruit_cap(Inv.selected_id(inv1)) && Inv.can_place(inv1) do
+          -- nothing in reach and a cap in hand: eat it. The species' effect starts
+          -- (or refreshes) for Effects.duration() seconds.
+          eat(sc1, Chunk.fruit_species(Inv.selected_id(inv1)), Inv.consume(inv1), now)
         else if place_now && Ray.is_hit(hit) do
           let px = Ray.bx(hit) + Ray.nx(hit)
           let py = Ray.by_(hit) + Ray.ny(hit)
@@ -1298,7 +1306,17 @@ mod CubeForge do
             let sc2 = edit_block(sc1, px, py, pz, id)
             if forced do sc2 else set_inv(sc2, Inv.consume(inv1)) end
           end end end
-        else sc1 end end
+        else sc1 end end end
+    end
+  end
+
+  -- Eat a cap of [sp]: the inventory after the bite, and the effect applied at [now].
+  pfn eat(sc, sp : Int, inv : CubeForge.Inventory.Inv, now : Float) do
+    match sc do
+      Scene(w, c, o, h, u, p, f, m, b, q, myc) ->
+        let e = Effects.apply(ui_effects(u), Effects.kind_for(sp), now)
+        println("ate a " ++ Species.name(sp) ++ " cap: " ++ Effects.summary(e, now))
+        Scene(w, c, o, h, ui_with_effects(ui_with_inv(u, inv), e), p, f, m, b, q, myc)
     end
   end
 
@@ -1508,14 +1526,31 @@ mod CubeForge do
   type Knobs = Knobs(Int, Int, String, Bool, Float, Int, Bool, Int, Int, Int, Float, Int, Float, Bool, Int, Int, Int, Int, Int, Bool, Int, Int, Int, Int, Int, Int, Int, Bool, Bool, Int, Int, Bool, Int, Int, Int, Int, Int, Int, Bool, Int, Int, Int, Int, Int, Int)   -- max_frames, dump_frame, dump_path, autowalk, autospin, autoedit frame (<0 = off), autoswim, autoflow frame (<0 = off), workers, automap frame (<0 = off; forces map view on from this frame, for headless verification), day length in seconds, sun angle override in degrees (<0 = follow the clock), shadow reach in blocks (0 = off), soft shadow edges, autobreak frame (<0 = off): break the column under the player every 20 frames, for a repeatable edit benchmark, weather pin 0..100 (<0 = follow the actor), precipitation pool capacity, biome ease rate in percent (100 = one CF_DAY per full swing), draw the biome map in map view, autocanal frame (<0 = off): lay a 9-block line of water three columns east of the player, aim-independent, for the biome end-to-end test, biome migration budget: surface columns retextured per tick, vegetation budget: trees grown or felled per tick, time pin in seconds (<0 = live clock) for the water animation, remesh-all frame (<0 = off): rebuild every section of every chunk at that frame, a ground truth for stale-mesh hunts, automenu frame (<0 = off): open the escape menu at that frame and start a new game five frames later, for the restart test, audio mode (0 off, 1 device, 2 null device -- render a tick per push straight into the WAV, for reproducible headless dumps), audio log, autodive, autoglow frame (<0 = off): place a glow cap three columns east of the player, through edit_block, for the block-light end-to-end check, myc rate in percent, draw the mycelium map overlay in map view, autoplant frame (<0 = off): plant the fittest species three columns east of the player, myc migration budget (surface columns per retexture slot; glow changes batch under one relight per slot), autoplant species override (0 = fittest), autospore frame (<0 = off): give three spores and plant one through the item path thirty frames later, fruit budget (bodies per fruit slot), fruit rate in percent, autostart (skip the start screen), autosave frame (<0 = off) and slot, autoload frame (<0 = off, first session only) and slot, autoslots frame (<0 = off): open the slots page at that frame, for a headless look at it, climate feedback from the network in percent (0 = none)
 
   doc "Write the session into [slot]. Prints the outcome; true on success."
-  pfn save_game(slot : Int, w : CubeForge.World.World, p : CubeForge.Player.Player, inv : CubeForge.Inventory.Inv, seed : Int, day : Float, wxpid) : Bool do
+  -- The fields blob: species, vigour, reach, shown, then the eased axes.
+  pfn fields_blob(w : CubeForge.World.World, bio : CubeForge.Biome.Field, myc : CubeForge.Myc.Field) : NativeU8Arr do
+    let n = World.side(w) * 16
+    let b0 = Myc.to_bytes(myc, n, NativeArray.make_u8(Save.fields_bytes(World.side(w)), 0), 0)
+    let b1 = Win.u8_blit(b0, 3 * n * n, World.shown(w), 0, n * n)
+    Biome.axes_to_bytes(bio, n, b1, 4 * n * n)
+  end
+  -- A slot's fields, or an empty array (with a note) when the slot has none.
+  pfn read_fields_or_empty(slot : Int, n : Int) : NativeU8Arr do
+    match Save.read_fields(Save.dir(), slot, n) do
+      Ok(b) -> b
+      Err(e) ->
+        println("slot " ++ int_to_string(slot) ++ " has no fields (" ++ e ++ "): fungus and climate restart from the seed")
+        NativeArray.make_u8(0, 0)
+    end
+  end
+
+  pfn save_game(slot : Int, w : CubeForge.World.World, p : CubeForge.Player.Player, inv : CubeForge.Inventory.Inv, seed : Int, day : Float, wxpid, bio : CubeForge.Biome.Field, myc : CubeForge.Myc.Field) : Bool do
     let ts0 = Win.time()
     let wx = match Weather.call_snapshot(wxpid) do
       Ok(l) -> Weather.phase_to_floats(Weather.unpack_phase(l))
       Err(_) -> Weather.phase_to_floats(Weather.start())
     end
     let h = Save.header_new(seed, DateTime.now(), Player.to_floats(p), Inv.to_ints(inv), day, wx)
-    match Save.write(Save.dir(), slot, World.chunks(w), World.side(w), h) do
+    match Save.write_with_fields(Save.dir(), slot, World.chunks(w), World.side(w), h, fields_blob(w, bio, myc)) do
       Ok(_) ->
         println("saved slot " ++ int_to_string(slot) ++ " in " ++ ms(Win.time() -. ts0) ++ ", world hash " ++ int_to_string(World.state_hash(w)))
         true
@@ -1664,7 +1699,7 @@ mod CubeForge do
           let load_slot = if first && autoload >= 0 && frame == autoload do autoload_slot
                           else if slot_click > 0 && Menu.is_start(menu3) do slot_click else 0 end end
           let menu4 = if save_slot > 0 do
-                        let saved = save_game(save_slot, scene_world(sc_drag), player, ui_inv(scene_ui(sc_drag)), seed, now -. t0 +. day0, wxpid)
+                        let saved = save_game(save_slot, scene_world(sc_drag), player, ui_inv(scene_ui(sc_drag)), seed, now -. t0 +. day0, wxpid, scene_biome(sc_drag), scene_myc(sc_drag))
                         Menu.set_slots(Menu.set_status(menu3, save_slot, if saved do Menu.status_saved() else Menu.status_failed() end, frame), Save.list(Save.dir(), side))
                       else menu3 end
           -- A slot is validated while this world still runs, so a bad slot never leaves you without one.
@@ -1677,7 +1712,11 @@ mod CubeForge do
                            mb
                          else menubuf end
           let player1 = if ui_open do player
-                        else Player.update(player, read_input(autowalk, autospin, autoswim && frame >= 320, autodive && frame >= 320), scene_world(sc_drag), dt) end
+                        else
+                      let ef = ui_effects(scene_ui(sc_drag))
+                      Player.update_with(player, read_input(autowalk, autospin, autoswim && frame >= 320, autodive && frame >= 320), scene_world(sc_drag), dt,
+                                         Effects.speed_mult(ef, now), Effects.jump_mult(ef, now), Effects.swim_mult(ef, now))
+                    end
           let view1 = write_view(player1, view)
           let vp1 = M.mul_into_f32(proj, view1, vp)
           -- The map camera follows the player (x, z) so it reads as a local overhead view, not a
@@ -1693,7 +1732,7 @@ mod CubeForge do
           -- No breaking or placing while the inventory is open: those clicks are drags.
           let sc0 = if ui_open do sc_drag
                     else interact(sc_drag, player1, In.button(In.button_left()) || scripted_hold, In.button_pressed(In.button_right()) || scripted_place || place_water,
-                                  if place_water do Chunk.id_of_level(7) else -1 end, if scripted_place do 1 else if scripted_sel > 0 do scripted_sel else selected_key() end end, dt, seed) end
+                                  if place_water do Chunk.id_of_level(7) else -1 end, if scripted_place do 1 else if scripted_sel > 0 do scripted_sel else selected_key() end end, dt, seed, now) end
           -- CF_AUTOFLOW: break the source again 600 frames after placing it
           let sc0b = if autoflow >= 0 && frame == autoflow + 600 do break_sources_near(sc0, player1) else sc0 end
           -- CF_AUTOBREAK=<frame>: from that frame, mine straight down one block every 20 frames.
@@ -1712,7 +1751,12 @@ mod CubeForge do
           -- CF_AUTOSPORE=<frame>: spores into the inventory, then one used on
           -- the column three east through the same path a hotbar spore takes.
           let sc0d3 = if autospore >= 0 && frame == autospore do give_spores(sc0d_pre, player1) else sc0d_pre end
-          let sc0d = if autospore >= 0 && frame == autospore + 30 do use_spore(sc0d3, player1) else sc0d3 end
+          let sc0d4 = if autospore >= 0 && frame == autospore + 30 do use_spore(sc0d3, player1) else sc0d3 end
+          -- CF_AUTOEAT=<frame>: a Frostcap cap into the inventory, eaten thirty
+          -- frames later through the same function a hotbar bite takes.
+          let autoeat = Env.get_int("CF_AUTOEAT", -1)
+          let sc0d5 = if autoeat >= 0 && frame == autoeat do set_inv(sc0d4, Inv.give(ui_inv(scene_ui(sc0d4)), Chunk.fruit_cap(1), 1)) else sc0d4 end
+          let sc0d = if autoeat >= 0 && frame == autoeat + 30 do eat(sc0d5, 1, Inv.take_one(ui_inv(scene_ui(sc0d5)), Chunk.fruit_cap(1)), now) else sc0d5 end
           -- The world tick, spread over three frames of the period rather than
           -- landing in one. The phases were already sequential and each is a
           -- whole step on its own; running them in the same frame only ever
@@ -1840,7 +1884,7 @@ mod CubeForge do
           let arc = arc_angle(now -. t0 +. day0, day_len, sun_deg)
           let sun = if map_mode1 do 1.0 else sun_level_at(arc) end
           let moon = if map_mode1 do 0.0 else moon_level(sun) end
-          let flash_now = if map_mode1 do false else flash1 end
+          let flash_now = if map_mode1 do false else flash1 || Effects.lantern(ui_effects(scene_ui(sc1)), now) end
           -- The moon rides the opposite side of the same arc, so it climbs as the
           -- sun sets. In map mode the light is pinned overhead: that view is a
           -- diagnostic, and a low sun would leave half of it in shadow.
@@ -1977,10 +2021,13 @@ mod CubeForge do
           Win.gfx_draw_hud(255, fps_hud_verts(fps1), false)
           -- The ground readout: what the looked-at column holds, or what would grow there.
           let hit_now = scene_hit(sc1)
-          let readout = if Ray.is_hit(hit_now) && !map_mode1 do
+          let ground = if Ray.is_hit(hit_now) && !map_mode1 do
               Myc.readout(scene_myc(sc1), World.side(scene_world(sc1)) * 16, Ray.bx(hit_now), Ray.bz(hit_now),
                           Biome.temp_of(scene_biome(sc1), Ray.bx(hit_now), Ray.bz(hit_now)), Biome.moist_of(scene_biome(sc1), Ray.bx(hit_now), Ray.bz(hit_now)))
             else "" end
+          -- the active effects follow the ground readout on the same line
+          let fx_line = Effects.summary(ui_effects(scene_ui(sc1)), now)
+          let readout = if fx_line == "" do ground else if ground == "" do fx_line else ground ++ "   " ++ fx_line end end
           let sc2 = scene_with_ui(sc1, refresh_hud(scene_ui(sc1), inv_open2, drag2, ndc_x, ndc_y, readout))
           Win.gfx_draw_hud(252, hud_verts(scene_ui(sc2)), false)
           Win.gfx_draw_hud(251, icon_verts(scene_ui(sc2)), true)
@@ -2000,6 +2047,7 @@ mod CubeForge do
             let pcz = float_to_int(V.z(Player.position(player1)))
             println("  biome at player column (" ++ int_to_string(pcx) ++ "," ++ int_to_string(pcz) ++ "): " ++ Biome.name(Biome.biome_of(scene_biome(sc1), pcx, pcz)) ++ " height " ++ int_to_string(Biome.height_of(scene_biome(sc1), pcx, pcz)) ++ " " ++ Biome.debug_axes(scene_biome(sc1), pcx, pcz))
             println("  mycelium: " ++ myc_summary(scene_myc(sc1), World.side(scene_world(sc1)) * 16, 1, ""))
+            println("  effects: " ++ Effects.summary(ui_effects(scene_ui(sc1)), now))
             println("  giant cells near the player: " ++ giant_cells(scene_world(sc1), scene_myc(sc1), seed, pcx, pcz, 0, ""))
             println("  fruit: small " ++ int_to_string(Fruit.count_bodies(scene_world(sc1), scene_biome(sc1), 0)) ++ " medium " ++ int_to_string(Fruit.count_bodies(scene_world(sc1), scene_biome(sc1), 1)) ++ " giant " ++ int_to_string(Fruit.count_bodies(scene_world(sc1), scene_biome(sc1), 2)) ++ " orphans " ++ int_to_string(Fruit.count_orphans(scene_world(sc1), scene_biome(sc1), World.shown(scene_world(sc1)))))
             -- the column three east of the player: where CF_AUTOPLANT plants
@@ -2363,15 +2411,23 @@ mod CubeForge do
     -- light flood, so glowing wild mycelium is lit by the flood rather than
     -- by a relight per column. CF_WILD=0 keeps a world bare.
     let tw0 = System.monotonic_time()
-    let biome0 = Biome.build(world_dark, seed)
-    let tw1 = System.monotonic_time()
     let cols = n * 16
-    let myc0 = if Env.get_int("CF_WILD", 1) == 1 do Myc.wild(Myc.build(cols), cols, Biome.temps(biome0), Biome.moists(biome0), seed) else Myc.build(cols) end
+    -- A save carries the two fields and the shown species; a slot without them
+    -- (or a new world) builds the climate from the terrain and seeds wild fungus.
+    let fields = match loaded do
+      Loaded(_, _) -> read_fields_or_empty(start_slot(start), n)
+      NoLoad -> NativeArray.make_u8(0, 0)
+    end
+    let have_fields = NativeArray.length_u8(fields) > 0
+    let biome0 = if have_fields do Biome.axes_of_bytes(Biome.build(world_dark, seed), world_dark, fields, 4 * cols * cols) else Biome.build(world_dark, seed) end
+    let tw1 = System.monotonic_time()
+    let myc0 = if have_fields do Myc.of_bytes(fields, 0, cols)
+               else if Env.get_int("CF_WILD", 1) == 1 do Myc.wild(Myc.build(cols), cols, Biome.temps(biome0), Biome.moists(biome0), seed) else Myc.build(cols) end end
     let tw2 = System.monotonic_time()
-    -- A loaded world already holds its fungus as blocks, so the wild patches
-    -- are not stamped over what was saved. The mycelium field itself is not in
-    -- the save yet: it restarts from the wild state (see the spec's as-built notes).
-    let world_wild = if is_loaded(loaded) do world_dark else apply_shown_all(world_dark, biome0, myc0, n, 0) end
+    -- A loaded world already holds its fungus as blocks: shown comes from the
+    -- save with the fields, and the wild patches are never stamped over it.
+    let world_wild = if have_fields do World.with_shown(world_dark, Win.u8_blit(World.shown_new(), 0, fields, 3 * cols * cols, cols * cols))
+                     else if is_loaded(loaded) do world_dark else apply_shown_all(world_dark, biome0, myc0, n, 0) end end
     println("  biome field: " ++ int_to_string(tw1 - tw0) ++ " ms, wild fungus: " ++ myc_summary(myc0, cols, 1, "") ++ "in " ++ int_to_string(tw2 - tw1) ++ " ms, applied in " ++ int_to_string(System.monotonic_time() - tw2) ++ " ms")
     let t2 = System.monotonic_time()
     -- stage 1b: skylight and block light (need the finished terrain, including neighbours)
@@ -2445,7 +2501,7 @@ mod CubeForge do
       if is_loaded(loaded) do reload_water_slot(pids, n * n - 1, n, seed, Save.dir(), start_slot(start))
       else reload_water(pids, n * n - 1, n, seed) end
       println("reloaded " ++ int_to_string(n * n) ++ " water actors in " ++ ms(Win.time() -. tw0) ++ " (loads run asynchronously)")
-      let scene = Scene(world, counts, F32Buf.new(256), Ray.miss(), Ui(inv0, F32Buf.new(2048), F32Buf.new(256), -1, F32Buf.new(2048), ""), pids, spring_flags(world, biome0, 0, n, NativeArray.make_int(n * n, 0)), Array.from_list(meshes), biome0, CubeForge.Light.marks_new(), myc0)
+      let scene = Scene(world, counts, F32Buf.new(256), Ray.miss(), Ui(inv0, F32Buf.new(2048), F32Buf.new(256), -1, F32Buf.new(2048), "", Effects.new()), pids, spring_flags(world, biome0, 0, n, NativeArray.make_int(n * n, 0)), Array.from_list(meshes), biome0, CubeForge.Light.marks_new(), myc0)
       let fps0 = Fps(t4, 0, 0, F32Buf.new(4096))
       -- Seed first, then the saved phase, so a fresh phase never overwrites it.
       Weather.send_seed(wxpid, seed)
