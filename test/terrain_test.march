@@ -151,6 +151,32 @@ mod CubeForge.Test.Terrain do
     end
   end
 
+  -- The apron: chunk (0, 0)'s column at lx = 16 is chunk (16, 0)'s column at lx = 0.
+  pfn seam_agrees(a : NativeIntArr, b : NativeIntArr, lz : Int) : Bool do
+    if lz >= 16 + C.apron() do true
+    else if C.hmap_at(a, 16, lz) == C.hmap_at(b, 0, lz) && C.hmap_at(a, 15, lz) == C.hmap_at(b, -1, lz) do seam_agrees(a, b, lz + 1)
+    else false end end
+  end
+  pfn interior_matches(hs : NativeIntArr, i : Int) : Bool do
+    if i >= 256 do true
+    else if C.hmap_at(hs, i % 16, i / 16) == N.height(32 + i % 16, 48 + i / 16, 11) do interior_matches(hs, i + 1)
+    else false end end
+  end
+
+  describe "chunk heightmap" do
+    test "the interior is Noise.height, column for column" do
+      Test.assert_true(interior_matches(C.heights(32, 48, 11), 0), "every column is its height")
+    end
+    test "the apron agrees with the neighbour's interior across the seam" do
+      Test.assert_true(seam_agrees(C.heights(0, 0, 11), C.heights(16, 0, 11), 0 - C.apron()), "x seam, both directions")
+    end
+    test "slope over the array is Noise.slope" do
+      let hs = C.heights(32, 48, 11)
+      Test.assert_eq_int(C.slope_at(hs, 5, 7), N.slope(37, 55, 11), "an interior column")
+      Test.assert_eq_int(C.slope_at(hs, 0, 15), N.slope(32, 63, 11), "a corner column reads the apron")
+    end
+  end
+
   describe "SIMD and scalar generators agree" do
     -- The 4-wide path is a separate implementation of the same formula; if they drift,
     -- `generate` and `generate_scalar` silently produce different worlds.

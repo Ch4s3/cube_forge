@@ -209,23 +209,68 @@ mod CubeForge.Chunk do
   doc "A chunk filled with the M2 test terrain."
   fn test_terrain() : Chunk do fill_go(new(), 0) end
 
-  -- ── M4: fill from the noise heightmap, four columns at a time ─────────────
-  pfn fill_noise_go(c : Chunk, i : Int, wx0 : Int, wz0 : Int, seed : Int) : Chunk do
+  -- ── M4: fill from the noise heightmap ───────────────────────────────────
+  -- The heightmap is computed ONCE per chunk, with an apron of apron() columns
+  -- on every side, and every per-column rule (slope now; talus, sediment and
+  -- the shore test later) reads it. Before, each column asked Noise.height
+  -- five times -- once for itself and four for its neighbours inside
+  -- Noise.slope -- and that was the whole of the world build.
+  --
+  -- The array is filled by the SCALAR Noise.height, not height_x4. Measured
+  -- on the layered generator, the 4-wide path is five times slower per chunk
+  -- and does not scale across workers: every F32x4 temporary is a heap box,
+  -- and the layered height makes hundreds of them per call (RESULTS.md).
+  -- height_x4 stays as the benchmark and the lanes test's reference. One
+  -- path also means a chunk and its neighbour agree on shared columns
+  -- exactly, and the surface materials agree with Noise.slope everywhere.
+  doc "Columns of heightmap kept beyond the chunk on every side."
+  fn apron() : Int do 1 end
+  doc "Side of the heightmap array: 16 + 2 * apron(). A literal, like the world's strides."
+  fn heights_side() : Int do 18 end
+  doc "Index of local column (lx, lz), each in [-apron(), 16 + apron()), in a heightmap array."
+  fn height_index(lx : Int, lz : Int) : Int do (lx + apron()) + heights_side() * (lz + apron()) end
+  doc "Height of local column (lx, lz) from a chunk heightmap (see heights). height_at is the M2 test terrain."
+  fn hmap_at(hs : NativeIntArr, lx : Int, lz : Int) : Int do NativeArray.get_int(hs, height_index(lx, lz)) end
+
+  pfn heights_go(hs : NativeIntArr, wx0 : Int, wz0 : Int, seed : Int, i : Int) : NativeIntArr do
+    if i >= heights_side() * heights_side() do hs
+    else
+      let lx = i % heights_side() - apron()
+      let lz = i / heights_side() - apron()
+      heights_go(NativeArray.set_int(hs, i, CubeForge.Noise.height(wx0 + lx, wz0 + lz, seed)), wx0, wz0, seed, i + 1)
+    end
+  end
+  doc "The heightmap of the chunk at world origin (wx0, wz0) with its apron."
+  fn heights(wx0 : Int, wz0 : Int, seed : Int) : NativeIntArr do
+    heights_go(NativeArray.make_int(heights_side() * heights_side(), 0), wx0, wz0, seed, 0)
+  end
+
+  pfn abs_int(v : Int) : Int do if v < 0 do 0 - v else v end end
+  doc "Largest height difference between local column (lx, lz) and its four neighbours, from the heightmap: Noise.slope over the array."
+  fn slope_at(hs : NativeIntArr, lx : Int, lz : Int) : Int do
+    let h = hmap_at(hs, lx, lz)
+    let d0 = abs_int(hmap_at(hs, lx + 1, lz) - h)
+    let d1 = abs_int(hmap_at(hs, lx - 1, lz) - h)
+    let d2 = abs_int(hmap_at(hs, lx, lz + 1) - h)
+    let d3 = abs_int(hmap_at(hs, lx, lz - 1) - h)
+    Math.max_int(Math.max_int(d0, d1), Math.max_int(d2, d3))
+  end
+
+  pfn fill_noise_go(c : Chunk, i : Int, hs : NativeIntArr) : Chunk do
     if i >= 256 do c
     else
       let x = i % 16
       let z = i / 16
-      let hs = CubeForge.Noise.height_x4(wx0 + x, wz0 + z, seed)
-      let c1 = fill_terrain_column(c, x, z, wx0 + x, wz0 + z, seed, float_to_int(Simd.extract_f32x4(hs, 0)))
-      let c2 = fill_terrain_column(c1, x + 1, z, wx0 + x + 1, wz0 + z, seed, float_to_int(Simd.extract_f32x4(hs, 1)))
-      let c3 = fill_terrain_column(c2, x + 2, z, wx0 + x + 2, wz0 + z, seed, float_to_int(Simd.extract_f32x4(hs, 2)))
-      let c4 = fill_terrain_column(c3, x + 3, z, wx0 + x + 3, wz0 + z, seed, float_to_int(Simd.extract_f32x4(hs, 3)))
-      fill_noise_go(c4, i + 4, wx0, wz0, seed)
+      let h = hmap_at(hs, x, z)
+      let sfc = surface_id(h, slope_at(hs, x, z))
+      fill_noise_go(fill_column_mat(c, x, z, 0, h, sfc, subsurface_id(sfc)), i + 1, hs)
     end
   end
 
   doc "Generate the chunk whose world origin is (wx0, wz0) from the noise heightmap."
-  fn generate(wx0 : Int, wz0 : Int, seed : Int) : Chunk do plant(fill_noise_go(new(), 0, wx0, wz0, seed), wx0, wz0, seed) end
+  fn generate(wx0 : Int, wz0 : Int, seed : Int) : Chunk do
+    plant(fill_noise_go(new(), 0, heights(wx0, wz0, seed)), wx0, wz0, seed)
+  end
 
   -- ── Vegetation ──────────────────────────────────────────────────────────────
   -- A tree near a chunk edge spills its canopy into the neighbour, so a chunk
