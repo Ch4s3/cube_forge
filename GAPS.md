@@ -1410,3 +1410,19 @@ transitive closure of the alias graph either.
 - **Done instead:** unique aliases per test module (`Myc`, `Sp`).
 - **Would need:** module-scoped aliases in the test build, or a duplicate-alias
   error at compile time.
+
+### G70 — a read in the writer copies; a read in a leaf does not
+
+Sharper than G21/G67 as written. A `NativeArray.get_*` of an array inside a
+function that later writes that array, or passes it to a function that
+writes it, holds the refcount up until the reading function returns, and
+the write copies the whole array. The same read inside a leaf callee that
+only reads is released when the callee returns and costs nothing. So a hot
+writer must do its reads through leaf helpers. Found in the worklist light
+sweep: a push that read the free slot and the list head before writing
+copied a 700 KB pool per push (2.7 s a relight); the same push with the two
+reads in one-line helpers is in place. See RESULTS.md, the perf pass of
+2026-09-05. Also: a variant cell holding two arrays keeps both refcounts at
+2 for as long as it lives, so a per-iteration pair return makes every write
+in the next iteration a copy (G12/G68 restated for this shape).
+
