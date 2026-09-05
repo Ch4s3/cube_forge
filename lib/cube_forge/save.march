@@ -1,0 +1,173 @@
+-- Save — the on-disk format for a save slot.
+--
+-- A slot is a directory: 64 raw chunk files and a text header written last, so
+-- a directory with chunks but no header is an incomplete save that lists as
+-- EMPTY and cannot be loaded. The header is `key value...` lines; unknown keys
+-- are ignored, missing keys are an error, so the format can grow without a
+-- migration and a truncated header cannot half-load.
+--
+-- See docs/superpowers/specs/2026-09-05-save-load-design.md.
+mod CubeForge.Save do
+
+  needs IO.FileRead
+  needs IO.FileWrite
+  needs IO.Process   -- CF_SAVE_DIR
+
+  -- seed, saved_at (unix seconds), player [px py pz vx vy vz yaw pitch],
+  -- inventory [72 slot ints then the selected slot], seconds into the day,
+  -- weather [phase, ticks left, intensity, bolt]
+  type Header = Header(Int, Int, NativeFloatArr, NativeIntArr, Float, NativeFloatArr)
+
+  fn version() : Int do 1 end
+  fn player_floats() : Int do 8 end
+  fn inventory_ints() : Int do 73 end
+  fn weather_floats() : Int do 4 end
+
+  fn header_new(seed : Int, saved_at : Int, player : NativeFloatArr, inv : NativeIntArr, day : Float, wx : NativeFloatArr) : Header do
+    Header(seed, saved_at, player, inv, day, wx)
+  end
+  fn h_seed(h : Header) : Int do match h do Header(s, _, _, _, _, _) -> s end end
+  fn h_saved_at(h : Header) : Int do match h do Header(_, t, _, _, _, _) -> t end end
+  fn h_player(h : Header) : NativeFloatArr do match h do Header(_, _, p, _, _, _) -> p end end
+  fn h_inventory(h : Header) : NativeIntArr do match h do Header(_, _, _, i, _, _) -> i end end
+  fn h_day(h : Header) : Float do match h do Header(_, _, _, _, d, _) -> d end end
+  fn h_weather(h : Header) : NativeFloatArr do match h do Header(_, _, _, _, _, w) -> w end end
+
+  -- ── Encoding ─────────────────────────────────────────────────────────────
+
+  pfn floats_go(a : NativeFloatArr, i : Int, n : Int, acc : String) : String do
+    if i >= n do acc else floats_go(a, i + 1, n, acc ++ " " ++ float_to_string(NativeArray.get_float(a, i))) end
+  end
+  pfn ints_go(a : NativeIntArr, i : Int, n : Int, acc : String) : String do
+    if i >= n do acc else ints_go(a, i + 1, n, acc ++ " " ++ int_to_string(NativeArray.get_int(a, i))) end
+  end
+
+  doc "The header as text. One `key value...` line per field, newline terminated."
+  fn encode_header(h : Header, side : Int) : String do
+    "version " ++ int_to_string(version()) ++ "\n"
+    ++ "side " ++ int_to_string(side) ++ "\n"
+    ++ "seed " ++ int_to_string(h_seed(h)) ++ "\n"
+    ++ "saved_at " ++ int_to_string(h_saved_at(h)) ++ "\n"
+    ++ "player" ++ floats_go(h_player(h), 0, player_floats(), "") ++ "\n"
+    ++ "inventory" ++ ints_go(h_inventory(h), 0, inventory_ints(), "") ++ "\n"
+    ++ "day " ++ float_to_string(h_day(h)) ++ "\n"
+    ++ "weather" ++ floats_go(h_weather(h), 0, weather_floats(), "") ++ "\n"
+  end
+
+  -- ── Parsing ──────────────────────────────────────────────────────────────
+
+  -- The tokens after [key] on the first line that starts with it, or an error.
+  pfn find_line(lines : List(String), key : String) : Result(List(String), String) do
+    match lines do
+      Nil -> Err("missing key " ++ key)
+      Cons(l, rest) ->
+        match String.split(String.trim(l), " ") do
+          Cons(k, toks) -> if k == key do Ok(toks) else find_line(rest, key) end
+          Nil -> find_line(rest, key)
+        end
+    end
+  end
+
+  pfn parse_int_tok(toks : List(String), key : String) : Result(Int, String) do
+    match toks do
+      Cons(t, Nil) ->
+        match String.to_int(t) do
+          Ok(v) -> Ok(v)
+          Err(e) -> Err(key ++ ": " ++ e)
+        end
+      _ -> Err(key ++ ": expected one integer")
+    end
+  end
+  pfn parse_float_tok(toks : List(String), key : String) : Result(Float, String) do
+    match toks do
+      Cons(t, Nil) ->
+        match String.to_float(t) do
+          Ok(v) -> Ok(v)
+          Err(e) -> Err(key ++ ": " ++ e)
+        end
+      _ -> Err(key ++ ": expected one number")
+    end
+  end
+  pfn parse_floats_go(toks : List(String), a : NativeFloatArr, i : Int, n : Int, key : String) : Result(NativeFloatArr, String) do
+    match toks do
+      Nil -> if i == n do Ok(a) else Err(key ++ ": expected " ++ int_to_string(n) ++ " numbers") end
+      Cons(t, rest) ->
+        if i >= n do Err(key ++ ": expected " ++ int_to_string(n) ++ " numbers")
+        else match String.to_float(t) do
+          Ok(v) -> parse_floats_go(rest, NativeArray.set_float(a, i, v), i + 1, n, key)
+          Err(e) -> Err(key ++ ": " ++ e)
+        end end
+    end
+  end
+  pfn parse_ints_go(toks : List(String), a : NativeIntArr, i : Int, n : Int, key : String) : Result(NativeIntArr, String) do
+    match toks do
+      Nil -> if i == n do Ok(a) else Err(key ++ ": expected " ++ int_to_string(n) ++ " integers") end
+      Cons(t, rest) ->
+        if i >= n do Err(key ++ ": expected " ++ int_to_string(n) ++ " integers")
+        else match String.to_int(t) do
+          Ok(v) -> parse_ints_go(rest, NativeArray.set_int(a, i, v), i + 1, n, key)
+          Err(e) -> Err(key ++ ": " ++ e)
+        end end
+    end
+  end
+
+  pfn int_field(lines : List(String), key : String) : Result(Int, String) do
+    match find_line(lines, key) do
+      Ok(toks) -> parse_int_tok(toks, key)
+      Err(e) -> Err(e)
+    end
+  end
+  pfn float_field(lines : List(String), key : String) : Result(Float, String) do
+    match find_line(lines, key) do
+      Ok(toks) -> parse_float_tok(toks, key)
+      Err(e) -> Err(e)
+    end
+  end
+  pfn floats_field(lines : List(String), key : String, n : Int) : Result(NativeFloatArr, String) do
+    match find_line(lines, key) do
+      Ok(toks) -> parse_floats_go(toks, NativeArray.make_float(n, 0.0), 0, n, key)
+      Err(e) -> Err(e)
+    end
+  end
+  pfn ints_field(lines : List(String), key : String, n : Int) : Result(NativeIntArr, String) do
+    match find_line(lines, key) do
+      Ok(toks) -> parse_ints_go(toks, NativeArray.make_int(n, 0), 0, n, key)
+      Err(e) -> Err(e)
+    end
+  end
+
+  doc "Parse a header. Fails on a missing key, a version other than [version], a side other than [side], or a malformed value."
+  fn parse_header(s : String, side : Int) : Result(Header, String) do
+    let lines = String.split(s, "\n")
+    match int_field(lines, "version") do
+      Err(e) -> Err(e)
+      Ok(v) ->
+        if v != version() do Err("version " ++ int_to_string(v) ++ ", this build reads " ++ int_to_string(version()))
+        else match int_field(lines, "side") do
+          Err(e) -> Err(e)
+          Ok(sd) ->
+            if sd != side do Err("side " ++ int_to_string(sd) ++ ", this world is " ++ int_to_string(side))
+            else match int_field(lines, "seed") do
+              Err(e) -> Err(e)
+              Ok(seed) -> match int_field(lines, "saved_at") do
+                Err(e) -> Err(e)
+                Ok(at) -> match floats_field(lines, "player", player_floats()) do
+                  Err(e) -> Err(e)
+                  Ok(p) -> match ints_field(lines, "inventory", inventory_ints()) do
+                    Err(e) -> Err(e)
+                    Ok(inv) -> match float_field(lines, "day") do
+                      Err(e) -> Err(e)
+                      Ok(day) -> match floats_field(lines, "weather", weather_floats()) do
+                        Err(e) -> Err(e)
+                        Ok(wx) -> Ok(Header(seed, at, p, inv, day, wx))
+                      end
+                    end
+                  end
+                end
+              end
+            end end
+        end end
+    end
+  end
+
+end
