@@ -61,6 +61,8 @@ mod CubeForge.Biome do
   fn grove_vigour() : Float do CubeForge.Myc.fruit_vigour() end
   doc "Established columns in a 3x3 (itself included) that make a grove: one column inside the patch's edge."
   fn grove_neighbours() : Int do 5 end
+  doc "A distance byte saying the kept distances no longer match the water flags: an edit moved a flag since the last sweep. Never produced by the sweep itself (distances stay under 128 and the flag adds 128, so 255 is free)."
+  fn stale() : Int do 255 end
   doc "The distance in a distance byte."
   fn dist_of(v : Int) : Int do v % 128 end
   doc "Whether a distance byte says the nearest water is small."
@@ -203,8 +205,25 @@ mod CubeForge.Biome do
       end
     end
   end
+  -- The same pass scanned backward: the forward pass carries a label toward
+  -- +x and +z within one pass, the backward one toward -x and -z, so a body
+  -- without holes settles in a round or two rather than one per column of span.
+  pfn relabel_back_go(lab : NativeIntArr, n : Int, i : Int) : NativeIntArr do
+    if i < 0 do lab
+    else
+      let l = NativeArray.get_int(lab, i)
+      if l == 0 do relabel_back_go(lab, n, i - 1)
+      else
+        let m = min8_go(lab, n, i % n, i / n, 0, l)
+        if m < l do
+          let c = NativeArray.get_int(lab, n * n)
+          relabel_back_go(NativeArray.set_int(NativeArray.set_int(lab, i, m), n * n, c + 1), n, i - 1)
+        else relabel_back_go(lab, n, i - 1) end
+      end
+    end
+  end
   pfn rounds_go(lab : NativeIntArr, n : Int) : NativeIntArr do
-    let lab1 = jump_go(relabel_go(NativeArray.set_int(lab, n * n, 0), n, 0), n, 0)
+    let lab1 = jump_go(relabel_back_go(relabel_go(NativeArray.set_int(lab, n * n, 0), n, 0), n, n * n - 1), n, 0)
     let c = NativeArray.get_int(lab1, n * n)
     if c == 0 do lab1 else rounds_go(lab1, n) end
   end
@@ -350,9 +369,12 @@ mod CubeForge.Biome do
                    else if y == cur && id == 0 do surface_go(w, x, z, y - 1)
                    else cur end end
           let hs1 = NativeArray.set_u8(copy_u8(hs, n * n), i, h1)
-          let ws1 = NativeArray.set_u8(copy_u8(ws, n * n), i, if wet_at(w, x, z, h1) do 1 else 0 end)
+          let wet1 = if wet_at(w, x, z, h1) do 1 else 0 end
+          let ws1 = NativeArray.set_u8(copy_u8(ws, n * n), i, wet1)
+          -- a water flag that moved makes the kept distances stale (see stale())
+          let ds1 = if wet1 != NativeArray.get_u8(ws, i) do NativeArray.set_u8(copy_u8(ds, n * n), i, stale()) else ds end
           -- the surface moved, so this column's temperature target moved: wake it
-          Field(hs1, ws1, ta, ma, bs, hold, tb, ds, NativeArray.set_u8(copy_u8(act, n * n), i, 1))
+          Field(hs1, ws1, ta, ma, bs, hold, tb, ds1, NativeArray.set_u8(copy_u8(act, n * n), i, 1))
       end
     end
   end
@@ -430,14 +452,31 @@ mod CubeForge.Biome do
     else wake_box_go(n, x0, z0, x1, z1, x + 1, z, NativeArray.set_u8(act, x + n * z, 1)) end end end
   end
 
+  -- Mark the kept distances stale at every edited column whose water flag moved.
+  pfn stale_go(n : Int, cells : List(Int), ws0 : NativeU8Arr, ws1 : NativeU8Arr, ds : NativeU8Arr) : NativeU8Arr do
+    match cells do
+      Nil -> ds
+      Cons(v, rest) ->
+        let x = edit_x(v)
+        let z = edit_z(v)
+        if x < 0 || z < 0 || x >= n || z >= n do stale_go(n, rest, ws0, ws1, ds)
+        else
+          let i = x + n * z
+          if NativeArray.get_u8(ws0, i) != NativeArray.get_u8(ws1, i) do stale_go(n, rest, ws0, ws1, NativeArray.set_u8(ds, i, stale()))
+          else stale_go(n, rest, ws0, ws1, ds) end
+        end
+    end
+  end
+
   doc "Apply a batch of single-column edits (see pack_edit) to the field, copying its arrays once for the whole batch rather than once per edit."
   fn note_edits(f : Field, w : CubeForge.World.World, cells : List(Int)) : Field do
     let n = cols(w)
     match f do
       Field(hs, ws, ta, ma, bs, hold, tb, ds, act) ->
         let hs1 = heights_go(w, n, cells, copy_u8(hs, n * n))
-        Field(hs1, wets_go(w, n, cells, hs1, copy_u8(ws, n * n)), ta, ma, bs, hold, tb, ds,
-              wake_go(n, cells, copy_u8(act, n * n)))
+        let ws1 = wets_go(w, n, cells, hs1, copy_u8(ws, n * n))
+        let ds1 = stale_go(n, cells, ws, ws1, copy_u8(ds, n * n))
+        Field(hs1, ws1, ta, ma, bs, hold, tb, ds1, wake_go(n, cells, copy_u8(act, n * n)))
     end
   end
 
@@ -475,14 +514,25 @@ mod CubeForge.Biome do
     else established_go(sps, vg, n, x, z, 0, 0) >= grove_neighbours() end
   end
 
+  -- Is column i looked at this tick? Active columns and rows whose network pulls
+  -- moved, as before. A row the network is dirty in is looked at only where the
+  -- grove test disagrees with the stored biome: the network eases vigour for
+  -- hundreds of ticks after a planting, and evaluating every column of every
+  -- such row for all of that was 5 ms a tick. Once the two agree the column
+  -- is settled again and stays so until they differ, which they can only do
+  -- in a dirty row. Nested, not `&&`: G33.
+  pfn must_look(act : NativeU8Arr, prow : NativeU8Arr, drow : NativeU8Arr, sps : NativeU8Arr, vg : NativeF32Arr, bs : NativeU8Arr, n : Int, i : Int) : Bool do
+    if NativeArray.get_u8(act, i) != 0 do true
+    else if NativeArray.get_u8(prow, i / n) != 0 do true
+    else if NativeArray.get_u8(drow, i / n) == 0 do false
+    else is_grove(sps, vg, n, i % n, i / n) != (NativeArray.get_u8(bs, i) == b_grove()) end end end
+  end
+
   pfn tick_go(hs : NativeU8Arr, tb : NativeFloatArr, rate : Float, d : NativeU8Arr, pulls : NativeF32Arr, prow : NativeU8Arr, scale : Float,
               sps : NativeU8Arr, vg : NativeF32Arr, drow : NativeU8Arr, n : Int, i : Int,
               ta : NativeFloatArr, ma : NativeFloatArr, bs : NativeU8Arr, hold : NativeU8Arr, act : NativeU8Arr) : Field do
     if i >= n * n do Field(hs, NativeArray.make_u8(0, 0), ta, ma, bs, hold, tb, NativeArray.make_u8(0, 0), act)
-    -- a row whose network pulls moved this tick, or whose network is dirty, is
-    -- looked at whole; the offsets and the grove test are constant otherwise,
-    -- so a settled column stays settled
-    else if NativeArray.get_u8(act, i) == 0 && NativeArray.get_u8(prow, i / n) == 0 && NativeArray.get_u8(drow, i / n) == 0 do tick_go(hs, tb, rate, d, pulls, prow, scale, sps, vg, drow, n, i + 1, ta, ma, bs, hold, act)
+    else if !must_look(act, prow, drow, sps, vg, bs, n, i) do tick_go(hs, tb, rate, d, pulls, prow, scale, sps, vg, drow, n, i + 1, ta, ma, bs, hold, act)
     else
       let h = NativeArray.get_u8(hs, i)
       let dv = NativeArray.get_u8(d, i)
@@ -608,14 +658,28 @@ mod CubeForge.Biome do
   fn tick_net(f : Field, w : CubeForge.World.World, seed : Int, rate : Float, pulls : NativeF32Arr, prow : NativeU8Arr, scale : Float,
               sps : NativeU8Arr, vg : NativeF32Arr, drow : NativeU8Arr) : Field do
     let n = cols(w)
-    let f1 = match f do Field(hs, _, ta, ma, bs, hold, tb, ds, act) -> Field(hs, water_go(w, hs, n, 0, NativeArray.make_u8(n * n, 0)), ta, ma, bs, hold, tb, ds, act) end
-    let d = distances(f1, w)
-    match f1 do
-      Field(hs, ws, ta0, ma0, bs0, hold0, tb, ds0, act0) ->
+    -- The distances (and the bodies behind them) are a function of the water
+    -- flags alone, so when this tick's flags equal the flags the kept distances
+    -- were swept from -- last tick's, and no edit has moved one since (stale())
+    -- -- the kept distances are the answer, and the sweep and the labelling are
+    -- skipped. Settled water is the common case; flowing water pays the full cost.
+    match f do
+      Field(hs, ws0, ta0, ma0, bs0, hold0, tb, ds0, act0) ->
+        let ws = water_go(w, hs, n, 0, NativeArray.make_u8(n * n, 0))
+        let same = same_u8(ws0, ws, ds0, n * n, 0)
+        let d = if same do ds0 else distances(Field(hs, ws, ta0, ma0, bs0, hold0, tb, ds0, act0), w) end
         match tick_go(hs, tb, rate, d, pulls, prow, scale, sps, vg, drow, n, 0, ta0, ma0, bs0, hold0, mark_dist_go(d, ds0, n, 0, act0)) do
           Field(hs1, _, ta, ma, bs, hold, tb1, _, act1) -> Field(hs1, ws, ta, ma, bs, hold, tb1, d, act1)
         end
     end
+  end
+
+  -- Equal flags, and no stale distance anywhere.
+  pfn same_u8(a : NativeU8Arr, b : NativeU8Arr, ds : NativeU8Arr, n : Int, i : Int) : Bool do
+    if i >= n do true
+    else if NativeArray.get_u8(a, i) != NativeArray.get_u8(b, i) do false
+    else if NativeArray.get_u8(ds, i) == stale() do false
+    else same_u8(a, b, ds, n, i + 1) end end end
   end
 
   doc "Pulls saying the network does nothing, for callers without one and for tests: zeros, with no row moved."

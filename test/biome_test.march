@@ -378,6 +378,19 @@ mod CubeForge.Test.Biome do
       Test.assert_false(Biome.is_small(NativeArray.get_u8(d, 81 + 128 * 21)), "the pool joined the body")
       Test.assert_false(Biome.is_small(NativeArray.get_u8(d, 83 + 128 * 22)), "and so did its shore")
     end
+    test "an edit that adds water is seen by the next tick even though the flags already agree" do
+      let w0 = flat_world(70)
+      let f0 = tick_n(Biome.build(w0, 7), w0, 3, 0.05)
+      let w1 = CubeForge.World.set_block(w0, 64, 70, 64, C.water())
+      let f1 = Biome.note_edit(f0, w1, 64, 70, 64, C.water())
+      Test.assert_true(Biome.is_wet(f1, 64, 64), "the edit set the flag")
+      let f2 = Biome.tick(f1, w1, 7, 0.05, Biome.no_pulls(128), Biome.no_rows(128), 1.0)
+      Test.assert_true(Biome.moist_of(f2, 66, 64) > 0.04, "the neighbour's moisture is moving: the distances were resweept")
+      -- the batched path too
+      let f3 = Biome.note_edits(f0, w1, Cons(Biome.pack_edit(64, 70, 64, C.water()), Nil))
+      let f4 = Biome.tick(f3, w1, 7, 0.05, Biome.no_pulls(128), Biome.no_rows(128), 1.0)
+      Test.assert_true(Biome.moist_of(f4, 66, 64) > 0.04, "note_edits also marks the distances stale")
+    end
     test "the small-body threshold and reach are the knobs" do
       Test.assert_eq_int(Biome.small_body(), 48, "48 columns")
       Test.assert_eq_int(Biome.small_reach(), 4, "4 columns")

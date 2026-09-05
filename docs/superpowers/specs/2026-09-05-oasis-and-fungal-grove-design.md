@@ -242,3 +242,17 @@ No new environment variables. `CF_BIOME_MAP` shows both; `CF_BIOME_RATE`,
   move its vigour down and up; the neighbour rule and the hold counter are the
   two guards. If a grove edge still flaps under a scripted contest, widen the
   neighbour requirement before touching the hold.
+
+## 10. As built (2026-09-05)
+
+- The distance sweep is skipped when the water flags did not change since the
+  last sweep; an edit that moves a flag marks the column's distance byte
+  `stale()` (255) so the next tick sweeps. §2's "each tick" is the worst case.
+- The grove wake is narrower than §4 says: a dirty row's columns are evaluated
+  only where the grove test disagrees with the stored biome. Evaluating the
+  whole row tripled the tick while wild patches eased.
+- A palm's crown is twelve fronds round the trunk top (|dx| + |dz| in 1..2),
+  not eight, plus the five above: seventeen.
+- Ten biomes; the shim's colour table is indexed with a bounds check.
+- `Biome.tick` keeps its signature for callers without a network; `tick_net`
+  is the full one.

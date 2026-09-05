@@ -1620,3 +1620,46 @@ planted or spread network is lost, and its surface blocks migrate back to
 bare ground; the biome's eased axes are rebuilt at target the same way. Both
 are the "cannot be rebuilt from the voxels" risk the two specs carry. Listed
 in `todos.md`.
+
+## Oasis and fungal grove (2026-09-05)
+
+`docs/superpowers/specs/2026-09-05-oasis-and-fungal-grove-design.md`, plan
+`docs/superpowers/plans/2026-09-05-oasis-and-fungal-grove.md`. Two biomes the
+field earns: an oasis around a small body of water in a hot region, a grove
+where the mycelium is established.
+
+- **Water bodies.** The water flags are labelled into 8-connected bodies each
+  tick by rounds of min-label propagation (a forward and a backward pass) and
+  pointer jumping over one threaded `NativeIntArr` — a queue is G63 — and a
+  body of at most 48 columns is small. The distance sweep carries a small bit
+  in the distance byte, and a small body's moisture reaches 4 columns instead
+  of 24. Measured with a temporary print: the labelling is **0-1 ms**, the
+  sweep 1 ms, at seed 7.
+- **Distances are reused** when this tick's water flags equal the last tick's
+  and no edit has moved a flag since (`Biome.stale()`, 255, written into the
+  distance byte by `note_edit` and `note_edits`). The first cut compared flags
+  only and the canal test caught it: an edit sets the flag without a sweep, so
+  "flags unchanged" did not mean "distances current".
+- **The grove wake.** The biome tick reads the network's species and vigour
+  and is woken by `Myc.dirty_rows`. Waking every column of a dirty row cost
+  **8 ms a tick against 2.6-3.2** at base (`CF_AUTOFLOW`, seed 7): the wild
+  patches ease vigour for hundreds of ticks, so most rows were dirty. Now a
+  dirty row's columns are looked at only where the grove test disagrees with
+  the stored biome (`Biome.must_look`): **2.1-4.1 ms**, the same as base.
+- **Grove, end to end.** Seed 7, `CF_WILD=0 CF_AUTOPLANT=100
+  CF_AUTOPLANT_SPECIES=4 CF_AUTOPLANT_MATURE=1 CF_BIOME_RATE=100000
+  CF_MYC_RATE=0`, frame 1200: the player's column reads `grove`, two medium
+  Lanterncap bodies stand.
+- **Oasis, end to end.** Seed 199 spawns in desert (`temp 0.67 moist 0.17`).
+  `CF_AUTOCANAL=10 CF_BIOME_RATE=100000 CF_VEG_BUDGET=8`, frame 1400: the
+  player's column reads `oasis`, the ground round the canal has migrated to
+  grass with bushes, and the biome map shows the bright green pocket inside the
+  tan desert (`docs/oasis-grove-map.png`, which also shows a wild grove in
+  violet; `docs/oasis-ground.png`). One tree grew during the run; whether it was
+  the oasis palm was not confirmed from the frame — palm growth goes through the
+  same `Veg` path as oaks and is covered by `veg_test`.
+- **Seed 7's biome map is pixel-identical** before and after the small-body
+  change in the map view's frame around the spawn (`scratch/cmpframe.py`): the
+  coast and the lake's reach did not move. The spring brook at (116, 74) is
+  outside that frame.
+- 349 tests (329 before).
