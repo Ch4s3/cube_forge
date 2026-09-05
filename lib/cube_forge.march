@@ -692,11 +692,12 @@ mod CubeForge do
         let base = if !Veg.is_decay(e) do h else if bush do h - 1 else Veg.trunk_base(w, x, z, h) end end
         let b = Biome.biome_of(bio, x, z)
         -- the box above ground the edit can touch: a trunk and canopy, or one layer of leaves
-        let trunk = if bush do 0 - 1 else if Veg.pine_for(b) do 7 else 5 end end
+        let sp = Veg.species_for(b)
+        let trunk = if bush do 0 - 1 else CubeForge.Trees.grown_trunk(sp) end
         let w1 = if bush do
           if Veg.is_decay(e) do Veg.unbush(w, x, z, base) else Veg.plant_bush(w, x, z, base) end
         else
-          if Veg.is_decay(e) do Veg.fell(w, x, z, base) else Veg.plant(w, x, z, base, trunk, Veg.pine_for(b)) end
+          if Veg.is_decay(e) do Veg.fell(w, x, z, base) else Veg.plant(w, x, z, base, trunk, sp) end
         end
         -- relight_marked, not relight_at: the relight can change baked light in
         -- sections the tree's box never touched, and a section whose light moved
