@@ -205,6 +205,25 @@ simplest), and `WRestore(phase, ticks, intensity, bolt)`.
   the frame after the load. The `world` and `biome` hashes must match. Two
   processes, so a script rather than a march test.
 
+## As built, 2026-09-05
+
+- The main page holds three items plus the seed field, so its panel runs to
+  -0.56; the slots page is wider (±0.40, rows 0.66 wide) and set in a smaller
+  face so `SLOT 5 SEED 1073741823` fits a row. Both pages still hit-test and
+  draw from the same accessors, now all functions of the menu (its page).
+- `Save.check` validates chunk sizes by reading the files: `File.stat`'s
+  record is private to the stdlib. `FileError` is private too, so errors name
+  the path and the operation, not the cause.
+- `&&` is strict in March (GAPS G33): the slot validation is behind an `if`,
+  not an `&&`, or it would run every frame for slot 0.
+- A new game keeps the process clock for the sun, as before; only a load sets
+  a day offset. The two are one formula: `clock - session start + day0`.
+- The weather snapshot is a second call handler; call sentinels route by
+  constructor tag, so `WxTickReq | WxSnapReq` is one type in handler order.
+- `CF_AUTOSLOTS=<frame>` was added for a headless look at the slots page.
+- The menu moved to VBO slot 246: the shim's spray pool had taken 247 and was
+  overwriting the menu's buffer every frame.
+
 ## Out of scope
 
 Compression, more than five slots, delete, loading from the escape menu,
