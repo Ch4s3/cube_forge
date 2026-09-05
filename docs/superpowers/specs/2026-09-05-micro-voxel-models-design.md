@@ -133,3 +133,15 @@ through the fx word is a natural follow-up and is out of scope.
 2. Stamping in the mesher for small mushrooms. Measure. Frame dump.
 3. Fronds with neighbour orientation.
 4. Bushes behind the measurement.
+
+## 8. As built (2026-09-05)
+
+- The template set is a `Model.Templates` value (a float blob plus offsets),
+  held in the `World` as a seventh field beside the shown species; the mesher
+  takes it as a parameter from `ChunkMesh`. `Set` collided with a stdlib type.
+- Bushes ship: foliage vertices at the seed 7 spawn went 3.0x (47k -> 142k),
+  the frame budget did not move (10.6 ms worst against 11.6 before), and the
+  bush is a four-layer mound rather than the spec's three plates, which read
+  as tables on sticks. See RESULTS.
+- Palms were not confirmed visually; the frond rule and the crown stamping are
+  covered by the mesher tests.

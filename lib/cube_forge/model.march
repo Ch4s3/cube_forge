@@ -162,24 +162,31 @@ mod CubeForge.Model do
     box(box(box(box(g1, 0, 5, 3, 0, 5, 4, c_midrib()), 7, 5, 3, 7, 5, 4, c_midrib()), 3, 5, 0, 4, 5, 0, c_midrib()), 3, 5, 7, 4, 5, 7, c_midrib())
   end
 
-  -- A bush: three leaf plates on short stems, placed by variant.
-  pfn plate_cx(i : Int, v : Int) : Int do (if i == 0 do 2 else if i == 1 do 5 else 3 end end) + v % 2 end
-  pfn plate_cz(i : Int, v : Int) : Int do (if i == 0 do 2 else if i == 1 do 3 else 5 end end) + v / 2 end
-  pfn plate_y(i : Int, v : Int) : Int do 2 + i + (v % 2) end
-  pfn bush_go(g : NativeU8Arr, v : Int, i : Int) : NativeU8Arr do
-    if i >= 3 do g
+  -- A bush: a low mound of overlapping leaf plates on a short stem, wider at
+  -- the middle than the top, offset by variant so a clump does not repeat.
+  -- Plates are one sub-cube thick and touch, so the greedy pass merges their
+  -- shared faces away and the mound stays well under its face cap.
+  pfn plate_go(g : NativeU8Arr, v : Int, i : Int) : NativeU8Arr do
+    if i >= 4 do g
     else
-      let cx = plate_cx(i, v)
-      let cz = plate_cz(i, v)
-      let y = plate_y(i, v)
+      -- half-widths per layer: 1, 2, 1, 0 (a 2x2 cap) -- a rounded mound. Five
+      -- layers read no better and cost a third more vertices world-wide.
+      let hw = if i == 0 do 1 else if i == 1 do 2 else if i == 2 do 1 else 0 end end end
+      let y = 1 + i
+      -- the mound leans with the variant: its centre slides one sub-cube
+      let cx = 3 + (if v % 2 == 1 && i >= 2 do 1 else 0 end)
+      let cz = 3 + (if v >= 2 && i >= 2 do 1 else 0 end)
       let k = if (i + v) % 2 == 0 do c_bush() else c_bush_light() end
-      -- a 2x3 plate, long along x on even plates and along z on odd ones
-      let g1 = if (i + v) % 2 == 0 do box(g, cx - 1, y, cz, cx + 1, y, cz + 1, k) else box(g, cx, y, cz - 1, cx + 1, y, cz + 1, k) end
-      bush_go(box(g1, cx, 0, cz, cx, y - 1, cz, c_bush_stem()), v, i + 1)
+      let g1 = box(g, cx - hw, y, cz - hw, cx + 1 + hw, y, cz + 1 + hw, k)
+      -- bite a corner out of the wide layers so the outline is not a square
+      let g2 = if hw == 2 do put(put(g1, cx - hw, y, cz - hw, 0), cx + 1 + hw, y, cz + 1 + hw, 0) else g1 end
+      plate_go(g2, v, i + 1)
     end
   end
-  doc "A bush leaf block as a low tangle, variant 0..3."
-  fn bush(variant : Int) : NativeU8Arr do bush_go(empty(), variant, 0) end
+  doc "A bush leaf block as a low leafy mound, variant 0..3."
+  fn bush(variant : Int) : NativeU8Arr do
+    plate_go(box(empty(), 3, 0, 3, 4, 0, 4, c_bush_stem()), variant, 0)
+  end
 
   doc "The grid for template id [k]."
   fn shape(k : Int) : NativeU8Arr do

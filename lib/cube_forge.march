@@ -2258,6 +2258,13 @@ mod CubeForge do
     end
   end
 
+  pfn count_foliage_verts(meshes : List(CubeForge.ChunkMesh.ChunkMesh), acc : Int) : Int do
+    match meshes do
+      Nil -> acc
+      Cons(m, rest) -> count_foliage_verts(rest, acc + CM.foliage_vertices(m))
+    end
+  end
+
   pfn count_water_verts(meshes : List(CubeForge.ChunkMesh.ChunkMesh), acc : Int) : Int do
     match meshes do
       Nil -> acc
@@ -2489,7 +2496,7 @@ mod CubeForge do
     println("world " ++ int_to_string(n) ++ "x" ++ int_to_string(n) ++ " chunks, " ++ int_to_string(workers) ++ " workers, "
             ++ int_to_string(Env.get_int("MARCH_NUM_SCHEDULERS", 4)) ++ " scheduler threads (MARCH_NUM_SCHEDULERS)")
     println("  terrain scalar noise: " ++ int_to_string(t1 - t0) ++ " ms   terrain F32x4 noise: " ++ int_to_string(t2 - t1) ++ " ms")
-    println("  mesh all (greedy sections): " ++ int_to_string(t3 - t2) ++ " ms wall, " ++ float_to_string(int_to_float(t3 - t2) /. int_to_float(n * n)) ++ " ms per chunk (wall / chunks), " ++ int_to_string(nverts) ++ " vertices (" ++ int_to_string(count_water_verts(meshes, 0)) ++ " water)")
+    println("  mesh all (greedy sections): " ++ int_to_string(t3 - t2) ++ " ms wall, " ++ float_to_string(int_to_float(t3 - t2) /. int_to_float(n * n)) ++ " ms per chunk (wall / chunks), " ++ int_to_string(nverts) ++ " vertices (" ++ int_to_string(count_water_verts(meshes, 0)) ++ " water, " ++ int_to_string(count_foliage_verts(meshes, 0)) ++ " foliage)")
     if headless do NoStart
     else
       let counts = upload_meshes(meshes, 0, NativeArray.make_int(3 * water_slot_base(), 0))

@@ -110,10 +110,12 @@ mod CubeForge.Test.Model do
       let m = Md.frond(2)
       Test.assert_eq_int(Md.cell(m, 7, 7, 3), Md.c_midrib(), "-x: the root is on the +x side")
     end
-    test "bush variants differ and stand on stems" do
+    test "a bush is a mound on a stem, wider in the middle than at the top" do
       let a = Md.bush(0)
-      Test.assert_eq_int(Md.cell(a, 2, 0, 2), Md.c_bush_stem(), "a stem from the ground")
-      Test.assert_true(Md.cell(a, 2, 2, 2) == Md.c_bush() || Md.cell(a, 2, 2, 2) == Md.c_bush_light(), "a plate above it")
+      Test.assert_eq_int(Md.cell(a, 3, 0, 3), Md.c_bush_stem(), "a stem from the ground")
+      Test.assert_true(Md.cell(a, 1, 2, 2) == Md.c_bush() || Md.cell(a, 1, 2, 2) == Md.c_bush_light(), "the middle layer reaches two out")
+      Test.assert_eq_int(Md.cell(a, 1, 4, 2), 0, "the top does not")
+      Test.assert_eq_int(Md.cell(a, 1, 2, 1), 0, "a bitten corner")
     end
   end
 

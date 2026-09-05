@@ -1730,3 +1730,42 @@ where the mycelium is established.
   coast and the lake's reach did not move. The spring brook at (116, 74) is
   outside that frame.
 - 349 tests (329 before).
+
+## Micro-voxel models (2026-09-05)
+
+`docs/superpowers/specs/2026-09-05-micro-voxel-models-design.md`, plan
+`docs/superpowers/plans/2026-09-05-micro-voxel-models.md`. Small mushrooms,
+palm fronds and bush leaves are drawn as 8x8x8 sculptures of coloured
+sub-cubes inside their cell: `CubeForge.Model` builds each shape as a grid of
+palette indices, greedy-meshes it once into a template, and the templates ride
+in the `World` beside the shown species; the foliage mesher skips model blocks
+in its greedy pass and stamps their templates afterward, translated to the cell
+and shaded from the cell's own light. Colours come from one palette texture
+layer (89), so no shader or vertex-format change.
+
+- **Twenty templates**, faces under caps of 160 / 120 / 100 (mushroom / frond /
+  bush), asserted by `model_test`. Frond orientation reads the neighbours the
+  mesher already fetches: away from an adjacent palm log, else away from
+  adjacent fronds, else an umbrella over a log below, else a tuft.
+- **Foliage vertices, seed 7, world start:** 47,166 before -> 142,014 after
+  (3.0x; total 234,570 -> 328,000). All of it is bushes -- wild fungus has not
+  fruited at frame 0. The first bush (three 2x3 plates on stems) read as little
+  tables at a distance; the mound (four layers, half-widths 1, 2, 1, 0) reads as
+  a bush and costs this; a five-layer mound was 171,222 (3.6x) and looked no
+  better. Startup meshing 244 -> 270 ms.
+- **Frame budget** (`scratch/frame_budget.sh 16 400 3`): worst frame **10.63 ms**
+  after against 11.62 ms before on the same machine minutes apart -- no
+  movement; the deferred and full-rebuild meshes still agree.
+- **Frames:** `docs/models-mushrooms.png` -- two Meadowbell bodies on their
+  mycelium at seed 7 (`CF_WILD=0 CF_AUTOPLANT=100 CF_AUTOPLANT_SPECIES=3
+  CF_AUTOPLANT_MATURE=1 CF_FRUIT_RATE=2000 CF_PITCH=-140`, frame 850);
+  `docs/models-bushes.png` -- bush mounds on the seed 199 oasis grass. No frame
+  shows a palm: the oasis run grew none in view. Fronds are covered by the
+  mesher tests (orientation on a stamped palm, and the crown stamped as
+  templates rather than cubes).
+- **Language notes:** an alias cannot stand in a type position
+  (`B.F32Buf` fails, `CubeForge.F32Buf.F32Buf` works); a `doc` before a `type`
+  is a parse error; a type named `Set` collides with the stdlib's and reports
+  "expected CubeForge.Model.Set but got Set" -- renamed `Templates`; the
+  alias `M` is taken by `CubeForge.Math.Mat4` across the test binary.
+- 378 tests (365 before).
