@@ -40,7 +40,7 @@ mod CubeForge.Test.Myc do
 
 
   pfn tick_n(f : CubeForge.Myc.Field, n : Int, ta : NativeFloatArr, ma : NativeFloatArr, rate : Float, k : Int) : CubeForge.Myc.Field do
-    if k <= 0 do f else tick_n(Myc.tick(f, n, ta, ma, rate), n, ta, ma, rate, k - 1) end
+    if k <= 0 do f else tick_n(Myc.tick(f, n, ta, ma, Myc.no_climate(n), rate), n, ta, ma, rate, k - 1) end
   end
 
   -- Chebyshev radius of species [sp] around (cx, cz): the farthest held column.
@@ -116,7 +116,7 @@ mod CubeForge.Test.Myc do
       let n = 32
       let f0 = Myc.plant(Myc.build(n), n, 16, 16, 3)
       let f1 = tick_n(f0, n, uniform(n, 0.5), uniform(n, 0.3), 0.1, 600)
-      let f2 = Myc.tick(f1, n, uniform(n, 0.5), uniform(n, 0.3), 0.1)
+      let f2 = Myc.tick(f1, n, uniform(n, 0.5), uniform(n, 0.3), Myc.no_climate(n), 0.1)
       Test.assert_eq_int(Myc.state_hash(f2, n), Myc.state_hash(f1, n), "one more tick changes nothing")
     end
   end
@@ -157,7 +157,7 @@ mod CubeForge.Test.Myc do
       Test.assert_eq_int(Myc.reach_of(f, n, 28, 20), 0, "no reach at the rim")
       Test.assert_eq_int(Myc.species_of(f, n, 28, 28), 0, "the diagonal corner is outside the octagon")
       Test.assert_true(Myc.count_species(f, n, 3) > 100, "a real patch")
-      let f1 = Myc.tick(f, n, uniform(n, 0.5), uniform(n, 0.3), 0.1)
+      let f1 = Myc.tick(f, n, uniform(n, 0.5), uniform(n, 0.3), Myc.no_climate(n), 0.1)
       Test.assert_eq_int(Myc.state_hash(f1, n), Myc.state_hash(f, n), "already settled")
     end
     test "wild seeds patches by the cell hash, fittest species, seeded" do
@@ -197,6 +197,22 @@ mod CubeForge.Test.Myc do
       let f2 = tick_n(Myc.plant(f1, n, 10, 16, 5), n, dry_t, wet_m, 0.1, 900)
       Test.assert_true(Myc.count_species(f2, n, 5) > 50, "Marshlight lives there wet")
       Test.assert_true(Myc.count_species(f2, n, 6) < Myc.count_species(f1, n, 6), "and Sunshelf has lost ground")
+    end
+  end
+
+
+  describe "Myc dirty set" do
+    test "a fresh field is all dirty, a planting dirties one column, a patch its octagon" do
+      let n = 32
+      Test.assert_eq_int(Myc.dirty_count(Myc.build(n), n), n * n, "fresh: everything must be looked at once")
+      let f = Myc.plant(Myc.clean(Myc.build(n), n), n, 10, 10, 3)
+      Test.assert_eq_int(Myc.dirty_count(f, n), 1, "one column")
+      Test.assert_true(Myc.is_dirty(f, n, 10, 10), "the planted one")
+      Test.assert_false(Myc.is_dirty(f, n, 11, 10), "not its neighbour")
+      let g = Myc.plant_patch(Myc.clean(Myc.build(n), n), n, 16, 16, 3)
+      Test.assert_eq_int(Myc.dirty_count(g, n), Myc.count_species(g, n, 3), "every column the patch wrote")
+      let r = Myc.reseed(Myc.clean(g, n), n, 20, 16)
+      Test.assert_eq_int(Myc.dirty_count(r, n), 1, "reseed dirties its column")
     end
   end
 

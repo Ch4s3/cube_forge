@@ -1598,7 +1598,7 @@ mod CubeForge do
             let f1 = scene_with_biome(scw, bio1)
             -- The mycelium field reads the climate the biome tick just eased.
             let tm0 = Win.time()
-            let myc1 = Myc.tick(scene_myc(f1), World.side(scene_world(f1)) * 16, Biome.temps(bio1), Biome.moists(bio1), Myc.default_rate() *. int_to_float(myc_rate) /. 100.0)
+            let myc1 = Myc.tick(scene_myc(f1), World.side(scene_world(f1)) * 16, Biome.temps(bio1), Biome.moists(bio1), Biome.active(bio1), Myc.default_rate() *. int_to_float(myc_rate) /. 100.0)
             let f2 = scene_with_myc(f1, myc1)
             if autoflow >= 0 && frame % 100 == field_slot() do println("biome tick: " ++ ms(tm0 -. tb0) ++ "  myc tick: " ++ ms(Win.time() -. tm0)) else () end
             f2
