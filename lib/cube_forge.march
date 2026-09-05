@@ -1440,7 +1440,8 @@ mod CubeForge do
   -- Gather this frame's input into a value the (Input-cap-free) Player module can consume.
   -- Block selection: keys 1-4; 0 when none is pressed this frame.
   -- Seed editing while the menu is open: digits append, Backspace deletes, R
-  -- rerolls. All edges, so holding a key does not repeat.
+  -- rerolls (seed and age), - and = move the age. All edges, so holding a key
+  -- does not repeat.
   pfn menu_digit(m : CubeForge.Menu.Menu, code : Int, d : Int) : CubeForge.Menu.Menu do
     if In.key_pressed(code) do Menu.append_digit(m, d) else m end
   end
@@ -1450,7 +1451,9 @@ mod CubeForge do
              In.key_0(), 0), In.key_1(), 1), In.key_2(), 2), In.key_3(), 3), In.key_4(), 4),
              In.key_5(), 5), In.key_6(), 6), In.key_7(), 7), In.key_8(), 8), In.key_9(), 9)
     let m1 = if In.key_pressed(In.key_backspace()) do Menu.backspace(m0) else m0 end
-    if In.key_pressed(In.key_r()) do Menu.reroll(m1, float_to_int(Win.time() *. 1000000.0)) else m1 end
+    let m2 = if In.key_pressed(In.key_minus()) do Menu.age_down(m1) else m1 end
+    let m3 = if In.key_pressed(In.key_equal()) do Menu.age_up(m2) else m2 end
+    if In.key_pressed(In.key_r()) do Menu.reroll(m3, float_to_int(Win.time() *. 1000000.0)) else m3 end
   end
 
   doc "The seed CF_AUTOMENU starts its second session with; fixed so the run is reproducible."
@@ -1692,7 +1695,7 @@ mod CubeForge do
                       else if m_click && !on_main && m_hover == Menu.item_back() do Menu.set_page(menu2, Menu.page_main())
                       else menu2 end end end
           let next_a = if start && !play_here do FromSeed(Menu.seed(menu2)) else next_seed end
-          if start && !play_here do println("new game, seed " ++ int_to_string(Menu.seed(menu2))) else () end
+          if start && !play_here do println("new game, seed " ++ int_to_string(Menu.seed(menu2)) ++ " (base " ++ int_to_string(Menu.base_seed(menu2)) ++ ", age " ++ int_to_string(Menu.age(menu2)) ++ ")") else () end
           -- Slot rows: save in escape mode, load on the start screen. CF_AUTOSAVE and
           -- CF_AUTOLOAD drive the same two paths for the headless round-trip test.
           let slot_click = if m_click && !on_main && m_hover < Menu.item_back() do Menu.slot_of_item(m_hover) else 0 end
@@ -2288,6 +2291,54 @@ mod CubeForge do
     end
   end
 
+  -- CF_TERRAIN_MAP=1 (alongside CF_TERRAIN_STATS): the world as a character map, one
+  -- character per 2x2 columns, so plateaus, valleys and rivers can be seen, not inferred.
+  --   ~ underwater   . sand   # granite (cliff)   * snow
+  --   , : = +  grass, by height band (below 70, 78, 86, above)
+  pfn map_char(h : Int, sfc : Int) : String do
+    if h < Chunk.sea_level() do "~"
+    else if sfc == Chunk.sand() do "."
+    else if sfc == Chunk.granite() do "#"
+    else if sfc == Chunk.snow() do "*"
+    else if h < 70 do ","
+    else if h < 78 do ":"
+    else if h < 86 do "="
+    else "+" end end end end end end end
+  end
+  pfn map_row_go(n : Int, z : Int, x : Int, seed : Int, acc : String) : String do
+    if x >= 16 * n do acc
+    else
+      let h = CubeForge.Noise.height(x, z, seed)
+      map_row_go(n, z, x + 2, seed, acc ++ map_char(h, Chunk.surface_id(h, CubeForge.Noise.slope(x, z, seed))))
+    end
+  end
+  pfn map_go(n : Int, z : Int, seed : Int) : Unit do
+    if z >= 16 * n do ()
+    else
+      println("  " ++ map_row_go(n, z, 0, seed, ""))
+      map_go(n, z + 2, seed)
+    end
+  end
+
+  -- Columns where the F32x4 generator and the scalar one disagree, over the whole
+  -- world. They are separate implementations in f32 and f64, so the truncation to
+  -- Int can land either side of an integer; this keeps that rate visible.
+  pfn lane_mismatch(h4 : Float, wx : Int, wz : Int, seed : Int) : Int do
+    if float_to_int(h4) != CubeForge.Noise.height(wx, wz, seed) do 1 else 0 end
+  end
+  pfn mismatch_go(n : Int, i : Int, seed : Int, acc : Int) : Int do
+    let span = 16 * n
+    if i >= span * span / 4 do acc
+    else
+      let wx = (i * 4) % span
+      let wz = (i * 4) / span
+      let hs = CubeForge.Noise.height_x4(wx, wz, seed)
+      let m = lane_mismatch(Simd.extract_f32x4(hs, 0), wx, wz, seed) + lane_mismatch(Simd.extract_f32x4(hs, 1), wx + 1, wz, seed)
+            + lane_mismatch(Simd.extract_f32x4(hs, 2), wx + 2, wz, seed) + lane_mismatch(Simd.extract_f32x4(hs, 3), wx + 3, wz, seed)
+      mismatch_go(n, i + 1, seed, acc + m)
+    end
+  end
+
   -- Pick a spawn column near the world centre: the HIGHEST flat, above-water column in a
   -- 32x32 box. Flat alone is not enough — the floor of a pit is flat, and spawning there
   -- boxes the camera in; the highest such column is open ground. Returns x + 4096 * z.
@@ -2308,10 +2359,15 @@ mod CubeForge do
     let max_frames = Env.get_int("CF_FRAMES", -1)
     let n = World.size()
     let workers = Env.get_int("CF_WORKERS", System.cpu_count())
-    -- CF_SEED unset: a new world each run, seeded from the clock. The seed is always
-    -- printed, so any world can be reproduced with CF_SEED=<n>.
+    -- CF_SEED unset: a new world each run, seeded from the clock, at a random age.
+    -- The (packed) seed is always printed, so any world can be reproduced with
+    -- CF_SEED=<n> alone. CF_AGE=<0..100> sets or overrides the age (Noise.with_age).
     let seed_env = Env.get_int("CF_SEED", -1)
-    let seed = if seed_env >= 0 do seed_env else int_and(System.monotonic_time() * 2654435761 + unix_time_ms(), 1073741823) end
+    let age_env = Env.get_int("CF_AGE", -1)
+    let entropy = int_and(System.monotonic_time() * 2654435761 + unix_time_ms(), 1073741823)
+    let seed = if age_env >= 0 do CubeForge.Noise.with_age(if seed_env >= 0 do seed_env else entropy end, age_env)
+               else if seed_env >= 0 do seed_env
+               else CubeForge.Noise.with_age(entropy, int_and(entropy * 40503 + 7919, 1073741823) % (CubeForge.Noise.max_age() + 1)) end end
     let headless = Env.get_int("CF_HEADLESS", 0) == 1
     -- `&&` does not short-circuit (GAPS.md G33), so the window open is gated with a nested if.
     let opened = if headless do 1 else Win.open(Env.get_int("CF_WIDTH", 800), Env.get_int("CF_HEIGHT", 600), "cube_forge") end
@@ -2457,13 +2513,18 @@ mod CubeForge do
     let meshes = mesh_all(world, n, workers)
     let t3 = System.monotonic_time()
     let nverts = count_verts(meshes, 0)
-    if Env.get_int("CF_TERRAIN_STATS", 0) == 1 do stats_go(n, 0, seed, 999, 0, 0, 0, 0, 0, 0, 0) else () end
+    if Env.get_int("CF_TERRAIN_STATS", 0) == 1 do
+      stats_go(n, 0, seed, 999, 0, 0, 0, 0, 0, 0, 0)
+      println("  SIMD/scalar height mismatches: " ++ int_to_string(mismatch_go(n, 0, seed, 0)) ++ " of " ++ int_to_string(16 * n * 16 * n) ++ " columns")
+      if Env.get_int("CF_TERRAIN_MAP", 0) == 1 do map_go(n, 0, seed) else () end
+    else () end
     if headless do
       let tn0 = System.monotonic_time()
       let naive_verts = mesh_all_naive(world, n, workers)
       println("  naive mesher for comparison: " ++ int_to_string(System.monotonic_time() - tn0) ++ " ms wall, " ++ int_to_string(naive_verts) ++ " vertices")
     else () end
-    println("seed " ++ int_to_string(seed) ++ (if from_env do " (CF_SEED)" else " (set CF_SEED to reproduce)" end))
+    println("seed " ++ int_to_string(seed) ++ " (base " ++ int_to_string(CubeForge.Noise.base_seed(seed)) ++ ", age " ++ int_to_string(CubeForge.Noise.age_of(seed)) ++ ")"
+            ++ (if from_env do " (CF_SEED)" else " (set CF_SEED to reproduce)" end))
     println("world " ++ int_to_string(n) ++ "x" ++ int_to_string(n) ++ " chunks, " ++ int_to_string(workers) ++ " workers, "
             ++ int_to_string(Env.get_int("MARCH_NUM_SCHEDULERS", 4)) ++ " scheduler threads (MARCH_NUM_SCHEDULERS)")
     println("  terrain scalar noise: " ++ int_to_string(t1 - t0) ++ " ms   terrain F32x4 noise: " ++ int_to_string(t2 - t1) ++ " ms")
