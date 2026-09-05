@@ -1,0 +1,62 @@
+-- The twelve-tone row and its four classical forms.
+--
+-- Schoenberg's rule is the whole point: all twelve pitch classes sound before
+-- any of them sounds again. That is what stops a drifting ambient line from
+-- settling into a key, and it is why the score can wander across a world for
+-- an hour without ever arriving somewhere and staying there.
+--
+-- There is no row *array*. A row is a pure function of (seed, position), so
+-- nothing is allocated, nothing is threaded through the frame, and the world's
+-- row is fixed by its seed for the world's whole lifetime.
+--
+-- Building the row by rank rather than by shuffling is what makes "it is a
+-- permutation" true by construction instead of true by luck: position i takes
+-- the rank of its key among the twelve keys, ties broken by index, and a rank
+-- is a bijection onto 0..11 whatever the keys happen to be.
+mod CubeForge.Tone do
+
+  alias CubeForge.Noise as N
+
+  doc "The four forms. Prime, retrograde, inversion, retrograde-inversion."
+  fn form_p() : Int do 0 end
+  fn form_r() : Int do 1 end
+  fn form_i() : Int do 2 end
+  fn form_ri() : Int do 3 end
+
+  doc "The sort key for position [i] of the row for [seed]."
+  fn key(seed : Int, i : Int) : Float do N.hash2(i, 0, seed) end
+
+  -- How many positions sort before [i]: strictly smaller keys, plus equal keys
+  -- at a lower index. The index tie-break is what keeps this a bijection even
+  -- if two keys collide.
+  pfn rank(seed : Int, i : Int, j : Int, acc : Int) : Int do
+    if j >= 12 do acc
+    else
+      let kj = key(seed, j)
+      let ki = key(seed, i)
+      let before = if kj < ki do true else if kj > ki do false else j < i end end
+      rank(seed, i, j + 1, if before do acc + 1 else acc end)
+    end
+  end
+
+  doc "Pitch class 0..11 at position [i] of the prime row for [seed]."
+  fn prime(seed : Int, i : Int) : Int do rank(seed, i, 0, 0) end
+
+  doc "Pitch class at position [i] of [form] of the row for [seed], transposed by [t] semitones. Inversion is taken about the row's first note, so the inverted row opens on the same pitch class the prime does and every interval after it is negated."
+  fn at(seed : Int, form : Int, t : Int, i : Int) : Int do
+    let src = if form == form_r() do 11 - i
+              else if form == form_ri() do 11 - i
+              else i end end
+    let p = prime(seed, src)
+    let inverted = if form == form_i() do true else form == form_ri() end
+    let v = if inverted do 2 * prime(seed, 0) - p else p end
+    (((v + t) % 12) + 12) % 12
+  end
+
+  doc "MIDI note number for pitch class [pc] in [octave] (octave 4 holds concert A at pitch class 9)."
+  fn midi(pc : Int, octave : Int) : Int do 12 * (octave + 1) + pc end
+
+  doc "Equal-tempered frequency of a MIDI note: 440 Hz at 69, doubling every twelve."
+  fn hz(m : Int) : Float do 440.0 *. Math.pow(2.0, int_to_float(m - 69) /. 12.0) end
+
+end

@@ -1,0 +1,115 @@
+-- The twelve-tone row: every form is a permutation of the twelve pitch
+-- classes, inversion really inverts, transposition is a rotation of the
+-- pitch space, and the frequency map is standard equal temperament.
+mod CubeForge.Test.Tone do
+
+  needs IO.Spawn   -- capability ceiling, as in test/weather_test.march
+  import Test
+  alias CubeForge.Tone as Tone
+
+  -- How many of the twelve positions carry pitch class [v].
+  pfn count_of(seed : Int, form : Int, t : Int, v : Int, i : Int, acc : Int) : Int do
+    if i >= 12 do acc
+    else count_of(seed, form, t, v, i + 1, if Tone.at(seed, form, t, i) == v do acc + 1 else acc end) end
+  end
+
+  -- -1 when every pitch class appears exactly once, else the offending class.
+  pfn not_a_permutation(seed : Int, form : Int, t : Int, v : Int) : Int do
+    if v >= 12 do -1
+    else if count_of(seed, form, t, v, 0, 0) != 1 do v
+    else not_a_permutation(seed, form, t, v + 1) end end
+  end
+
+  -- Scan many seeds; -1 when all of them give permutations.
+  pfn bad_seed(form : Int, t : Int, s : Int, n : Int) : Int do
+    if s >= n do -1
+    else if not_a_permutation(s, form, t, 0) >= 0 do s
+    else bad_seed(form, t, s + 1, n) end end
+  end
+
+  -- Interval from position i to i+1, as 0..11.
+  pfn step(seed : Int, form : Int, i : Int) : Int do
+    let d = Tone.at(seed, form, 0, i + 1) - Tone.at(seed, form, 0, i)
+    ((d % 12) + 12) % 12
+  end
+
+  -- -1 when every step of the inversion is the negated step of the prime.
+  pfn inversion_break(seed : Int, i : Int) : Int do
+    if i >= 11 do -1
+    else if step(seed, Tone.form_i(), i) != (12 - step(seed, Tone.form_p(), i)) % 12 do i
+    else inversion_break(seed, i + 1) end end
+  end
+
+  -- -1 when transposing by [t] shifts every position by exactly t.
+  pfn transpose_break(seed : Int, form : Int, t : Int, i : Int) : Int do
+    if i >= 12 do -1
+    else if Tone.at(seed, form, t, i) != (Tone.at(seed, form, 0, i) + t) % 12 do i
+    else transpose_break(seed, form, t, i + 1) end end
+  end
+
+  describe "Tone.at" do
+    test "the prime row is a permutation of the twelve pitch classes" do
+      Test.assert_eq_int(bad_seed(Tone.form_p(), 0, 0, 200), -1, "every seed gives a permutation")
+    end
+
+    test "every form is a permutation" do
+      Test.assert_eq_int(bad_seed(Tone.form_r(), 0, 0, 50), -1, "retrograde")
+      Test.assert_eq_int(bad_seed(Tone.form_i(), 0, 0, 50), -1, "inversion")
+      Test.assert_eq_int(bad_seed(Tone.form_ri(), 0, 0, 50), -1, "retrograde-inversion")
+    end
+
+    test "every transposition is a permutation" do
+      Test.assert_eq_int(bad_seed(Tone.form_p(), 7, 0, 50), -1, "prime at 7")
+      Test.assert_eq_int(bad_seed(Tone.form_ri(), 11, 0, 50), -1, "retrograde-inversion at 11")
+    end
+
+    test "retrograde reads the prime row backwards" do
+      Test.assert_eq_int(Tone.at(42, Tone.form_r(), 0, 0), Tone.at(42, Tone.form_p(), 0, 11), "first of R is last of P")
+      Test.assert_eq_int(Tone.at(42, Tone.form_r(), 0, 11), Tone.at(42, Tone.form_p(), 0, 0), "last of R is first of P")
+    end
+
+    test "inversion negates every interval of the prime row" do
+      Test.assert_eq_int(inversion_break(42, 0), -1, "seed 42")
+      Test.assert_eq_int(inversion_break(7, 0), -1, "seed 7")
+    end
+
+    test "transposition shifts every pitch class by the same amount" do
+      Test.assert_eq_int(transpose_break(42, Tone.form_p(), 5, 0), -1, "prime by 5")
+      Test.assert_eq_int(transpose_break(42, Tone.form_i(), 8, 0), -1, "inversion by 8")
+    end
+
+    test "is deterministic for a seed" do
+      Test.assert_eq_int(Tone.at(99, Tone.form_p(), 0, 3), Tone.at(99, Tone.form_p(), 0, 3), "same seed, same class")
+    end
+
+    test "different seeds give different rows" do
+      Test.assert_true(not_a_permutation(1, Tone.form_p(), 0, 0) < 0, "seed 1 is still a row")
+      Test.assert_true(Tone.at(1, Tone.form_p(), 0, 0) != Tone.at(2, Tone.form_p(), 0, 0)
+                       || Tone.at(1, Tone.form_p(), 0, 1) != Tone.at(2, Tone.form_p(), 0, 1),
+                       "seeds 1 and 2 do not open alike")
+    end
+  end
+
+  describe "Tone.hz" do
+    test "concert A is 440" do
+      Test.assert_true(Math.abs(Tone.hz(69) -. 440.0) < 0.001, "midi 69")
+    end
+
+    test "an octave up doubles the frequency" do
+      Test.assert_true(Math.abs(Tone.hz(81) -. 880.0) < 0.001, "midi 81")
+      Test.assert_true(Math.abs(Tone.hz(57) -. 220.0) < 0.001, "midi 57")
+    end
+  end
+
+  describe "Tone.midi" do
+    test "octave 4 pitch class 9 is concert A" do
+      Test.assert_eq_int(Tone.midi(9, 4), 69, "A4")
+    end
+
+    test "the octaves the biome table uses stay in audible range" do
+      Test.assert_true(Tone.hz(Tone.midi(0, 3)) > 100.0, "lowest octave is above 100 Hz")
+      Test.assert_true(Tone.hz(Tone.midi(11, 6)) < 4000.0, "highest octave is below 4 kHz")
+    end
+  end
+
+end

@@ -1,0 +1,208 @@
+-- Audio — the mixer policy. What should be heard, never how to make it.
+--
+-- This module decides six numbers per tick: four bed gains, the master filter
+-- cutoff, and the music level. The synthesis that turns them into samples is
+-- in native/cf_audio.c, running at 48 kHz on miniaudio's own thread, for the
+-- reason `Precip` gives: March's per-element NativeArray writes are O(n) on a
+-- shared array (GAPS G68), so a per-sample loop here would be O(n^2) and
+-- 48,000 of them a second is not a thing this language will do.
+--
+-- Everything here is pure, so all of it is testable without a sound device.
+mod CubeForge.Audio do
+
+  alias CubeForge.Biome as Biome
+  alias CubeForge.Tone as Tone
+  alias CubeForge.Noise as N
+
+  -- rain, wind, leaves, underwater, cutoff Hz, music
+  type Mix = Mix(Float, Float, Float, Float, Float, Float)
+
+  fn rain_of(m : Mix) : Float do match m do Mix(v, _, _, _, _, _) -> v end end
+  fn wind_of(m : Mix) : Float do match m do Mix(_, v, _, _, _, _) -> v end end
+  fn leaves_of(m : Mix) : Float do match m do Mix(_, _, v, _, _, _) -> v end end
+  fn water_of(m : Mix) : Float do match m do Mix(_, _, _, v, _, _) -> v end end
+  fn cutoff_of(m : Mix) : Float do match m do Mix(_, _, _, _, v, _) -> v end end
+  fn music_of(m : Mix) : Float do match m do Mix(_, _, _, _, _, v) -> v end end
+
+  pfn clamp01(v : Float) : Float do if v < 0.0 do 0.0 else if v > 1.0 do 1.0 else v end end end
+
+  -- ── The muffle ────────────────────────────────────────────────────────────
+
+  doc "Cutoff of the master lowpass with clear air, in Hz: haze, not a filter."
+  fn open_hz() : Float do 18000.0 end
+  doc "Cutoff under the thickest snowfall."
+  fn snow_hz() : Float do 4000.0 end
+  doc "Cutoff with the eye under water."
+  fn water_hz() : Float do 700.0 end
+
+  doc "Master lowpass cutoff in Hz for [snowfall] -- how much snow is actually coming down, not how cold it is. Snow closes it; water closes it further and takes precedence rather than compounding, because a head under water hears the same dull world whatever is falling on the surface above it."
+  fn cutoff(snowfall : Float, under : Bool) : Float do
+    if under do water_hz()
+    else open_hz() +. (snow_hz() -. open_hz()) *. clamp01(snowfall) end
+  end
+
+  doc "How much snow is actually falling: the share of the precipitation that is snow, times how much precipitation there is. Snow.mix is a property of temperature alone -- it reads 1.0 on a bright still day in the tundra -- so the muffle has to be gated on the weather as well, or a clear cold morning would sound like a blizzard."
+  fn snowfall(wx : Float, snow : Float) : Float do clamp01(wx) *. clamp01(snow) end
+
+  -- ── The beds ──────────────────────────────────────────────────────────────
+
+  doc "Loudest each bed is allowed to be. The music sits below all of them: it is a score, not a source in the world."
+  fn rain_max() : Float do 0.85 end
+  fn wind_max() : Float do 0.9 end
+  fn leaf_max() : Float do 0.8 end
+  fn water_max() : Float do 0.75 end
+  fn music_max() : Float do 0.5 end
+
+  doc "The six numbers, from the world under the listener. [wx] weather intensity, [wind] gust strength, [snow] how much of the precipitation is snow, [exposure] open sky above times height above sea level, [leaf] the fraction of nearby blocks that are foliage."
+  fn mix(biome : Int, wx : Float, wind : Float, snow : Float,
+         exposure : Float, leaf : Float, under : Bool) : Mix do
+    -- Under water the surface world is not merely muffled, it is gone. The
+    -- filter alone would leave a thin hiss of rain audible from the lake bed.
+    let surface = if under do 0.0 else 1.0 end
+    -- Rain reuses the multiplier the particle count already keys on, so what
+    -- you hear and what you see cannot disagree about how wet a biome is.
+    let rain = surface *. rain_max() *. clamp01(wx *. Biome.precip_scale(biome)) *. (1.0 -. clamp01(snow))
+    -- Both terms matter: a peak is windy, a cave at the same height is not.
+    let windbed = surface *. wind_max() *. clamp01(wind) *. clamp01(exposure)
+    -- Shares the wind term with the bed above, which is what stops leaves
+    -- rustling on a still day or a gale passing through silent trees.
+    let leaves = surface *. leaf_max() *. clamp01(wind) *. clamp01(leaf)
+    let water = (1.0 -. surface) *. water_max()
+    Mix(rain, windbed, leaves, water, cutoff(snowfall(wx, snow), under), music_max())
+  end
+
+  doc "Share of the sampled box that counts as a full canopy. Measured, not guessed: standing under a generated forest fills about 2.5% of the 343-point lattice with leaves, because most of a cube around a player is air and ground. Ask for a third and the bed is silent in every forest there is."
+  fn full_canopy() : Float do 0.045 end
+
+  doc "How loud the trees are, from [hits] foliage blocks out of [samples] sampled around the listener."
+  fn leaf_fraction(hits : Int, samples : Int) : Float do
+    if samples <= 0 do 0.0
+    else clamp01(int_to_float(hits) /. (int_to_float(samples) *. full_canopy())) end
+  end
+
+  doc "How exposed the listener is to the wind: how far above sea level they stand, ramped to full at the snow line, times how much sky is over their head. Both terms matter -- a peak is windy and a cave at the same height is not."
+  fn exposure(y : Int, sky : Int) : Float do
+    let height = int_to_float(y - CubeForge.Noise.sea_level())
+              /. int_to_float(CubeForge.Noise.snow_line() - CubeForge.Noise.sea_level())
+    clamp01(height) *. clamp01(int_to_float(sky) /. int_to_float(CubeForge.Light.max_level()))
+  end
+
+  -- ── The biome table ───────────────────────────────────────────────────────
+  --
+  -- One row for the world; the biome chooses which face of it you hear. Form
+  -- and transposition are the harmonic shift and only move at a row boundary;
+  -- octave, timbre and rate are the colour and pacing and ease continuously.
+
+  doc "Which form of the row this biome states."
+  fn form_of(b : Int) : Int do
+    if b == Biome.b_tundra() do Tone.form_p()
+    else if b == Biome.b_taiga() do Tone.form_i()
+    else if b == Biome.b_grassland() do Tone.form_p()
+    else if b == Biome.b_forest() do Tone.form_i()
+    else if b == Biome.b_desert() do Tone.form_r()
+    else if b == Biome.b_wetland() do Tone.form_ri()
+    else if b == Biome.b_beach() do Tone.form_p()
+    else Tone.form_r() end end end end end end end
+  end
+
+  doc "Semitones this biome transposes the row by."
+  fn transpose_of(b : Int) : Int do
+    if b == Biome.b_tundra() do 0
+    else if b == Biome.b_taiga() do 3
+    else if b == Biome.b_grassland() do 5
+    else if b == Biome.b_forest() do 7
+    else if b == Biome.b_desert() do 2
+    else if b == Biome.b_wetland() do 10
+    else if b == Biome.b_beach() do 8
+    else 0 end end end end end end end
+  end
+
+  doc "Octave the voice sits in. Alpine sings above the treeline and forests sit under it."
+  fn octave_of(b : Int) : Int do
+    if b == Biome.b_tundra() do 5
+    else if b == Biome.b_taiga() do 4
+    else if b == Biome.b_grassland() do 4
+    else if b == Biome.b_forest() do 3
+    else if b == Biome.b_desert() do 5
+    else if b == Biome.b_wetland() do 3
+    else if b == Biome.b_beach() do 4
+    else 6 end end end end end end end
+  end
+
+  doc "Waveform id for the voice: 0 glass, 1 triangle, 2 filtered saw, 3 sine, 4 hollow square. Read by the synthesiser in cf_audio.c."
+  fn timbre_of(b : Int) : Int do
+    if b == Biome.b_tundra() do 0
+    else if b == Biome.b_taiga() do 1
+    else if b == Biome.b_grassland() do 1
+    else if b == Biome.b_forest() do 2
+    else if b == Biome.b_desert() do 3
+    else if b == Biome.b_wetland() do 4
+    else if b == Biome.b_beach() do 3
+    else 0 end end end end end end end
+  end
+
+  doc "Notes per minute. A desert is sparse and a wetland busy, which is the pacing half of the biome shift."
+  fn rate_of(b : Int) : Int do
+    if b == Biome.b_tundra() do 6
+    else if b == Biome.b_taiga() do 8
+    else if b == Biome.b_grassland() do 10
+    else if b == Biome.b_forest() do 10
+    else if b == Biome.b_desert() do 5
+    else if b == Biome.b_wetland() do 12
+    else if b == Biome.b_beach() do 8
+    else 5 end end end end end end end
+  end
+
+  -- ── The schedule ──────────────────────────────────────────────────────────
+
+  doc "Ticks per second: the frame loop asks once every tick_period() frames at 60 fps."
+  fn ticks_per_second() : Int do 6 end
+  doc "Closest two notes may fall: four seconds."
+  fn min_gap() : Int do 4 * ticks_per_second() end
+  doc "Furthest two notes may fall: twelve seconds."
+  fn max_gap() : Int do 12 * ticks_per_second() end
+
+  doc "Ticks until the next note at [rate] notes per minute, jittered a quarter either way so the line breathes rather than ticking like a metronome."
+  fn gap_ticks(rate : Int, tick : Int, seed : Int) : Int do
+    let nominal = int_to_float(60 * ticks_per_second()) /. int_to_float(rate)
+    let jittered = float_to_int(nominal *. (0.75 +. 0.5 *. N.hash2(tick, 17, seed)))
+    if jittered < min_gap() do min_gap()
+    else if jittered > max_gap() do max_gap()
+    else jittered end end
+  end
+
+  doc "How long a note sounds at full level before its release, for a gap of [gap] ticks: most of the way to the next note, so the tails overlap a little and the line is never quite empty."
+  fn note_seconds(gap : Int) : Float do 0.6 *. int_to_float(gap) /. int_to_float(ticks_per_second()) end
+
+  doc "Level a note is struck at. The music sits under the world, not over it."
+  fn note_gain() : Float do 0.8 end
+
+  -- tick the next note is due, position in the row, form and transposition in force
+  type Sched = Sched(Int, Int, Int, Int)
+
+  fn next_of(s : Sched) : Int do match s do Sched(v, _, _, _) -> v end end
+  fn index_of(s : Sched) : Int do match s do Sched(_, v, _, _) -> v end end
+  fn form_of_sched(s : Sched) : Int do match s do Sched(_, _, v, _) -> v end end
+  fn transpose_of_sched(s : Sched) : Int do match s do Sched(_, _, _, v) -> v end end
+
+  doc "A schedule whose first note is due at [tick], opening on the prime row untransposed."
+  fn sched_start(tick : Int) : Sched do Sched(tick, 0, Tone.form_p(), 0) end
+
+  doc "Is a note due at [tick]?"
+  fn due(s : Sched, tick : Int) : Bool do tick >= next_of(s) end
+
+  doc "The pitch class of the note this schedule is holding, for the world's row."
+  fn pitch_class(s : Sched, seed : Int) : Int do
+    Tone.at(seed, form_of_sched(s), transpose_of_sched(s), index_of(s))
+  end
+
+  doc "Fire the held note and set up the next one. The biome's [want_form] and [want_t] are adopted only when the row wraps, so walking into a forest never cuts a row in half -- the harmonic shift waits for all twelve classes to have sounded, up to a row later."
+  fn advance(s : Sched, tick : Int, rate : Int, want_form : Int, want_t : Int, seed : Int) : Sched do
+    let i = index_of(s)
+    let wrapped = i == 11
+    let form1 = if wrapped do want_form else form_of_sched(s) end
+    let t1 = if wrapped do want_t else transpose_of_sched(s) end
+    Sched(tick + gap_ticks(rate, tick, seed), (i + 1) % 12, form1, t1)
+  end
+
+end

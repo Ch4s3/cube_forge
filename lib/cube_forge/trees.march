@@ -132,15 +132,23 @@ mod CubeForge.Trees do
 
   -- ── Bushes ──────────────────────────────────────────────────────────────────
 
+  doc "Fraction of bush cells that hold a bush at generation, on grass."
+  fn bush_density() : Float do 0.22 end
+  doc "The bush cell's density draw, compared against a biome's bush density."
+  fn bush_cell_density(cx : Int, cz : Int, seed : Int) : Float do cell_hash(cx, cz, seed, 11) end
+  doc "The one column of bush cell (cx, cz) a bush may stand on, packed x + 4096 * z. Shared by generation and Veg so growth is spaced the same way."
+  fn bush_cell_column(cx : Int, cz : Int, seed : Int) : Int do
+    let ox = float_to_int(cell_hash(cx, cz, seed, 12) *. int_to_float(bush_cell_size()))
+    let oz = float_to_int(cell_hash(cx, cz, seed, 13) *. int_to_float(bush_cell_size()))
+    (cx * bush_cell_size() + ox) + 4096 * (cz * bush_cell_size() + oz)
+  end
+
   doc "Bush column in bush cell (cx, cz), packed x + 4096 * z, or -1."
   fn bush_at_cell(cx : Int, cz : Int, seed : Int) : Int do
-    if cell_hash(cx, cz, seed, 11) > 0.22 do -1
+    if bush_cell_density(cx, cz, seed) >= bush_density() do -1
     else
-      let ox = float_to_int(cell_hash(cx, cz, seed, 12) *. int_to_float(bush_cell_size()))
-      let oz = float_to_int(cell_hash(cx, cz, seed, 13) *. int_to_float(bush_cell_size()))
-      let wx = cx * bush_cell_size() + ox
-      let wz = cz * bush_cell_size() + oz
-      if plantable(wx, wz, seed) do wx + 4096 * wz else -1 end
+      let col = bush_cell_column(cx, cz, seed)
+      if plantable(col % 4096, col / 4096, seed) do col else -1 end
     end
   end
 

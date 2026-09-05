@@ -1,0 +1,83 @@
+-- Wind: a gust curve that stays in range, never jumps, actually gusts, and
+-- blows harder in bad weather.
+mod CubeForge.Test.Wind do
+
+  needs IO.Spawn   -- capability ceiling, as in test/weather_test.march
+  import Test
+  alias CubeForge.Wind as Wind
+
+  pfn out_of_range(t : Int, n : Int, seed : Int, wx : Float) : Int do
+    if t >= n do -1
+    else
+      let v = Wind.at(t, seed, wx)
+      if v < 0.0 || v > 1.0 do t else out_of_range(t + 1, n, seed, wx) end
+    end
+  end
+
+  pfn max_jump(t : Int, n : Int, seed : Int, wx : Float, worst : Float) : Float do
+    if t + 1 >= n do worst
+    else
+      let d = Math.abs(Wind.at(t + 1, seed, wx) -. Wind.at(t, seed, wx))
+      max_jump(t + 1, n, seed, wx, if d > worst do d else worst end)
+    end
+  end
+
+  pfn lowest(t : Int, n : Int, seed : Int, wx : Float, lo : Float) : Float do
+    if t >= n do lo
+    else
+      let v = Wind.at(t, seed, wx)
+      lowest(t + 1, n, seed, wx, if v < lo do v else lo end)
+    end
+  end
+
+  pfn highest(t : Int, n : Int, seed : Int, wx : Float, hi : Float) : Float do
+    if t >= n do hi
+    else
+      let v = Wind.at(t, seed, wx)
+      highest(t + 1, n, seed, wx, if v > hi do v else hi end)
+    end
+  end
+
+  pfn total(t : Int, n : Int, seed : Int, wx : Float, acc : Float) : Float do
+    if t >= n do acc else total(t + 1, n, seed, wx, acc +. Wind.at(t, seed, wx)) end
+  end
+
+  pfn mean(n : Int, seed : Int, wx : Float) : Float do total(0, n, seed, wx, 0.0) /. int_to_float(n) end
+
+  describe "Wind.at" do
+    test "stays within 0..1 in every weather" do
+      Test.assert_eq_int(out_of_range(0, 20000, 42, 0.0), -1, "clear")
+      Test.assert_eq_int(out_of_range(0, 20000, 42, 0.5), -1, "half")
+      Test.assert_eq_int(out_of_range(0, 20000, 42, 1.0), -1, "storm")
+    end
+
+    test "never jumps between ticks" do
+      Test.assert_true(max_jump(0, 20000, 42, 1.0, 0.0) <= Wind.max_step() +. 0.0001,
+                       "no jump larger than one step")
+    end
+
+    test "actually gusts rather than sitting still" do
+      let lo = lowest(0, 20000, 42, 0.5, 2.0)
+      let hi = highest(0, 20000, 42, 0.5, -1.0)
+      Test.assert_true(hi -. lo > 0.2, "the gust curve has real range")
+    end
+
+    test "blows harder in bad weather" do
+      Test.assert_true(mean(20000, 42, 1.0) > mean(20000, 42, 0.0) +. 0.2, "a storm is windier than a clear day")
+    end
+
+    test "is calm but not dead in clear weather" do
+      Test.assert_true(mean(20000, 42, 0.0) > 0.02, "a clear day still has a breeze")
+      Test.assert_true(mean(20000, 42, 0.0) < 0.4, "a clear day is not a gale")
+    end
+
+    test "is deterministic for a seed" do
+      Test.assert_true(Math.abs(Wind.at(1234, 42, 0.5) -. Wind.at(1234, 42, 0.5)) < 0.000001, "same tick, same value")
+    end
+
+    test "different seeds give different weather" do
+      Test.assert_true(Math.abs(mean(2000, 1, 0.5) -. mean(2000, 2, 0.5)) > 0.0, "seeds 1 and 2 differ")
+    end
+  end
+
+end

@@ -45,6 +45,82 @@ mod CubeForge.Test.Veg do
     end
   end
 
+  pfn first_bush_grow(cols : List(Int)) : Int do
+    match cols do
+      Nil -> 0 - 1
+      Cons(e, rest) -> if Veg.is_bush(e) && !Veg.is_decay(e) do Veg.column_of(e) else first_bush_grow(rest) end
+    end
+  end
+  pfn bush_picks_canonical(cols : List(Int), seed : Int) : Bool do
+    match cols do
+      Nil -> true
+      Cons(e, rest) ->
+        if !Veg.is_bush(e) do bush_picks_canonical(rest, seed)
+        else
+          let ci = Veg.column_of(e)
+          let x = ci % 128
+          let z = ci / 128
+          if CubeForge.Trees.bush_cell_column(x / 5, z / 5, seed) == x + 4096 * z do bush_picks_canonical(rest, seed) else false end
+        end
+    end
+  end
+
+  describe "Veg bushes" do
+    test "entries pack bush and decay bits beside the column" do
+      let g = 1000 + 536870912
+      let d = 1000 + 1073741824 + 536870912
+      Test.assert_true(Veg.is_bush(g) && !Veg.is_decay(g), "bush growth")
+      Test.assert_true(Veg.is_bush(d) && Veg.is_decay(d), "bush decay")
+      Test.assert_true(!Veg.is_bush(1000 + 1073741824), "tree decay is not a bush")
+      Test.assert_eq_int(Veg.column_of(d), 1000, "column survives both bits")
+    end
+
+    test "grassland and forest hold bushes, the rest do not" do
+      Test.assert_true(Veg.wants_bushes(Biome.b_grassland()) && Veg.wants_bushes(Biome.b_forest()), "grass biomes")
+      Test.assert_true(!Veg.wants_bushes(Biome.b_desert()) && !Veg.wants_bushes(Biome.b_taiga()) && !Veg.wants_bushes(Biome.b_tundra()), "not the others")
+    end
+
+    test "a planted bush is generation's clump, sits on the ground, and unbush removes exactly it" do
+      let w = grass_top16(flat_world(70), 0, 70)
+      let w2 = Veg.plant_bush(w, 8, 8, 69)
+      Test.assert_eq_int(CubeForge.World.block_at(w2, 8, 70, 8), C.oak_leaves(), "centre leaf")
+      Test.assert_true(Veg.has_bush(w2, 8, 8, 70), "has_bush sees a ground-level leaf")
+      Test.assert_true(!Veg.has_bush(w2, 8, 8, 71), "nothing above it")
+      Test.assert_eq_int(CubeForge.World.block_at(w2, 8, 71, 8), 0, "one layer only")
+      -- generation's ring pattern: (x + z + i) % 3 != 0 keeps two thirds of the ring
+      Test.assert_eq_int(CubeForge.World.block_at(w2, 9, 70, 7), 0, "ring corner (9,7,i=2): 18 % 3 == 0, skipped")
+      Test.assert_eq_int(CubeForge.World.block_at(w2, 8, 70, 7), C.oak_leaves(), "ring cell (8,7,i=1) kept")
+      let w3 = Veg.unbush(w2, 8, 8, 69)
+      Test.assert_eq_int(CubeForge.World.block_at(w3, 8, 70, 8), 0, "centre gone")
+      Test.assert_eq_int(CubeForge.World.block_at(w3, 8, 70, 7), 0, "ring gone")
+      Test.assert_eq_int(CubeForge.World.block_at(w3, 7, 70, 7), 0, "corner (7,7,i=0): 14 % 3 == 2, kept then removed")
+      Test.assert_eq_int(CubeForge.World.block_at(w3, 8, 69, 8), 1, "the grass stays")
+    end
+
+    test "a tree's canopy is not mistaken for a bush" do
+      let w = grass_top16(flat_world(70), 0, 70)
+      let w2 = Veg.plant(w, 8, 8, 69, 5, false)
+      Test.assert_true(!Veg.has_bush(w2, 9, 8, 73), "a canopy leaf has air or leaves under it")
+    end
+
+    test "bush growth picks are canonical bush columns and a planted bush is not picked again" do
+      let w = grass_top16(flat_world(70), 0, 70)
+      let f = Biome.build(w, 7)
+      let picks = Veg.candidates(f, w, 7, 0, 256, 64)
+      Test.assert_true(bush_picks_canonical(picks, 7), "every bush pick is its cell's column")
+      let g = first_bush_grow(picks)
+      if g < 0 do Test.assert_true(true, "no grass biome in this corner for seed 7; nothing to plant")
+      else
+        let x = g % 128
+        let z = g / 128
+        let w2 = Veg.plant_bush(w, x, z, 69)
+        let f2 = Biome.rescan_box(f, w2, x, z, 2, 70)
+        Test.assert_true(!Veg.can_grow_bush(f2, w2, 7, x, z), "not a growth candidate any more")
+        Test.assert_true(!Veg.can_decay_bush(f2, w2, x, z), "and not a decay candidate while the biome wants it")
+      end
+    end
+  end
+
   describe "Veg.candidates" do
     test "growth picks are canonical trunk columns, and a planted tree is not picked again" do
       let w = grass_top16(flat_world(70), 0, 70)
