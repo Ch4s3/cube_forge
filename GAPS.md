@@ -824,6 +824,16 @@ are freed immediately.
 
 ---
 
+### G78. Test modules share one alias namespace: the same alias for two modules fails to link
+- `alias CubeForge.Lakes as L` in `test/lakes_test.march` while
+  `test/light_test.march` has `alias CubeForge.Light as L`: the test binary
+  compiles, then the linker wants `_CubeForge.Lakes.chunk_layer`,
+  `_CubeForge.Lakes.emission` -- Light's functions resolved against the
+  Lakes alias from another file. `forge test` builds every test module into
+  one unit and the aliases leak across them. (`world_size_test` already
+  aliases World as `Wf` for the same reason.) Workaround: an alias name is
+  used for one module across the whole test tree; `Lk` here. Found 2026-09-05.
+
 ## Terrain generation notes
 
 ### G61. A `NativeU8Arr` store wraps mod 256 silently, and near-white textures came out red
