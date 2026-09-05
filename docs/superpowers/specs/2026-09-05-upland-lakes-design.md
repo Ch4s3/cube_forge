@@ -97,14 +97,20 @@ Measure it (§6) rather than adding a knob.
   hot path does not pay for it. The render side (`is_world_spring`) applies
   the same rule for spray, so a lake is not a thousand emitters.
 
-Lake columns by seed and age, `CF_TERRAIN_STATS` (of 16,384):
+Lake columns by seed and age, `CF_TERRAIN_STATS` (of 16,384). *Corrected
+2026-09-05:* the first counts (729 / 2,321 / 2,283 on seeds 7, 99 and 2024)
+were mostly dips in the sea bed that drained to the border below sea level
+and were poured as "lakes" at that lower level -- a column filled to 55 in
+a sea at 62, a hole in the ocean with walls of water, seen in play. The
+pour's heightmap is floored at sea level now, so the sea is the base every
+basin drains into; `lakes_test` asserts no lake surface sits at or under
+sea level over eight seeds (4,624 such columns before).
 
-| seed | age 0 | age 50 | age 100 |
-|---|---|---|---|
-| 7 | 729 | 420 | 206 |
-| 1234 | 865 | 1041 | 964 |
-| 99 | 1937 | 2321 | 2288 |
-| 2024 | 2283 | 2097 | 1749 |
+| seed | age 50 | age 100 |
+|---|---|---|
+| 7 | 105 | 81 |
+| 1234 | 972 | 970 |
+| 99 | 300 | 419 |
 
 Seed 99 at age 50, windowed, 900 frames: 4 spray springs for 2,321 lake
 columns, worst frame 14.6 ms, flowing water 85 cells at frame 800 (the
@@ -125,9 +131,11 @@ pour point (90 outlets a world), and one per basin of six or more is kept.
 
 | seed | age | lake columns | outlets |
 |---|---|---|---|
-| 7 | 50 / 100 | 420 / 206 | 6 / 2 |
-| 1234 | 50 / 100 | 1,022 / 973 | 12 / 8 |
-| 99 | 50 / 100 | 2,321 / 2,288 | 6 / 7 |
+| 7 | 50 / 100 | 105 / 81 | 5 / 1 |
+| 1234 | 50 / 100 | 972 / 970 | 10 / 8 |
+| 99 | 50 / 100 | 300 / 419 | 4 / 4 |
+
+(after the sea-level floor above; the first pass counted sea-bed pits).
 
 Seed 1234 windowed, 1,200 frames, everything on: flowing water plateaus at
 ~410 cells at age 50 and ~370 at age 100 (it was 1,544 and climbing), 109

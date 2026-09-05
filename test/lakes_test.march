@@ -79,6 +79,24 @@ mod CubeForge.Test.Lakes do
     end
   end
 
+  -- Lake columns whose surface sits at or under sea level: holes in the sea.
+  pfn low_lakes(lk : NativeU8Arr, i : Int, acc : Int) : Int do
+    if i >= 16384 do acc
+    else
+      let v = NativeArray.get_u8(lk, i)
+      low_lakes(lk, i + 1, if v > 0 && v <= CubeForge.Chunk.sea_level() do acc + 1 else acc end)
+    end
+  end
+  pfn low_lakes_seeds(seed : Int, acc : Int) : Int do
+    if seed >= 8 do acc else low_lakes_seeds(seed + 1, acc + low_lakes(Lk.levels(CubeForge.Noise.with_age(seed, 50), 8), 0, 0)) end
+  end
+
+  describe "the sea" do
+    test "no lake surface sits at or under sea level: the sea bed is not a basin" do
+      Test.assert_eq_int(low_lakes_seeds(0, 0), 0, "lake columns at or under sea level over seeds 0..7")
+    end
+  end
+
   describe "pour" do
     test "a bowl fills to its lowest rim and nothing else is wet" do
       let lv = Lk.pour(bowl(), 8)

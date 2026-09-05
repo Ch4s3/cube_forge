@@ -21,6 +21,7 @@
 mod CubeForge.Lakes do
 
   alias CubeForge.Noise as N
+  alias CubeForge.Chunk as C
 
   -- The array holds, per column, a pending spill level (< done_mark()) or a
   -- settled one (+ done_mark(), + pour_mark() when the column is a basin's
@@ -204,9 +205,13 @@ mod CubeForge.Lakes do
     finish_go(sp, hs, side, 0, NativeArray.make_int(2 * side * side, 0), lb, cn)
   end
 
+  -- Heights floored at sea level: the sea is the base every basin drains
+  -- into, so a dip in the sea bed that drains to the border below sea level
+  -- is not a basin. It was: a "lake" at 55 in a sea at 62 was a column
+  -- filled to 55, a hole in the ocean with walls of water.
   pfn heights_go(hs : NativeIntArr, side : Int, seed : Int, i : Int) : NativeIntArr do
     if i >= side * side do hs
-    else heights_go(NativeArray.set_int(hs, i, N.height(i % side, i / side, seed)), side, seed, i + 1) end
+    else heights_go(NativeArray.set_int(hs, i, Math.max_int(N.height(i % side, i / side, seed), C.sea_level())), side, seed, i + 1) end
   end
   pfn to_u8_go(lv : NativeIntArr, out : NativeU8Arr, i : Int, count : Int) : NativeU8Arr do
     if i >= count do out
