@@ -36,16 +36,16 @@ mod CubeForge.Test.MycBlock do
   end
 
   describe "Light.emission for mycelium" do
-    test "dim glows at 2, bright at 4, none at 0" do
+    test "dim glows at 3, bright at 6, none at 0" do
       Test.assert_eq_int(Lt.emission(Ch.myc_id(2, 0)), 0, "none")
-      Test.assert_eq_int(Lt.emission(Ch.myc_id(2, 1)), 2, "dim")
-      Test.assert_eq_int(Lt.emission(Ch.myc_id(2, 2)), 4, "bright")
+      Test.assert_eq_int(Lt.emission(Ch.myc_id(2, 1)), 3, "dim")
+      Test.assert_eq_int(Lt.emission(Ch.myc_id(2, 2)), 6, "bright")
     end
   end
 
   describe "Texture mycelium layers" do
     test "one layer per (base, species), after the existing seventeen" do
-      Test.assert_eq_int(Tx.layers(), 60, "17 + 42 + the glow cap")
+      Test.assert_eq_int(Tx.layers(), 66, "17 + 42 mycelium + 6 spore icons, with the glow cap")
       Test.assert_true(near(Tx.myc_layer(0, 1), 18.0), "grass x Frostcap")
       Test.assert_true(near(Tx.myc_layer(0, 6), 23.0), "grass x Sunshelf")
       Test.assert_true(near(Tx.myc_layer(6, 6), 59.0), "stone x Sunshelf is the last")
@@ -80,6 +80,16 @@ mod CubeForge.Test.MycBlock do
     test "digging mycelium yields the base block" do
       Test.assert_eq_int(CubeForge.Inventory.yield_of(Ch.myc_id(Ch.sand(), 2)), Ch.sand(), "sand")
       Test.assert_eq_int(CubeForge.Inventory.yield_of(Ch.myc_id(1, 0)), 1, "grass")
+    end
+  end
+
+
+  describe "Texture spore icons" do
+    test "one icon layer per species after the mycelium layers" do
+      Test.assert_eq_int(Tx.layers(), 66, "60 + 6")
+      Test.assert_true(near(Tx.spore_layer(1), 60.0), "Frostcap")
+      Test.assert_true(near(Tx.icon_layer(CubeForge.Species.spore_item(6)), 65.0), "Sunshelf spores in the HUD")
+      Test.assert_true(near(Tx.icon_layer(1), 0.0), "grass icon unchanged")
     end
   end
 

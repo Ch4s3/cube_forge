@@ -59,4 +59,16 @@ mod CubeForge.Test.Species do
     end
   end
 
+
+  describe "Species spore items" do
+    test "spore ids are 200 + species and round-trip" do
+      Test.assert_eq_int(S.spore_item(4), 204, "Lanterncap spores")
+      Test.assert_true(S.is_spore(204), "is a spore")
+      Test.assert_false(S.is_spore(22), "the glow cap is not")
+      Test.assert_false(S.is_spore(207), "207 is not")
+      Test.assert_eq_int(S.species_of_item(204), 4, "back to the species")
+      Test.assert_eq_int(S.species_of_item(3), 0, "a block is no species")
+    end
+  end
+
 end

@@ -98,4 +98,12 @@ mod CubeForge.Species do
   doc "The fittest species for a climate, or 0 when none reaches viable()."
   fn best_for(temp : Float, moist : Float) : Int do best_go(temp, moist, 1, 0, viable()) end
 
+
+  -- ── Spores: the item that plants a species ──────────────────────────────
+  doc "Item id of a species' spores: 200 + species. Items share the block-id space; nothing else lives above 199."
+  fn spore_item(sp : Int) : Int do 200 + sp end
+  fn is_spore(id : Int) : Bool do id >= 201 && id <= 200 + count() end
+  doc "The species a spore item plants, or 0 when [id] is not a spore."
+  fn species_of_item(id : Int) : Int do if is_spore(id) do id - 200 else 0 end end
+
 end

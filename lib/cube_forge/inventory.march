@@ -140,6 +140,15 @@ mod CubeForge.Inventory do
     end
   end
 
+  doc "Add [n] of [item] directly (no yield mapping). A full inventory silently drops it."
+  fn give(i : Inv, item : Int, n : Int) : Inv do
+    if item == 0 || n <= 0 do i
+    else
+      let s = slot_for(i, item)
+      if s < 0 do i else set_slot(i, s, item, count_at(i, s) + n) end
+    end
+  end
+
   -- ── Moving stacks ───────────────────────────────────────────────────────────
 
   doc """
