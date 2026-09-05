@@ -77,6 +77,7 @@ mod CubeForge.Myc do
     match f do Field(_, _, rc, _, _) -> NativeArray.get_u8(rc, x + n * z) end
   end
   fn field_species(f : Field) : NativeU8Arr do match f do Field(sps, _, _, _, _) -> sps end end
+  fn field_vigour(f : Field) : NativeFloatArr do match f do Field(_, vg, _, _, _) -> vg end end
 
   pfn u8_go(vg : NativeFloatArr, out : NativeU8Arr, i : Int, n : Int) : NativeU8Arr do
     if i >= n do out

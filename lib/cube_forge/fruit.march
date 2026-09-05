@@ -126,4 +126,70 @@ mod CubeForge.Fruit do
     fell_go(w, sp, bx, base, bz, seed, 0, height_of(sp, bx, bz, seed), 0, 0)
   end
 
+
+  -- ── Growth and decay candidates ──────────────────────────────────────────
+  doc "Chance per visit that an eligible cell fruits: small, medium, giant."
+  fn rate(tier : Int) : Float do if tier == 0 do 0.05 else if tier == 1 do 0.02 else 0.005 end end end
+  doc "The growth roll for a cell's column on tick [tick], scaled by CF_FRUIT_RATE / 100."
+  fn rolls(x : Int, z : Int, tick : Int, seed : Int, tier : Int, scale : Float) : Bool do
+    N.hash2(x * 13 + tick, z * 17 - tick, seed + 91) < rate(tier) *. scale
+  end
+  fn is_decay(entry : Int) : Bool do entry >= 1073741824 end
+  fn column_of(entry : Int) : Int do entry % 1073741824 end
+
+  -- One column: a body that the network has left decays; an empty canonical
+  -- column of a mature, shown species may grow when its roll passes.
+  pfn scan_go(sps : NativeU8Arr, vg : NativeFloatArr, shown : NativeU8Arr, w : CubeForge.World.World, bio : CubeForge.Biome.Field, seed : Int, tick : Int,
+              n : Int, i : Int, left : Int, budget : Int, scale : Float, acc : List(Int)) : List(Int) do
+    if left <= 0 || budget <= 0 do acc
+    else
+      let ci = i % (n * n)
+      let x = ci % n
+      let z = ci / n
+      let h = CubeForge.Biome.height_of(bio, x, z)
+      let base = base_of(w, x, z, h)
+      let body = has_body(w, x, z, base)
+      let sp = NativeArray.get_u8(sps, ci)
+      if body do
+        let bsp = C.fruit_species(W.block_at(w, x, base + 1, z))
+        if NativeArray.get_u8(shown, ci) != bsp do scan_go(sps, vg, shown, w, bio, seed, tick, n, i + 1, left - 1, budget - 1, scale, Cons(ci + 1073741824, acc))
+        else scan_go(sps, vg, shown, w, bio, seed, tick, n, i + 1, left - 1, budget, scale, acc) end
+      else if sp == 0 do scan_go(sps, vg, shown, w, bio, seed, tick, n, i + 1, left - 1, budget, scale, acc)
+      else
+        let tier = S.tier(sp)
+        let ok = if NativeArray.get_float(vg, ci) < CubeForge.Myc.fruit_vigour() do false
+                 else if NativeArray.get_u8(shown, ci) != sp do false
+                 else if !is_canonical(x, z, tier, seed) do false
+                 else if base <= 0 || base + height_of(sp, x, z, seed) >= 255 do false
+                 else rolls(x, z, tick, seed, tier, scale) end end end end
+        if ok do scan_go(sps, vg, shown, w, bio, seed, tick, n, i + 1, left - 1, budget - 1, scale, Cons(ci, acc))
+        else scan_go(sps, vg, shown, w, bio, seed, tick, n, i + 1, left - 1, budget, scale, acc) end
+      end end
+    end
+  end
+
+  doc "Columns to act on this tick: growth entries are column indices, decay entries have bit 30 set. At most [budget], scanning [scan] columns from where tick [tick] leaves off."
+  fn candidates(f : CubeForge.Myc.Field, shown : NativeU8Arr, w : CubeForge.World.World, bio : CubeForge.Biome.Field, seed : Int, tick : Int, scan : Int, budget : Int, scale : Float) : List(Int) do
+    let n = CubeForge.Biome.cols(w)
+    scan_go(CubeForge.Myc.field_species(f), CubeForge.Myc.field_vigour(f), shown, w, bio, seed, tick, n, (tick * scan) % (n * n), scan, budget, scale, Nil)
+  end
+
+  -- ── Counting, for the dump summary ───────────────────────────────────────
+  pfn count_go(w : CubeForge.World.World, bio : CubeForge.Biome.Field, n : Int, tier : Int, i : Int, acc : Int) : Int do
+    if i >= n * n do acc
+    else
+      let x = i % n
+      let z = i / n
+      let base = base_of(w, x, z, CubeForge.Biome.height_of(bio, x, z))
+      let id = W.block_at(w, x, base + 1, z)
+      let hit = if C.is_fruit_small(id) || C.is_fruit_stem(id) do S.tier(C.fruit_species(id)) == tier else false end
+      count_go(w, bio, n, tier, i + 1, if hit do acc + 1 else acc end)
+    end
+  end
+  doc "Bodies of [tier] standing in the world, by their first block. A diagnostic: 16k columns of block reads."
+  fn count_bodies(w : CubeForge.World.World, bio : CubeForge.Biome.Field, tier : Int) : Int do
+    let n = CubeForge.Biome.cols(w)
+    count_go(w, bio, n, tier, 0, 0)
+  end
+
 end
