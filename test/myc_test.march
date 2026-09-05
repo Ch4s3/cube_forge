@@ -62,6 +62,27 @@ mod CubeForge.Test.Myc do
     if i >= 1000 do acc else dig_count(i + 1, if Myc.dig_spore(i % 37, 60 + i % 5, i / 37, 7) do acc + 1 else acc end) end
   end
 
+
+  -- Tick [f] both ways for [k] ticks, asserting they agree after every tick.
+  pfn agree_go(a : CubeForge.Myc.Field, b : CubeForge.Myc.Field, n : Int, ta : NativeFloatArr, ma : NativeFloatArr, rate : Float, k : Int, t : Int) : Bool do
+    if k <= 0 do true
+    else
+      let a1 = Myc.tick(a, n, ta, ma, Myc.no_climate(n), rate)
+      let b1 = Myc.tick_all(b, n, ta, ma, rate)
+      if Myc.state_hash(a1, n) != Myc.state_hash(b1, n) do false
+      else if !same_vigour(a1, b1, n, 0) do false
+      else agree_go(a1, b1, n, ta, ma, rate, k - 1, t + 1) end end
+    end
+  end
+  pfn same_vigour(a : CubeForge.Myc.Field, b : CubeForge.Myc.Field, n : Int, i : Int) : Bool do
+    if i >= n * n do true
+    else if Myc.vigour_of(a, n, i % n, i / n) != Myc.vigour_of(b, n, i % n, i / n) do false
+    else same_vigour(a, b, n, i + 1) end end
+  end
+  pfn tick_clim(f : CubeForge.Myc.Field, n : Int, ta : NativeFloatArr, ma : NativeFloatArr, clim : NativeU8Arr, rate : Float, k : Int) : CubeForge.Myc.Field do
+    if k <= 0 do f else tick_clim(Myc.tick(f, n, ta, ma, clim, rate), n, ta, ma, clim, rate, k - 1) end
+  end
+
   describe "Myc.tick" do
     test "vigour eases toward fitness and a planting in the wrong climate withers" do
       let n = 32
@@ -213,6 +234,36 @@ mod CubeForge.Test.Myc do
       Test.assert_eq_int(Myc.dirty_count(g, n), Myc.count_species(g, n, 3), "every column the patch wrote")
       let r = Myc.reseed(Myc.clean(g, n), n, 20, 16)
       Test.assert_eq_int(Myc.dirty_count(r, n), 1, "reseed dirties its column")
+    end
+  end
+
+
+  describe "Myc active set" do
+    test "the dirty-set tick agrees with the look-at-everything tick, every tick of a contest" do
+      let n = 40
+      let ta = uniform(n, 0.68)
+      let ma = uniform(n, 0.7)
+      let f0 = Myc.plant(Myc.plant(Myc.build(n), n, 20, 20, 4), n, 26, 20, 5)
+      Test.assert_true(agree_go(f0, f0, n, ta, ma, 0.05, 300, 0), "identical hashes and vigour for 300 ticks")
+    end
+    test "a settled patch has nothing to look at" do
+      let n = 32
+      let f = tick_n(Myc.plant(Myc.build(n), n, 16, 16, 3), n, uniform(n, 0.5), uniform(n, 0.3), 0.1, 600)
+      Test.assert_eq_int(Myc.active_count(f, n, Myc.no_climate(n)), 0, "nothing dirty, nothing near dirty")
+      Test.assert_eq_int(Myc.dirty_count(f, n), 0, "no column marked")
+    end
+    test "a settled patch wakes only when the climate is reported as moved" do
+      let n = 32
+      let dry = uniform(n, 0.1)
+      let wet = uniform(n, 0.7)
+      let hot = uniform(n, 0.85)
+      let f = tick_n(Myc.plant(Myc.build(n), n, 16, 16, 6), n, hot, dry, 0.1, 600)
+      Test.assert_true(Myc.count_species(f, n, 6) > 50, "Sunshelf settled in the desert")
+      Test.assert_eq_int(Myc.active_count(f, n, Myc.no_climate(n)), 0, "and settled")
+      let asleep = tick_clim(f, n, hot, wet, Myc.no_climate(n), 0.1, 200)
+      Test.assert_eq_int(Myc.count_species(asleep, n, 6), Myc.count_species(f, n, 6), "unreported climate change: nothing happens")
+      let woken = tick_clim(f, n, hot, wet, NativeArray.make_u8(n * n, 1), 0.1, 200)
+      Test.assert_eq_int(Myc.count_species(woken, n, 6), 0, "reported: the whole patch withers")
     end
   end
 
