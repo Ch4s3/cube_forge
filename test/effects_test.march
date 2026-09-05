@@ -1,0 +1,90 @@
+-- Food effects: timers, multipliers, the species table, and the player physics that reads them.
+mod CubeForge.Test.Effects do
+
+  needs IO.Spawn
+  import Test
+  alias CubeForge.Effects as Ef
+  alias CubeForge.Player as Pl
+  alias CubeForge.Chunk as Ce
+
+  pfn near(a : Float, b : Float) : Bool do Math.abs(a -. b) < 0.0001 end
+
+  -- A flat stone world at height 70, one chunk.
+  pfn flat_cells(c : CubeForge.Chunk.Chunk, i : Int) : CubeForge.Chunk.Chunk do
+    if i >= 256 * 71 do c else flat_cells(Ce.set(c, i % 16, i / 256, (i / 16) % 16, 3), i + 1) end
+  end
+  pfn flat_world() : CubeForge.World.World do
+    CubeForge.World.World(Array.from_list([flat_cells(Ce.new(), 0)]), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.World.shown_new(), 1)
+  end
+
+  describe "Effects" do
+    test "apply starts a timer that runs out, and refreshes rather than stacks" do
+      let e0 = Ef.new()
+      Test.assert_false(Ef.active(e0, Ef.k_speed(), 5.0), "nothing at first")
+      Test.assert_true(Ef.summary(e0, 5.0) == "", "empty summary")
+      let e1 = Ef.apply(e0, Ef.k_speed(), 10.0)
+      Test.assert_true(Ef.active(e1, Ef.k_speed(), 10.0 +. Ef.duration() -. 0.1), "active until the end")
+      Test.assert_false(Ef.active(e1, Ef.k_speed(), 10.0 +. Ef.duration() +. 0.1), "expired after")
+      Test.assert_true(near(Ef.remaining(e1, Ef.k_speed(), 20.0), Ef.duration() -. 10.0), "remaining")
+      let e2 = Ef.apply(e1, Ef.k_speed(), 25.0)
+      Test.assert_true(near(Ef.remaining(e2, Ef.k_speed(), 25.0), Ef.duration()), "refreshed, not stacked")
+      Test.assert_false(Ef.active(e2, Ef.k_jump(), 25.0), "other kinds untouched")
+    end
+    test "multipliers and the summary line" do
+      let e = Ef.apply(Ef.apply(Ef.new(), Ef.k_jump(), 0.0), Ef.k_lantern(), 0.0)
+      Test.assert_true(near(Ef.speed_mult(e, 1.0), 1.0), "no speed")
+      Test.assert_true(Ef.jump_mult(e, 1.0) > 1.0, "jump up")
+      Test.assert_true(Ef.lantern(e, 1.0), "lantern on")
+      Test.assert_true(Ef.summary(e, 1.0) == "JUMP 29  LANTERN 29", "summary lists both with whole seconds left")
+      Test.assert_true(Ef.summary(e, 40.0) == "", "gone")
+    end
+    test "each species maps to its effect" do
+      Test.assert_eq_int(Ef.kind_for(3), Ef.k_speed(), "Meadowbell runs")
+      Test.assert_eq_int(Ef.kind_for(6), Ef.k_speed(), "Sunshelf runs")
+      Test.assert_eq_int(Ef.kind_for(1), Ef.k_jump(), "Frostcap jumps")
+      Test.assert_eq_int(Ef.kind_for(2), Ef.k_jump(), "Pinewart jumps")
+      Test.assert_eq_int(Ef.kind_for(5), Ef.k_swim(), "Marshlight swims")
+      Test.assert_eq_int(Ef.kind_for(4), Ef.k_lantern(), "Lanterncap lights")
+      Test.assert_eq_int(Ef.kind_for(0), 0 - 1, "nothing for nothing")
+    end
+  end
+
+  describe "Player.update_with" do
+    test "the jump multiplier scales the take-off and the speed multiplier the stride" do
+      let w = flat_world()
+      let p0 = Pl.new(8.5, 71.0, 8.5)
+      let jump_in = CubeForge.Player.Input(0.0, 0.0, 0.0, 0.0, true, false)
+      let plain = Pl.update_with(p0, jump_in, w, 0.001, 1.0, 1.0, 1.0)
+      let boosted = Pl.update_with(p0, jump_in, w, 0.001, 1.0, 1.35, 1.0)
+      Test.assert_true(near(CubeForge.Math.Vec3.y(Pl.velocity(boosted)), CubeForge.Math.Vec3.y(Pl.velocity(plain)) *. 1.35), "1.35x take-off")
+      let walk_in = CubeForge.Player.Input(1.0, 0.0, 0.0, 0.0, false, false)
+      let slow = Pl.update_with(p0, walk_in, w, 0.001, 1.0, 1.0, 1.0)
+      let fast = Pl.update_with(p0, walk_in, w, 0.001, 1.5, 1.0, 1.0)
+      let vs = CubeForge.Math.Vec3.z(Pl.velocity(slow))
+      let vf = CubeForge.Math.Vec3.z(Pl.velocity(fast))
+      Test.assert_true(near(vf, vs *. 1.5), "1.5x stride")
+      Test.assert_true(near(CubeForge.Math.Vec3.z(Pl.velocity(Pl.update(p0, walk_in, w, 0.001))), vs), "update is update_with at 1")
+    end
+  end
+
+
+  -- Sweep [t] to [stop] in steps, checking the stamp changes exactly when the summary does.
+  pfn sweep(e : CubeForge.Effects.Effects, t : Float, stop : Float, prev_stamp : Int, prev_sum : String) : Bool do
+    if t > stop do true
+    else
+      let st = Ef.stamp(e, t)
+      let sm = Ef.summary(e, t)
+      if (st != prev_stamp) != (sm != prev_sum) do false
+      else sweep(e, t +. 0.05, stop, st, sm) end
+    end
+  end
+
+  describe "Effects.stamp" do
+    test "changes exactly when the summary text would, and never allocates to find out" do
+      let e = Ef.apply(Ef.apply(Ef.new(), Ef.k_speed(), 0.0), Ef.k_lantern(), 3.3)
+      Test.assert_true(sweep(e, 0.0, 40.0, Ef.stamp(e, 0.0 -. 0.05), Ef.summary(e, 0.0 -. 0.05)), "stamp and summary agree on every change over 40 s")
+      Test.assert_eq_int(Ef.stamp(Ef.new(), 5.0), 0, "nothing active is stamp 0")
+    end
+  end
+
+end

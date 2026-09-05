@@ -163,6 +163,12 @@ mod CubeForge.Inventory do
     end
   end
 
+  doc "Remove one [item] from the first stack holding it; unchanged when there is none."
+  fn take_one(i : Inv, item : Int) : Inv do
+    let s = find_stack(i, item, 0, slots())
+    if s < 0 do i else set_slot(i, s, item, count_at(i, s) - 1) end
+  end
+
   -- ── Moving stacks ───────────────────────────────────────────────────────────
 
   doc """

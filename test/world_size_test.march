@@ -1,0 +1,64 @@
+-- The world's size is one number, CubeForge.World.size(), and a scattering of
+-- integer literals that have to agree with it.
+--
+-- They cannot be derived from it. A refinement predicate that calls a function
+-- has no SMT translation -- `@[measure]` on the function silences the warning
+-- and leaves the precondition unverified -- so Light.index's bounds, and every
+-- guard that discharges them, have to be literals. Deriving them was measured:
+-- 85 unverified obligations became 100.
+--
+-- So the agreement is asserted here instead. Raising World.size() fails these
+-- tests, and each one names the literal to change with it. That is the whole
+-- point: the coupling is real, and it should be loud rather than silent.
+mod CubeForge.WorldSizeTest do
+
+  alias CubeForge.World as W
+  alias CubeForge.Light as L
+  alias CubeForge.Chunk as C
+
+  describe "world size" do
+    test "the column stride matches the chunk grid" do
+      Test.assert_eq_int(W.cols(), 16 * W.size(), "cols() is size() chunks of 16")
+      Test.assert_eq_int(W.cols(), 128, "the literal every index bound is written as")
+    end
+
+    test "the light field's dimensions match the world" do
+      Test.assert_eq_int(L.size_x(), W.cols(), "light is as wide as the world")
+      Test.assert_eq_int(L.size_z(), W.cols(), "and as deep")
+      Test.assert_eq_int(L.size_y(), C.size_y(), "and as tall as a chunk")
+      Test.assert_eq_int(L.volume(), L.size_x() * L.size_y() * L.size_z(), "volume is the product")
+      Test.assert_eq_int(L.volume(), 4194304, "the literal in index()'s result bound and new()")
+    end
+
+    test "the two layer strides are what they claim, and are not the same thing" do
+      Test.assert_eq_int(L.layer(), L.size_x() * L.size_z(), "a world y layer is cols x cols")
+      Test.assert_eq_int(L.chunk_layer(), C.size_x() * C.size_z(), "a chunk y layer is 16 x 16")
+      -- Both were bare numbers before, 16384 and 256, and 256 is also the world
+      -- height -- three different meanings sharing two spellings.
+      Test.assert_true(L.layer() != L.chunk_layer(), "they are different strides")
+    end
+
+    test "the flat index agrees with the strides it is written from" do
+      Test.assert_eq_int(L.index(0, 0, 0), 0, "origin")
+      Test.assert_eq_int(L.index(1, 0, 0), 1, "x is the fastest axis")
+      Test.assert_eq_int(L.index(0, 0, 1), L.size_x(), "z steps by a row")
+      Test.assert_eq_int(L.index(0, 1, 0), L.layer(), "y steps by a layer")
+      Test.assert_eq_int(L.index(L.size_x() - 1, L.size_y() - 1, L.size_z() - 1), L.volume() - 1, "the last voxel is the last slot")
+    end
+
+    test "the occupancy index covers the same field in a different order" do
+      Test.assert_eq_int(L.occ_index(0, 0, 0), 0, "origin")
+      Test.assert_eq_int(L.occ_index(1, 0, 0), 1, "x is the fastest axis here too")
+      Test.assert_eq_int(L.occ_index(0, 1, 0), L.size_x(), "but y steps by a row")
+      Test.assert_eq_int(L.occ_index(L.size_x() - 1, L.size_y() - 1, L.size_z() - 1), L.volume() - 1, "and it is the same size")
+    end
+
+    test "the biome field's stride is the world's" do
+      -- Biome's accessors index hs/ws/bs as wx + 128 * wz, and the field is
+      -- allocated at the world's runtime size. If those disagree the field reads
+      -- the wrong column and nothing errors.
+      Test.assert_eq_int(CubeForge.Biome.stride(), W.cols(), "the accessors' stride is the world's width")
+    end
+  end
+
+end

@@ -399,4 +399,20 @@ mod CubeForge.Test.Biome do
     end
   end
 
+  describe "Biome export and import" do
+    test "the eased axes round-trip and classify as before" do
+      let w = flat_world(70)
+      let n = Biome.cols(w)
+      let f0 = Biome.build(w, 7)
+      let bonus = NativeArray.set_f32(NativeArray.make_f32(2 * n * n, 0.0), 2 * (40 + n * 40) + 1, 0.19)
+      let f1 = tick_k(f0, w, bonus, 12)
+      let bytes = Biome.axes_to_bytes(f1, n, NativeArray.make_u8(4 * n * n + 5, 0), 5)
+      let g = Biome.axes_of_bytes(Biome.build(w, 7), w, bytes, 5)
+      Test.assert_true(Math.abs(Biome.moist_of(g, 40, 40) -. Biome.moist_of(f1, 40, 40)) < 0.0001, "moisture")
+      Test.assert_true(Math.abs(Biome.temp_of(g, 40, 40) -. Biome.temp_of(f1, 40, 40)) < 0.0001, "temperature")
+      Test.assert_eq_int(Biome.biome_of(g, 40, 40), Biome.biome_of(f1, 40, 40), "same biome")
+      Test.assert_eq_int(NativeArray.get_u8(Biome.active(g), 40 + n * 40), 1, "active after a load, so it settles or moves on its own")
+    end
+  end
+
 end

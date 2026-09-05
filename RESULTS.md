@@ -1621,6 +1621,73 @@ bare ground; the biome's eased axes are rebuilt at target the same way. Both
 are the "cannot be rebuilt from the voxels" risk the two specs carry. Listed
 in `todos.md`.
 
+
+## Save the fields, and food effects (2026-09-05)
+
+Plan `docs/superpowers/plans/2026-09-05-fungus-save-fields-and-food.md`.
+
+**The fields ride in the save.** One more file per slot, `fields.bin`, 131,072
+bytes for the 128-column world: species, vigour (0..255), reach and shown
+species at one byte per column, then the biome's eased temperature and
+moisture at two bytes each. Written after the chunks and before the header,
+so the header still marks a complete save; a slot without it (an older save)
+loads with a printed note and rebuilds both fields from the seed as before.
+Round trip on seed 7 with a planted patch grown to frame 1500: the `myc`
+state hash and every species count are identical across the load, and the
+climate carries on from its saved position (moisture 0.2433 at the save,
+0.2422 a hundred frames into the loaded session, easing as it was). Load
+cost: 11 ms for the slot including the fields. Hold, claimant, the climate
+memory and the pulls are rebuilt on load and the first tick looks at every
+column once.
+
+`import` is a keyword in March: `fn import(...)` is a parse error with no
+hint that the name is the problem (GAPS G65 has the same shape). The pair is
+`to_bytes` / `of_bytes`.
+
+**Food.** A cap is food. Using one with nothing in reach eats it: one is
+consumed and the species' effect starts, or refreshes, for thirty seconds.
+`CubeForge.Effects` holds four until-times and answers multipliers for a
+clock; `Player.update_with` takes them (walk speed, jump speed, swim speed,
+both horizontal and vertical); the lantern effect forces the flashlight on;
+the ground readout line shows the active effects with seconds left. Species
+to effect: Meadowbell and Sunshelf speed x1.5, Frostcap and Pinewart jump
+x1.35, Marshlight swim x1.6, Lanterncap lantern. Effects are not saved.
+`CF_AUTOEAT=100`: `ate a Frostcap cap: JUMP 30`, and the dump 200 frames
+later shows `JUMP 28`.
+
+Budget: 10.25 ms best of 3 (a 32 ms outlier in one run; the pinned run's own
+worst frame 9.67 ms). The allocation gauge reads 127 live objects per frame;
+the effects summary is rebuilt as a string every frame for the readout
+comparison, which is the obvious thing to make per-second if that number
+ever matters.
+
+
+## Effects summary, stamp-gated (2026-09-05)
+
+`Effects.stamp` packs the whole seconds left on each kind into one integer:
+four float reads, no allocation, and it moves exactly when the summary text
+would (a sweep test over forty seconds with two effects checks every step).
+The frame loop rebuilds the summary only when the stamp at `now` differs
+from the stamp at the previous frame's clock -- which also catches a bite
+this frame, whose timer was a second longer a frame ago -- and the UI keeps
+the last string otherwise. The allocation gauge did not move (127 live
+objects per frame with an effect active, the same as before): the ground
+readout string is the per-frame allocator, not this one. Listed.
+
+
+## The reticle over fungus (2026-09-05)
+
+The crosshair leans 45% of the way from white toward the cap colour of the
+fungus under it: a fruit block's own species, a mycelium block's column
+species from `World.shown`. `Hud.reticle_r/g/b(tint)`; the species is folded
+into the HUD rebuild key, so the bars recolour only when the target's species
+changes and nothing is rebuilt per frame. `docs/fungus-reticle.png`: looking
+straight down at a Lanterncap patch (`CF_PITCH=-140`, a new knob for the
+spawn pitch in hundredths of a radian), the reticle is a warm cream against
+the white it keeps over sky and water. Budget 11.26 ms best of 3 on a machine
+still carrying other sessions' benchmarks.
+
+
 ## Oasis and fungal grove (2026-09-05)
 
 `docs/superpowers/specs/2026-09-05-oasis-and-fungal-grove-design.md`, plan

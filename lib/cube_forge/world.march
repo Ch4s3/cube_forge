@@ -10,7 +10,11 @@ mod CubeForge.World do
 
   type World = World(Array.PVec(CubeForge.Chunk.Chunk), NativeU8Arr, NativeU8Arr, NativeU8Arr, NativeU8Arr, Int)   -- chunks, skylight field, block-light field, occupancy field, shown species per column, side length in chunks
 
+  doc "The world's side in chunks. The one number the world's size comes from."
   fn size() : Int do 8 end
+
+  doc "Columns per side: size() chunks of 16."
+  fn cols() : Int do 16 * size() end
 
   fn side(w : World) : Int do match w do World(_, _, _, _, _, n) -> n end end
 
@@ -63,6 +67,8 @@ mod CubeForge.World do
     if x < 0 || z < 0 || x >= 128 || z >= 128 do 0
     else match w do World(_, _, _, _, sh, _) -> NativeArray.get_u8(sh, x + 128 * z) end end
   end
+  doc "Replace the shown-species array whole (a load)."
+  fn with_shown(w : World, sh : NativeU8Arr) : World do match w do World(cs, la, lb, o, _, n) -> World(cs, la, lb, o, sh, n) end end
   fn set_shown(w : World, x : Int, z : Int, sp : Int) : World do
     if x < 0 || z < 0 || x >= 128 || z >= 128 do w
     else match w do World(cs, la, lb, o, sh, n) -> World(cs, la, lb, o, NativeArray.set_u8(sh, x + 128 * z, sp), n) end end

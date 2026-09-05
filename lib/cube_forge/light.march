@@ -13,10 +13,20 @@ mod CubeForge.Light do
 
   alias CubeForge.Chunk as C
 
+  -- These four, and every size literal below, are tied to CubeForge.World.size()
+  -- and cannot be derived from it: a refinement predicate that calls a function
+  -- has no SMT translation, so deriving them costs the static bounds proofs that
+  -- index() exists to give (measured: 85 unverified obligations become 100).
+  -- world_size_test asserts they agree, so changing the world's size fails
+  -- loudly here rather than silently mis-indexing.
   fn size_x() : Int do 128 end
   fn size_y() : Int do 256 end
   fn size_z() : Int do 128 end
   fn volume() : Int do 4194304 end
+  doc "World columns in one y layer: the stride between layers in the flat index."
+  fn layer() : Int do 16384 end
+  doc "Cells in one y layer of a CHUNK, 16 x 16. Distinct from layer(), and both were spelled as bare numbers before."
+  fn chunk_layer() : Int do 256 end
   fn max_level() : Int do 15 end
   @[no_alloc]
   -- Flat world index of a voxel; the refinements let Z3 discharge the bound.
@@ -103,7 +113,7 @@ mod CubeForge.Light do
 
   -- Every column of one chunk, with the chunk fetched once.
   pfn seed_chunk_go(la : NativeU8Arr, c : CubeForge.Chunk.Chunk, cx : Int, cz : Int, i : Int) : NativeU8Arr do
-    if i >= 256 do la
+    if i >= chunk_layer() do la
     else
       let lx = i % 16
       let lz = i / 16
@@ -189,7 +199,7 @@ mod CubeForge.Light do
   -- than the scan it is meant to save (GAPS.md G64, learned the hard way twice).
   pfn chunk_top(c : CubeForge.Chunk.Chunk, i : Int) : Int do
     if i < 0 do 0
-    else if CubeForge.Chunk.get_idx(c, i) != 0 do i / 256
+    else if CubeForge.Chunk.get_idx(c, i) != 0 do i / chunk_layer()
     else chunk_top(c, i - 1) end end
   end
   pfn sky_floor_go(w : CubeForge.World.World, ci : Int, n : Int, acc : Int) : Int do
@@ -209,7 +219,7 @@ mod CubeForge.Light do
   pfn level_go(src : NativeU8Arr, dst : NativeU8Arr, w : CubeForge.World.World, lv : Int, i : Int, stop : Int) : NativeU8Arr do
     if i >= stop do dst
     else if NativeArray.get_u8(src, i) != lv do level_go(src, dst, w, lv, i + 1, stop)
-    else level_go(src, give6(src, dst, w, i % 128, i / 16384, (i / 128) % 128, lv), w, lv, i + 1, stop) end end
+    else level_go(src, give6(src, dst, w, i % size_x(), i / layer(), (i / size_x()) % size_z(), lv), w, lv, i + 1, stop) end end
   end
 
   -- Sweep levels [lv] down to 2. Each level writes into a FRESH buffer rather
@@ -228,7 +238,7 @@ mod CubeForge.Light do
 
   doc "Propagate [la] to a fixed point, scanning only up to the highest non-air voxel."
   fn spread(la : NativeU8Arr, w : CubeForge.World.World) : NativeU8Arr do
-    sweep_go(la, w, max_level(), (sky_floor(w) + 1) * 16384)
+    sweep_go(la, w, max_level(), (sky_floor(w) + 1) * layer())
   end
 
   doc "Compute the world's skylight from scratch: seed every column, then spread."
@@ -440,6 +450,8 @@ mod CubeForge.Light do
     let sy0 = if cy0 <= 0 do 0 else clampi(cy0 - 1, 0, 255) end
     -- One y layer past the box top, so give1's reads of the layer above are in
     -- range; that layer is read-only and feeds the box as a boundary source.
+    -- Literal, not layer(): this feeds copy_prefix's `_ >= 1`, and a call has no
+    -- SMT translation, so naming it here costs two verified obligations.
     let plen = (sy1 + 2) * 16384
     -- only the swept y-slice is written, so only it has to be re-synced per pass
     let slo = sy0 * 16384
@@ -494,6 +506,16 @@ mod CubeForge.Light do
   end
 
   doc "Repair the block-light field after the block at (ex, ey, ez) changed, reporting which sections moved. [w] is the world after the edit."
+  -- Is any voxel of the box lit? Reads through get(), which is bounds-checked,
+  -- and stops at the first hit.
+  pfn box_any_go(lb : NativeU8Arr, x0 : Int, x1 : Int, y0 : Int, y1 : Int, z0 : Int, z1 : Int, i : Int) : Bool do
+    let bw = x1 - x0 + 1
+    let bh = y1 - y0 + 1
+    if i >= bw * bh * (z1 - z0 + 1) do false
+    else if get(lb, x0 + i % bw, y0 + (i / bw) % bh, z0 + i / (bw * bh)) != 0 do true
+    else box_any_go(lb, x0, x1, y0, y1, z0, z1, i + 1) end end
+  end
+
   fn relight_block_marked(lb : NativeU8Arr, w : CubeForge.World.World, ex : Int, ey : Int, ez : Int) : Relit do
     let r = relight_radius()
     let cx0 = clampi(ex - r, 0, 127)
@@ -503,6 +525,27 @@ mod CubeForge.Light do
     let cy0 = clampi(ey - r, 0, 255)
     let cy1 = clampi(ey + r, 0, 255)
     let sy1 = clampi(ey + r + 1, 0, 255)
+    -- Most edits are nowhere near a light-emitting block, and for those this
+    -- whole pass is provably a no-op: with no block light anywhere in the scan
+    -- box, there is nothing to clear, nothing to seed (an emissive block inside
+    -- the box would have lit its own cell), and nothing outside can reach in
+    -- without lighting the ring, which the scan box contains. The edit's own
+    -- block is the one thing that can add light without appearing in the field
+    -- yet, so it is tested separately. Nested, not `&&`: `&&` evaluates both
+    -- sides (GAPS G33) and the box scan is the expensive half.
+    --
+    -- Worth it because this pass is half the cost of a block edit: relighting
+    -- both fields was 5.7-6.9 ms of a 10-14 ms break, and skylight is the half
+    -- that genuinely has work to do.
+    let sx0g = clampi(ex - r - 1, 0, 127)
+    let sx1g = clampi(ex + r + 1, 0, 127)
+    let sz0g = clampi(ez - r - 1, 0, 127)
+    let sz1g = clampi(ez + r + 1, 0, 127)
+    let sy0g = if cy0 <= 0 do 0 else clampi(cy0 - 1, 0, 255) end
+    let dark = if emission(CubeForge.World.block_at(w, ex, ey, ez)) != 0 do false
+               else !box_any_go(lb, sx0g, sx1g, sy0g, sy1, sz0g, sz1g, 0) end
+    if dark do Relit(lb, marks_new())
+    else
     -- Only y layers up to the scan box top are read or written, and a y range
     -- is a contiguous prefix of the flat index, so every copy is that prefix.
     let plen = if sy1 >= 254 do volume() else (sy1 + 2) * 16384 end
@@ -520,6 +563,7 @@ mod CubeForge.Light do
                               sx0, sx1, sy0, sy1, sz0, sz1, slo, plen - slo)
     let out = CubeForge.Ffi.Window.u8_blit(lb2, slo, swept, slo, plen - slo)
     Relit(out, mark_box(marks_new(), before, out, sx0, sx1, sy0, sy1, sz0, sz1))
+    end
   end
 
   -- The union of two marks arrays, as a fresh array: reads [a] and [b], writes
@@ -563,7 +607,7 @@ mod CubeForge.Light do
     if i >= stop do o
     else
       let lx = i % 16
-      let ly = i / 256
+      let ly = i / chunk_layer()
       let lz = (i / 16) % 16
       let v = if occludes(C.get_idx(c, i)) do occ_solid() else 0 end
       occ_chunk_go(NativeArray.set_u8(o, occ_index(16 * cx + lx, ly, 16 * cz + lz), v), c, cx, cz, i + 1, stop)
@@ -584,7 +628,7 @@ mod CubeForge.Light do
     -- A chunk's flat index is ordered by y, so stopping past the highest non-air
     -- layer skips the empty sky. The buffer starts zeroed, which is exactly the
     -- right answer up there.
-    occ_go(new(), w, 0, CubeForge.World.side(w), (sky_floor(w) + 1) * 256)
+    occ_go(new(), w, 0, CubeForge.World.side(w), (sky_floor(w) + 1) * chunk_layer())
   end
 
 end

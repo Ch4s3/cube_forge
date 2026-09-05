@@ -122,6 +122,14 @@ mod CubeForge.Biome do
 
   fn cols(w : CubeForge.World.World) : Int do W.side(w) * 16 end
 
+  doc """
+  The stride the Field's accessors index by. The field is allocated at the
+  world's runtime size (cols(w) above); this is the compile-time width the
+  accessors are written against, and world_size_test asserts they agree. It is a
+  literal for the same reason Light.index's bounds are -- see World.cols.
+  """
+  fn stride() : Int do 128 end
+
   -- Highest non-air block in a column, scanning down from [top]. 0 if none.
   pfn surface_go(w : CubeForge.World.World, wx : Int, wz : Int, y : Int) : Int do
     if y <= 0 do 0
@@ -340,10 +348,10 @@ mod CubeForge.Biome do
   end
 
   fn height_of(f : Field, wx : Int, wz : Int) : Int do
-    match f do Field(hs, _, _, _, _, _, _, _, _) -> NativeArray.get_u8(hs, wx + 128 * wz) end
+    match f do Field(hs, _, _, _, _, _, _, _, _) -> NativeArray.get_u8(hs, wx + stride() * wz) end
   end
   fn biome_of(f : Field, wx : Int, wz : Int) : Int do
-    match f do Field(_, _, _, _, bs, _, _, _, _) -> NativeArray.get_u8(bs, wx + 128 * wz) end
+    match f do Field(_, _, _, _, bs, _, _, _, _) -> NativeArray.get_u8(bs, wx + stride() * wz) end
   end
   fn field_biomes(f : Field) : NativeU8Arr do match f do Field(_, _, _, _, bs, _, _, _, _) -> bs end end
 
@@ -529,10 +537,10 @@ mod CubeForge.Biome do
   end
 
   pfn tick_go(hs : NativeU8Arr, tb : NativeFloatArr, rate : Float, d : NativeU8Arr, pulls : NativeF32Arr, prow : NativeU8Arr, scale : Float,
-              sps : NativeU8Arr, vg : NativeF32Arr, drow : NativeU8Arr, n : Int, i : Int,
+              sps : NativeU8Arr, vg : NativeF32Arr, drow : NativeU8Arr, n : Int, i : Int, stop : Int,
               ta : NativeFloatArr, ma : NativeFloatArr, bs : NativeU8Arr, hold : NativeU8Arr, act : NativeU8Arr) : Field do
-    if i >= n * n do Field(hs, NativeArray.make_u8(0, 0), ta, ma, bs, hold, tb, NativeArray.make_u8(0, 0), act)
-    else if !must_look(act, prow, drow, sps, vg, bs, n, i) do tick_go(hs, tb, rate, d, pulls, prow, scale, sps, vg, drow, n, i + 1, ta, ma, bs, hold, act)
+    if i >= stop do Field(hs, NativeArray.make_u8(0, 0), ta, ma, bs, hold, tb, NativeArray.make_u8(0, 0), act)
+    else if !must_look(act, prow, drow, sps, vg, bs, n, i) do tick_go(hs, tb, rate, d, pulls, prow, scale, sps, vg, drow, n, i + 1, stop, ta, ma, bs, hold, act)
     else
       let h = NativeArray.get_u8(hs, i)
       let dv = NativeArray.get_u8(d, i)
@@ -558,7 +566,7 @@ mod CubeForge.Biome do
       -- the network's pull on this row moving.
       let settled = if t == tt do (if m == mt do hc1 == 0 else false end) else false end
       let act1 = NativeArray.set_u8(act, i, if settled do 0 else 1 end)
-      tick_go(hs, tb, rate, d, pulls, prow, scale, sps, vg, drow, n, i + 1,
+      tick_go(hs, tb, rate, d, pulls, prow, scale, sps, vg, drow, n, i + 1, stop,
               NativeArray.set_float(ta, i, t), NativeArray.set_float(ma, i, m),
               NativeArray.set_u8(bs, i, b1), NativeArray.set_u8(hold, i, hc1), act1)
     end end
@@ -643,33 +651,77 @@ mod CubeForge.Biome do
   to discover that almost none of them had moved.
   """
   fn tick(f : Field, w : CubeForge.World.World, seed : Int, rate : Float, pulls : NativeF32Arr, prow : NativeU8Arr, scale : Float) : Field do
-    let n = cols(w)
-    tick_net(f, w, seed, rate, pulls, prow, scale, no_species(n), no_vigour(n), no_rows(n))
+    tick_slice(tick_begin(f, w), w, rate, pulls, prow, scale, 0, cols(w) * cols(w))
+  end
+  doc "The whole tick with the network in view (see tick_slice_net): for tests."
+  fn tick_net(f : Field, w : CubeForge.World.World, seed : Int, rate : Float, pulls : NativeF32Arr, prow : NativeU8Arr, scale : Float,
+              sps : NativeU8Arr, vg : NativeF32Arr, drow : NativeU8Arr) : Field do
+    tick_slice_net(tick_begin(f, w), w, rate, pulls, prow, scale, 0, cols(w) * cols(w), sps, vg, drow)
   end
 
   doc """
-  The tick with the network in view: [sps] and [vg] are Myc.field_species and
-  Myc.field_vigour, read to find groves, and [drow] is Myc.dirty_rows, waking
-  every column in a row the network changed in or beside. The biome reads the
-  network as it stood at the end of the previous tick; the network then reads
-  the climate this tick eased. The grove cannot feed back: the network never
-  reads the biome id.
+  The whole-map half of a tick: rescan the water flags, recompute the distance
+  field, and wake every column whose distance moved. Nothing is eased here.
+
+  Split from the sweep because these three are O(map) and the sweep is O(awake),
+  and the two want different schedules: this runs once at the head of a period,
+  the sweep is spread across the period's frames a slice at a time.
   """
-  fn tick_net(f : Field, w : CubeForge.World.World, seed : Int, rate : Float, pulls : NativeF32Arr, prow : NativeU8Arr, scale : Float,
-              sps : NativeU8Arr, vg : NativeF32Arr, drow : NativeU8Arr) : Field do
+  fn tick_begin(f : Field, w : CubeForge.World.World) : Field do
     let n = cols(w)
     -- The distances (and the bodies behind them) are a function of the water
-    -- flags alone, so when this tick's flags equal the flags the kept distances
-    -- were swept from -- last tick's, and no edit has moved one since (stale())
-    -- -- the kept distances are the answer, and the sweep and the labelling are
-    -- skipped. Settled water is the common case; flowing water pays the full cost.
+    -- flags alone, so when this period's flags equal the flags the kept
+    -- distances were swept from -- last period's, and no edit has moved one
+    -- since (stale()) -- the kept distances are the answer, and the sweep and
+    -- the body labelling are skipped. Settled water is the common case;
+    -- flowing water pays the full cost.
     match f do
-      Field(hs, ws0, ta0, ma0, bs0, hold0, tb, ds0, act0) ->
+      Field(hs, ws0, ta, ma, bs, hold, tb, ds0, act) ->
         let ws = water_go(w, hs, n, 0, NativeArray.make_u8(n * n, 0))
         let same = same_u8(ws0, ws, ds0, n * n, 0)
-        let d = if same do ds0 else distances(Field(hs, ws, ta0, ma0, bs0, hold0, tb, ds0, act0), w) end
-        match tick_go(hs, tb, rate, d, pulls, prow, scale, sps, vg, drow, n, 0, ta0, ma0, bs0, hold0, mark_dist_go(d, ds0, n, 0, act0)) do
-          Field(hs1, _, ta, ma, bs, hold, tb1, _, act1) -> Field(hs1, ws, ta, ma, bs, hold, tb1, d, act1)
+        let d = if same do ds0 else distances(Field(hs, ws, ta, ma, bs, hold, tb, ds0, act), w) end
+        Field(hs, ws, ta, ma, bs, hold, tb, d, mark_dist_go(d, ds0, n, 0, act))
+    end
+  end
+
+  doc """
+  Ease and reclassify the awake columns in [from, from + count), against the
+  distances tick_begin left in the field, with no network in view. See
+  tick_slice_net.
+  """
+  fn tick_slice(f : Field, w : CubeForge.World.World, rate : Float, pulls : NativeF32Arr, prow : NativeU8Arr, scale : Float, from : Int, count : Int) : Field do
+    let n = cols(w)
+    tick_slice_net(f, w, rate, pulls, prow, scale, from, count, no_species(n), no_vigour(n), no_rows(n))
+  end
+
+  doc """
+  Ease and reclassify the awake columns in [from, from + count), against the
+  distances tick_begin left in the field.
+
+  A period sweeps the whole map in slices, so each column is still visited
+  exactly once per period and the ease rate and the hold counter are unchanged.
+  What moves is only WHEN in the period a column is looked at, which matters
+  solely for an edit landing mid-period: the column ahead of the cursor sees it
+  this period, the one behind it next period. The sweep costs what the awake set
+  costs, and the fungus climate feedback keeps some four thousand columns awake,
+  so it is worth spreading.
+
+  The network in view: [sps] and [vg] are Myc.field_species and
+  Myc.field_vigour, read to find groves, and [drow] is Myc.dirty_rows, whose
+  rows are looked at where the grove test disagrees with the stored biome. The
+  biome reads the network as it stood at the end of the previous period; the
+  network then reads the climate the sweep eased. The grove cannot feed back:
+  the network never reads the biome id.
+  """
+  fn tick_slice_net(f : Field, w : CubeForge.World.World, rate : Float, pulls : NativeF32Arr, prow : NativeU8Arr, scale : Float, from : Int, count : Int,
+                    sps : NativeU8Arr, vg : NativeF32Arr, drow : NativeU8Arr) : Field do
+    let n = cols(w)
+    let lo = if from < 0 do 0 else if from > n * n do n * n else from end end
+    let hi = if lo + count > n * n do n * n else lo + count end
+    match f do
+      Field(hs, ws, ta0, ma0, bs0, hold0, tb, ds, act0) ->
+        match tick_go(hs, tb, rate, ds, pulls, prow, scale, sps, vg, drow, n, lo, hi, ta0, ma0, bs0, hold0, act0) do
+          Field(hs1, _, ta, ma, bs, hold, tb1, _, act1) -> Field(hs1, ws, ta, ma, bs, hold, tb1, ds, act1)
         end
     end
   end
@@ -691,11 +743,51 @@ mod CubeForge.Biome do
   fn no_vigour(n : Int) : NativeF32Arr do NativeArray.make_f32(n * n, 0.0) end
 
 
+  -- ── Save and load: the eased axes ────────────────────────────────────────
+  -- Four bytes per column: temperature then moisture, each 16-bit fixed point
+  -- (1/65535, below anything the game can show). The rest of the field is
+  -- rebuilt from the world: heights, water, distances, the temperature base.
+  pfn put16(out : NativeU8Arr, off : Int, v : Float) : NativeU8Arr do
+    let q = float_to_int(clamp01(v) *. 65535.0 +. 0.5)
+    NativeArray.set_u8(NativeArray.set_u8(out, off, q % 256), off + 1, q / 256)
+  end
+  pfn get16(b : NativeU8Arr, off : Int) : Float do
+    int_to_float(NativeArray.get_u8(b, off) + 256 * NativeArray.get_u8(b, off + 1)) /. 65535.0
+  end
+  pfn export_go(ta : NativeFloatArr, ma : NativeFloatArr, n2 : Int, i : Int, out : NativeU8Arr, off : Int) : NativeU8Arr do
+    if i >= n2 do out
+    else export_go(ta, ma, n2, i + 1, put16(put16(out, off + 4 * i, NativeArray.get_float(ta, i)), off + 4 * i + 2, NativeArray.get_float(ma, i)), off) end
+  end
+  doc "Write the eased axes into [out] at [off], four bytes per column."
+  fn axes_to_bytes(f : Field, n : Int, out : NativeU8Arr, off : Int) : NativeU8Arr do
+    match f do Field(_, _, ta, ma, _, _, _, _, _) -> export_go(ta, ma, n * n, 0, out, off) end
+  end
+  pfn import_go(b : NativeU8Arr, off : Int, hs : NativeU8Arr, d : NativeU8Arr, n : Int, i : Int,
+                ta : NativeFloatArr, ma : NativeFloatArr, bs : NativeU8Arr) : Field do
+    if i >= n * n do Field(hs, NativeArray.make_u8(0, 0), ta, ma, bs, NativeArray.make_u8(0, 0), NativeArray.make_float(0, 0.0), d, NativeArray.make_u8(0, 0))
+    else
+      let t = get16(b, off + 4 * i)
+      let m = get16(b, off + 4 * i + 2)
+      let cls = classify(t, m, NativeArray.get_u8(hs, i), NativeArray.get_u8(d, i))
+      import_go(b, off, hs, d, n, i + 1, NativeArray.set_float(ta, i, t), NativeArray.set_float(ma, i, m), NativeArray.set_u8(bs, i, cls))
+    end
+  end
+  doc "A built field with its eased axes replaced from [b] at [off] and every column reclassified from them and set active, so it settles or moves on from where the save left it."
+  fn axes_of_bytes(f : Field, w : CubeForge.World.World, b : NativeU8Arr, off : Int) : Field do
+    let n = cols(w)
+    match f do
+      Field(hs, ws, _, _, _, _, tb, ds, _) ->
+        match import_go(b, off, hs, ds, n, 0, NativeArray.make_float(n * n, 0.0), NativeArray.make_float(n * n, 0.0), NativeArray.make_u8(n * n, 0)) do
+          Field(_, _, ta, ma, bs, _, _, _, _) -> Field(hs, ws, ta, ma, bs, NativeArray.make_u8(n * n, 0), tb, ds, NativeArray.make_u8(n * n, 1))
+        end
+    end
+  end
+
   doc "Eased temperature / moisture / water flag / distance-cap for one column, for diagnostics."
   fn debug_axes(f : Field, wx : Int, wz : Int) : String do
     match f do
       Field(_, ws, ta, ma, _, _, _, _, _) ->
-        let i = wx + 128 * wz
+        let i = wx + stride() * wz
         "temp " ++ float_to_string(NativeArray.get_float(ta, i)) ++ " moist " ++ float_to_string(NativeArray.get_float(ma, i)) ++ " wet " ++ int_to_string(NativeArray.get_u8(ws, i))
     end
   end
@@ -703,7 +795,7 @@ mod CubeForge.Biome do
 
   doc "Eased temperature 0..1 of one column."
   fn temp_of(f : Field, wx : Int, wz : Int) : Float do
-    match f do Field(_, _, ta, _, _, _, _, _, _) -> NativeArray.get_float(ta, wx + 128 * wz) end
+    match f do Field(_, _, ta, _, _, _, _, _, _) -> NativeArray.get_float(ta, wx + stride() * wz) end
   end
   doc "Eased moisture 0..1 of one column."
   fn moist_of(f : Field, wx : Int, wz : Int) : Float do
@@ -788,7 +880,7 @@ mod CubeForge.Biome do
 
   doc "The column's water flag."
   fn is_wet(f : Field, wx : Int, wz : Int) : Bool do
-    match f do Field(_, ws, _, _, _, _, _, _, _) -> NativeArray.get_u8(ws, wx + 128 * wz) == 1 end
+    match f do Field(_, ws, _, _, _, _, _, _, _) -> NativeArray.get_u8(ws, wx + stride() * wz) == 1 end
   end
 
   -- A rolling hash of the field's discrete state: heights, water flags and biome

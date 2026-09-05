@@ -1,0 +1,41 @@
+-- HUD: the reticle's tint over fungus.
+mod CubeForge.Test.Hud do
+
+  import Test
+  alias CubeForge.Hud as Hud
+  alias CubeForge.F32Buf as B
+  alias CubeForge.Vertex as Vx
+
+  pfn near(a : Float, b : Float) : Bool do Math.abs(a -. b) < 0.001 end
+  pfn f(b : CubeForge.F32Buf.F32Buf, i : Int) : Float do
+    match B.get(b, i) do
+      Some(v) -> v
+      None -> 0.0 -. 1.0
+    end
+  end
+  -- Vertices whose untextured colour (u, v, layer) is (r, g, b).
+  pfn count_rgb(b : CubeForge.F32Buf.F32Buf, r : Float, g : Float, bl : Float, i : Int, acc : Int) : Int do
+    if i * Vx.floats() >= B.len(b) do acc
+    else
+      let o = i * Vx.floats()
+      let hit = near(f(b, o + 3), r) && near(f(b, o + 4), g) && near(f(b, o + 5), bl)
+      count_rgb(b, r, g, bl, i + 1, if hit do acc + 1 else acc end)
+    end
+  end
+
+  describe "Hud reticle" do
+    test "plain white over nothing, leaning toward the cap colour over a species" do
+      let inv = CubeForge.Inventory.new()
+      let plain = Hud.build_hotbar(B.new(1024), inv, 0.0, false, -1, 0)
+      Test.assert_eq_int(count_rgb(plain, Hud.reticle_r(4), Hud.reticle_g(4), Hud.reticle_b(4), 0, 0), 0, "no Lanterncap tint when there is no target")
+      Test.assert_true(count_rgb(plain, 1.0, 1.0, 1.0, 0, 0) >= 12, "the two crosshair bars are white")
+      let tinted = Hud.build_hotbar(B.new(1024), inv, 0.0, false, -1, 4)
+      Test.assert_eq_int(count_rgb(tinted, Hud.reticle_r(4), Hud.reticle_g(4), Hud.reticle_b(4), 0, 0), 12, "both bars, six vertices each, in the leaning colour")
+      Test.assert_true(near(Hud.reticle_r(4), 1.0), "Lanterncap is full red, so red stays")
+      Test.assert_true(Hud.reticle_g(4) < 1.0 && Hud.reticle_g(4) > 0.85, "green leans a little")
+      Test.assert_true(Hud.reticle_b(4) < 0.75 && Hud.reticle_b(4) > 0.6, "blue leans more, still far from the cap itself")
+      Test.assert_true(near(Hud.reticle_b(0), 1.0), "species 0 is white")
+    end
+  end
+
+end
