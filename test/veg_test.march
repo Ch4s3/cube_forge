@@ -145,6 +145,15 @@ mod CubeForge.Test.Veg do
       end
     end
 
+    test "an oak in a grove decays" do
+      let w = grass_top16(flat_world(70), 0, 70)
+      let w2 = Veg.plant(w, 8, 8, 69, 5, CubeForge.Trees.oak())
+      let f = Biome.rescan_box(Biome.build(w2, 7), w2, 8, 8, 5, 76)
+      let g = Biome.force_biome(f, 128, 8, 8, Biome.b_grove())
+      Test.assert_true(Veg.can_decay(g, w2, 8, 8), "the network took the ground: the oak goes")
+      Test.assert_true(!Veg.can_grow(g, w2, 7, 8, 8), "and nothing grows back")
+    end
+
     test "a palm is planted and felled by its own shape" do
       let w = grass_top16(flat_world(70), 0, 70)
       let w2 = Veg.plant(w, 8, 8, 69, 6, CubeForge.Trees.palm())

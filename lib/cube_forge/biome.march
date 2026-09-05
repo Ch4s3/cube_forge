@@ -57,6 +57,10 @@ mod CubeForge.Biome do
   fn small_reach() : Int do 4 end
   doc "The distance byte's top bit: set when the nearest water is a small body. Distances stay under 128."
   fn small_bit() : Int do 128 end
+  doc "Vigour at and above which a column counts as established for the grove: the fruiting line."
+  fn grove_vigour() : Float do CubeForge.Myc.fruit_vigour() end
+  doc "Established columns in a 3x3 (itself included) that make a grove: one column inside the patch's edge."
+  fn grove_neighbours() : Int do 5 end
   doc "The distance in a distance byte."
   fn dist_of(v : Int) : Int do v % 128 end
   doc "Whether a distance byte says the nearest water is small."
@@ -449,12 +453,36 @@ mod CubeForge.Biome do
   -- is read at its own index before it is written.
   pfn clampb(v : Float, cap : Float) : Float do if v < 0.0 -. cap do 0.0 -. cap else if v > cap do cap else v end end end
 
-  pfn tick_go(hs : NativeU8Arr, tb : NativeFloatArr, rate : Float, d : NativeU8Arr, pulls : NativeF32Arr, prow : NativeU8Arr, scale : Float, n : Int, i : Int,
+  -- Established columns in the 3x3 of (x, z), the field's edge clipping the box.
+  pfn established_go(sps : NativeU8Arr, vg : NativeF32Arr, n : Int, x : Int, z : Int, k : Int, acc : Int) : Int do
+    if k >= 9 do acc
+    else
+      let nx = x + k % 3 - 1
+      let nz = z + k / 3 - 1
+      if nx < 0 || nz < 0 || nx >= n || nz >= n do established_go(sps, vg, n, x, z, k + 1, acc)
+      else
+        let j = nx + n * nz
+        let est = if NativeArray.get_u8(sps, j) == 0 do false else NativeArray.get_f32(vg, j) >= grove_vigour() end
+        established_go(sps, vg, n, x, z, k + 1, if est do acc + 1 else acc end)
+      end
+    end
+  end
+  doc "Is column (x, z) a grove: at least grove_neighbours() of its 3x3 hold a species at grove_vigour() or more."
+  fn is_grove(sps : NativeU8Arr, vg : NativeF32Arr, n : Int, x : Int, z : Int) : Bool do
+    -- the centre first: a column with nothing on it is never a grove, and
+    -- that rejects almost every column before the eight neighbour reads
+    if NativeArray.get_u8(sps, x + n * z) == 0 do false
+    else established_go(sps, vg, n, x, z, 0, 0) >= grove_neighbours() end
+  end
+
+  pfn tick_go(hs : NativeU8Arr, tb : NativeFloatArr, rate : Float, d : NativeU8Arr, pulls : NativeF32Arr, prow : NativeU8Arr, scale : Float,
+              sps : NativeU8Arr, vg : NativeF32Arr, drow : NativeU8Arr, n : Int, i : Int,
               ta : NativeFloatArr, ma : NativeFloatArr, bs : NativeU8Arr, hold : NativeU8Arr, act : NativeU8Arr) : Field do
     if i >= n * n do Field(hs, NativeArray.make_u8(0, 0), ta, ma, bs, hold, tb, NativeArray.make_u8(0, 0), act)
-    -- a row whose network pulls moved this tick is looked at whole; the
-    -- offsets are constant otherwise, so a settled column stays settled
-    else if NativeArray.get_u8(act, i) == 0 && NativeArray.get_u8(prow, i / n) == 0 do tick_go(hs, tb, rate, d, pulls, prow, scale, n, i + 1, ta, ma, bs, hold, act)
+    -- a row whose network pulls moved this tick, or whose network is dirty, is
+    -- looked at whole; the offsets and the grove test are constant otherwise,
+    -- so a settled column stays settled
+    else if NativeArray.get_u8(act, i) == 0 && NativeArray.get_u8(prow, i / n) == 0 && NativeArray.get_u8(drow, i / n) == 0 do tick_go(hs, tb, rate, d, pulls, prow, scale, sps, vg, drow, n, i + 1, ta, ma, bs, hold, act)
     else
       let h = NativeArray.get_u8(hs, i)
       let dv = NativeArray.get_u8(d, i)
@@ -466,7 +494,7 @@ mod CubeForge.Biome do
       let mt = clamp01(moisture_target_of(dv) +. bm)
       let t = ease(NativeArray.get_float(ta, i), tt, rate)
       let m = ease(NativeArray.get_float(ma, i), mt, rate)
-      let raw = classify_full(t, m, h, dist_of(dv), is_small(dv), false)
+      let raw = classify_full(t, m, h, dist_of(dv), is_small(dv), is_grove(sps, vg, n, i % n, i / n))
       let cur = NativeArray.get_u8(bs, i)
       -- The hold counter: flip only after hold_ticks() consecutive disagreements,
       -- so a column parked on a threshold cannot alternate every tick.
@@ -480,7 +508,7 @@ mod CubeForge.Biome do
       -- the network's pull on this row moving.
       let settled = if t == tt do (if m == mt do hc1 == 0 else false end) else false end
       let act1 = NativeArray.set_u8(act, i, if settled do 0 else 1 end)
-      tick_go(hs, tb, rate, d, pulls, prow, scale, n, i + 1,
+      tick_go(hs, tb, rate, d, pulls, prow, scale, sps, vg, drow, n, i + 1,
               NativeArray.set_float(ta, i, t), NativeArray.set_float(ma, i, m),
               NativeArray.set_u8(bs, i, b1), NativeArray.set_u8(hold, i, hc1), act1)
     end end
@@ -566,11 +594,25 @@ mod CubeForge.Biome do
   """
   fn tick(f : Field, w : CubeForge.World.World, seed : Int, rate : Float, pulls : NativeF32Arr, prow : NativeU8Arr, scale : Float) : Field do
     let n = cols(w)
+    tick_net(f, w, seed, rate, pulls, prow, scale, no_species(n), no_vigour(n), no_rows(n))
+  end
+
+  doc """
+  The tick with the network in view: [sps] and [vg] are Myc.field_species and
+  Myc.field_vigour, read to find groves, and [drow] is Myc.dirty_rows, waking
+  every column in a row the network changed in or beside. The biome reads the
+  network as it stood at the end of the previous tick; the network then reads
+  the climate this tick eased. The grove cannot feed back: the network never
+  reads the biome id.
+  """
+  fn tick_net(f : Field, w : CubeForge.World.World, seed : Int, rate : Float, pulls : NativeF32Arr, prow : NativeU8Arr, scale : Float,
+              sps : NativeU8Arr, vg : NativeF32Arr, drow : NativeU8Arr) : Field do
+    let n = cols(w)
     let f1 = match f do Field(hs, _, ta, ma, bs, hold, tb, ds, act) -> Field(hs, water_go(w, hs, n, 0, NativeArray.make_u8(n * n, 0)), ta, ma, bs, hold, tb, ds, act) end
     let d = distances(f1, w)
     match f1 do
       Field(hs, ws, ta0, ma0, bs0, hold0, tb, ds0, act0) ->
-        match tick_go(hs, tb, rate, d, pulls, prow, scale, n, 0, ta0, ma0, bs0, hold0, mark_dist_go(d, ds0, n, 0, act0)) do
+        match tick_go(hs, tb, rate, d, pulls, prow, scale, sps, vg, drow, n, 0, ta0, ma0, bs0, hold0, mark_dist_go(d, ds0, n, 0, act0)) do
           Field(hs1, _, ta, ma, bs, hold, tb1, _, act1) -> Field(hs1, ws, ta, ma, bs, hold, tb1, d, act1)
         end
     end
@@ -580,6 +622,9 @@ mod CubeForge.Biome do
   fn no_pulls(n : Int) : NativeF32Arr do NativeArray.make_f32(2 * n * n, 0.0) end
   fn no_rows(n : Int) : NativeU8Arr do NativeArray.make_u8(n, 0) end
   fn all_rows(n : Int) : NativeU8Arr do NativeArray.make_u8(n, 1) end
+  doc "An empty network, for callers without one and for tests: no species, no vigour."
+  fn no_species(n : Int) : NativeU8Arr do NativeArray.make_u8(n * n, 0) end
+  fn no_vigour(n : Int) : NativeF32Arr do NativeArray.make_f32(n * n, 0.0) end
 
 
   doc "Eased temperature / moisture / water flag / distance-cap for one column, for diagnostics."

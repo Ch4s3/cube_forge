@@ -1721,8 +1721,9 @@ mod CubeForge do
             -- The network's climate offsets, from the field as it stands: the biome
             -- reads the network, then the network reads the climate the biome eased.
             let tbo = Win.time()
-            let bio1 = Biome.tick(scene_biome(scw), scene_world(scw), seed, Biome.default_rate() *. int_to_float(biome_rate) /. 100.0,
-                                  Myc.pulls(scene_myc(scw)), Myc.pull_rows(scene_myc(scw)), int_to_float(myc_feedback) /. 100.0)
+            let bio1 = Biome.tick_net(scene_biome(scw), scene_world(scw), seed, Biome.default_rate() *. int_to_float(biome_rate) /. 100.0,
+                                      Myc.pulls(scene_myc(scw)), Myc.pull_rows(scene_myc(scw)), int_to_float(myc_feedback) /. 100.0,
+                                      Myc.field_species(scene_myc(scw)), Myc.field_vigour(scene_myc(scw)), Myc.dirty_rows(scene_myc(scw), World.side(scene_world(scw)) * 16))
             let f1 = scene_with_biome(scw, bio1)
             -- The mycelium field reads the climate the biome tick just eased.
             let tm0 = Win.time()
