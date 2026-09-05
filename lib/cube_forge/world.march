@@ -215,6 +215,13 @@ mod CubeForge.World do
     World(Array.from_list(chunks), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), shown_new(), n)
   end
 
+  doc "A world over chunks read from a save, with empty light and occupancy fields (rebuilt by the caller)."
+  fn from_chunks(chunks : Array.PVec(CubeForge.Chunk.Chunk), n : Int) : World do
+    World(chunks, CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), shown_new(), n)
+  end
+  doc "The chunk array, in grid order."
+  fn chunks(w : World) : Array.PVec(CubeForge.Chunk.Chunk) do match w do World(cs, _, _, _, _, _) -> cs end end
+
   fn generate_scalar(n : Int, seed : Int, workers : Int) : World do
     let chunks = List.pmap_n(coords(n), fn i -> C.generate_scalar(16 * (i % n), 16 * (i / n), seed), workers)
     World(Array.from_list(chunks), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), shown_new(), n)

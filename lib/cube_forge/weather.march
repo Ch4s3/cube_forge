@@ -30,7 +30,10 @@ mod CubeForge.Weather do
   doc "Clear skies with a long spell ahead."
   fn start() : Phase do Phase(p_clear(), 600, 0.0, 0.0) end
 
+  doc "A phase from its four fields, for restoring a save."
+  fn phase_new(phase : Int, left : Int, v : Float, bolt : Float) : Phase do Phase(phase, left, v, bolt) end
   fn phase_of(s : Phase) : Int do match s do Phase(p, _, _, _) -> p end end
+  fn left_of(s : Phase) : Int do match s do Phase(_, l, _, _) -> l end end
   fn intensity_of(s : Phase) : Float do match s do Phase(_, _, v, _) -> v end end
   fn bolt_of(s : Phase) : Float do match s do Phase(_, _, _, b) -> b end end
 
@@ -83,8 +86,46 @@ mod CubeForge.Weather do
     end
   end
 
+  -- ── Snapshot and restore ─────────────────────────────────────────────────────
+  -- A save carries the phase. Messages cannot carry floats through a call reply
+  -- in the shape the water actor already uses (an Int list), so the two floats
+  -- travel scaled by a million; the header stores them as floats.
+  fn scale() : Float do 1000000.0 end
+  doc "[phase, ticks left, intensity * 1e6, bolt * 1e6]."
+  fn pack_phase(s : Phase) : List(Int) do
+    match s do
+      Phase(p, l, v, b) -> Cons(p, Cons(l, Cons(float_to_int(v *. scale()), Cons(float_to_int(b *. scale()), Nil))))
+    end
+  end
+  fn unpack_phase(l : List(Int)) : Phase do
+    match l do
+      Cons(p, Cons(left, Cons(v, Cons(b, _)))) -> Phase(p, left, int_to_float(v) /. scale(), int_to_float(b) /. scale())
+      _ -> start()
+    end
+  end
+  doc "[phase, ticks left, intensity, bolt] as floats, the header's shape."
+  fn phase_to_floats(s : Phase) : NativeFloatArr do
+    match s do
+      Phase(p, l, v, b) ->
+        NativeArray.set_float(NativeArray.set_float(NativeArray.set_float(NativeArray.set_float(
+          NativeArray.make_float(4, 0.0), 0, int_to_float(p)), 1, int_to_float(l)), 2, v), 3, b)
+    end
+  end
+  fn phase_of_floats(a : NativeFloatArr) : Phase do
+    Phase(float_to_int(NativeArray.get_float(a, 0)), float_to_int(NativeArray.get_float(a, 1)),
+          NativeArray.get_float(a, 2), NativeArray.get_float(a, 3))
+  end
+
   -- ── The actor ────────────────────────────────────────────────────────────────
-  type WxTickReq = WxTickReq
+  -- Call sentinels route by constructor tag to the handler at that position
+  -- (specs/lang/actors.md), so both live in one type, in handler order:
+  -- WxTick is handler 0, WxSnap handler 1.
+  type WxReq = WxTickReq | WxSnapReq
+
+  pfn handle_snap(reply_to, s : Phase) : Phase do
+    Actor.reply(reply_to, pack_phase(s))
+    s
+  end
 
   -- Handler bodies live here (the actor lint asks handlers to delegate).
   -- The reply is [intensity * 1000, bolt * 1000, phase]: an Int list, matching
@@ -106,8 +147,17 @@ mod CubeForge.Weather do
       { state with phase: handle_tick(reply_to, state.phase, state.tick, state.seed), tick: state.tick + 1 }
     end
 
+    -- second call handler (tag 1): reply with the packed phase, for a save
+    on WxSnap(reply_to) do
+      { state with phase: handle_snap(reply_to, state.phase) }
+    end
+
     on WxSeed(seed : Int) do
       { state with seed: seed }
+    end
+
+    on WxRestore(p : Int, left : Int, v : Int, b : Int) do
+      { state with phase: unpack_phase(Cons(p, Cons(left, Cons(v, Cons(b, Nil))))) }
     end
   end
 
@@ -118,6 +168,17 @@ mod CubeForge.Weather do
   fn send_seed(pid, seed : Int) : Unit do
     let _ = send(pid, WxSeed(seed))
     ()
+  end
+  doc "The actor's current phase, packed as [phase, left, intensity*1e6, bolt*1e6]."
+  fn call_snapshot(pid) : Result(List(Int), String) do Actor.call(pid, WxSnapReq, 2000) end
+  doc "Replace the actor's phase with [s]. Send after send_seed, so a fresh seed never overwrites it."
+  fn send_restore(pid, s : Phase) : Unit do
+    match pack_phase(s) do
+      Cons(p, Cons(left, Cons(v, Cons(b, _)))) ->
+        let _ = send(pid, WxRestore(p, left, v, b))
+        ()
+      _ -> ()
+    end
   end
   doc "Advance the actor one tick; returns [intensity*1000, bolt*1000, phase]."
   fn call_tick(pid) : Result(List(Int), String) do Actor.call(pid, WxTickReq, 2000) end

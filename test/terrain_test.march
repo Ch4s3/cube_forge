@@ -173,5 +173,13 @@ mod CubeForge.Test.Terrain do
       end
     end end
   end
+  describe "World.from_chunks" do
+    test "a world rebuilt from its own chunks hashes the same" do
+      let w = CubeForge.World.generate(1, 7, 1)
+      let w2 = CubeForge.World.from_chunks(CubeForge.World.chunks(w), 1)
+      Test.assert_eq_int(CubeForge.World.state_hash(w2), CubeForge.World.state_hash(w), "same blocks")
+      Test.assert_eq_int(CubeForge.World.side(w2), 1, "side")
+    end
+  end
 
 end

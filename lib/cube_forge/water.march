@@ -17,8 +17,11 @@ mod CubeForge.Water do
 
   needs IO.Spawn
   needs IO.Process   -- Env reads for CF_SPRING_RATE and CF_EVAP
+  needs IO.Console   -- the fallback in load_slot_or_generate says so
+  needs IO.FileRead  -- WLoadSlot reads this chunk's save file (see load_sim_from_slot)
 
   alias CubeForge.Chunk as C
+  alias CubeForge.Save as Save
 
   -- chunk, edge mirrors (4 * 4096), queue ring (65536), queue head, queue count, dirty bitmap (65536),
   -- reply entries queued outside a tick (overflow bounced back by accept_spill), drained by the next tick,
@@ -79,6 +82,8 @@ mod CubeForge.Water do
 
   doc "Units of water in the chunk: level_of summed over every non-source water cell. Sources are infinite and do not count; this is the conservation invariant."
   fn volume(s : Sim) : Int do volume_go(sim_chunk(s), 0, 0) end
+  doc "How many springs the sim knows (test helper)."
+  fn spring_count(s : Sim) : Int do match s do Sim(_, _, _, _, _, _, _, sp, _) -> List.length(sp) end end
   pfn volume_go(c : CubeForge.Chunk.Chunk, i : Int, acc : Int) : Int do
     if i >= 65536 do acc
     else
@@ -464,6 +469,50 @@ mod CubeForge.Water do
     new_sim(c, load_edge(e2, 3, nb(cx - 1, cz)))
   end
 
+  -- A neighbour's chunk from the slot, or an empty chunk outside the world.
+  -- A neighbour whose file is unreadable also reads as empty: the frame loop
+  -- validated the whole slot before the load, so this is the deleted-mid-load
+  -- race, and the mirror is refreshed by the first edge message anyway.
+  pfn slot_neighbour(d : String, slot : Int, n : Int, x : Int, z : Int) : CubeForge.Chunk.Chunk do
+    if x < 0 || x >= n || z < 0 || z >= n do C.new()
+    else
+      match Save.read_chunk(d, slot, x + n * z) do
+        Ok(c) -> c
+        Err(_) -> C.new()
+      end
+    end
+  end
+
+  doc """
+  A sim over this chunk's file in save slot [slot] under [d], with the edge
+  mirrors taken from the neighbours' files. Err when our own file is unreadable.
+
+  Stopgap: messages cannot carry native arrays (GAPS G44), so the actor reads
+  the chunk the frame loop has already read. When March lets a message carry a
+  byte array, the frame loop sends the chunk and this function goes away.
+  """
+  fn load_sim_from_slot(cx : Int, cz : Int, n : Int, d : String, slot : Int) : Result(Sim, String) do
+    match Save.read_chunk(d, slot, cx + n * cz) do
+      Err(e) -> Err(e)
+      Ok(c) ->
+        let e0 = load_edge(empty_edges(), 0, slot_neighbour(d, slot, n, cx, cz - 1))
+        let e1 = load_edge(e0, 1, slot_neighbour(d, slot, n, cx, cz + 1))
+        let e2 = load_edge(e1, 2, slot_neighbour(d, slot, n, cx + 1, cz))
+        Ok(new_sim(c, load_edge(e2, 3, slot_neighbour(d, slot, n, cx - 1, cz))))
+    end
+  end
+
+  -- On a failed read, generate from the seed and say so: the rendered world
+  -- and this actor then disagree for one chunk, which is logged, not hidden.
+  pfn load_slot_or_generate(cx : Int, cz : Int, n : Int, seed : Int, d : String, slot : Int) : Sim do
+    match load_sim_from_slot(cx, cz, n, d, slot) do
+      Ok(s) -> s
+      Err(e) ->
+        println("water chunk " ++ int_to_string(cx + n * cz) ++ ": " ++ e ++ "; generated from the seed instead")
+        load_sim(cx, cz, n, seed)
+    end
+  end
+
   actor WaterChunk do
     state { sim : Sim, cx : Int, cz : Int }
     init { sim: new_sim(C.new(), empty_edges()), cx: 0, cz: 0 }
@@ -482,6 +531,11 @@ mod CubeForge.Water do
       { state with sim: edited(state.sim, i, id) }
     end
 
+    -- load this chunk from a save slot (falls back to the seed on a failed read)
+    on WLoadSlot(cx : Int, cz : Int, n : Int, seed : Int, d : String, slot : Int) do
+      { sim: load_slot_or_generate(cx, cz, n, seed, d, slot), cx: cx, cz: cz }
+    end
+
     on WSpill(dir : Int, slot : Int, level : Int) do
       { state with sim: accept_spill(state.sim, dir, slot, level) }
     end
@@ -496,6 +550,10 @@ mod CubeForge.Water do
   fn spawn_chunk() do spawn(WaterChunk) end
   fn send_load(pid, cx : Int, cz : Int, n : Int, seed : Int) : Unit do
     let _ = send(pid, WLoad(cx, cz, n, seed))
+    ()
+  end
+  fn send_load_slot(pid, cx : Int, cz : Int, n : Int, seed : Int, d : String, slot : Int) : Unit do
+    let _ = send(pid, WLoadSlot(cx, cz, n, seed, d, slot))
     ()
   end
   fn send_edited(pid, i : Int, id : Int) : Unit do

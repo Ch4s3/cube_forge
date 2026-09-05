@@ -8,6 +8,8 @@ mod CubeForge.Test.Audio do
   needs IO.Clock
   needs IO.Console
   needs IO.Process
+  needs IO.FileRead
+  needs IO.FileWrite
   import Test
   alias CubeForge.Audio as Audio
   alias CubeForge.Biome as Biome

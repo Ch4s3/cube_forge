@@ -6,10 +6,13 @@ mod CubeForge.Test.Flow do
   needs IO.Process
   needs IO.Clock
   needs IO.Foreign
+  needs IO.FileRead
+  needs IO.FileWrite
   needs Window
   import Test
   alias CubeForge.Chunk as C
   alias CubeForge.Water as Water
+  alias CubeForge.Save as Save
 
   -- A flat stone floor at y = 70 (above sea level, so the infinite-lake rule stays out of the way).
   pfn floor_go(c : CubeForge.Chunk.Chunk, i : Int) : CubeForge.Chunk.Chunk do
@@ -432,6 +435,32 @@ mod CubeForge.Test.Flow do
       let h = CubeForge.Raycast.cast(w, 10.5, 66.5, 8.5, 0.0, -1.0, 0.0, 8.0, true)
       Test.assert_true(CubeForge.Raycast.is_hit(h), "hits")
       Test.assert_eq_int(CubeForge.Raycast.by_(h), 63, "the spring, not the stone under it")
+    end
+  end
+
+  -- A slot holding one chunk: the lake from above plus a spring high on the land.
+  pfn slot_dir() : String do "test_saves_tmp" end
+  pfn dummy_header() : CubeForge.Save.Header do
+    Save.header_new(7, 0, NativeArray.make_float(8, 0.0), NativeArray.make_int(73, 0), 0.0, NativeArray.make_float(4, 0.0))
+  end
+  pfn write_lake_slot(slot : Int) : CubeForge.Chunk.Chunk do
+    let c = C.set(lake_go(C.new(), 0), 12, 80, 12, C.water())
+    let _ = Dir.rm_rf(Save.slot_dir(slot_dir(), slot))
+    let _ = Test.assert_ok(Save.write(slot_dir(), slot, Array.from_list(Cons(c, Nil)), 1, dummy_header()), "write slot")
+    c
+  end
+
+  describe "Loading a sim from a save slot" do
+    test "the sim holds the file's water and finds its spring" do
+      let c = write_lake_slot(2)
+      let sim = Test.assert_ok(Water.load_sim_from_slot(0, 0, 1, slot_dir(), 2), "load")
+      Test.assert_eq_int(Water.volume(sim), Water.volume(Water.new_sim(c, Water.empty_edges())), "same volume as the chunk")
+      Test.assert_eq_int(Water.spring_count(sim), 1, "one spring above sea level")
+    end
+    test "a missing slot is an error" do
+      let _ = Dir.rm_rf(Save.slot_dir(slot_dir(), 4))
+      let _ = Test.assert_err(Water.load_sim_from_slot(0, 0, 1, slot_dir(), 4), "no such slot")
+      ()
     end
   end
 

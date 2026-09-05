@@ -1,0 +1,125 @@
+-- Save format: the header round-trips and rejects what it must.
+mod CubeForge.Test.Save do
+
+  import Test
+  needs IO.FileRead
+  needs IO.FileWrite
+  alias CubeForge.Save as Save
+  alias CubeForge.Chunk as C
+
+  pfn near(a : Float, b : Float) : Bool do
+    let d = a -. b
+    d < 0.000001 && d > -0.000001
+  end
+
+  pfn floats(xs : List(Float), n : Int) : NativeFloatArr do fill_floats(NativeArray.make_float(n, 0.0), xs, 0) end
+  pfn fill_floats(a : NativeFloatArr, xs : List(Float), i : Int) : NativeFloatArr do
+    match xs do
+      Nil -> a
+      Cons(x, rest) -> fill_floats(NativeArray.set_float(a, i, x), rest, i + 1)
+    end
+  end
+
+  pfn sample() : CubeForge.Save.Header do
+    let p = floats(Cons(1.5, Cons(70.25, Cons(-3.0, Cons(0.0, Cons(-2.5, Cons(0.0, Cons(3.1, Cons(-0.7, Nil)))))))), 8)
+    let inv = NativeArray.set_int(NativeArray.set_int(NativeArray.set_int(NativeArray.make_int(73, 0), 0, 3), 1, 12), 72, 4)
+    let wx = floats(Cons(2.0, Cons(150.0, Cons(0.7, Cons(0.3, Nil)))), 4)
+    Save.header_new(424242, 1757000000, p, inv, 812.5, wx)
+  end
+
+  pfn drop_go(ls : List(String), key : String, acc : String) : String do
+    match ls do
+      Nil -> acc
+      Cons(l, rest) ->
+        if String.starts_with(l, key ++ " ") do drop_go(rest, key, acc) else drop_go(rest, key, acc ++ l ++ "\n") end
+    end
+  end
+  pfn drop_line(s : String, key : String) : String do drop_go(String.split(s, "\n"), key, "") end
+
+  describe "Save header" do
+    test "a header round-trips" do
+      let h = Test.assert_ok(Save.parse_header(Save.encode_header(sample(), 8), 8), "parses")
+      Test.assert_eq_int(Save.h_seed(h), 424242, "seed")
+      Test.assert_eq_int(Save.h_saved_at(h), 1757000000, "saved_at")
+      Test.assert_true(near(NativeArray.get_float(Save.h_player(h), 1), 70.25), "player y")
+      Test.assert_true(near(NativeArray.get_float(Save.h_player(h), 7), -0.7), "pitch")
+      Test.assert_eq_int(NativeArray.get_int(Save.h_inventory(h), 1), 12, "slot 0 count")
+      Test.assert_eq_int(NativeArray.get_int(Save.h_inventory(h), 72), 4, "selected slot")
+      Test.assert_true(near(Save.h_day(h), 812.5), "day")
+      Test.assert_true(near(NativeArray.get_float(Save.h_weather(h), 2), 0.7), "intensity")
+    end
+    test "a missing key is rejected" do
+      let _ = Test.assert_err(Save.parse_header(drop_line(Save.encode_header(sample(), 8), "day"), 8), "no day line")
+      ()
+    end
+    test "a wrong version is rejected" do
+      let s = String.replace(Save.encode_header(sample(), 8), "version 1", "version 2")
+      let _ = Test.assert_err(Save.parse_header(s, 8), "version 2")
+      ()
+    end
+    test "a wrong side is rejected" do
+      let _ = Test.assert_err(Save.parse_header(Save.encode_header(sample(), 8), 4), "side 4 vs 8")
+      ()
+    end
+    test "unknown keys are ignored" do
+      let _ = Test.assert_ok(Save.parse_header("colour blue\n" ++ Save.encode_header(sample(), 8), 8), "extra line")
+      ()
+    end
+    test "a malformed number is rejected" do
+      let s = String.replace(Save.encode_header(sample(), 8), "day 812.5", "day soon")
+      let _ = Test.assert_err(Save.parse_header(s, 8), "day soon")
+      ()
+    end
+  end
+
+  pfn tmp() : String do "test_saves_tmp" end
+
+  -- Four chunks, each with a distinct byte at index 1000.
+  pfn four_chunks() : Array.PVec(CubeForge.Chunk.Chunk) do
+    Array.from_list(Cons(C.set_idx(C.new(), 1000, 11), Cons(C.set_idx(C.new(), 1000, 22),
+                    Cons(C.set_idx(C.new(), 1000, 33), Cons(C.set_idx(C.new(), 1000, 44), Nil)))))
+  end
+  pfn fresh_slot(slot : Int) : Unit do
+    let _ = Dir.rm_rf(Save.slot_dir(tmp(), slot))
+    let _ = Test.assert_ok(Save.write(tmp(), slot, four_chunks(), 2, sample()), "write")
+    ()
+  end
+
+  describe "Save slots" do
+    test "chunks and header round-trip through a slot" do
+      fresh_slot(3)
+      let h = Test.assert_ok(Save.check(tmp(), 3, 2), "check")
+      Test.assert_eq_int(Save.h_seed(h), 424242, "seed")
+      let cs = Test.assert_ok(Save.read_chunks(tmp(), 3, 2), "read")
+      Test.assert_eq_int(C.get_idx(Array.get(cs, 0), 1000), 11, "chunk 0")
+      Test.assert_eq_int(C.get_idx(Array.get(cs, 3), 1000), 44, "chunk 3")
+      Test.assert_eq_int(C.get_idx(Array.get(cs, 3), 1001), 0, "untouched byte")
+    end
+    test "a slot with chunks but no header lists as empty and fails check" do
+      fresh_slot(3)
+      let _ = File.delete(Save.header_path(tmp(), 3))
+      Test.assert_true(Save.info_is_empty(Save.info_for(Save.list(tmp(), 2), 3)), "empty")
+      let _ = Test.assert_err(Save.check(tmp(), 3, 2), "check")
+      ()
+    end
+    test "a short chunk file fails check" do
+      fresh_slot(3)
+      let _ = File.write(Save.chunk_path(tmp(), 3, 1), "abc")
+      let _ = Test.assert_err(Save.check(tmp(), 3, 2), "short chunk")
+      let _ = Test.assert_err(Save.read_chunks(tmp(), 3, 2), "short read")
+      ()
+    end
+    test "list reports seed and time for a used slot" do
+      fresh_slot(3)
+      let i = Save.info_for(Save.list(tmp(), 2), 3)
+      Test.assert_eq_int(Save.info_seed(i), 424242, "seed")
+      Test.assert_eq_int(Save.info_saved_at(i), 1757000000, "time")
+      Test.assert_true(Save.info_is_empty(Save.info_for(Save.list(tmp(), 2), 5)), "slot 5 empty")
+      Test.assert_eq_int(List.length(Save.list(tmp(), 2)), 5, "five entries")
+    end
+    test "chunk paths are two-digit" do
+      Test.assert_eq_str(Save.chunk_path("d", 1, 7), "d/slot1/chunk_07.bin", "07")
+      Test.assert_eq_str(Save.chunk_path("d", 1, 63), "d/slot1/chunk_63.bin", "63")
+    end
+  end
+end
