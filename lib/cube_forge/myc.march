@@ -330,6 +330,56 @@ mod CubeForge.Myc do
     end
   end
 
+  -- ── Climate feedback: what the network does to the ground ───────────────
+  doc "Largest offset the network can put on either climate axis of a column."
+  fn cap() : Float do 0.2 end
+
+  pfn clampc(v : Float) : Float do if v < 0.0 -. cap() do 0.0 -. cap() else if v > cap() do cap() else v end end end
+
+  -- Sum the pulls of the DISTINCT species in the 3x3 of (x, z). Six species at
+  -- most, so "seen" is a bitmask threaded through the walk.
+  pfn pulls_go(sps : NativeU8Arr, n : Int, x : Int, z : Int, k : Int, seen : Int, t : Float, m : Float, axis : Int) : Float do
+    if k >= 9 do (if axis == 0 do t else m end)
+    else
+      let nx = x + k % 3 - 1
+      let nz = z + k / 3 - 1
+      if nx < 0 || nz < 0 || nx >= n || nz >= n do pulls_go(sps, n, x, z, k + 1, seen, t, m, axis)
+      else
+        let sp = NativeArray.get_u8(sps, nx + n * nz)
+        let bit = if sp <= 0 do 0 else pow2(sp) end
+        -- `||` does not short-circuit (GAPS G33): the division waits for the branch
+        let already = if sp == 0 do true else (seen / bit) % 2 == 1 end
+        if already do pulls_go(sps, n, x, z, k + 1, seen, t, m, axis)
+        else pulls_go(sps, n, x, z, k + 1, seen + bit, t +. S.pull_t(sp), m +. S.pull_m(sp), axis) end
+      end
+    end
+  end
+  pfn pow2(k : Int) : Int do if k <= 0 do 1 else 2 * pow2(k - 1) end end
+
+  pfn bonus_go(sps : NativeU8Arr, rows : NativeU8Arr, n : Int, scale : Float, i : Int, out : NativeF32Arr) : NativeF32Arr do
+    if i >= n * n do out
+    else if !row_band(rows, n, i / n) do bonus_go(sps, rows, n, scale, i + n, out)
+    else
+      let x = i % n
+      let z = i / n
+      let t = clampc(pulls_go(sps, n, x, z, 0, 0, 0.0, 0.0, 0) *. scale)
+      let m = clampc(pulls_go(sps, n, x, z, 0, 0, 0.0, 0.0, 1) *. scale)
+      bonus_go(sps, rows, n, scale, i + 1, NativeArray.set_f32(NativeArray.set_f32(out, 2 * i, t), 2 * i + 1, m))
+    end end
+  end
+
+  doc "The network's climate offsets, two f32 per column (temperature at 2i, moisture at 2i + 1): the distinct species in each column's 3x3 pull toward their cores, summed, scaled by [scale] (CF_MYC_FEEDBACK / 100), clamped to +-cap(). Rows with nothing in or beside them stay zero without a read."
+  fn bonuses(f : Field, n : Int, scale : Float) : NativeF32Arr do
+    match f do
+      Field(sps, _, _, _, _, _, _) -> bonus_go(sps, species_rows(sps, n, 0, NativeArray.make_u8(n, 0)), n, scale, 0, NativeArray.make_f32(2 * n * n, 0.0))
+    end
+  end
+  pfn species_rows(sps : NativeU8Arr, n : Int, i : Int, rows : NativeU8Arr) : NativeU8Arr do
+    if i >= n * n do rows
+    else if NativeArray.get_u8(sps, i) != 0 do species_rows(sps, n, i + 1, NativeArray.set_u8(rows, i / n, 1))
+    else species_rows(sps, n, i + 1, rows) end end
+  end
+
   -- ── Migration: what the surface should show ──────────────────────────────
   doc "Vigour at and above which a column's surface shows its species."
   fn show_vigour() : Float do 0.15 end

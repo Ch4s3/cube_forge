@@ -263,4 +263,32 @@ mod CubeForge.Test.Myc do
     end
   end
 
+
+  describe "Myc.bonuses" do
+    test "an empty field pulls nothing" do
+      let n = 32
+      let b = Myc.bonuses(Myc.build(n), n, 1.0)
+      Test.assert_true(near(NativeArray.get_f32(b, 2 * (10 + n * 10)), 0.0) && near(NativeArray.get_f32(b, 2 * (10 + n * 10) + 1), 0.0), "zero")
+    end
+    test "a lone column pulls its 3x3 and nothing two away" do
+      let n = 32
+      let b = Myc.bonuses(Myc.plant(Myc.build(n), n, 10, 10, 4), n, 1.0)
+      Test.assert_true(near(NativeArray.get_f32(b, 2 * (10 + n * 10) + 1), Sp.pull_m(4)), "itself")
+      Test.assert_true(near(NativeArray.get_f32(b, 2 * (11 + n * 11) + 1), Sp.pull_m(4)), "a diagonal neighbour")
+      Test.assert_true(near(NativeArray.get_f32(b, 2 * (12 + n * 10) + 1), 0.0), "two away")
+      Test.assert_true(near(NativeArray.get_f32(b, 2 * (10 + n * 10)), 0.0), "Lanterncap has no temperature pull")
+    end
+    test "distinct species stack, the same species counts once, and the cap holds" do
+      let n = 32
+      let f = Myc.plant(Myc.plant(Myc.plant(Myc.plant(Myc.build(n), n, 10, 10, 2), n, 11, 10, 4), n, 12, 10, 5), n, 11, 11, 4)
+      let b = Myc.bonuses(f, n, 1.0)
+      -- (11, 10) touches all three: Pinewart + Lanterncap + Marshlight, Lanterncap once
+      Test.assert_true(near(NativeArray.get_f32(b, 2 * (11 + n * 10) + 1), Sp.pull_m(2) +. Sp.pull_m(4) +. Sp.pull_m(5)), "three-way sum")
+      Test.assert_true(near(NativeArray.get_f32(b, 2 * (11 + n * 10)), Sp.pull_t(2) +. Sp.pull_t(4) +. Sp.pull_t(5)), "on both axes")
+      let big = Myc.bonuses(f, n, 3.0)
+      Test.assert_true(near(NativeArray.get_f32(big, 2 * (11 + n * 10) + 1), Myc.cap()), "clamped to the cap")
+      Test.assert_true(near(NativeArray.get_f32(Myc.bonuses(f, n, 0.0), 2 * (11 + n * 10) + 1), 0.0), "scale 0 disables")
+    end
+  end
+
 end
