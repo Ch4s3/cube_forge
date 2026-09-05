@@ -1231,7 +1231,7 @@ mod CubeForge do
                         else sc end
           let drag2 = if dropped do -1 else drag1 end
           -- ── Menu ────────────────────────────────────────────────────────────
-          let m_hover = if Menu.is_open(menu1) do Menu.item_at(ndc_x, ndc_y) else -1 end
+          let m_hover = if Menu.is_open(menu1) do Menu.item_at(menu1, ndc_x, ndc_y) else -1 end
           let menu2 = if Menu.is_open(menu1) do menu_keys(Menu.set_focus(menu1, m_hover)) else menu1 end
           let m_click = Menu.is_open(menu2) && In.button_pressed(In.button_left()) && m_hover >= 0
           if m_click && m_hover == Menu.item_quit() do Win.request_close() else () end
