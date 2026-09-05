@@ -231,6 +231,17 @@ mod CubeForge.Water do
   pfn open_above(c : CubeForge.Chunk.Chunk, e : NativeU8Arr, x : Int, y : Int, z : Int) : Bool do
     if y >= 256 do true else if cell(c, e, x, y, z) != 0 do false else open_above(c, e, x, y + 1, z) end end
   end
+  -- Exposure: how many of a thin cell's four sides are open air. Evaporation
+  -- draws in proportion to it. A brook is one cell wide (two open sides), a
+  -- puddle's corner three, a stray cell four; the frontier of a pool's film
+  -- one or two, and its interior none. That is what lets a trickle fill a
+  -- depression: a per-cell rate on every thin cell held a film to ~evap()
+  -- cells, because a film's whole frontier is thin, and a wider one lost more
+  -- than the trickle brought.
+  pfn exposure(c : CubeForge.Chunk.Chunk, e : NativeU8Arr, x : Int, y : Int, z : Int) : Int do
+    (if cell(c, e, x + 1, y, z) == 0 do 1 else 0 end) + (if cell(c, e, x - 1, y, z) == 0 do 1 else 0 end)
+      + (if cell(c, e, x, y, z + 1) == 0 do 1 else 0 end) + (if cell(c, e, x, y, z - 1) == 0 do 1 else 0 end)
+  end
   pfn defer(s : Sim, i : Int) : Sim do
     match s do Sim(c, e, q, qh, qn, bm, po, sp, wk) -> Sim(c, e, q, qh, qn, bm, po, sp, Cons(i, wk)) end
   end
@@ -240,23 +251,62 @@ mod CubeForge.Water do
     if n == 0 do 0 else if C.is_water(n) && !C.is_source(n) do C.level_of(n) else 0 - 1 end end
   end
 
-  -- Spread sideways from (x, y, z) holding [l]: neighbours in fixed order, each
-  -- taking (l - n) / 2 when it is at least two below. Returns the step and the
-  -- units left, packed as Step; the remaining level is re-read from the cell.
+  -- A cell one level below the giver takes a single unit only when it has
+  -- somewhere lower to pass it on: air (or room) beneath it, or a horizontal
+  -- neighbour of its own, other than the giver, lower than itself. Without
+  -- this, half-the-difference spreading left every pool a pyramid -- seven at
+  -- the inlet, one level less per cell outward -- whose whole rim was thin
+  -- shore, evaporating; and a still stream stopped one cell short of a drop.
+  -- With it a pool levels to within one unit, and a flat surface has nowhere
+  -- lower, so nothing churns. Only a giver holding two or more does this: a
+  -- lone unit passed along ran a whole slope in one tick and the brook was
+  -- never seen, so thin water still only falls, and waits to be pushed. A receiver at most one cell outside the chunk is
+  -- in the mirrors; its onward neighbours two cells out are not, and are taken
+  -- as not lower.
+  pfn onward(c : CubeForge.Chunk.Chunk, e : NativeU8Arr, rx : Int, ry : Int, rz : Int, n : Int, gx : Int, gz : Int) : Bool do
+    let b = cell(c, e, rx, ry - 1, rz)
+    if ry > 0 && (b == 0 || (C.is_water(b) && !C.is_source(b) && C.level_of(b) < 7)) do true
+    else onward_side(c, e, rx, ry, rz, n, gx, gz, 0) end
+  end
+  pfn lower_than(m : Int, n : Int) : Bool do m >= 0 && m < n end
+  pfn onward_side(c : CubeForge.Chunk.Chunk, e : NativeU8Arr, rx : Int, ry : Int, rz : Int, n : Int, gx : Int, gz : Int, k : Int) : Bool do
+    if k >= 4 do false
+    else
+      let nx = rx + (if k == 0 do 1 else if k == 1 do 0 - 1 else 0 end end)
+      let nz = rz + (if k == 2 do 1 else if k == 3 do 0 - 1 else 0 end end)
+      let known = nx >= 0 - 1 && nx <= 16 && nz >= 0 - 1 && nz <= 16
+      let lower = if known && !(nx == gx && nz == gz) do lower_than(side_level(c, e, nx, ry, nz), n) else false end
+      if lower do true else onward_side(c, e, rx, ry, rz, n, gx, gz, k + 1) end
+    end
+  end
+
+  -- Spread sideways from (x, y, z) holding [l]: neighbours in fixed order. Two
+  -- passes: first every neighbour at least two below takes (l - n) / 2; then,
+  -- with what is left, a neighbour exactly one below takes a single unit when
+  -- it can pass it onward (see onward). The order matters: done in one pass, a
+  -- unit ran along a row of ones ahead of the twos that should have widened it.
+  -- Returns the step; the remaining level is carried in [l].
   pfn spread(st : Step, x : Int, y : Int, z : Int, l : Int, src : Bool, k : Int, cap : Int) : Step do
-    if k >= 4 || l < 2 || cap <= 0 do st
+    spread_pass(st, x, y, z, l, src, k, cap, 0)
+  end
+  pfn spread_pass(st : Step, x : Int, y : Int, z : Int, l : Int, src : Bool, k : Int, cap : Int, pass : Int) : Step do
+    if l < 1 || cap <= 0 do st
+    else if k >= 4 do (if pass == 0 do spread_pass(st, x, y, z, l, src, 0, cap, 1) else st end)
     else
       let dx = if k == 0 do 1 else if k == 1 do 0 - 1 else 0 end end
       let dz = if k == 2 do 1 else if k == 3 do 0 - 1 else 0 end end
       let c = step_sim_chunk(st)
       let e = match step_sim(st) do Sim(_, ed, _, _, _, _, _, _, _) -> ed end
       let n = side_level(c, e, x + dx, y, z + dz)
-      if n >= 0 && n < l - 1 do
-        let u0 = (l - n) / 2
+      let u0 = if n < 0 do 0
+               else if pass == 0 do (if n < l - 1 do (l - n) / 2 else 0 end)
+               else if l >= 2 && n == l - 1 && n < 7 && onward(c, e, x + dx, y, z + dz, n, x, z) do 1
+               else 0 end end end
+      if u0 > 0 do
         let u = if u0 > cap do cap else u0 end
-        spread(give(st, x, y, z, l, src, x + dx, y, z + dz, u), x, y, z, if src do l else l - u end, src, k + 1, cap - u)
-      else spread(st, x, y, z, l, src, k + 1, cap) end
-    end
+        spread_pass(give(st, x, y, z, l, src, x + dx, y, z + dz, u), x, y, z, if src do l else l - u end, src, k + 1, cap - u, pass)
+      else spread_pass(st, x, y, z, l, src, k + 1, cap, pass) end
+    end end
   end
 
   -- Lakes are infinite: at or below sea level, a cell touching a source (beside it, or
@@ -283,8 +333,10 @@ mod CubeForge.Water do
       -- of fixed length instead of a valley filling forever, and what dries a
       -- stray puddle. Deterministic: the draw is a hash of the cell and the
       -- queue position, not a clock.
-      let thin = !src && l == 1 && open_above(c, e, x, y + 1, z)
-      if thin && CubeForge.Noise.hash2(idx(x, y, z), salt, 77) *. int_to_float(evap()) < 1.0 do set_cell(st, x, y, z, 0)
+      -- nested, not &&: it does not short-circuit (GAPS.md G33), and open_above is a walk
+      let exp = if !src && l == 1 do exposure(c, e, x, y, z) else 0 end
+      let thin = if exp > 0 do open_above(c, e, x, y + 1, z) else false end
+      if thin && CubeForge.Noise.hash2(idx(x, y, z), salt, 77) *. int_to_float(4 * evap()) < int_to_float(exp) do set_cell(st, x, y, z, 0)
       else
       -- A thin cell that survived is woken next tick -- not re-marked now, or it
       -- would be drawn again and again within this tick and dry in one. One

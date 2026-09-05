@@ -1174,3 +1174,33 @@ read off the `state:` line specifically, since plain `grep mesh` also matches
 the startup line `mesh all (greedy sections)` and both sides came back empty and
 equal; and best-of-N across runs, worst-frame within a run, so a busy machine
 does not fail it while a real regression -- which fails every run -- still does.
+
+## Depressions fill, springs can be mined (2026-09-05)
+
+Two reports: flowing water did not fill a hollow, and springs could not be
+picked up. Design notes in `2026-09-04-springs-and-flow-design.md` (§1-3, "as
+built").
+
+**The hollow.** A probe with a rim spring over a 6x6 bowl filled it in ~900
+ticks with ~80% of the trickle evaporating on the way; a 10x10 bowl never
+filled, its volume oscillating between 5 and 56 units over 2500 ticks. Two
+causes. Spreading only across a difference of two built a pyramid -- seven at
+the inlet, one level less per cell outward -- so the pool's rim was thin water
+and evaporated; and evaporation was a flat per-cell rate on every thin cell,
+so any film wider than `evap` cells lost more than the trickle brought. Fixed
+by a levelling pass (one unit to a neighbour one below that has somewhere
+lower to send it -- no churn, the queue drains) and by weighting the
+evaporation draw by exposure (open sides over four). The 10x10 bowl now
+covers its floor by ~750 ticks and holds 890 units at 1500. Terraces two
+cells wide remain in a settled pool: the lookahead is one cell.
+
+**The spring.** The break ray ignored water unless hotbar slot 4 was
+selected, from before slots held items. Springs now stop the ray always; other
+water only while a water item is held.
+
+Cost, release, seed 7, `CF_WORKERS=1`, frames 800-900: 8 chunks ticking, ~120
+active cells, actors ~2.0 ms, 16-23 sections owed -- against 87 cells and 1.4
+ms before. Brooks are about twice as long: a brook cell has two open sides and
+now loses at half the old rate. Within the 2 ms target; `CF_EVAP` is the knob
+if it is not.
+

@@ -175,6 +175,12 @@ mod CubeForge.Test.Flow do
   pfn slope_col(c : CubeForge.Chunk.Chunk, x : Int, z : Int, top : Int, y : Int) : CubeForge.Chunk.Chunk do
     if y > top do c else slope_col(C.set(c, x, y, z, 3), x, z, top, y + 1) end
   end
+  pfn wall_x15(c : CubeForge.Chunk.Chunk, i : Int) : CubeForge.Chunk.Chunk do
+    if i >= 16 * 12 do c else wall_x15(C.set(c, 15, 60 + i / 16, i % 16, 3), i + 1) end
+  end
+  pfn roof_at(c : CubeForge.Chunk.Chunk, y : Int, i : Int) : CubeForge.Chunk.Chunk do
+    if i >= 256 do c else roof_at(C.set(c, i % 16, y, i / 16, 3), y, i + 1) end
+  end
   -- The basin, roofed at y = 72 so nothing inside is open to the sky.
   pfn roof_go(c : CubeForge.Chunk.Chunk, i : Int) : CubeForge.Chunk.Chunk do
     if i >= 256 do c else roof_go(C.set(c, i % 16, 72, i / 16, 3), i + 1) end
@@ -182,7 +188,9 @@ mod CubeForge.Test.Flow do
 
   describe "springs are a trickle" do
     test "a source on a slope gives at most spring_rate() a tick" do
-      let c0 = C.set(slope_go(C.new(), 0), 8, 71, 8, C.water())
+      -- roofed, and walled at x = 15: the stream now runs the whole slope, and
+      -- would otherwise evaporate or leave the chunk before the count
+      let c0 = C.set(roof_go(wall_x15(slope_go(C.new(), 0), 60), 0), 8, 71, 8, C.water())
       let s0 = Water.edited(Water.new_sim(c0, Water.empty_edges()), Water.idx(8, 71, 8), C.water())
       let s1 = run_ticks(s0, 1)
       Test.assert_true(Water.volume(s1) <= Water.spring_rate(), "one tick, at most the rate")
@@ -219,6 +227,73 @@ mod CubeForge.Test.Flow do
       let c0 = C.set(wall_go(floored(), 0), 7, 71, 7, C.id_of_level(7))
       let s = run_ticks(Water.edited(Water.new_sim(c0, Water.empty_edges()), Water.idx(7, 71, 7), C.id_of_level(7)), 800)
       Test.assert_eq_int(Water.volume(s), 0, "open: gone")
+    end
+  end
+
+  -- Stone from y = 70 to 73, with a 10x10 bowl (x, z in 3..12) dug down to y = 71: a
+  -- depression with a hundred-cell floor, open to the sky.
+  pfn bowl_go(c : CubeForge.Chunk.Chunk, i : Int) : CubeForge.Chunk.Chunk do
+    if i >= 256 * 4 do c
+    else
+      let x = i % 16
+      let z = (i / 16) % 16
+      let y = 70 + i / 256
+      let inside = y >= 71 && x >= 3 && x <= 12 && z >= 3 && z <= 12
+      bowl_go(if inside do c else C.set(c, x, y, z, 3) end, i + 1)
+    end
+  end
+  pfn bowl_floor_water(c : CubeForge.Chunk.Chunk, i : Int, acc : Int) : Int do
+    if i >= 100 do acc
+    else bowl_floor_water(c, i + 1, if C.is_water(C.get(c, 3 + i % 10, 71, 3 + i / 10)) do acc + 1 else acc end) end
+  end
+
+  describe "a spring fills a depression" do
+    test "a rim spring covers the floor of a ten-by-ten bowl within 1500 ticks" do
+      -- Before the shore rule, every thin cell of the spreading floor film
+      -- evaporated, so the film sat at ~15 cells forever and the bowl never
+      -- filled: evaporation is a per-cell rate, and a film wider than
+      -- evap() cells loses more than the trickle brings.
+      let c0 = C.set(bowl_go(C.new(), 0), 2, 74, 8, C.water())
+      let s0 = Water.edited(Water.new_sim(c0, Water.empty_edges()), Water.idx(2, 74, 8), C.water())
+      let s = run_ticks(s0, 1500)
+      Test.assert_eq_int(bowl_floor_water(Water.sim_chunk(s), 0, 0), 100, "the whole floor is under water")
+      Test.assert_true(Water.volume(s) > 200, "and the pool is rising, not a film")
+    end
+  end
+
+  -- A cliff: a floor cell of the bowl with a horizontal neighbour, inside the
+  -- bowl, two or more units below it. Levelling guarantees none remain.
+  pfn bowl_cliffs(c : CubeForge.Chunk.Chunk, i : Int, acc : Int) : Int do
+    if i >= 100 do acc
+    else
+      let x = 3 + i % 10
+      let z = 3 + i / 10
+      let l = C.level_of(C.get(c, x, 71, z))
+      let cliff = cliff_to(c, x, z, l, x + 1, z) || cliff_to(c, x, z, l, x - 1, z) || cliff_to(c, x, z, l, x, z + 1) || cliff_to(c, x, z, l, x, z - 1)
+      bowl_cliffs(c, i + 1, if cliff do acc + 1 else acc end)
+    end
+  end
+  pfn cliff_to(c : CubeForge.Chunk.Chunk, x : Int, z : Int, l : Int, nx : Int, nz : Int) : Bool do
+    if nx < 3 || nx > 12 || nz < 3 || nz > 12 do false
+    else C.level_of(C.get(c, nx, 71, nz)) <= l - 2 end
+  end
+
+  describe "a pool settles" do
+    test "with the spring gone, a roofed pool keeps its volume, has no cliffs, and its queue drains" do
+      -- Levelling moves a unit only toward somewhere lower, so a flat surface
+      -- has nothing left to do: no perpetual churn keeping the chunk live. The
+      -- lookahead is one cell, so the surface settles to terraces two cells
+      -- wide -- a slope of one unit per two cells, never a two-unit step.
+      let c0 = C.set(roof_at(bowl_go(C.new(), 0), 75, 0), 2, 74, 8, C.water())
+      let s0 = Water.edited(Water.new_sim(c0, Water.empty_edges()), Water.idx(2, 74, 8), C.water())
+      let fed = run_ticks(s0, 800)
+      let v = Water.volume(fed)
+      let s = run_ticks(Water.edited(fed, Water.idx(2, 74, 8), 3), 300)
+      let ch = Water.sim_chunk(s)
+      Test.assert_eq_int(Water.volume(s), v, "roofed: nothing evaporated")
+      Test.assert_eq_int(Water.pending(s), 0, "queue drained")
+      Test.assert_eq_int(bowl_floor_water(ch, 0, 0), 100, "the floor is covered")
+      Test.assert_eq_int(bowl_cliffs(ch, 0, 0), 0, "no two-unit steps anywhere on the floor")
     end
   end
 
@@ -283,7 +358,8 @@ mod CubeForge.Test.Flow do
 
     test "a stale mirror cannot lose units: the receiver keeps seven and bounces the rest" do
       -- B's cell at x = 0 already holds 6, but A was never told (mirror shows air).
-      let cb = C.set(floored(), 0, 71, 8, C.id_of_level(6))
+      -- roofed: the count is of bookkeeping, and an open sky would evaporate a thin cell
+      let cb = roof_go(C.set(floored(), 0, 71, 8, C.id_of_level(6)), 0)
       let b0 = Water.new_sim(cb, Water.empty_edges())
       let b1 = Water.accept_spill(b0, 3, 8 + 16 * 71, 3)
       Test.assert_eq_int(C.get(Water.sim_chunk(b1), 0, 71, 8), C.id_of_level(7), "capped at seven")
@@ -349,6 +425,13 @@ mod CubeForge.Test.Flow do
       Test.assert_eq_int(CubeForge.Raycast.by_(bed), 58, "the stone bed")
       let surf = CubeForge.Raycast.cast(w, 4.5, 64.5, 4.5, 0.0, -0.985, -0.17, 8.0, false)
       Test.assert_eq_int(CubeForge.Raycast.by_(surf), 62, "the water surface")
+    end
+    test "a spring above sea level stops the ray even when water is ignored, so it can be mined" do
+      -- a source on the stone at (10, 63, 8): y = 63 > sea_level, so it is a spring, not the lake
+      let w = CubeForge.World.World(Array.from_list([C.set(lake_go(C.new(), 0), 10, 63, 8, C.water())]), CubeForge.Light.new(), CubeForge.Light.new(), 1)
+      let h = CubeForge.Raycast.cast(w, 10.5, 66.5, 8.5, 0.0, -1.0, 0.0, 8.0, true)
+      Test.assert_true(CubeForge.Raycast.is_hit(h), "hits")
+      Test.assert_eq_int(CubeForge.Raycast.by_(h), 63, "the spring, not the stone under it")
     end
   end
 
