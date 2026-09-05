@@ -1620,3 +1620,43 @@ planted or spread network is lost, and its surface blocks migrate back to
 bare ground; the biome's eased axes are rebuilt at target the same way. Both
 are the "cannot be rebuilt from the voxels" risk the two specs carry. Listed
 in `todos.md`.
+
+
+## Save the fields, and food effects (2026-09-05)
+
+Plan `docs/superpowers/plans/2026-09-05-fungus-save-fields-and-food.md`.
+
+**The fields ride in the save.** One more file per slot, `fields.bin`, 131,072
+bytes for the 128-column world: species, vigour (0..255), reach and shown
+species at one byte per column, then the biome's eased temperature and
+moisture at two bytes each. Written after the chunks and before the header,
+so the header still marks a complete save; a slot without it (an older save)
+loads with a printed note and rebuilds both fields from the seed as before.
+Round trip on seed 7 with a planted patch grown to frame 1500: the `myc`
+state hash and every species count are identical across the load, and the
+climate carries on from its saved position (moisture 0.2433 at the save,
+0.2422 a hundred frames into the loaded session, easing as it was). Load
+cost: 11 ms for the slot including the fields. Hold, claimant, the climate
+memory and the pulls are rebuilt on load and the first tick looks at every
+column once.
+
+`import` is a keyword in March: `fn import(...)` is a parse error with no
+hint that the name is the problem (GAPS G65 has the same shape). The pair is
+`to_bytes` / `of_bytes`.
+
+**Food.** A cap is food. Using one with nothing in reach eats it: one is
+consumed and the species' effect starts, or refreshes, for thirty seconds.
+`CubeForge.Effects` holds four until-times and answers multipliers for a
+clock; `Player.update_with` takes them (walk speed, jump speed, swim speed,
+both horizontal and vertical); the lantern effect forces the flashlight on;
+the ground readout line shows the active effects with seconds left. Species
+to effect: Meadowbell and Sunshelf speed x1.5, Frostcap and Pinewart jump
+x1.35, Marshlight swim x1.6, Lanterncap lantern. Effects are not saved.
+`CF_AUTOEAT=100`: `ate a Frostcap cap: JUMP 30`, and the dump 200 frames
+later shows `JUMP 28`.
+
+Budget: 10.25 ms best of 3 (a 32 ms outlier in one run; the pinned run's own
+worst frame 9.67 ms). The allocation gauge reads 127 live objects per frame;
+the effects summary is rebuilt as a string every frame for the readout
+comparison, which is the obvious thing to make per-second if that number
+ever matters.
