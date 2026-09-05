@@ -40,7 +40,7 @@ mod CubeForge.Test.Myc do
 
 
   pfn tick_n(f : CubeForge.Myc.Field, n : Int, ta : NativeFloatArr, ma : NativeFloatArr, rate : Float, k : Int) : CubeForge.Myc.Field do
-    if k <= 0 do f else tick_n(Myc.tick(f, n, ta, ma, Myc.no_climate(n), rate), n, ta, ma, rate, k - 1) end
+    if k <= 0 do f else tick_n(Myc.tick(f, n, ta, ma, rate), n, ta, ma, rate, k - 1) end
   end
 
   -- Chebyshev radius of species [sp] around (cx, cz): the farthest held column.
@@ -67,7 +67,7 @@ mod CubeForge.Test.Myc do
   pfn agree_go(a : CubeForge.Myc.Field, b : CubeForge.Myc.Field, n : Int, ta : NativeFloatArr, ma : NativeFloatArr, rate : Float, k : Int, t : Int) : Bool do
     if k <= 0 do true
     else
-      let a1 = Myc.tick(a, n, ta, ma, Myc.no_climate(n), rate)
+      let a1 = Myc.tick(a, n, ta, ma, rate)
       let b1 = Myc.tick_all(b, n, ta, ma, rate)
       if Myc.state_hash(a1, n) != Myc.state_hash(b1, n) do false
       else if !same_vigour(a1, b1, n, 0) do false
@@ -78,9 +78,6 @@ mod CubeForge.Test.Myc do
     if i >= n * n do true
     else if Myc.vigour_of(a, n, i % n, i / n) != Myc.vigour_of(b, n, i % n, i / n) do false
     else same_vigour(a, b, n, i + 1) end end
-  end
-  pfn tick_clim(f : CubeForge.Myc.Field, n : Int, ta : NativeFloatArr, ma : NativeFloatArr, clim : NativeU8Arr, rate : Float, k : Int) : CubeForge.Myc.Field do
-    if k <= 0 do f else tick_clim(Myc.tick(f, n, ta, ma, clim, rate), n, ta, ma, clim, rate, k - 1) end
   end
 
   describe "Myc.tick" do
@@ -137,7 +134,7 @@ mod CubeForge.Test.Myc do
       let n = 32
       let f0 = Myc.plant(Myc.build(n), n, 16, 16, 3)
       let f1 = tick_n(f0, n, uniform(n, 0.5), uniform(n, 0.3), 0.1, 600)
-      let f2 = Myc.tick(f1, n, uniform(n, 0.5), uniform(n, 0.3), Myc.no_climate(n), 0.1)
+      let f2 = Myc.tick(f1, n, uniform(n, 0.5), uniform(n, 0.3), 0.1)
       Test.assert_eq_int(Myc.state_hash(f2, n), Myc.state_hash(f1, n), "one more tick changes nothing")
     end
   end
@@ -178,7 +175,7 @@ mod CubeForge.Test.Myc do
       Test.assert_eq_int(Myc.reach_of(f, n, 28, 20), 0, "no reach at the rim")
       Test.assert_eq_int(Myc.species_of(f, n, 28, 28), 0, "the diagonal corner is outside the octagon")
       Test.assert_true(Myc.count_species(f, n, 3) > 100, "a real patch")
-      let f1 = Myc.tick(f, n, uniform(n, 0.5), uniform(n, 0.3), Myc.no_climate(n), 0.1)
+      let f1 = Myc.tick(f, n, uniform(n, 0.5), uniform(n, 0.3), 0.1)
       Test.assert_eq_int(Myc.state_hash(f1, n), Myc.state_hash(f, n), "already settled")
     end
     test "wild seeds patches by the cell hash, fittest species, seeded" do
@@ -249,21 +246,20 @@ mod CubeForge.Test.Myc do
     test "a settled patch has nothing to look at" do
       let n = 32
       let f = tick_n(Myc.plant(Myc.build(n), n, 16, 16, 3), n, uniform(n, 0.5), uniform(n, 0.3), 0.1, 600)
-      Test.assert_eq_int(Myc.active_count(f, n, Myc.no_climate(n)), 0, "nothing dirty, nothing near dirty")
+      Test.assert_eq_int(Myc.active_count(f, n, uniform(n, 0.5), uniform(n, 0.3)), 0, "nothing dirty, nothing near dirty, climate as before")
       Test.assert_eq_int(Myc.dirty_count(f, n), 0, "no column marked")
     end
-    test "a settled patch wakes only when the climate is reported as moved" do
+    test "a settled patch wakes by itself when the climate moves under it" do
       let n = 32
       let dry = uniform(n, 0.1)
       let wet = uniform(n, 0.7)
       let hot = uniform(n, 0.85)
       let f = tick_n(Myc.plant(Myc.build(n), n, 16, 16, 6), n, hot, dry, 0.1, 600)
       Test.assert_true(Myc.count_species(f, n, 6) > 50, "Sunshelf settled in the desert")
-      Test.assert_eq_int(Myc.active_count(f, n, Myc.no_climate(n)), 0, "and settled")
-      let asleep = tick_clim(f, n, hot, wet, Myc.no_climate(n), 0.1, 200)
-      Test.assert_eq_int(Myc.count_species(asleep, n, 6), Myc.count_species(f, n, 6), "unreported climate change: nothing happens")
-      let woken = tick_clim(f, n, hot, wet, NativeArray.make_u8(n * n, 1), 0.1, 200)
-      Test.assert_eq_int(Myc.count_species(woken, n, 6), 0, "reported: the whole patch withers")
+      Test.assert_eq_int(Myc.active_count(f, n, hot, dry), 0, "and settled under the same climate")
+      Test.assert_true(Myc.active_count(f, n, hot, wet) > 0, "a wetter climate wakes it")
+      let woken = tick_n(f, n, hot, wet, 0.1, 200)
+      Test.assert_eq_int(Myc.count_species(woken, n, 6), 0, "and the whole patch withers")
     end
   end
 

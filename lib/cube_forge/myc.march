@@ -5,6 +5,8 @@
 -- claimant has wanted this column.           claimant: that claimant's species.
 -- dirty: the column changed last tick or is unsettled, so it and its eight
 --        neighbours must be looked at again.
+-- seen: the temperature and moisture the column was last evaluated at (two
+--       f32 per column), so a climate that moved under it wakes it by itself.
 --
 -- Recomputed every tick, like the biome field, but only where something can
 -- change. The tick is PULL-based: each column reads its eight neighbours from
@@ -19,7 +21,7 @@ mod CubeForge.Myc do
   alias CubeForge.Noise as N
   alias CubeForge.Ffi.Window as Win
 
-  type Field = Field(NativeU8Arr, NativeF32Arr, NativeU8Arr, NativeU8Arr, NativeU8Arr, NativeU8Arr)
+  type Field = Field(NativeU8Arr, NativeF32Arr, NativeU8Arr, NativeU8Arr, NativeU8Arr, NativeU8Arr, NativeF32Arr)
 
   -- ── Tuning ────────────────────────────────────────────────────────────────
   doc "Columns a planting can spread along an axis."
@@ -40,11 +42,13 @@ mod CubeForge.Myc do
   fn default_rate() : Float do 1.0 /. 540.0 end
   doc "How much faster a contested incumbent loses vigour than it would ease."
   fn contest_factor() : Float do 3.0 end
+  doc "Vigour differences below this are no difference: f32 storage against f64 targets."
+  fn vigour_eps() : Float do 0.000001 end
 
   -- ── Build, plant, read ────────────────────────────────────────────────────
   doc "An empty field of n x n columns. Every column starts dirty: the first tick looks at all of them once."
   fn build(n : Int) : Field do
-    Field(NativeArray.make_u8(n * n, 0), NativeArray.make_f32(n * n, 0.0), NativeArray.make_u8(n * n, 0), NativeArray.make_u8(n * n, 0), NativeArray.make_u8(n * n, 0), NativeArray.make_u8(n * n, 1))
+    Field(NativeArray.make_u8(n * n, 0), NativeArray.make_f32(n * n, 0.0), NativeArray.make_u8(n * n, 0), NativeArray.make_u8(n * n, 0), NativeArray.make_u8(n * n, 0), NativeArray.make_u8(n * n, 1), NativeArray.make_f32(2 * n * n, -1.0))
   end
 
   -- Whole-array copies are one memcpy each in the shim.
@@ -56,41 +60,41 @@ mod CubeForge.Myc do
     if x < 0 || z < 0 || x >= n || z >= n do f
     else
       match f do
-        Field(sps, vg, rc, hd, cl, dt) ->
+        Field(sps, vg, rc, hd, cl, dt, cs) ->
           let i = x + n * z
           Field(NativeArray.set_u8(copy_u8(sps, n * n), i, sp),
                 NativeArray.set_f32(copy_f(vg, n * n), i, seed_vigour()),
                 NativeArray.set_u8(copy_u8(rc, n * n), i, plant_reach()),
                 NativeArray.set_u8(copy_u8(hd, n * n), i, 0),
                 NativeArray.set_u8(copy_u8(cl, n * n), i, 0),
-                NativeArray.set_u8(copy_u8(dt, n * n), i, 1))
+                NativeArray.set_u8(copy_u8(dt, n * n), i, 1), cs)
       end
     end
   end
 
   fn species_of(f : Field, n : Int, x : Int, z : Int) : Int do
-    match f do Field(sps, _, _, _, _, _) -> NativeArray.get_u8(sps, x + n * z) end
+    match f do Field(sps, _, _, _, _, _, cs) -> NativeArray.get_u8(sps, x + n * z) end
   end
   fn vigour_of(f : Field, n : Int, x : Int, z : Int) : Float do
-    match f do Field(_, vg, _, _, _, _) -> NativeArray.get_f32(vg, x + n * z) end
+    match f do Field(_, vg, _, _, _, _, cs) -> NativeArray.get_f32(vg, x + n * z) end
   end
   fn reach_of(f : Field, n : Int, x : Int, z : Int) : Int do
-    match f do Field(_, _, rc, _, _, _) -> NativeArray.get_u8(rc, x + n * z) end
+    match f do Field(_, _, rc, _, _, _, cs) -> NativeArray.get_u8(rc, x + n * z) end
   end
-  fn field_species(f : Field) : NativeU8Arr do match f do Field(sps, _, _, _, _, _) -> sps end end
-  fn field_vigour(f : Field) : NativeF32Arr do match f do Field(_, vg, _, _, _, _) -> vg end end
+  fn field_species(f : Field) : NativeU8Arr do match f do Field(sps, _, _, _, _, _, cs) -> sps end end
+  fn field_vigour(f : Field) : NativeF32Arr do match f do Field(_, vg, _, _, _, _, cs) -> vg end end
 
   doc "Is column (x, z) marked for the next tick?"
   fn is_dirty(f : Field, n : Int, x : Int, z : Int) : Bool do
-    match f do Field(_, _, _, _, _, dt) -> NativeArray.get_u8(dt, x + n * z) != 0 end
+    match f do Field(_, _, _, _, _, dt, cs) -> NativeArray.get_u8(dt, x + n * z) != 0 end
   end
   doc "Columns marked for the next tick."
   fn dirty_count(f : Field, n : Int) : Int do
-    match f do Field(_, _, _, _, _, dt) -> count_go(dt, 1, 0, n * n, 0) end
+    match f do Field(_, _, _, _, _, dt, cs) -> count_go(dt, 1, 0, n * n, 0) end
   end
   doc "The field with nothing marked: for tests that want to see what a change wakes."
   fn clean(f : Field, n : Int) : Field do
-    match f do Field(sps, vg, rc, hd, cl, _) -> Field(sps, vg, rc, hd, cl, NativeArray.make_u8(n * n, 0)) end
+    match f do Field(sps, vg, rc, hd, cl, _, cs) -> Field(sps, vg, rc, hd, cl, NativeArray.make_u8(n * n, 0), cs) end
   end
 
   pfn u8_go(vg : NativeF32Arr, out : NativeU8Arr, i : Int, n : Int) : NativeU8Arr do
@@ -99,7 +103,7 @@ mod CubeForge.Myc do
   end
   doc "Vigour as 0..255 bytes, a fresh array for the map upload."
   fn vigour_u8(f : Field, n : Int) : NativeU8Arr do
-    match f do Field(_, vg, _, _, _, _) -> u8_go(vg, NativeArray.make_u8(n * n, 0), 0, n * n) end
+    match f do Field(_, vg, _, _, _, _, cs) -> u8_go(vg, NativeArray.make_u8(n * n, 0), 0, n * n) end
   end
 
   pfn count_go(sps : NativeU8Arr, sp : Int, i : Int, n : Int, acc : Int) : Int do
@@ -108,7 +112,7 @@ mod CubeForge.Myc do
   end
   doc "Columns held by species [sp]."
   fn count_species(f : Field, n : Int, sp : Int) : Int do
-    match f do Field(sps, _, _, _, _, _) -> count_go(sps, sp, 0, n * n, 0) end
+    match f do Field(sps, _, _, _, _, _, cs) -> count_go(sps, sp, 0, n * n, 0) end
   end
 
   pfn hash_u8(a : NativeU8Arr, n : Int, i : Int, h : Int) : Int do
@@ -117,7 +121,7 @@ mod CubeForge.Myc do
   end
   doc "A hash of species and reach, the discrete state: an oracle for 'the field evolved the same way'."
   fn state_hash(f : Field, n : Int) : Int do
-    match f do Field(sps, _, rc, _, _, _) -> hash_u8(rc, n * n, 0, hash_u8(sps, n * n, 0, 11)) end
+    match f do Field(sps, _, rc, _, _, _, cs) -> hash_u8(rc, n * n, 0, hash_u8(sps, n * n, 0, 11)) end
   end
 
   -- ── The tick ──────────────────────────────────────────────────────────────
@@ -184,18 +188,21 @@ mod CubeForge.Myc do
   -- Write one column's new state, and its dirty flag: set when anything
   -- changed, or when it is unsettled (vigour off its target, a claim pending).
   -- Threads the five destination arrays plus the dirty array as a Field.
-  pfn put(nsps : NativeU8Arr, nvg : NativeF32Arr, nrc : NativeU8Arr, nhd : NativeU8Arr, ncl : NativeU8Arr, ndt : NativeU8Arr,
+  pfn put(nsps : NativeU8Arr, nvg : NativeF32Arr, nrc : NativeU8Arr, nhd : NativeU8Arr, ncl : NativeU8Arr, ndt : NativeU8Arr, ncs : NativeF32Arr,
           i : Int, sp : Int, v : Float, r : Int, h : Int, c : Int, unsettled : Bool,
-          osp : Int, ov : Float, orc : Int, oh : Int, oc : Int) : Field do
-    let changed = if sp != osp do true else if r != orc do true else if h != oh do true else if c != oc do true else v != ov end end end end
+          osp : Int, ov : Float, orc : Int, oh : Int, oc : Int, t : Float, m : Float) : Field do
+    -- vigour is stored as f32 and compared against f64 targets: within eps is equal,
+    -- or a column whose fitness is not f32-representable would never settle
+    let changed = if sp != osp do true else if r != orc do true else if h != oh do true else if c != oc do true else Math.abs(v -. ov) > vigour_eps() end end end end
     Field(NativeArray.set_u8(nsps, i, sp), NativeArray.set_f32(nvg, i, v), NativeArray.set_u8(nrc, i, r), NativeArray.set_u8(nhd, i, h), NativeArray.set_u8(ncl, i, c),
-          NativeArray.set_u8(ndt, i, if changed || unsettled do 1 else 0 end))
+          NativeArray.set_u8(ndt, i, if changed || unsettled do 1 else 0 end),
+          NativeArray.set_f32(NativeArray.set_f32(ncs, 2 * i, t), 2 * i + 1, m))
   end
 
   -- One column. Reads the old arrays, writes index i of the new ones.
   pfn tick_col(sps : NativeU8Arr, vg : NativeF32Arr, rc : NativeU8Arr, hd : NativeU8Arr, cl : NativeU8Arr,
                ta : NativeFloatArr, ma : NativeFloatArr, n : Int, rate : Float, i : Int,
-               nsps : NativeU8Arr, nvg : NativeF32Arr, nrc : NativeU8Arr, nhd : NativeU8Arr, ncl : NativeU8Arr, ndt : NativeU8Arr) : Field do
+               nsps : NativeU8Arr, nvg : NativeF32Arr, nrc : NativeU8Arr, nhd : NativeU8Arr, ncl : NativeU8Arr, ndt : NativeU8Arr, ncs : NativeF32Arr) : Field do
     let x = i % n
     let z = i / n
     let sp = NativeArray.get_u8(sps, i)
@@ -212,19 +219,19 @@ mod CubeForge.Myc do
     let hd2 = if hd1 > 255 do 255 else hd1 end
     let matured = if c == 0 do false else hd2 >= hold_ticks() end
     if sp == 0 do
-      if matured do put(nsps, nvg, nrc, nhd, ncl, ndt, i, c, seed_vigour(), claim_rc(claim), 0, 0, true, sp, v0, rc0, hd0, cl0)
-      else put(nsps, nvg, nrc, nhd, ncl, ndt, i, 0, 0.0, 0, hd2, c, c != 0, sp, v0, rc0, hd0, cl0) end
+      if matured do put(nsps, nvg, nrc, nhd, ncl, ndt, ncs, i, c, seed_vigour(), claim_rc(claim), 0, 0, true, sp, v0, rc0, hd0, cl0, t, m)
+      else put(nsps, nvg, nrc, nhd, ncl, ndt, ncs, i, 0, 0.0, 0, hd2, c, c != 0, sp, v0, rc0, hd0, cl0, t, m) end
     else
       let v1 = if c != 0 do v0 -. contest_factor() *. rate else ease(v0, fit, rate) end
       let dies = if v1 <= 0.0 do (if c != 0 do true else fit < S.viable() end) else false end
       if dies do
-        if matured do put(nsps, nvg, nrc, nhd, ncl, ndt, i, c, seed_vigour(), claim_rc(claim), 0, 0, true, sp, v0, rc0, hd0, cl0)
-        else put(nsps, nvg, nrc, nhd, ncl, ndt, i, 0, 0.0, 0, hd2, c, c != 0, sp, v0, rc0, hd0, cl0) end
+        if matured do put(nsps, nvg, nrc, nhd, ncl, ndt, ncs, i, c, seed_vigour(), claim_rc(claim), 0, 0, true, sp, v0, rc0, hd0, cl0, t, m)
+        else put(nsps, nvg, nrc, nhd, ncl, ndt, ncs, i, 0, 0.0, 0, hd2, c, c != 0, sp, v0, rc0, hd0, cl0, t, m) end
       else
         let v2 = if v1 < 0.0 do 0.0 else v1 end
         -- unsettled while the vigour is still moving or someone wants the column
-        let unsettled = if c != 0 do true else v2 != fit end
-        put(nsps, nvg, nrc, nhd, ncl, ndt, i, sp, v2, rc0, hd2, c, unsettled, sp, v0, rc0, hd0, cl0)
+        let unsettled = if c != 0 do true else Math.abs(v2 -. fit) > vigour_eps() end
+        put(nsps, nvg, nrc, nhd, ncl, ndt, ncs, i, sp, v2, rc0, hd2, c, unsettled, sp, v0, rc0, hd0, cl0, t, m)
       end
     end
   end
@@ -245,11 +252,16 @@ mod CubeForge.Myc do
   -- pass over the two flag arrays. A row with nothing in it or beside it skips
   -- the 3x3 test for all n of its columns, so a settled world's tick is 32k
   -- byte reads and the memcpys.
-  pfn rows_go(dt : NativeU8Arr, clim : NativeU8Arr, n : Int, i : Int, rows : NativeU8Arr) : NativeU8Arr do
+  -- Did the climate move under column i since it was last evaluated?
+  pfn moved(cs : NativeF32Arr, ta : NativeFloatArr, ma : NativeFloatArr, i : Int) : Bool do
+    if Math.abs(NativeArray.get_f32(cs, 2 * i) -. NativeArray.get_float(ta, i)) > vigour_eps() do true
+    else Math.abs(NativeArray.get_f32(cs, 2 * i + 1) -. NativeArray.get_float(ma, i)) > vigour_eps() end
+  end
+  pfn rows_go(dt : NativeU8Arr, cs : NativeF32Arr, ta : NativeFloatArr, ma : NativeFloatArr, n : Int, i : Int, rows : NativeU8Arr) : NativeU8Arr do
     if i >= n * n do rows
-    else if NativeArray.get_u8(dt, i) != 0 do rows_go(dt, clim, n, i + 1, NativeArray.set_u8(rows, i / n, 1))
-    else if NativeArray.get_u8(clim, i) != 0 do rows_go(dt, clim, n, i + 1, NativeArray.set_u8(rows, i / n, 1))
-    else rows_go(dt, clim, n, i + 1, rows) end end end
+    else if NativeArray.get_u8(dt, i) != 0 do rows_go(dt, cs, ta, ma, n, i + 1, NativeArray.set_u8(rows, i / n, 1))
+    else if moved(cs, ta, ma, i) do rows_go(dt, cs, ta, ma, n, i + 1, NativeArray.set_u8(rows, i / n, 1))
+    else rows_go(dt, cs, ta, ma, n, i + 1, rows) end end end
   end
   pfn row_band(rows : NativeU8Arr, n : Int, z : Int) : Bool do
     let a = if z > 0 do NativeArray.get_u8(rows, z - 1) != 0 else false end
@@ -258,55 +270,52 @@ mod CubeForge.Myc do
     a || b || c
   end
 
-  pfn tick_go(sps : NativeU8Arr, vg : NativeF32Arr, rc : NativeU8Arr, hd : NativeU8Arr, cl : NativeU8Arr, dt : NativeU8Arr, clim : NativeU8Arr,
+  pfn tick_go(sps : NativeU8Arr, vg : NativeF32Arr, rc : NativeU8Arr, hd : NativeU8Arr, cl : NativeU8Arr, dt : NativeU8Arr, cs : NativeF32Arr, all : Bool,
               ta : NativeFloatArr, ma : NativeFloatArr, n : Int, rate : Float, rows : NativeU8Arr, i : Int,
-              nsps : NativeU8Arr, nvg : NativeF32Arr, nrc : NativeU8Arr, nhd : NativeU8Arr, ncl : NativeU8Arr, ndt : NativeU8Arr) : Field do
-    if i >= n * n do Field(nsps, nvg, nrc, nhd, ncl, ndt)
-    else if !row_band(rows, n, i / n) do tick_go(sps, vg, rc, hd, cl, dt, clim, ta, ma, n, rate, rows, i + n, nsps, nvg, nrc, nhd, ncl, ndt)
+              nsps : NativeU8Arr, nvg : NativeF32Arr, nrc : NativeU8Arr, nhd : NativeU8Arr, ncl : NativeU8Arr, ndt : NativeU8Arr, ncs : NativeF32Arr) : Field do
+    if i >= n * n do Field(nsps, nvg, nrc, nhd, ncl, ndt, ncs)
+    else if !all && !row_band(rows, n, i / n) do tick_go(sps, vg, rc, hd, cl, dt, cs, all, ta, ma, n, rate, rows, i + n, nsps, nvg, nrc, nhd, ncl, ndt, ncs)
     else
-      let look = if NativeArray.get_u8(clim, i) != 0 do true else any_near(dt, n, i % n, i / n, 0) end
-      if !look do tick_go(sps, vg, rc, hd, cl, dt, clim, ta, ma, n, rate, rows, i + 1, nsps, nvg, nrc, nhd, ncl, ndt)
+      let look = if all do true else if moved(cs, ta, ma, i) do true else any_near(dt, n, i % n, i / n, 0) end end
+      if !look do tick_go(sps, vg, rc, hd, cl, dt, cs, all, ta, ma, n, rate, rows, i + 1, nsps, nvg, nrc, nhd, ncl, ndt, ncs)
       else
-        match tick_col(sps, vg, rc, hd, cl, ta, ma, n, rate, i, nsps, nvg, nrc, nhd, ncl, ndt) do
-          Field(a, b, c, d, e, g) -> tick_go(sps, vg, rc, hd, cl, dt, clim, ta, ma, n, rate, rows, i + 1, a, b, c, d, e, g)
+        match tick_col(sps, vg, rc, hd, cl, ta, ma, n, rate, i, nsps, nvg, nrc, nhd, ncl, ndt, ncs) do
+          Field(a, b, c, d, e, g, h2) -> tick_go(sps, vg, rc, hd, cl, dt, cs, all, ta, ma, n, rate, rows, i + 1, a, b, c, d, e, g, h2)
         end
       end
     end end
   end
 
-  doc "A climate array saying nothing moved: for callers with no biome field and for tests."
-  fn no_climate(n : Int) : NativeU8Arr do NativeArray.make_u8(n * n, 0) end
-
   doc """
   One tick against the eased climate arrays [ta] and [ma] (one entry per column,
-  the biome field's `temps` and `moists`). [clim] flags the columns whose
-  climate the biome tick moved: they are looked at whatever the dirty set says.
-  Every looked-at column pulls from its eight neighbours in the previous state
-  and writes its own entry into fresh arrays; every other column keeps its
-  state through the memcpy the fresh arrays start from.
+  the biome field's `temps` and `moists`). A column is looked at when it or a
+  neighbour is dirty, or when its climate differs from what it was last
+  evaluated at. Every looked-at column pulls from its eight neighbours in the
+  previous state and writes its own entry into fresh arrays; every other column
+  keeps its state through the memcpy the fresh arrays start from.
   """
-  fn tick(f : Field, n : Int, ta : NativeFloatArr, ma : NativeFloatArr, clim : NativeU8Arr, rate : Float) : Field do
+  fn tick(f : Field, n : Int, ta : NativeFloatArr, ma : NativeFloatArr, rate : Float) : Field do tick_with(f, n, ta, ma, rate, false) end
+
+  doc "The tick with every column looked at: the oracle the active set is checked against."
+  fn tick_all(f : Field, n : Int, ta : NativeFloatArr, ma : NativeFloatArr, rate : Float) : Field do tick_with(f, n, ta, ma, rate, true) end
+
+  pfn tick_with(f : Field, n : Int, ta : NativeFloatArr, ma : NativeFloatArr, rate : Float, all : Bool) : Field do
     match f do
-      Field(sps, vg, rc, hd, cl, dt) ->
-        tick_go(sps, vg, rc, hd, cl, dt, clim, ta, ma, n, rate, rows_go(dt, clim, n, 0, NativeArray.make_u8(n, 0)), 0,
-                copy_u8(sps, n * n), copy_f(vg, n * n), copy_u8(rc, n * n), copy_u8(hd, n * n), copy_u8(cl, n * n), NativeArray.make_u8(n * n, 0))
+      Field(sps, vg, rc, hd, cl, dt, cs) ->
+        tick_go(sps, vg, rc, hd, cl, dt, cs, all, ta, ma, n, rate, rows_go(dt, cs, ta, ma, n, 0, NativeArray.make_u8(n, 0)), 0,
+                copy_u8(sps, n * n), copy_f(vg, n * n), copy_u8(rc, n * n), copy_u8(hd, n * n), copy_u8(cl, n * n), NativeArray.make_u8(n * n, 0), copy_f(cs, 2 * n * n))
     end
   end
 
-  doc "The tick with every column looked at: the oracle the active set is checked against."
-  fn tick_all(f : Field, n : Int, ta : NativeFloatArr, ma : NativeFloatArr, rate : Float) : Field do
-    tick(f, n, ta, ma, NativeArray.make_u8(n * n, 1), rate)
+  doc "Columns the next tick will look at against [ta] and [ma]: the dirty set widened by one, and the columns whose climate moved."
+  fn active_count(f : Field, n : Int, ta : NativeFloatArr, ma : NativeFloatArr) : Int do
+    match f do Field(_, _, _, _, _, dt, cs) -> active_go(dt, cs, ta, ma, n, 0, 0) end
   end
-
-  doc "Columns the next tick will look at, given [clim]: the dirty set widened by one and the climate-moved columns."
-  fn active_count(f : Field, n : Int, clim : NativeU8Arr) : Int do
-    match f do Field(_, _, _, _, _, dt) -> active_go(dt, clim, n, 0, 0) end
-  end
-  pfn active_go(dt : NativeU8Arr, clim : NativeU8Arr, n : Int, i : Int, acc : Int) : Int do
+  pfn active_go(dt : NativeU8Arr, cs : NativeF32Arr, ta : NativeFloatArr, ma : NativeFloatArr, n : Int, i : Int, acc : Int) : Int do
     if i >= n * n do acc
     else
-      let look = if NativeArray.get_u8(clim, i) != 0 do true else any_near(dt, n, i % n, i / n, 0) end
-      active_go(dt, clim, n, i + 1, if look do acc + 1 else acc end)
+      let look = if moved(cs, ta, ma, i) do true else any_near(dt, n, i % n, i / n, 0) end
+      active_go(dt, cs, ta, ma, n, i + 1, if look do acc + 1 else acc end)
     end
   end
 
@@ -321,10 +330,10 @@ mod CubeForge.Myc do
     if x < 0 || z < 0 || x >= n || z >= n do f
     else
       match f do
-        Field(sps, vg, rc, hd, cl, dt) ->
+        Field(sps, vg, rc, hd, cl, dt, cs) ->
           let i = x + n * z
           if NativeArray.get_u8(sps, i) == 0 do f
-          else Field(sps, vg, NativeArray.set_u8(copy_u8(rc, n * n), i, plant_reach()), hd, cl, NativeArray.set_u8(copy_u8(dt, n * n), i, 1)) end
+          else Field(sps, vg, NativeArray.set_u8(copy_u8(rc, n * n), i, plant_reach()), hd, cl, NativeArray.set_u8(copy_u8(dt, n * n), i, 1), cs) end
       end
     end
   end
@@ -332,7 +341,7 @@ mod CubeForge.Myc do
   doc "The species column [i] should display: its species once vigour reaches show_vigour(), else 0."
   fn wanted(f : Field, n : Int, i : Int) : Int do
     match f do
-      Field(sps, vg, _, _, _, _) ->
+      Field(sps, vg, _, _, _, _, cs) ->
         let sp = NativeArray.get_u8(sps, i)
         if sp == 0 do 0 else if NativeArray.get_f32(vg, i) >= show_vigour() do sp else 0 end end
     end
@@ -352,7 +361,7 @@ mod CubeForge.Myc do
   doc "Column indices whose surface should change: wanted species differs from [shown]. Scans [scan] columns from where tick [tick] leaves off (a stateless cursor), returns at most [budget]. Destructures the field once (GAPS G68)."
   fn migrations(f : Field, n : Int, shown : NativeU8Arr, tick : Int, scan : Int, budget : Int) : List(Int) do
     match f do
-      Field(sps, vg, _, _, _, _) -> migrations_go(sps, vg, shown, n, (tick * scan) % (n * n), scan, budget, Nil)
+      Field(sps, vg, _, _, _, _, cs) -> migrations_go(sps, vg, shown, n, (tick * scan) % (n * n), scan, budget, Nil)
     end
   end
 
@@ -370,7 +379,7 @@ mod CubeForge.Myc do
 
   pfn patch_go(sps : NativeU8Arr, vg : NativeF32Arr, rc : NativeU8Arr, dt : NativeU8Arr, n : Int, x : Int, z : Int, sp : Int, r : Int, i : Int) : Field do
     let span = 2 * r + 1
-    if i >= span * span do Field(sps, vg, rc, NativeArray.make_u8(0, 0), NativeArray.make_u8(0, 0), dt)
+    if i >= span * span do Field(sps, vg, rc, NativeArray.make_u8(0, 0), NativeArray.make_u8(0, 0), dt, NativeArray.make_f32(0, 0.0))
     else
       let dx = i % span - r
       let dz = i / span - r
@@ -388,9 +397,9 @@ mod CubeForge.Myc do
   doc "A mature patch of [sp] centred on (x, z): the octagon a planting grows into, at full vigour, reach falling with distance, every column dirty. Copies the arrays once."
   fn plant_patch(f : Field, n : Int, x : Int, z : Int, sp : Int) : Field do
     match f do
-      Field(sps, vg, rc, hd, cl, dt) ->
+      Field(sps, vg, rc, hd, cl, dt, cs) ->
         match patch_go(copy_u8(sps, n * n), copy_f(vg, n * n), copy_u8(rc, n * n), copy_u8(dt, n * n), n, x, z, sp, plant_radius(), 0) do
-          Field(s1, v1, r1, _, _, d1) -> Field(s1, v1, r1, hd, cl, d1)
+          Field(s1, v1, r1, _, _, d1, _) -> Field(s1, v1, r1, hd, cl, d1, cs)
         end
     end
   end
