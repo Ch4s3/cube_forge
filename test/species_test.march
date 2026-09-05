@@ -1,0 +1,62 @@
+-- The species table: bands that line up with the biome thresholds, and fitness.
+mod CubeForge.Test.Species do
+
+  import Test
+  alias CubeForge.Species as S
+
+  pfn near(a : Float, b : Float) : Bool do Math.abs(a -. b) < 0.0001 end
+
+  describe "Species table" do
+    test "six species, in spec order, with 0 meaning none" do
+      Test.assert_eq_int(S.count(), 6, "six")
+      Test.assert_true(S.name(1) == "Frostcap", "1")
+      Test.assert_true(S.name(2) == "Pinewart", "2")
+      Test.assert_true(S.name(3) == "Meadowbell", "3")
+      Test.assert_true(S.name(4) == "Lanterncap", "4")
+      Test.assert_true(S.name(5) == "Marshlight", "5")
+      Test.assert_true(S.name(6) == "Sunshelf", "6")
+      Test.assert_true(S.name(0) == "none", "0")
+    end
+    test "tiers, glow and yield follow the table" do
+      Test.assert_eq_int(S.tier(1), 0, "Frostcap small")
+      Test.assert_eq_int(S.tier(4), 1, "Lanterncap medium")
+      Test.assert_eq_int(S.tier(5), 2, "Marshlight giant")
+      Test.assert_eq_int(S.glow(1), 1, "Frostcap dim")
+      Test.assert_eq_int(S.glow(3), 0, "Meadowbell none")
+      Test.assert_eq_int(S.glow(4), 2, "Lanterncap bright")
+      Test.assert_eq_int(S.glow(5), 2, "Marshlight bright")
+      Test.assert_eq_int(S.spores(1), 1, "small yields 1")
+      Test.assert_eq_int(S.spores(4), 3, "medium yields 3")
+      Test.assert_eq_int(S.spores(6), 8, "giant yields 8")
+    end
+  end
+
+  describe "Species.fitness" do
+    test "is 1 in the core of the band and 0 outside it" do
+      Test.assert_true(near(S.fitness(3, 0.5, 0.3), 1.0), "Meadowbell at temperate dry")
+      Test.assert_true(near(S.fitness(3, 0.9, 0.3), 0.0), "Meadowbell in the desert")
+      Test.assert_true(near(S.fitness(3, 0.5, 0.9), 0.0), "Meadowbell in the swamp")
+      Test.assert_true(near(S.fitness(0, 0.5, 0.5), 0.0), "no species has no fitness")
+    end
+    test "falls linearly across the edge" do
+      -- Meadowbell's upper moisture edge is 0.56; edge width 0.06
+      Test.assert_true(near(S.fitness(3, 0.5, 0.50), 1.0), "at the inner edge")
+      Test.assert_true(near(S.fitness(3, 0.5, 0.53), 0.5), "halfway across")
+      Test.assert_true(near(S.fitness(3, 0.5, 0.56), 0.0), "at the outer edge")
+    end
+    test "every biome's home ground has a species above the viable floor" do
+      Test.assert_eq_int(S.best_for(0.15, 0.2), 1, "tundra -> Frostcap")
+      Test.assert_eq_int(S.best_for(0.15, 0.8), 2, "taiga -> Pinewart")
+      Test.assert_eq_int(S.best_for(0.5, 0.2), 3, "grassland -> Meadowbell")
+      Test.assert_eq_int(S.best_for(0.5, 0.8), 4, "forest -> Lanterncap")
+      Test.assert_eq_int(S.best_for(0.85, 0.8), 5, "wetland -> Marshlight")
+      Test.assert_eq_int(S.best_for(0.85, 0.2), 6, "desert -> Sunshelf")
+    end
+    test "the transitional ground is contested" do
+      -- warm forest: both Lanterncap and Marshlight are viable
+      Test.assert_true(S.fitness(4, 0.64, 0.7) > S.viable(), "Lanterncap viable at 0.64")
+      Test.assert_true(S.fitness(5, 0.64, 0.7) > S.viable(), "Marshlight viable at 0.64")
+    end
+  end
+
+end
