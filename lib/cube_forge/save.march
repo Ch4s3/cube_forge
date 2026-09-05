@@ -259,6 +259,17 @@ mod CubeForge.Save do
     end
   end
 
+  doc "Read one chunk file of a slot."
+  fn read_chunk(d : String, slot : Int, i : Int) : Result(CubeForge.Chunk.Chunk, String) do
+    match File.read(chunk_path(d, slot, i)) do
+      Err(_) -> Err(err_text("read", chunk_path(d, slot, i)))
+      Ok(s) ->
+        let a = Bytes.to_u8_arr(Bytes.from_string(s))
+        if NativeArray.length_u8(a) != chunk_bytes() do Err("chunk " ++ int_to_string(i) ++ " is " ++ int_to_string(NativeArray.length_u8(a)) ++ " bytes")
+        else Ok(C.of_raw(a)) end
+    end
+  end
+
   doc "Read every chunk of a slot, in grid order."
   fn read_chunks(d : String, slot : Int, side : Int) : Result(Array.PVec(CubeForge.Chunk.Chunk), String) do
     match read_chunks_go(d, slot, side * side - 1, side * side, Nil) do
