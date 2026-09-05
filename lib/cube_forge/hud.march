@@ -298,29 +298,35 @@ mod CubeForge.Hud do
   pfn menu_items_go(b : CubeForge.F32Buf.F32Buf, m : CubeForge.Menu.Menu, i : Int) : CubeForge.F32Buf.F32Buf do
     if i >= Menu.items(m) do b
     else
-      let x0 = Menu.item_x0()
+      let x0 = Menu.item_x0(m)
       let y0 = Menu.item_y0(m, i)
       let h = Menu.item_h(m)
+      let w = Menu.item_w(m)
       let hot = Menu.focused(m) == i
-      let b1 = arect(b, x0, y0, x0 +. Menu.item_w(), y0 +. h,
+      let b1 = arect(b, x0, y0, x0 +. w, y0 +. h,
                      if hot do 0.30 else 0.15 end, if hot do 0.35 else 0.17 end,
                      if hot do 0.42 else 0.21 end, 0.98)
       let lbl = Menu.label(m, i)
       let sub = Menu.sublabel(m, i)
-      let tw = text_width(lbl, menu_px())
-      -- A row with a second line carries its label higher to make room.
-      let lift = if sub == "" do 0.035 else 0.050 end
-      let b2 = emit_text(b1, lbl, x0 +. (Menu.item_w() -. tw) /. 2.0, y0 +. h /. 2.0 +. lift, menu_px(), menu_py())
+      -- Slot rows are set smaller: SLOT 5 SEED plus ten digits must fit the row.
+      let px = if Menu.page(m) == Menu.page_slots() do slot_px() else menu_px() end
+      let py = px *. 1.4
+      let tw = text_width(lbl, px)
+      -- A one-line row centres its label; a two-line row puts the label at the
+      -- top and the date under it. Text y is the glyph's top edge.
+      let ly = if sub == "" do y0 +. h /. 2.0 +. 2.5 *. py else y0 +. h -. 0.012 end
+      let b2 = emit_text(b1, lbl, x0 +. (w -. tw) /. 2.0, ly, px, py)
       let b3 = if sub == "" do b2
-               else emit_text(b2, sub, x0 +. (Menu.item_w() -. text_width(sub, sub_px())) /. 2.0, y0 +. 0.040, sub_px(), sub_py()) end
+               else emit_text(b2, sub, x0 +. (w -. text_width(sub, sub_px())) /. 2.0, y0 +. 0.012 +. 5.0 *. sub_py(), sub_px(), sub_py()) end
       menu_items_go(b3, m, i + 1)
     end
   end
 
   fn menu_px() : Float do 0.010 end
   fn menu_py() : Float do 0.014 end
-  fn sub_px() : Float do 0.006 end
-  fn sub_py() : Float do 0.009 end
+  fn slot_px() : Float do 0.007 end
+  fn sub_px() : Float do 0.005 end
+  fn sub_py() : Float do 0.007 end
   fn title_px() : Float do 0.018 end
   fn title_py() : Float do 0.026 end
 
@@ -331,7 +337,7 @@ mod CubeForge.Hud do
   """
   fn build_menu(b : CubeForge.F32Buf.F32Buf, m : CubeForge.Menu.Menu) : CubeForge.F32Buf.F32Buf do
     let b0 = arect(B.clear(b), -1.0, -1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.55)
-    let b1 = arect(b0, Menu.panel_x0(), Menu.panel_y0(m), Menu.panel_x1(), Menu.panel_y1(m),
+    let b1 = arect(b0, Menu.panel_x0(m), Menu.panel_y0(m), Menu.panel_x1(m), Menu.panel_y1(m),
                    0.10, 0.11, 0.14, 0.95)
     let b2 = menu_items_go(b1, m, 0)
     let title = Menu.title(m)
@@ -339,9 +345,9 @@ mod CubeForge.Hud do
              else emit_text(b2, title, 0.0 -. text_width(title, title_px()) /. 2.0, Menu.title_y() +. title_py() *. 5.0, title_px(), title_py()) end
     if !Menu.has_seed_field(m) do b3
     else
-      let sx = Menu.seed_x0()
+      let sx = Menu.seed_x0(m)
       let sy = Menu.seed_y0(m)
-      let b4 = arect(b3, sx, sy, sx +. Menu.item_w(), sy +. Menu.item_h(m), 0.05, 0.06, 0.08, 0.98)
+      let b4 = arect(b3, sx, sy, sx +. Menu.item_w(m), sy +. Menu.item_h(m), 0.05, 0.06, 0.08, 0.98)
       let b5 = emit_text(b4, "SEED", sx +. 0.014, sy +. Menu.item_h(m) -. 0.010, 0.006, 0.009)
       emit_digits(b5, digits_of(Menu.seed(m), Nil), sx +. 0.014, sy +. 0.062, 0.008, 0.011)
     end

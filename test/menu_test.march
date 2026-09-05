@@ -8,7 +8,7 @@ mod CubeForge.Test.Menu do
 
   pfn centres_ok(m : CubeForge.Menu.Menu, i : Int) : Bool do
     if i >= Menu.items(m) do true
-    else if Menu.item_at(m, Menu.item_x0() +. Menu.item_w() /. 2.0,
+    else if Menu.item_at(m, Menu.item_x0(m) +. Menu.item_w(m) /. 2.0,
                          Menu.item_y0(m, i) +. Menu.item_h(m) /. 2.0) == i do centres_ok(m, i + 1)
     else false end end
   end
@@ -34,9 +34,9 @@ mod CubeForge.Test.Menu do
     test "the gap between items is not clickable" do
       let m = Menu.new(7)
       let between = Menu.item_y0(m, 0) -. 0.03
-      Test.assert_eq_int(Menu.item_at(m, Menu.item_x0() +. 0.1, between), -1, "between two items")
+      Test.assert_eq_int(Menu.item_at(m, Menu.item_x0(m) +. 0.1, between), -1, "between two items")
       let sp = slots_page()
-      Test.assert_eq_int(Menu.item_at(sp, Menu.item_x0() +. 0.1, Menu.item_y0(sp, 0) -. 0.01), -1, "between two slot rows")
+      Test.assert_eq_int(Menu.item_at(sp, Menu.item_x0(sp) +. 0.1, Menu.item_y0(sp, 0) -. 0.01), -1, "between two slot rows")
     end
     test "outside the panel is not clickable" do
       let m = Menu.new(7)
@@ -51,12 +51,13 @@ mod CubeForge.Test.Menu do
     end
     test "the panel contains every item" do
       let m = Menu.new(7)
-      Test.assert_true(Menu.item_x0() > Menu.panel_x0(), "left edge inside")
-      Test.assert_true(Menu.item_x0() +. Menu.item_w() < Menu.panel_x1(), "right edge inside")
+      Test.assert_true(Menu.item_x0(m) > Menu.panel_x0(m), "left edge inside")
+      Test.assert_true(Menu.item_x0(m) +. Menu.item_w(m) < Menu.panel_x1(m), "right edge inside")
       Test.assert_true(Menu.item_y0(m, 0) +. Menu.item_h(m) < Menu.panel_y1(m), "first item inside")
       Test.assert_true(Menu.seed_y0(m) > Menu.panel_y0(m), "seed field inside")
       let sp = slots_page()
       Test.assert_true(Menu.item_y0(sp, 0) +. Menu.item_h(sp) < Menu.panel_y1(sp), "first slot row inside")
+      Test.assert_true(Menu.item_x0(sp) > Menu.panel_x0(sp) && Menu.item_x0(sp) +. Menu.item_w(sp) < Menu.panel_x1(sp), "slot rows inside the wider panel")
       Test.assert_true(Menu.item_y0(sp, Menu.item_back()) > Menu.panel_y0(sp), "BACK inside")
     end
   end

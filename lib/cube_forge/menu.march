@@ -106,14 +106,15 @@ mod CubeForge.Menu do
   -- One source for both drawing and hit-testing. The slots page is taller and
   -- tighter than the main page; everything below is a function of the page.
 
-  fn panel_x0() : Float do -0.36 end
-  fn panel_x1() : Float do 0.36 end
+  doc "The slots page is wider: a row must hold SLOT 5 SEED and a ten-digit seed."
+  fn panel_x0(m : Menu) : Float do if page(m) == page_slots() do -0.40 else -0.36 end end
+  fn panel_x1(m : Menu) : Float do 0.0 -. panel_x0(m) end
   fn panel_y0(m : Menu) : Float do if page(m) == page_slots() do -0.50 else -0.56 end end
   fn panel_y1(m : Menu) : Float do if page(m) == page_slots() do 0.50 else 0.36 end end
 
-  fn item_w() : Float do 0.44 end
+  fn item_w(m : Menu) : Float do if page(m) == page_slots() do 0.66 else 0.44 end end
   fn item_h(m : Menu) : Float do if page(m) == page_slots() do 0.115 else 0.13 end end
-  fn item_x0() : Float do -0.22 end
+  fn item_x0(m : Menu) : Float do 0.0 -. item_w(m) /. 2.0 end
   doc "Bottom edge of item [i]; items run downward from the top of the panel."
   fn item_y0(m : Menu, i : Int) : Float do
     if page(m) == page_slots() do 0.32 -. int_to_float(i) *. 0.14
@@ -124,7 +125,7 @@ mod CubeForge.Menu do
   fn has_seed_field(m : Menu) : Bool do page(m) == page_main() end
   doc "The seed field sits below the last item."
   fn seed_y0(m : Menu) : Float do item_y0(m, 2) -. 0.19 end
-  fn seed_x0() : Float do item_x0() end
+  fn seed_x0(m : Menu) : Float do item_x0(m) end
 
   doc "The title drawn above the panel: the game's name on the start screen, nothing otherwise."
   fn title(m : Menu) : String do if is_start(m) do "CUBE FORGE" else "" end end
@@ -134,7 +135,7 @@ mod CubeForge.Menu do
   fn item_at(m : Menu, x : Float, y : Float) : Int do item_at_go(m, x, y, 0) end
   pfn item_at_go(m : Menu, x : Float, y : Float, i : Int) : Int do
     if i >= items(m) do -1
-    else if x >= item_x0() && x <= item_x0() +. item_w()
+    else if x >= item_x0(m) && x <= item_x0(m) +. item_w(m)
             && y >= item_y0(m, i) && y <= item_y0(m, i) +. item_h(m) do i
     else item_at_go(m, x, y, i + 1) end end
   end

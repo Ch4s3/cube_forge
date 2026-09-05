@@ -39,6 +39,24 @@ mod CubeForge.Player do
     match p do Player(pos, vel, yaw, _, g) -> Player(pos, vel, yaw, pitch, g) end
   end
   fn position(p : Player) : CubeForge.Math.Vec3.Vec3 do match p do Player(pos, _, _, _, _) -> pos end end
+  fn velocity(p : Player) : CubeForge.Math.Vec3.Vec3 do match p do Player(_, vel, _, _, _) -> vel end end
+
+  doc "The eight floats a save stores: position, velocity, yaw, pitch."
+  fn to_floats(p : Player) : NativeFloatArr do
+    match p do
+      Player(pos, vel, yaw, pitch, _) ->
+        let a = NativeArray.make_float(8, 0.0)
+        let a1 = NativeArray.set_float(NativeArray.set_float(NativeArray.set_float(a, 0, V.x(pos)), 1, V.y(pos)), 2, V.z(pos))
+        let a2 = NativeArray.set_float(NativeArray.set_float(NativeArray.set_float(a1, 3, V.x(vel)), 4, V.y(vel)), 5, V.z(vel))
+        NativeArray.set_float(NativeArray.set_float(a2, 6, yaw), 7, pitch)
+    end
+  end
+  doc "A player from the eight floats of a save; not on the ground until the next physics step says so."
+  fn of_floats(a : NativeFloatArr) : Player do
+    Player(V.new(NativeArray.get_float(a, 0), NativeArray.get_float(a, 1), NativeArray.get_float(a, 2)),
+           V.new(NativeArray.get_float(a, 3), NativeArray.get_float(a, 4), NativeArray.get_float(a, 5)),
+           NativeArray.get_float(a, 6), NativeArray.get_float(a, 7), false)
+  end
   fn yaw(p : Player) : Float do match p do Player(_, _, y, _, _) -> y end end
   fn pitch(p : Player) : Float do match p do Player(_, _, _, pt, _) -> pt end end
   fn on_ground(p : Player) : Bool do match p do Player(_, _, _, _, g) -> g end end
