@@ -2306,10 +2306,13 @@ mod CubeForge do
   -- CF_TERRAIN_STATS=1: sample the generator over the world and report height and
   -- surface-material distributions, so terrain tuning is measured rather than eyeballed.
   pfn stats_go(n : Int, i : Int, seed : Int, lo : Int, hi : Int, sum : Int,
-               grass : Int, sand : Int, snow : Int, granite : Int, under : Int, flat : Int, gravel : Int) : Unit do
+               grass : Int, sand : Int, snow : Int, granite : Int, under : Int, flat : Int, gravel : Int, climate : Int) : Unit do
     let span = 16 * n
     if i >= span * span / 16 do
       let cols = span * span / 16
+      -- climate packs dune, glacier and bog counts as d + 4096 * (g + 4096 * b)
+      println("  climate ground: dune " ++ int_to_string(climate % 4096 * 100 / cols) ++ "%  glacier " ++ int_to_string(climate / 4096 % 4096 * 100 / cols)
+              ++ "%  bog " ++ int_to_string(climate / 16777216 * 100 / cols) ++ "%")
       println("  height min=" ++ int_to_string(lo) ++ " max=" ++ int_to_string(hi) ++ " mean=" ++ int_to_string(sum / cols)
               ++ "  (sea level " ++ int_to_string(Chunk.sea_level()) ++ ", snow line " ++ int_to_string(CubeForge.Noise.snow_line()) ++ ")"
               ++ "  flat (slope <= 1) " ++ int_to_string(flat * 100 / cols) ++ "%")
@@ -2326,6 +2329,9 @@ mod CubeForge do
       -- the pile, from a heightmap around this one column (a 9x9 apron is cheap at 1 in 16 columns)
       let hs = Chunk.heights(wx - 8, wz - 8, seed)
       let pile = Chunk.pile_at(hs, 8, 8, CubeForge.Noise.age_frac(seed))
+      let dune = if CubeForge.Noise.dune_mask_at(wx, wz, seed) >= Chunk.dune_min() do 1 else 0 end
+      let glacier = if CubeForge.Noise.glacier_at(wx, wz, seed) do 4096 else 0 end
+      let bog = if Chunk.is_bog(h, slope, CubeForge.Noise.river_at(wx, wz, seed), 0, seed) do 16777216 else 0 end
       stats_go(n, i + 1, seed,
                if h < lo do h else lo end, if h > hi do h else hi end, sum + h,
                if sfc == 1 do grass + 1 else grass end,
@@ -2334,14 +2340,15 @@ mod CubeForge do
                if sfc == Chunk.granite() do granite + 1 else granite end,
                if h < Chunk.sea_level() do under + 1 else under end,
                if slope <= 1 do flat + 1 else flat end,
-               if pile > 0 do gravel + 1 else gravel end)
+               if pile > 0 do gravel + 1 else gravel end,
+               climate + dune + glacier + bog)
     end
   end
 
   -- CF_TERRAIN_MAP=1 (alongside CF_TERRAIN_STATS): the world as a character map, one
   -- character per 2x2 columns, so plateaus, valleys and rivers can be seen, not inferred.
   --   ~ underwater   . sand   # granite (cliff)   * snow
-  --   , : = +  grass, by height band (below 70, 78, 86, above)
+  --   , : = +  grass, by height band (below 70, 78, 86, above)   d dune  g glacier  b bog
   -- Is any of the 2x2 columns at (x, z) a spring column? A spring sits at its
   -- cell's trunk column, so the test is against that.
   pfn spring_in_2x2(x : Int, z : Int, seed : Int, k : Int) : Bool do
@@ -2367,7 +2374,14 @@ mod CubeForge do
     if x >= 16 * n do acc
     else
       let h = CubeForge.Noise.height(x, z, seed)
-      let ch = if spring_in_2x2(x, z, seed, 0) do "s" else map_char(h, Chunk.surface_id(h, CubeForge.Noise.slope(x, z, seed)), CubeForge.Lakes.level_at(lk, n, x, z)) end
+      let slope = CubeForge.Noise.slope(x, z, seed)
+      let lake = CubeForge.Lakes.level_at(lk, n, x, z)
+      -- d dune field, g glacier, b bog: the climate-shaped ground, over the material
+      let ch = if spring_in_2x2(x, z, seed, 0) do "s"
+               else if lake == 0 && h >= Chunk.sea_level() && CubeForge.Noise.glacier_at(x, z, seed) do "g"
+               else if lake == 0 && Chunk.is_bog(h, slope, CubeForge.Noise.river_at(x, z, seed), 0, seed) do "b"
+               else if lake == 0 && h >= Chunk.sea_level() && CubeForge.Noise.dune_mask_at(x, z, seed) >= Chunk.dune_min() do "d"
+               else map_char(h, Chunk.surface_id(h, slope), lake) end end end end
       map_row_go(n, z, x + 2, seed, lk, acc ++ ch)
     end
   end
@@ -2584,7 +2598,7 @@ mod CubeForge do
     let t3 = System.monotonic_time()
     let nverts = count_verts(meshes, 0)
     if Env.get_int("CF_TERRAIN_STATS", 0) == 1 do
-      stats_go(n, 0, seed, 999, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+      stats_go(n, 0, seed, 999, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
       springs_go(n, 0, seed, 0, 0)
       let tl0 = System.monotonic_time()
       let lk = CubeForge.Lakes.levels(seed, n)

@@ -89,13 +89,31 @@ column fill like water's. Generation time up by a few percent; measured.
 
 ## 7. Measured
 
-- `CF_TERRAIN_STATS`: sand, ice and mud percentages by age on a hot seed
-  and a cold seed (found by `Biome.debug_axes` at the player column).
-- `CF_TERRAIN_MAP`: `d` dune crest, `g` glacier, `b` bog pool, so the three
-  fields are seen as regions.
-- Biome agreement after the first tick: the fraction of dune columns the
-  retexture leaves alone (expected ~100%), of bog columns classified
-  wetland.
+*As built, 2026-09-05.* What moved from the design:
+
+- **Dunes** are gated on the same temperature the biome will compute (the
+  lapse included), and hot ground near the sea is the only hot ground
+  there is, so the first gates (6 above the sea, a 0.15 hot ramp) found no
+  dune anywhere on eight seeds. As built: 3 above the sea with a 3-block
+  ramp, a 0.08 hot ramp, `Chunk.dune_min()` 0.35 -- 2% of columns on two
+  of eight seeds at age 50, none on the rest. Dune fields are as rare as
+  deserts, which is right, and a hotter world is a knob for later
+  (`dune_temp`). The sand goes four deep, the subsurface's depth, not six.
+- **Glaciers**: the tongue is a column rule (cold at the surface, above
+  the snow line, on a river's floor), not a walk down the valley; the
+  moraine is the band within `moraine_band()` of the threshold rather than
+  the last six blocks; the U-trough was not built (the plain rule of the
+  sediment spec already flattens the floor). About 1-2% of columns at age
+  0 on cold seeds (7, 3, 11, 21), retreating to none by mid-age as
+  `glacier_temp` falls.
+- **Bog** is the floodplain rule near sea level (`Chunk.is_bog`: within
+  three of the sea, flat, on the plain, not under a lake): 0-7% of columns,
+  most on seed 11. One column in seven is a pool dug to a block under sea
+  level, which the sea rule fills.
+
+`CF_TERRAIN_STATS` prints the three as a climate-ground line; the map marks
+`d`, `g`, `b`. SIMD/scalar mismatches stayed at 0-5 with the dune term in
+both paths.
 
 ## 8. Tests
 

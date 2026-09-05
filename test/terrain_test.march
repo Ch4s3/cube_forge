@@ -178,6 +178,76 @@ mod CubeForge.Test.Terrain do
     end
   end
 
+  -- Climate ground: find the first column of a kind in a world, packed x + 4096 * z, or -1.
+  pfn first_dune(seed : Int, i : Int) : Int do
+    if i >= 16384 do -1
+    else if N.dune_mask_at(i % 128, i / 128, seed) >= C.dune_min() do i % 128 + 4096 * (i / 128)
+    else first_dune(seed, i + 1) end end
+  end
+  pfn first_glacier(seed : Int, i : Int) : Int do
+    if i >= 16384 do -1
+    else if N.glacier_at(i % 128, i / 128, seed) && !N.moraine_at(i % 128, i / 128, seed) && N.relief(i % 128, i / 128, seed) > N.height(i % 128, i / 128, seed) do i % 128 + 4096 * (i / 128)
+    else first_glacier(seed, i + 1) end end
+  end
+  pfn first_bog(seed : Int, i : Int) : Int do
+    if i >= 16384 do -1
+    else
+      let wx = i % 128
+      let wz = i / 128
+      if C.is_bog(N.height(wx, wz, seed), N.slope(wx, wz, seed), N.river_at(wx, wz, seed), 0, seed) do wx + 4096 * wz
+      else first_bog(seed, i + 1) end
+    end
+  end
+  pfn chunk_of(col : Int, seed : Int) : CubeForge.Chunk.Chunk do
+    C.generate_lakes(col % 4096 / 16 * 16, col / 4096 / 16 * 16, seed, CubeForge.Lakes.levels(seed, 8), 8)
+  end
+
+  describe "climate-shaped ground" do
+    test "the generator's temperature is the biome's" do
+      Test.assert_true(N.temperature(40, 40, 7, 62) == CubeForge.Biome.temp_target(40, 40, 7, 62), "same value at sea level")
+      Test.assert_true(N.temperature(40, 40, 7, 100) == CubeForge.Biome.temp_target(40, 40, 7, 100), "and up a mountain")
+      Test.assert_true(N.temperature(40, 40, 7, 100) < N.temperature(40, 40, 7, 62), "the lapse cools with height")
+    end
+    test "the dune mask needs hot, dry and open ground" do
+      Test.assert_true(N.dune_mask_of(0.9, 90.0, 0.0) == 1.0, "hot, high and out of any valley: a dune field")
+      Test.assert_true(N.dune_mask_of(0.3, 90.0, 0.0) == 0.0, "cold: none")
+      Test.assert_true(N.dune_mask_of(0.9, 63.0, 0.0) == 0.0, "a beach: none")
+      Test.assert_true(N.dune_mask_of(0.9, 90.0, 0.9) == 0.0, "a river valley: none")
+    end
+    test "a dune column is sand through" do
+      let seed = N.with_age(1234, 50)
+      let col = first_dune(seed, 0)
+      Test.assert_true(col >= 0, "seed 1234 at age 50 has a dune field")
+      let c = chunk_of(col, seed)
+      let h = top_of(c, col % 4096 % 16, col / 4096 % 16, 200)
+      Test.assert_eq_int(C.get(c, col % 4096 % 16, h, col / 4096 % 16), C.sand(), "sand on top")
+      Test.assert_eq_int(C.get(c, col % 4096 % 16, h - 3, col / 4096 % 16), C.sand(), "sand three down")
+    end
+    test "a glacier column is ice from its floor to the relief, and the ice retreats with age" do
+      Test.assert_true(N.glacier_temp(1.0) < N.glacier_temp(0.0), "colder threshold when ancient")
+      let seed = N.with_age(11, 0)
+      let col = first_glacier(seed, 0)
+      Test.assert_true(col >= 0, "seed 11 at age 0 has a glacier")
+      let c = chunk_of(col, seed)
+      let x = col % 4096 % 16
+      let z = col / 4096 % 16
+      Test.assert_eq_int(C.get(c, x, N.relief(col % 4096, col / 4096, seed), z), C.ice(), "ice at the relief")
+      Test.assert_eq_int(C.get(c, x, N.height(col % 4096, col / 4096, seed) + 1, z), C.ice(), "ice just above the carved floor")
+    end
+    test "a bog is mud and clay with pools at sea level" do
+      let seed = N.with_age(11, 50)
+      let col = first_bog(seed, 0)
+      Test.assert_true(col >= 0, "seed 11 at age 50 has bog")
+      let c = chunk_of(col, seed)
+      let x = col % 4096 % 16
+      let z = col / 4096 % 16
+      let h = N.height(col % 4096, col / 4096, seed)
+      let top = C.get(c, x, h, z)
+      let pool = C.bog_pool(col % 4096, col / 4096, seed)
+      Test.assert_true(if pool do C.is_water(C.get(c, x, C.sea_level(), z)) else top == C.mud() || top == C.clay() end, "a pool holds water at sea level; the rest is mud or clay")
+    end
+  end
+
   describe "talus" do
     test "a four-block face piles gravel at mid-age and nothing in a young world" do
       Test.assert_eq_int(C.pile_at(synth(4), 9, 8, 0.5), 1, "one block beside a four-block face at mid-age")

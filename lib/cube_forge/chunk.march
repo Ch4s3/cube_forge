@@ -415,6 +415,33 @@ mod CubeForge.Chunk do
     Math.max_int(Math.max_int(d0, d1), Math.max_int(d2, d3))
   end
 
+  -- ── Climate-shaped ground ───────────────────────────────────────────────
+  -- Dunes are sand through (the biome finds sand and keeps it); a glacier
+  -- column is filled with ice from its carved floor back up to the relief,
+  -- gravel at the tongue's warm end (a moraine); a bog is a wet flat near
+  -- sea level with mud and clay and one column in bog_pit() dug to a pool.
+  doc "A dune column: the dune mask at or above this."
+  fn dune_min() : Float do 0.35 end
+  doc "One column in this many of a bog is a pool."
+  fn bog_pit() : Int do 7 end
+  doc "Fraction of bog columns that are mud rather than clay, on the same fixed hash Biome.wetland_surface uses, so a dug bank matches its surface."
+  fn bog_surface(x : Int, z : Int) : Int do
+    if CubeForge.Noise.hash2(x, z, 91537) < 0.4 do mud() else clay() end
+  end
+  doc "Is a column bog: at or within three of sea level, flat, on a river's plain, and not under a lake."
+  fn is_bog(h : Int, slope : Int, river : Float, lake : Int, seed : Int) : Bool do
+    lake == 0 && h >= sea_level() && h <= sea_level() + 3 && slope <= 1
+      && river >= CubeForge.Noise.plain_edge(CubeForge.Noise.age_frac(seed))
+  end
+  doc "Is a bog column one of its pools."
+  fn bog_pool(wx : Int, wz : Int, seed : Int) : Bool do
+    CubeForge.Noise.hash2(wx, wz, seed + 1400) *. int_to_float(bog_pit()) < 1.0
+  end
+  -- Ice from [y] up to [top]: the glacier's fill.
+  pfn fill_ice(c : Chunk, x : Int, z : Int, y : Int, top : Int) : Chunk do
+    if y > top || y >= 255 do c else fill_ice(set(c, x, y, z, ice()), x, z, y + 1, top) end
+  end
+
   -- A column with a pile is gravel over gravel: the pile IS the surface, and
   -- its slope is read from the piled map, so the foot of a cliff is scree at
   -- a walkable angle while the face above it keeps its granite.
@@ -428,9 +455,27 @@ mod CubeForge.Chunk do
       -- the water level this column is under: a lake's surface, or the sea's
       let lake = CubeForge.Lakes.level_at(lk, n, wx0 + x, wz0 + z)
       let level = if lake > 0 do lake else sea_level() end
-      let sfc = if piled_up do gravel() else surface_id_at(top, piled_slope_at(ps, x, z), level) end
-      let sub = if piled_up do gravel() else sediment_id(sfc, CubeForge.Noise.river_at(wx0 + x, wz0 + z, seed), top, level, seed) end
-      fill_noise_go(fill_column_world(c, x, z, wx0 + x, wz0 + z, seed, top, sfc, sub, level), i + 1, hs, ps, wx0, wz0, seed, lk, n)
+      let wx = wx0 + x
+      let wz = wz0 + z
+      let river = CubeForge.Noise.river_at(wx, wz, seed)
+      let slope = piled_slope_at(ps, x, z)
+      let bog = is_bog(top, slope, river, lake, seed)
+      let pool = bog && bog_pool(wx, wz, seed)
+      let dune = !piled_up && !bog && CubeForge.Noise.dune_mask_at(wx, wz, seed) >= dune_min()
+      let glacier = !piled_up && lake == 0 && CubeForge.Noise.glacier_at(wx, wz, seed)
+      let moraine = glacier && CubeForge.Noise.moraine_at(wx, wz, seed)
+      let top1 = if pool do sea_level() - 1 else top end
+      let sfc = if piled_up || moraine do gravel()
+                else if dune do sand()
+                else if bog && !pool do bog_surface(wx, wz)
+                else surface_id_at(top1, slope, level) end end end
+      let sub = if piled_up || moraine do gravel()
+                else if dune do sand()
+                else if bog do mud()
+                else sediment_id(sfc, river, top1, level, seed) end end end
+      let c1 = fill_column_world(c, x, z, wx, wz, seed, top1, sfc, sub, level)
+      let c2 = if glacier && !moraine do fill_ice(c1, x, z, top1 + 1, CubeForge.Noise.relief(wx, wz, seed)) else c1 end
+      fill_noise_go(c2, i + 1, hs, ps, wx0, wz0, seed, lk, n)
     end
   end
 
