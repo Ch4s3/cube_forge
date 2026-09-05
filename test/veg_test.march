@@ -43,6 +43,11 @@ mod CubeForge.Test.Veg do
       Test.assert_true(!Veg.wants_trees(Biome.b_desert()) && !Veg.wants_trees(Biome.b_tundra()) && !Veg.wants_trees(Biome.b_grassland()), "not the others")
       Test.assert_true(Math.abs(Veg.density(Biome.b_forest()) -. 0.45) < 0.001, "forest 0.45")
     end
+    test "an oasis holds palms and bushes; a grove holds nothing" do
+      Test.assert_true(Veg.wants_trees(Biome.b_oasis()) && Veg.wants_bushes(Biome.b_oasis()), "oasis: trees and bushes")
+      Test.assert_true(Math.abs(Veg.density(Biome.b_oasis()) -. 0.5) < 0.001, "oasis 0.5")
+      Test.assert_true(!Veg.wants_trees(Biome.b_grove()) && !Veg.wants_bushes(Biome.b_grove()), "grove: none")
+    end
   end
 
   pfn first_bush_grow(cols : List(Int)) : Int do

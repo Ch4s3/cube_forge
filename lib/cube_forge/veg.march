@@ -13,14 +13,14 @@ mod CubeForge.Veg do
   alias CubeForge.Trees as Trees
   alias CubeForge.World as W
 
-  doc "Biomes that hold trees at all."
-  fn wants_trees(b : Int) : Bool do b == Biome.b_forest() || b == Biome.b_taiga() || b == Biome.b_wetland() end
-  doc "Fraction of 8-block cells that hold a tree, per biome. Forest matches generation's 0.45."
+  doc "Biomes that hold trees at all. A grove holds none: the network takes the forest."
+  fn wants_trees(b : Int) : Bool do b == Biome.b_forest() || b == Biome.b_taiga() || b == Biome.b_wetland() || b == Biome.b_oasis() end
+  doc "Fraction of 8-block cells that hold a tree, per biome. Forest matches generation's 0.45; an oasis is dense so its ring fills."
   fn density(b : Int) : Float do
-    if b == Biome.b_forest() do 0.45 else if b == Biome.b_taiga() do 0.25 else if b == Biome.b_wetland() do 0.15 else 0.0 end end end
+    if b == Biome.b_forest() do 0.45 else if b == Biome.b_taiga() do 0.25 else if b == Biome.b_wetland() do 0.15 else if b == Biome.b_oasis() do 0.5 else 0.0 end end end end
   end
-  doc "Biomes that hold bushes: the two whose ground is grass, as at generation, where bushes go only on grass."
-  fn wants_bushes(b : Int) : Bool do b == Biome.b_grassland() || b == Biome.b_forest() end
+  doc "Biomes that hold bushes: those whose ground is grass, as at generation, where bushes go only on grass."
+  fn wants_bushes(b : Int) : Bool do b == Biome.b_grassland() || b == Biome.b_forest() || b == Biome.b_oasis() end
   doc "Pines in the taiga, oaks everywhere else that has trees."
   fn pine_for(b : Int) : Bool do b == Biome.b_taiga() end
   doc "How far around a trunk decay looks for orphaned leaves: the widest canopy plus one."

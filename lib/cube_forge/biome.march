@@ -31,11 +31,16 @@ mod CubeForge.Biome do
   fn b_wetland() : Int do 5 end
   fn b_beach() : Int do 6 end
   fn b_alpine() : Int do 7 end
+  doc "Hot and damp beside a SMALL body of water: a well in the desert, ringed by palms."
+  fn b_oasis() : Int do 8 end
+  doc "Ground the mycelium network holds outright: established in five of nine columns."
+  fn b_grove() : Int do 9 end
+  fn count() : Int do 10 end
 
   fn name(id : Int) : String do
     if id == 0 do "tundra" else if id == 1 do "taiga" else if id == 2 do "grassland"
     else if id == 3 do "forest" else if id == 4 do "desert" else if id == 5 do "wetland"
-    else if id == 6 do "beach" else "alpine" end end end end end end end
+    else if id == 6 do "beach" else if id == 7 do "alpine" else if id == 8 do "oasis" else "grove" end end end end end end end end end
   end
 
   doc "Columns from water at which moisture reaches zero."
@@ -81,16 +86,28 @@ mod CubeForge.Biome do
     clamp01(base -. lapse() *. int_to_float(h - N.sea_level()))
   end
 
-  doc "The Whittaker lookup with two gates in front of it. Thresholds: cold below 0.33, hot from 0.66; damp from 0.5."
+  doc "The Whittaker lookup with the gates in front of it, for a column with no small water and no network. Thresholds: cold below 0.33, hot from 0.66; damp from 0.5."
   fn classify(temp : Float, moist : Float, h : Int, dist_water : Int) : Int do
-    if h >= alpine_line() do b_alpine()
+    classify_full(temp, moist, h, dist_water, false, false)
+  end
+
+  doc """
+  The full lookup. Gates in order: grove (the network is established here,
+  whatever else is true), alpine, oasis (hot, damp, and the nearest water is a
+  small body -- before beach, so a low pool rim in the desert is palms, not
+  sand), beach, then the Whittaker table.
+  """
+  fn classify_full(temp : Float, moist : Float, h : Int, dist_water : Int, small : Bool, grove : Bool) : Int do
+    let damp = moist >= 0.5
+    if grove do b_grove()
+    else if h >= alpine_line() do b_alpine()
+    else if temp >= 0.66 && damp && small do b_oasis()
     else if dist_water <= 1 && h <= beach_max_height() do b_beach()
     else
-      let damp = moist >= 0.5
       if temp < 0.33 do (if damp do b_taiga() else b_tundra() end)
       else if temp < 0.66 do (if damp do b_forest() else b_grassland() end)
       else (if damp do b_wetland() else b_desert() end) end end
-    end end
+    end end end end
   end
 
 
@@ -281,7 +298,7 @@ mod CubeForge.Biome do
       let base = temp_base(i % n, i / n, seed)
       let t = temp_from_base(base, h)
       let m = moisture_target_of(dv)
-      let b = classify(t, m, h, dist_of(dv))
+      let b = classify_full(t, m, h, dist_of(dv), is_small(dv), false)
       classify_all(hs, seed, d, n, i + 1, NativeArray.set_float(ta, i, t), NativeArray.set_float(ma, i, m), NativeArray.set_u8(bs, i, b), NativeArray.set_float(tb, i, base))
     end
   end
@@ -449,7 +466,7 @@ mod CubeForge.Biome do
       let mt = clamp01(moisture_target_of(dv) +. bm)
       let t = ease(NativeArray.get_float(ta, i), tt, rate)
       let m = ease(NativeArray.get_float(ma, i), mt, rate)
-      let raw = classify(t, m, h, dist_of(dv))
+      let raw = classify_full(t, m, h, dist_of(dv), is_small(dv), false)
       let cur = NativeArray.get_u8(bs, i)
       -- The hold counter: flip only after hold_ticks() consecutive disagreements,
       -- so a column parked on a threshold cannot alternate every tick.
@@ -598,7 +615,9 @@ mod CubeForge.Biome do
     else if id == b_grassland() do 0.9
     else if id == b_alpine() do 0.9
     else if id == b_wetland() do 1.3
-    else 1.0 end end end end end end
+    else if id == b_oasis() do 0.3
+    else if id == b_grove() do 1.1
+    else 1.0 end end end end end end end end
   end
 
 
@@ -613,14 +632,15 @@ mod CubeForge.Biome do
     if N.hash2(x, z, wetland_mix_seed()) < mud_fraction() do C.mud() else C.clay() end
   end
 
-  doc "The surface block a biome wants. Granite is absent on purpose: cliff faces stay on the slope rule in every biome."
+  doc "The surface block a biome wants, or 0 for none: a grove's surface is the network's mycelium block, which the migration never touches. Granite is absent on purpose: cliff faces stay on the slope rule in every biome."
   fn palette(id : Int, x : Int, z : Int) : Int do
-    if id == b_tundra() do C.snow()
+    if id == b_grove() do 0
+    else if id == b_tundra() do C.snow()
     else if id == b_taiga() do 2                       -- dirt
     else if id == b_desert() || id == b_beach() do C.sand()
     else if id == b_wetland() do wetland_surface(x, z)
     else if id == b_alpine() do C.gravel()
-    else 1 end end end end end                         -- grass: grassland, forest
+    else 1 end end end end end end                     -- grass: grassland, forest, oasis
   end
 
   doc "Only these ever migrate: the natural surface blocks. Granite, stone, water, logs, leaves and bedrock are never rewritten."
@@ -638,7 +658,7 @@ mod CubeForge.Biome do
       let wet = match f do Field(_, ws, _, _, _, _, _, _, _) -> NativeArray.get_u8(ws, ci) == 1 end
       let sfc = W.block_at(w, x, h, z)
       let want = palette(biome_of(f, x, z), x, z)
-      if h > 0 && !wet && is_palette_block(sfc) && sfc != want do migrations_go(f, w, n, i + 1, left - 1, budget - 1, Cons(ci, acc))
+      if h > 0 && !wet && want != 0 && is_palette_block(sfc) && sfc != want do migrations_go(f, w, n, i + 1, left - 1, budget - 1, Cons(ci, acc))
       else migrations_go(f, w, n, i + 1, left - 1, budget, acc) end
     end
   end
@@ -649,6 +669,13 @@ mod CubeForge.Biome do
     migrations_go(f, w, n, (tick * scan) % (n * n), scan, budget, Nil)
   end
 
+
+  doc "The field with column (x, z) forced to biome [id]: for tests that need a biome the terrain would not give. Copies the array (GAPS G68)."
+  fn force_biome(f : Field, n : Int, x : Int, z : Int, id : Int) : Field do
+    match f do
+      Field(hs, ws, ta, ma, bs, hold, tb, ds, act) -> Field(hs, ws, ta, ma, NativeArray.set_u8(copy_u8(bs, n * n), x + n * z, id), hold, tb, ds, act)
+    end
+  end
 
   doc "The column's water flag."
   fn is_wet(f : Field, wx : Int, wz : Int) : Bool do
