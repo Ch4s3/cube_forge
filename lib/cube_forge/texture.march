@@ -85,6 +85,13 @@ mod CubeForge.Texture do
     end
   end
 
+  -- Layer 89: the model palette. Texel k is Model.colour k, opaque; a model
+  -- quad's uv points at one texel's centre (Model.palette_u/v).
+  pfn palette_go(a : NativeU8Arr, i : Int) : NativeU8Arr do
+    if i >= 256 do a
+    else palette_go(put_rgba(a, 89 * 1024 + i * 4, CubeForge.Model.colour_r(i), CubeForge.Model.colour_g(i), CubeForge.Model.colour_b(i), 255), i + 1) end
+  end
+
   -- Palm fronds: the leaf cutout in a yellower green, with a lighter midrib on
   -- the two middle rows so a frond reads as a blade rather than a clump.
   pfn fronds_go(a : NativeU8Arr, layer : Int, i : Int) : NativeU8Arr do
@@ -119,10 +126,11 @@ mod CubeForge.Texture do
   11 pine leaves, 12 pine bark, 13 gravel, 14 clay, 15 spring (icon only), 16 foam,
   17 basalt, 18 ice, 19 mud, 20 glow cap, 21..62 mycelium over (grass, dirt, sand, snow,
   gravel, clay, stone) x six species, 63..68 spore icons per species, 69..86 fruit
-  (small, stem, cap) x six species, 87 palm bark, 88 palm frond.
+  (small, stem, cap) x six species, 87 palm bark, 88 palm frond, 89 the model palette
+  (texel k is Model.colour k).
   """
   fn checkerboard() : NativeU8Arr do
-    let a0 = checker_go(NativeArray.make_u8(89 * 16 * 16 * 4, 0), 0)
+    let a0 = checker_go(NativeArray.make_u8(90 * 16 * 16 * 4, 0), 0)
     let a1 = water_go(a0, 0)
     let a2 = speckle_go(a1, 2, 0, 134, 96, 67)
     let a3 = speckle_go(a2, 3, 0, 128, 128, 132)
@@ -145,7 +153,8 @@ mod CubeForge.Texture do
     let a20 = speckle_go(a19, 20, 0, 250, 214, 120)
     let a21 = bark_tinted_go(a20, 87, 0, 188, 166, 118)
     let a22 = fronds_go(a21, 88, 0)
-    fruit_all_go(spore_all_go(myc_all_go(a22, 0), 1), 0)
+    let a23 = palette_go(a22, 0)
+    fruit_all_go(spore_all_go(myc_all_go(a23, 0), 1), 0)
   end
 
   -- Layer 15: the spring ITEM's icon -- water blue with a pale ring, so a spring in
@@ -164,7 +173,7 @@ mod CubeForge.Texture do
   doc "Texture layer for an item's HUD icon: as layer_for, except the spring item (id 4) shows its ring. The sea is also id 4 and must keep rendering as water, which is why this is not layer_for."
   fn icon_layer(id : Int) : Float do if id == 4 do 15.0 else if CubeForge.Species.is_spore(id) do spore_layer(CubeForge.Species.species_of_item(id)) else layer_for(id) end end end
 
-  fn layers() : Int do 89 end
+  fn layers() : Int do 90 end
   fn water_layer() : Float do 1.0 end
   doc "Texture layer for a block id on face direction [d] (0 +y, 1 -y, 2 +x, 3 -x, 4 +z, 5 -z)."
   fn layer_for_face(id : Int, d : Int) : Float do
