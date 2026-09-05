@@ -1,0 +1,98 @@
+# Lakes above sea level — design
+
+Water at generation reaches exactly `sea_level()` (62): `fill_column_mat`
+fills every column below it and no column above it. A basin on a plateau, a
+cirque under a ridge, or a valley dammed by a terrace rim is a dry bowl. This
+fills every closed basin to its rim, so the terrain's own shapes hold water
+where they would.
+
+## 1. The pour
+
+A basin is found by the priority-flood: start from every border column at
+its own height (the map edge drains off-world), repeatedly take the lowest
+frontier column and give each unvisited neighbour a **spill level** of
+`max(neighbour height, current level)`. A column whose spill level is above
+its height is under a lake whose surface is that level; the level is the
+same for every column of one basin, by construction.
+
+Two caps keep it honest:
+
+- a lake deeper than `lake_max_depth()` (16) is cut to that depth — a
+  ridged-noise pit can be forty blocks and the priority flood would fill it
+  to the brim;
+- a basin under `lake_min_cols()` (6) columns is left dry: a one-column dip
+  is a puddle the water sim would evaporate anyway.
+
+The result is one `NativeU8Arr` per world, `Lakes.levels(seed)`, 0 where
+there is no lake and the surface height otherwise. It is a pure function of
+the seed (through `Noise.height`), 16,384 columns, and takes single-digit
+milliseconds — it is essentially `Biome.distances` with a priority queue in
+place of the level sweep, which the same G68 rule shapes: one array threaded
+through every write, never wrapped.
+
+## 2. Filling
+
+`Chunk.generate` takes the level table and fills each column from its
+surface to its lake level with **source** blocks (id 4), the same block the
+sea is made of. Above the snow line the surface block is ice, as a spring is.
+
+Then the surface rules: the sand shore test compares against the *local*
+water level (`sea_level()` where there is no lake), so a lake has a beach;
+the lake bed under `level - 5` is dirt, as the sea bed is.
+
+## 3. The water sim
+
+`Water.springs_in` calls every source above sea level a spring, marks it
+every tick, and gives it `spring_rate()` — a lake of 400 sources would eat
+the tick budget (`max_cells_per_tick` 250) doing nothing. So the spring list
+takes only sources with somewhere to give: a horizontal or downward
+neighbour that is not water and not solid. In a full lake that is nobody,
+except at the **outlet**: the pour point has a neighbour at its own level
+outside the basin, so the lake overflows there at one unit a tick — a brook
+leaves every upland lake, unasked for. Digging the rim makes the exposed
+sources springs (`springs_upd` on the edited cell's neighbours, which it
+already visits), and the lake drains at the spring rate until the level sits
+below the cut; then the interior is still again. Sources never evaporate, so
+a lake keeps its level.
+
+The actor rebuilds its chunk from `(cx, cz, seed)` on `WLoad` and messages
+may not carry arrays (GAPS G44), so each actor computes `Lakes.levels(seed)`
+itself: 64 actors, single-digit milliseconds each, once. If that measures
+badly, the alternative is a run-length list of (column, level) in the load
+message.
+
+## 4. Biome
+
+Lake columns are water flags. Bodies are grouped and sized already: a small
+cirque is a small body (a green ring, or an oasis where hot), a plateau lake
+is a large one with `reach()`. Distance-to-water is what moisture is, so the
+climate around every lake follows without a rule.
+
+## 5. Age
+
+Nothing in the pour is age-specific. The terrain makes the basins, and age
+makes the terrain: young worlds have many small sharp basins between ridges,
+ancient ones a few wide shallow lakes on their floodplains and terraces.
+Measure it (§6) rather than adding a knob.
+
+## 6. Measured
+
+- Lakes per world, columns under lakes, and the largest, for five seeds at
+  ages 0/50/100 (`CF_TERRAIN_STATS` gains a lakes line; `CF_TERRAIN_MAP`
+  draws them as `~` like the sea).
+- `Lakes.levels` time, once and per actor.
+- Water tick cost with lakes: the spring list length per chunk and
+  `kind_pending` after warm-up.
+- Underwater rendering: the camera-under-water test and the underwater quad
+  key on the block at the camera, not on `sea_level()` — verify, since a
+  lake at 80 is the first water above 62.
+
+## 7. Tests
+
+- Priority flood on a synthetic 8x8 heightmap with one bowl: the bowl's
+  columns get the rim's height, the rim and outside get 0.
+- Depth and size caps.
+- A generated chunk over a lake column holds sources from the surface to the
+  level and air above; the lane heights are untouched.
+- A sim loaded on a lake chunk lists only the outlet as a spring, and its
+  volume is flat over 200 ticks (sources do not count in `volume`).
