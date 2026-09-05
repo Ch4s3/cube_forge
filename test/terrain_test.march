@@ -130,7 +130,7 @@ mod CubeForge.Test.Terrain do
         let h = CubeForge.Noise.height(wx, wz, seed)
         let ch = CubeForge.Chunk.generate(wx - wx % 16, wz - wz % 16, seed)
         let block = CubeForge.Chunk.get(ch, wx % 16, h, wz % 16)
-        let is_valid_spring = CubeForge.Chunk.is_source(block) || block == CubeForge.Chunk.ice()
+        let is_valid_spring = if h >= CubeForge.Noise.snow_line() do block == CubeForge.Chunk.ice() else CubeForge.Chunk.is_source(block) end
         if CubeForge.Noise.slope(wx, wz, seed) >= 2 && h >= 72 && is_valid_spring do all_springs_ok(i + 1, seed) else false end
       end
     end
