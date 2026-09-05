@@ -155,7 +155,10 @@ mod CubeForge.Test.Biome do
   pfn apply_palette(f : CubeForge.Biome.Field, w : CubeForge.World.World, cols : List(Int)) : CubeForge.World.World do
     match cols do
       Nil -> w
-      Cons(ci, rest) -> apply_palette(f, CubeForge.World.set_block(w, ci % 128, Biome.height_of(f, ci % 128, ci / 128), ci / 128, Biome.palette(Biome.biome_of(f, ci % 128, ci / 128))), rest)
+      Cons(ci, rest) ->
+        let x = ci % 128
+        let z = ci / 128
+        apply_palette(f, CubeForge.World.set_block(w, x, Biome.height_of(f, x, z), z, Biome.palette(Biome.biome_of(f, x, z), x, z)), rest)
     end
   end
   pfn all_mismatched(f : CubeForge.Biome.Field, w : CubeForge.World.World, cols : List(Int)) : Bool do
@@ -165,7 +168,7 @@ mod CubeForge.Test.Biome do
         let x = ci % 128
         let z = ci / 128
         let sfc = CubeForge.World.block_at(w, x, Biome.height_of(f, x, z), z)
-        if sfc == Biome.palette(Biome.biome_of(f, x, z)) do false else all_mismatched(f, w, rest) end
+        if sfc == Biome.palette(Biome.biome_of(f, x, z), x, z) do false else all_mismatched(f, w, rest) end
     end
   end
 
@@ -183,6 +186,23 @@ mod CubeForge.Test.Biome do
     test "stone is never a palette block; a stone surface never migrates" do
       let w = flat_world(66)
       Test.assert_eq_int(List.length(Biome.migrations(Biome.build(w, 7), w, 0, 2048, 64)), 0, "stone stays")
+    end
+  end
+
+  describe "Biome.palette wetland mix" do
+    test "wetland picks clay or mud per column, and stays a palette block" do
+      let a = Biome.palette(Biome.b_wetland(), 0, 0)
+      let b = Biome.palette(Biome.b_wetland(), 1, 0)
+      Test.assert_true(a == C.clay() || a == C.mud(), "column (0,0) is clay or mud")
+      Test.assert_true(b == C.clay() || b == C.mud(), "column (1,0) is clay or mud")
+      Test.assert_true(Biome.is_palette_block(C.mud()), "mud is a palette block")
+    end
+    test "the same column is always the same pick" do
+      Test.assert_eq_int(Biome.palette(Biome.b_wetland(), 42, 17), Biome.palette(Biome.b_wetland(), 42, 17), "deterministic")
+    end
+    test "other biomes are unaffected by the x, z parameters" do
+      Test.assert_eq_int(Biome.palette(Biome.b_alpine(), 0, 0), C.gravel(), "alpine still gravel")
+      Test.assert_eq_int(Biome.palette(Biome.b_alpine(), 99, 99), C.gravel(), "alpine ignores column")
     end
   end
   pfn grass_top16(w : CubeForge.World.World, i : Int, h : Int) : CubeForge.World.World do

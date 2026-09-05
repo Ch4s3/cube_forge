@@ -740,7 +740,7 @@ mod CubeForge do
         let x = ci % (n * 16)
         let z = ci / (n * 16)
         let h = Biome.height_of(bio, x, z)
-        let id = Biome.palette(Biome.biome_of(bio, x, z))
+        let id = Biome.palette(Biome.biome_of(bio, x, z), x, z)
         migrate_go(World.set_block(w, x, h, z, id), bio, mark_geometry(marks, x, h, z, n), n, rest,
                    Cons(Biome.pack_edit(x, h, z, id), edits))
     end
