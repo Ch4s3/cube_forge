@@ -44,4 +44,31 @@ mod CubeForge.Test.Vertex do
     end
   end
 
+
+  pfn shade_roundtrip(i : Int) : Int do
+    if i > 255 do -1
+    else
+      let b = int_to_float(i) /. 255.0
+      let p = Vx.pack_shade(0.37, b)
+      if Math.abs(Vx.blk_of(p) -. b) > 0.0001 do i
+      else if Math.abs(Vx.sky_of(p) -. 0.37) > 0.0001 do i
+      else shade_roundtrip(i + 1) end end
+    end
+  end
+
+  describe "Vertex.pack_shade" do
+    test "round-trips every block-light step with the sky shade intact" do
+      Test.assert_eq_int(shade_roundtrip(0), -1, "all 256 steps")
+    end
+    test "a plain shade float is sky only" do
+      Test.assert_true(Math.abs(Vx.sky_of(1.0) -. 1.0) < 0.0001, "1.0 is full sky")
+      Test.assert_true(Math.abs(Vx.blk_of(1.0)) < 0.0001, "and no block light")
+      Test.assert_true(Math.abs(Vx.sky_of(0.5) -. 0.5) < 0.0001, "0.5 is half sky")
+    end
+    test "brightness is the sum, and sky clamps" do
+      Test.assert_true(Math.abs(Vx.brightness_of(Vx.pack_shade(0.25, 0.5)) -. 0.75) < 0.01, "0.25 + 0.5")
+      Test.assert_true(Math.abs(Vx.sky_of(Vx.pack_shade(1.7, 0.0)) -. 1.0) < 0.0001, "sky above 1 clamps")
+    end
+  end
+
 end
