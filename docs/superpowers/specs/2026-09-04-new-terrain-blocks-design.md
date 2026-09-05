@@ -57,29 +57,32 @@ the same way clay does when a column's biome classification changes.
 Clay and mud are both surface-only in this pass — no change to what's
 beneath them (still plain dirt/stone via `subsurface_id`).
 
-## 4. Ice — cold water surfaces
+## 4. Ice — cold water surfaces, altitude only
 
-Water columns are deliberately excluded from the existing surface migration
-(`migrations_go` skips any column where `wet` is true — water is never a
-"palette block"). Ice needs a parallel, small migration pass rather than a
-change to that one, so the finite-water flow simulation stays untouched.
+**Scope note:** the original draft of this design also froze tundra-biome
+lakes. That turned out to need a second migration/apply pipeline parallel to
+the existing surface-palette one — biome classification isn't available
+until after generation (it depends on a live, world-wide `Biome.Field`, not
+noise), so it would mean new tick wiring in `cube_forge.march`'s frame loop
+and a new `World.set_block` path for water cells. That's a much bigger,
+riskier change than the rest of this feature, so it's dropped from this pass
+in favor of the altitude rule alone. Tundra-lake freezing is a reasonable
+follow-up once it's the only thing being built.
 
-A column's **source** water block (id 4, `is_source`) becomes ice when the
-column is wet **and either**:
+Ice is generation-time only, exactly like basalt and mud: a water **source**
+block (id 4, `is_source`) placed at or above the snow line
+(`Noise.snow_line()`, 95) becomes `ice()` instead. `fill_water` (in
+`fill_column_mat`) only ever fills from just above a column's terrain top up
+to sea level (62) — always below the snow line, so it is never a candidate
+and is left alone. `plant_springs_go`, which places a single source block at
+a spring cell's surface height, is the one path that reaches high altitude
+(mountain springs) — that's where the check goes.
 
-- its biome is tundra (`Biome.b_tundra()`), or
-- its surface height is at/above the snow line (`Noise.snow_line()`, 95) —
-  this is what catches a mountain spring that's cold regardless of the
-  biome classifier's read on the column.
-
-Only the exposed source cell freezes, not flow cells beneath/around it — a
-frozen lake is still "water" a few cells down in this pass, which is fine
-since the visible top is what a player interacts with. No melting, no
-slipperiness, no interaction with the evaporation/flow tick: ice behaves
-exactly like a normal opaque solid block once placed. If a source migrates
-back to a flowing/unfrozen state later (biome drift, or the column drops
-below the snow line), the same pass can migrate it back to water — mirroring
-how `migrations_go` re-checks every settled column already.
+Only the source cell placed by generation is ever ice; nothing about the
+flow simulation, evaporation, or `is_water`/`is_source` changes — `ice()` is
+a distinct, non-water id, so mined or placed ice behaves exactly like any
+other opaque solid block (no melting, no slipperiness, no interaction with
+the water tick).
 
 ## 5. Textures
 
@@ -103,6 +106,8 @@ like logs do).
   not built here.
 - Ice melting, slipperiness, or any gameplay behavior beyond "solid opaque
   block."
+- Tundra-biome lake freezing — see the scope note in §4; needs a live-tick
+  migration pipeline, follow-up work.
 - A volcanic/badlands biome for basalt — it's depth-only, not biome-driven.
 - Alternating clay/mud subsurface layers — both are surface-only for now.
 
@@ -112,6 +117,7 @@ like logs do).
 2. Textures + `layer_for` (`texture.march`) — needed before generation is
    testable by eye.
 3. Basalt depth band (`chunk.march` `fill_column_mat`).
-4. Mud/clay wetland hash (`biome.march` `palette`).
-5. Ice migration pass (`biome.march`), alongside the existing `migrations`/
-   `migrations_go`.
+4. Mud/clay wetland hash (`biome.march` `palette`) — signature changes to
+   `palette(id, x, z)`; update its two call sites (`cube_forge.march`'s
+   `migrate_go`, and the test helpers in `test/biome_test.march`).
+5. Ice altitude rule (`chunk.march`, generation-time: `plant_springs_go`).
