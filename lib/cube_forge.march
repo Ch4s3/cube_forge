@@ -1550,7 +1550,7 @@ mod CubeForge do
 
   -- Frame loop. `max_frames < 0` means run until the window closes.
   -- Run-time knobs read once, outside the frame loop (an Env read allocates).
-  type Knobs = Knobs(Int, Int, String, Bool, Float, Int, Bool, Int, Int, Int, Float, Int, Int, Int, Int, Int, Int, Bool, Int, Int, Int, Int, Int, Int, Int, Bool, Bool, Int, Int, Bool, Int, Int, Int, Int, Int, Int, Bool, Int, Int, Int, Int, Int, Int, Int, CubeForge.Settings.Settings, Int)   -- max_frames, dump_frame, dump_path, autowalk, autospin, autoedit frame (<0 = off), autoswim, autoflow frame (<0 = off), workers, automap frame (<0 = off; forces map view on from this frame, for headless verification), day length in seconds, sun angle override in degrees (<0 = follow the clock), autobreak frame (<0 = off): break the column under the player every 20 frames, for a repeatable edit benchmark, weather pin 0..100 (<0 = follow the actor), CF_PRECIP raw cap override (<0 = the precipitation setting), biome ease rate in percent (100 = one CF_DAY per full swing), draw the biome map in map view, autocanal frame (<0 = off): lay a 9-block line of water three columns east of the player, aim-independent, for the biome end-to-end test, biome migration budget: surface columns retextured per tick, vegetation budget: trees grown or felled per tick, time pin in seconds (<0 = live clock) for the water animation, remesh-all frame (<0 = off): rebuild every section of every chunk at that frame, a ground truth for stale-mesh hunts, automenu frame (<0 = off): open the escape menu at that frame and start a new game five frames later, for the restart test, audio mode (0 off, 1 device, 2 null device -- render a tick per push straight into the WAV, for reproducible headless dumps), audio log, autodive, autoglow frame (<0 = off): place a glow cap three columns east of the player, through edit_block, for the block-light end-to-end check, myc rate in percent, draw the mycelium map overlay in map view, autoplant frame (<0 = off): plant the fittest species three columns east of the player, myc migration budget (surface columns per retexture slot; glow changes batch under one relight per slot), autoplant species override (0 = fittest), autospore frame (<0 = off): give three spores and plant one through the item path thirty frames later, fruit budget (bodies per fruit slot), fruit rate in percent, autostart (skip the start screen), autosave frame (<0 = off) and slot, autoload frame (<0 = off, first session only) and slot, autoslots frame (<0 = off): open the slots page at that frame, for a headless look at it, climate feedback from the network in percent (0 = none), autosettings frame (<0 = off): open the settings page at that frame and click the shadow row's right arrow five frames later, for the settings file end-to-end check, the settings as read from disk and the mask of fields an environment variable overrides (both for writing the file, see Settings.merge)
+  type Knobs = Knobs(Int, Int, String, Bool, Float, Int, Bool, Int, Int, Int, Float, Int, Int, Int, Int, Int, Int, Bool, Int, Int, Int, Int, Int, Int, Int, Bool, Bool, Int, Int, Bool, Int, Int, Int, Int, Int, Int, Bool, Int, Int, Int, Int, Int, Int, Int, CubeForge.Settings.Settings, Int, Int)   -- max_frames, dump_frame, dump_path, autowalk, autospin, autoedit frame (<0 = off), autoswim, autoflow frame (<0 = off), workers, automap frame (<0 = off; forces map view on from this frame, for headless verification), day length in seconds, sun angle override in degrees (<0 = follow the clock), autobreak frame (<0 = off): break the column under the player every 20 frames, for a repeatable edit benchmark, weather pin 0..100 (<0 = follow the actor), CF_PRECIP raw cap override (<0 = the precipitation setting), biome ease rate in percent (100 = one CF_DAY per full swing), draw the biome map in map view, autocanal frame (<0 = off): lay a 9-block line of water three columns east of the player, aim-independent, for the biome end-to-end test, biome migration budget: surface columns retextured per tick, vegetation budget: trees grown or felled per tick, time pin in seconds (<0 = live clock) for the water animation, remesh-all frame (<0 = off): rebuild every section of every chunk at that frame, a ground truth for stale-mesh hunts, automenu frame (<0 = off): open the escape menu at that frame and start a new game five frames later, for the restart test, audio mode (0 off, 1 device, 2 null device -- render a tick per push straight into the WAV, for reproducible headless dumps), audio log, autodive, autoglow frame (<0 = off): place a glow cap three columns east of the player, through edit_block, for the block-light end-to-end check, myc rate in percent, draw the mycelium map overlay in map view, autoplant frame (<0 = off): plant the fittest species three columns east of the player, myc migration budget (surface columns per retexture slot; glow changes batch under one relight per slot), autoplant species override (0 = fittest), autospore frame (<0 = off): give three spores and plant one through the item path thirty frames later, fruit budget (bodies per fruit slot), fruit rate in percent, autostart (skip the start screen), autosave frame (<0 = off) and slot, autoload frame (<0 = off, first session only) and slot, autoslots frame (<0 = off): open the slots page at that frame, for a headless look at it, climate feedback from the network in percent (0 = none), autosettings frame (<0 = off): open the settings page at that frame and click the shadow row's right arrow five frames later, for the settings file end-to-end check, the settings as read from disk and the mask of fields an environment variable overrides (both for writing the file, see Settings.merge), autopage: which menu page CF_AUTOSETTINGS opens (2 hub, 3 graphics, 4 sound)
 
   doc "Write the session into [slot]. Prints the outcome; true on success."
   -- The fields blob: species, vigour, reach, shown, then the eased axes.
@@ -1623,7 +1623,7 @@ mod CubeForge do
     match f do
       Frame(frame, last_t, player, sample, view, vp, map_mode, marker, flash, wcache, bcache, inv_open, drag_from, menu, menubuf, next_seed, worst, worst_at, sched) ->
         match k do
-        Knobs(max_frames, dump_frame, dump_path, autowalk, autospin, autoedit, autoswim, autoflow, workers, automap, day_len, sun_deg, autoinv, autobreak, weather_pin, precip_cap, biome_rate, biome_map, autocanal, biome_budget, veg_budget, time_pin, remesh_all_at, automenu, audio_mode, audio_log, autodive, autoglow, myc_rate, myc_map, autoplant, myc_budget, autoplant_species, autospore, fruit_budget, fruit_rate, autostart, autosave, autosave_slot, autoload, autoload_slot, autoslots, myc_feedback, autosettings, settings_disk, settings_mask) ->
+        Knobs(max_frames, dump_frame, dump_path, autowalk, autospin, autoedit, autoswim, autoflow, workers, automap, day_len, sun_deg, autoinv, autobreak, weather_pin, precip_cap, biome_rate, biome_map, autocanal, biome_budget, veg_budget, time_pin, remesh_all_at, automenu, audio_mode, audio_log, autodive, autoglow, myc_rate, myc_map, autoplant, myc_budget, autoplant_species, autospore, fruit_budget, fruit_rate, autostart, autosave, autosave_slot, autoload, autoload_slot, autoslots, myc_feedback, autosettings, settings_disk, settings_mask, autopage) ->
         if Win.should_close() || (max_frames >= 0 && frame >= max_frames) || !is_no_start(next_seed) do
           Frame(frame, last_t, player, sample, view, vp, map_mode, marker, flash, wcache, bcache, inv_open, drag_from, menu, menubuf, next_seed, worst, worst_at, sched)
         else
@@ -1650,8 +1650,8 @@ mod CubeForge do
           let menu1b = if autoslots >= 0 && frame == autoslots do
                         Menu.set_slots(Menu.set_page(Menu.set_open(menu1a, true), Menu.page_slots()), Save.list(Save.dir(), World.side(scene_world(sc))))
                       else menu1a end
-          -- CF_AUTOSETTINGS=<frame>: open the settings page at that frame; the click comes five frames later.
-          let menu1 = if autosettings >= 0 && frame == autosettings do Menu.set_page(Menu.set_open(menu1b, true), Menu.page_settings()) else menu1b end
+          -- CF_AUTOSETTINGS=<frame>: open the graphics page (or CF_AUTOPAGE) at that frame; on a row page a click comes five frames later.
+          let menu1 = if autosettings >= 0 && frame == autosettings do Menu.set_page(Menu.set_open(menu1b, true), autopage) else menu1b end
           -- Either panel releases the cursor; with both closed the mouse looks around again.
           let ui_open = inv_open2 || Menu.is_open(menu1)
           if esc do CubeForge.Ffi.Input.capture_cursor(!ui_open) else () end
@@ -1703,6 +1703,7 @@ mod CubeForge do
           let m_hover = if Menu.is_open(menu1) do Menu.item_at(menu1, ndc_x, ndc_y) else -1 end
           let menu2 = if Menu.is_open(menu1) do menu_keys(Menu.set_focus(Menu.expire_status(menu1, frame), m_hover)) else menu1 end
           let on_main = Menu.page(menu2) == Menu.page_main()
+          let on_hub = Menu.page(menu2) == Menu.page_settings()
           let m_click = Menu.is_open(menu2) && In.button_pressed(In.button_left()) && m_hover >= 0
           if m_click && on_main && m_hover == Menu.item_quit() do Win.request_close() else () end
           -- ── Settings ──────────────────────────────────────────────────────
@@ -1711,7 +1712,7 @@ mod CubeForge do
           -- read from the settings every frame further down. Every change is
           -- written at once, so a crash never loses a choice; an environment
           -- override is applied but never written (Settings.merge).
-          let on_settings = Menu.page(menu2) == Menu.page_settings()
+          let on_settings = Menu.is_row_page(Menu.page(menu2))
           let s_item = if autosettings >= 0 && frame == autosettings + 5 && on_settings do Menu.settings_item(Settings.field_shadow_dist(), Menu.part_right())
                        else if m_click && on_settings do m_hover else -1 end end
           let menu2s = Menu.click(menu2, s_item)
@@ -1735,8 +1736,10 @@ mod CubeForge do
                       else if m_click && on_main && m_hover == Menu.item_second() do
                         Menu.set_slots(Menu.set_page(menu2b, Menu.page_slots()), Save.list(Save.dir(), side))
                       else if m_click && on_main && m_hover == Menu.item_settings() do Menu.set_page(menu2b, Menu.page_settings())
-                      else if m_click && !on_main && m_hover == Menu.item_back(menu2b) do Menu.set_page(menu2b, Menu.page_main())
-                      else menu2b end end end end
+                      else if m_click && on_hub && m_hover == Menu.hub_graphics() do Menu.set_page(menu2b, Menu.page_graphics())
+                      else if m_click && on_hub && m_hover == Menu.hub_sound() do Menu.set_page(menu2b, Menu.page_sound())
+                      else if m_click && !on_main && m_hover == Menu.item_back(menu2b) do Menu.set_page(menu2b, Menu.back_page(menu2b))
+                      else menu2b end end end end end end
           let next_a = if start && !play_here do FromSeed(Menu.seed(menu2)) else next_seed end
           if start && !play_here do println("new game, seed " ++ int_to_string(Menu.seed(menu2)) ++ " (base " ++ int_to_string(Menu.base_seed(menu2)) ++ ", age " ++ int_to_string(Menu.age(menu2)) ++ ")") else () end
           -- Slot rows: save in escape mode, load on the start screen. CF_AUTOSAVE and
@@ -2005,11 +2008,16 @@ mod CubeForge do
               let expo = Audio.exposure(py, World.light_at(scene_world(sc1), bcx, py, bcz))
               let leafy = leaf_amount(scene_world(sc1), bcx, py, bcz)
               let m = Audio.mix(bid, wx, Wind.at(tick, seed, wx), snowmix, expo, leafy, under)
+              -- The volume settings: the beds under master times ambience, the
+              -- score under master times music. The cutoff is a filter, not a level.
+              let s_aud = Menu.settings(menu5)
+              let amb_vol = Settings.fraction(s_aud, Settings.field_master()) *. Settings.fraction(s_aud, Settings.field_ambience())
+              let mus_vol = Settings.fraction(s_aud, Settings.field_master()) *. Settings.fraction(s_aud, Settings.field_music())
               let fired = if Audio.due(sched, tick) do
                 let gap = Audio.gap_ticks(Audio.rate_of(bid), tick, seed)
                 let pc = Audio.pitch_class(sched, seed)
                 Aud.note(Tone.hz(Tone.midi(pc, Audio.octave_of(bid))),
-                         Audio.note_seconds(gap), Audio.timbre_of(bid), Audio.note_gain())
+                         Audio.note_seconds(gap), Audio.timbre_of(bid), Audio.note_gain() *. mus_vol)
                 if audio_log do
                   println("note t" ++ int_to_string(tick) ++ " row[" ++ int_to_string(Audio.index_of(sched))
                           ++ "] pc " ++ int_to_string(pc) ++ " form " ++ int_to_string(Audio.form_of_sched(sched))
@@ -2020,8 +2028,8 @@ mod CubeForge do
                 else () end
                 Audio.advance(sched, tick, Audio.rate_of(bid), Audio.form_of(bid), Audio.transpose_of(bid), seed)
               else sched end
-              Aud.set_mix(Audio.rain_of(m), Audio.wind_of(m), Audio.leaves_of(m),
-                          Audio.water_of(m), Audio.cutoff_of(m), Audio.music_of(m))
+              Aud.set_mix(Audio.rain_of(m) *. amb_vol, Audio.wind_of(m) *. amb_vol, Audio.leaves_of(m) *. amb_vol,
+                          Audio.water_of(m) *. amb_vol, Audio.cutoff_of(m), Audio.music_of(m) *. mus_vol)
               -- CF_AUDIO_LOG=1: one line a second. What each bed is actually
               -- being asked for beats inferring it back out of the spectrum.
               if audio_log && tick % Audio.ticks_per_second() == 0 do
@@ -2480,7 +2488,7 @@ mod CubeForge do
         else () end
       else () end
       let knobs = Knobs(max_frames, Env.get_int("CF_DUMP_FRAME", 30), Env.get("CF_DUMP", ""), Env.get_int("CF_AUTOWALK", 0) == 1,
-                        int_to_float(Env.get_int("CF_AUTOSPIN", 0)) /. 1000.0 /. Player.mouse_sens(), Env.get_int("CF_AUTOEDIT", -1), autoswim, Env.get_int("CF_AUTOFLOW", -1), workers, Env.get_int("CF_AUTOMAP", -1), int_to_float(Env.get_int("CF_DAY", 1800)), Env.get_int("CF_SUN", -1), Env.get_int("CF_AUTOINV", -1), Env.get_int("CF_AUTOBREAK", -1), Env.get_int("CF_WEATHER", -1), Env.get_int("CF_PRECIP", -1), Env.get_int("CF_BIOME_RATE", 100), Env.get_int("CF_BIOME_MAP", 0) == 1, Env.get_int("CF_AUTOCANAL", -1), Env.get_int("CF_BIOME_BUDGET", 32), Env.get_int("CF_VEG_BUDGET", 1), Env.get_int("CF_TIME", -1), Env.get_int("CF_REMESH_ALL_AT", -1), Env.get_int("CF_AUTOMENU", -1), audio_mode, Env.get_int("CF_AUDIO_LOG", 0) == 1, Env.get_int("CF_AUTODIVE", 0) == 1, Env.get_int("CF_AUTOGLOW", -1), Env.get_int("CF_MYC_RATE", 100), Env.get_int("CF_MYC_MAP", 0) == 1, Env.get_int("CF_AUTOPLANT", -1), Env.get_int("CF_MYC_BUDGET", 64), Env.get_int("CF_AUTOPLANT_SPECIES", 0), Env.get_int("CF_AUTOSPORE", -1), Env.get_int("CF_FRUIT_BUDGET", 1), Env.get_int("CF_FRUIT_RATE", 100), Env.get_int("CF_AUTOSTART", 0) == 1, Env.get_int("CF_AUTOSAVE", -1), Env.get_int("CF_AUTOSAVE_SLOT", 1), Env.get_int("CF_AUTOLOAD", -1), Env.get_int("CF_AUTOLOAD_SLOT", 1), Env.get_int("CF_AUTOSLOTS", -1), Env.get_int("CF_MYC_FEEDBACK", 100), Env.get_int("CF_AUTOSETTINGS", -1), settings_disk, settings_mask)
+                        int_to_float(Env.get_int("CF_AUTOSPIN", 0)) /. 1000.0 /. Player.mouse_sens(), Env.get_int("CF_AUTOEDIT", -1), autoswim, Env.get_int("CF_AUTOFLOW", -1), workers, Env.get_int("CF_AUTOMAP", -1), int_to_float(Env.get_int("CF_DAY", 1800)), Env.get_int("CF_SUN", -1), Env.get_int("CF_AUTOINV", -1), Env.get_int("CF_AUTOBREAK", -1), Env.get_int("CF_WEATHER", -1), Env.get_int("CF_PRECIP", -1), Env.get_int("CF_BIOME_RATE", 100), Env.get_int("CF_BIOME_MAP", 0) == 1, Env.get_int("CF_AUTOCANAL", -1), Env.get_int("CF_BIOME_BUDGET", 32), Env.get_int("CF_VEG_BUDGET", 1), Env.get_int("CF_TIME", -1), Env.get_int("CF_REMESH_ALL_AT", -1), Env.get_int("CF_AUTOMENU", -1), audio_mode, Env.get_int("CF_AUDIO_LOG", 0) == 1, Env.get_int("CF_AUTODIVE", 0) == 1, Env.get_int("CF_AUTOGLOW", -1), Env.get_int("CF_MYC_RATE", 100), Env.get_int("CF_MYC_MAP", 0) == 1, Env.get_int("CF_AUTOPLANT", -1), Env.get_int("CF_MYC_BUDGET", 64), Env.get_int("CF_AUTOPLANT_SPECIES", 0), Env.get_int("CF_AUTOSPORE", -1), Env.get_int("CF_FRUIT_BUDGET", 1), Env.get_int("CF_FRUIT_RATE", 100), Env.get_int("CF_AUTOSTART", 0) == 1, Env.get_int("CF_AUTOSAVE", -1), Env.get_int("CF_AUTOSAVE_SLOT", 1), Env.get_int("CF_AUTOLOAD", -1), Env.get_int("CF_AUTOLOAD_SLOT", 1), Env.get_int("CF_AUTOSLOTS", -1), Env.get_int("CF_MYC_FEEDBACK", 100), Env.get_int("CF_AUTOSETTINGS", -1), settings_disk, settings_mask, Env.get_int("CF_AUTOPAGE", Menu.page_graphics()))
       let pids = Array.from_list(spawn_water(n * n - 1, n, Nil))
       let wxpid = Weather.spawn_weather()
       session_loop(FromSeed(seed), settings0, true, n, workers, headless, seed_env >= 0, knobs, proj, map_proj, pids, wxpid, autoswim)

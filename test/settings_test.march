@@ -47,6 +47,19 @@ mod CubeForge.Test.Settings do
       Test.assert_eq_int(Sx.value(d, Sx.field_shadow_dist()), 64, "CF_SHADOW_DIST 64")
       Test.assert_eq_int(Sx.value(d, Sx.field_soft_shadows()), 1, "CF_SHADOW_SOFT 1")
       Test.assert_eq_int(Sx.value(d, Sx.field_precip()), 4000, "CF_PRECIP 4000")
+      Test.assert_eq_int(Sx.fields(), 8, "eight fields")
+      Test.assert_eq_int(Sx.value(d, Sx.field_master()), 100, "master full")
+      Test.assert_eq_int(Sx.value(d, Sx.field_ambience()), 100, "ambience full")
+      Test.assert_eq_int(Sx.value(d, Sx.field_music()), 100, "music full")
+    end
+    test "volumes step by 25 and read as a fraction" do
+      let d = Sx.defaults()
+      Test.assert_eq_str(Sx.label(d, Sx.field_master()), "100", "label")
+      let down = Sx.step(d, Sx.field_music(), -1)
+      Test.assert_eq_int(Sx.value(down, Sx.field_music()), 75, "75")
+      Test.assert_true(Sx.fraction(down, Sx.field_music()) > 0.749 && Sx.fraction(down, Sx.field_music()) < 0.751, "0.75")
+      Test.assert_eq_str(Sx.label(Sx.set_index(d, Sx.field_ambience(), 0), Sx.field_ambience()), "OFF", "OFF at 0")
+      Test.assert_eq_int(Sx.nearest(Sx.field_master(), 60), 2, "60 -> 50")
     end
     test "labels name the current choice" do
       let d = Sx.defaults()
@@ -95,6 +108,12 @@ mod CubeForge.Test.Settings do
       Test.assert_eq_int(Sx.value(s, Sx.field_precip()), 4000, "bad number -> default")
       Test.assert_eq_int(Sx.value(s, Sx.field_vsync()), 1, "missing -> default")
       Test.assert_eq_int(Sx.value(Sx.parse(""), Sx.field_shadow_dist()), 64, "empty file")
+      let old = Sx.parse("version 1\nfullscreen 0\nvsync 1\nshadow_dist 64\nsoft_shadows 1\nprecip 4000\n")
+      Test.assert_eq_int(Sx.value(old, Sx.field_master()), 100, "a five-key file plays at full volume")
+      let snd = Sx.parse("master 50\nmusic 0\n")
+      Test.assert_eq_int(Sx.value(snd, Sx.field_master()), 50, "master")
+      Test.assert_eq_int(Sx.value(snd, Sx.field_music()), 0, "music")
+      Test.assert_eq_int(Sx.value(snd, Sx.field_ambience()), 100, "ambience defaults")
     end
     test "store then load, and a missing file loads defaults" do
       let _ = Dir.rm_rf(tmp())

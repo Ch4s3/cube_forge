@@ -66,8 +66,10 @@ panel does not hang empty under them.
 **Navigation.** Main SETTINGS goes to the hub. Hub GRAPHICS and SOUND go to
 their row pages. BACK on a row page goes to the hub. BACK on the hub goes to
 main. Esc follows BACK on every sub-page: row page to hub, hub to main.
-`CF_AUTOSETTINGS` opens `page_graphics` directly, so the scripted graphics
-check is unchanged.
+`CF_AUTOSETTINGS` opens `page_graphics` by default, so the scripted graphics
+check is unchanged; `CF_AUTOPAGE=<page>` (2 hub, 3 graphics, 4 sound) picks
+another page for a headless look, and on the sound page the scripted click
+lands on the MUSIC row's right arrow.
 
 ### 3. Applying
 
