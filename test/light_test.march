@@ -15,7 +15,7 @@ mod CubeForge.Test.Light do
   -- An 8x8 world of entirely empty chunks (no terrain), so seeding tests see
   -- only the blocks they place themselves.
   pfn air_world() : CubeForge.World.World do
-    CubeForge.World.rebuild_occupancy(CubeForge.World.World(Array.from_list(air_chunks(63, Nil)), L.new(), L.new(), 8))
+    CubeForge.World.rebuild_occupancy(CubeForge.World.World(Array.from_list(air_chunks(63, Nil)), L.new(), L.new(), L.new(), 8))
   end
 
 
@@ -30,7 +30,7 @@ mod CubeForge.Test.Light do
     if i < 0 do acc else slab_chunks(i - 1, y, Cons(slab_cells(C.new(), 0, y), acc)) end
   end
   pfn slab_world(y : Int) : CubeForge.World.World do
-    CubeForge.World.rebuild_occupancy(CubeForge.World.World(Array.from_list(slab_chunks(63, y, Nil)), L.new(), L.new(), 8))
+    CubeForge.World.rebuild_occupancy(CubeForge.World.World(Array.from_list(slab_chunks(63, y, Nil)), L.new(), L.new(), L.new(), 8))
   end
 
 
@@ -390,6 +390,18 @@ mod CubeForge.Test.Light do
       -- 14, not 13: the open columns beside the lake are at 15 and spread
       -- sideways underneath it, which beats the 13 arriving down through water.
       Test.assert_eq_int(L.get(la, 40, 99, 40), 14, "lateral light under the lake beats the attenuated column")
+    end
+  end
+
+
+  describe "World block light field" do
+    test "a fresh world has a dark block-light field that reads back what is written" do
+      let w0 = air_world()
+      Test.assert_eq_int(CubeForge.World.block_light_at(w0, 40, 100, 40), 0, "dark at birth")
+      let lb = NativeArray.set_u8(L.new(), L.index(40, 100, 40), 9)
+      let w1 = CubeForge.World.set_block_light(w0, lb)
+      Test.assert_eq_int(CubeForge.World.block_light_at(w1, 40, 100, 40), 9, "written value")
+      Test.assert_eq_int(CubeForge.World.light_at(w1, 40, 100, 40), 0, "skylight untouched")
     end
   end
 
