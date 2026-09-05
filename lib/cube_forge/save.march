@@ -13,6 +13,8 @@ mod CubeForge.Save do
   needs IO.FileWrite
   needs IO.Process   -- CF_SAVE_DIR
 
+  alias CubeForge.Chunk as C
+
   -- seed, saved_at (unix seconds), player [px py pz vx vy vz yaw pitch],
   -- inventory [72 slot ints then the selected slot], seconds into the day,
   -- weather [phase, ticks left, intensity, bolt]
@@ -167,6 +169,130 @@ mod CubeForge.Save do
               end
             end end
         end end
+    end
+  end
+
+  -- ── Files ────────────────────────────────────────────────────────────────
+
+  doc "The save directory: CF_SAVE_DIR, or `saves` under the working directory."
+  fn dir() : String do Env.get("CF_SAVE_DIR", "saves") end
+  fn slots() : Int do 5 end
+  fn slot_dir(d : String, slot : Int) : String do d ++ "/slot" ++ int_to_string(slot) end
+  fn header_path(d : String, slot : Int) : String do slot_dir(d, slot) ++ "/header.txt" end
+  fn chunk_path(d : String, slot : Int, i : Int) : String do
+    slot_dir(d, slot) ++ "/chunk_" ++ (if i < 10 do "0" else "" end) ++ int_to_string(i) ++ ".bin"
+  end
+  fn chunk_bytes() : Int do 65536 end
+
+  -- FileError is private to the stdlib, so the message names the path, not the cause.
+  pfn err_text(what : String, path : String) : String do "cannot " ++ what ++ " " ++ path end
+
+  pfn write_chunks_go(d : String, slot : Int, chunks : Array.PVec(CubeForge.Chunk.Chunk), i : Int, n : Int) : Result(Unit, String) do
+    if i >= n do Ok(())
+    else
+      match File.write(chunk_path(d, slot, i), Bytes.to_string(Bytes.from_u8_arr(C.raw(Array.get(chunks, i))))) do
+        Ok(_) -> write_chunks_go(d, slot, chunks, i + 1, n)
+        Err(_) -> Err(err_text("write", chunk_path(d, slot, i)))
+      end
+    end
+  end
+
+  doc "Write a slot: the directory, every chunk file, then the header last. Stops at the first failure."
+  fn write(d : String, slot : Int, chunks : Array.PVec(CubeForge.Chunk.Chunk), side : Int, h : Header) : Result(Unit, String) do
+    match Dir.mkdir_p(slot_dir(d, slot)) do
+      Err(_) -> Err(err_text("create", slot_dir(d, slot)))
+      Ok(_) ->
+        match write_chunks_go(d, slot, chunks, 0, side * side) do
+          Err(e) -> Err(e)
+          Ok(_) ->
+            match File.write(header_path(d, slot), encode_header(h, side)) do
+              Ok(_) -> Ok(())
+              Err(_) -> Err(err_text("write", header_path(d, slot)))
+            end
+        end
+    end
+  end
+
+  pfn read_header(d : String, slot : Int, side : Int) : Result(Header, String) do
+    match File.read(header_path(d, slot)) do
+      Err(_) -> Err(err_text("read", header_path(d, slot)))
+      Ok(s) -> parse_header(s, side)
+    end
+  end
+
+  -- Sizes come from reading the file: File.stat's record is private to the stdlib.
+  pfn check_chunks_go(d : String, slot : Int, i : Int, n : Int) : Result(Unit, String) do
+    if i >= n do Ok(())
+    else
+      match File.read(chunk_path(d, slot, i)) do
+        Err(_) -> Err(err_text("read", chunk_path(d, slot, i)))
+        Ok(s) ->
+          let size = String.byte_size(s)
+          if size != chunk_bytes() do Err("chunk " ++ int_to_string(i) ++ " is " ++ int_to_string(size) ++ " bytes")
+          else check_chunks_go(d, slot, i + 1, n) end
+      end
+    end
+  end
+
+  doc "Validate a slot without loading it: the header parses and every chunk file has exactly [chunk_bytes]."
+  fn check(d : String, slot : Int, side : Int) : Result(Header, String) do
+    match read_header(d, slot, side) do
+      Err(e) -> Err(e)
+      Ok(h) ->
+        match check_chunks_go(d, slot, 0, side * side) do
+          Ok(_) -> Ok(h)
+          Err(e) -> Err(e)
+        end
+    end
+  end
+
+  pfn read_chunks_go(d : String, slot : Int, i : Int, n : Int, acc : List(CubeForge.Chunk.Chunk)) : Result(List(CubeForge.Chunk.Chunk), String) do
+    if i < 0 do Ok(acc)
+    else
+      match File.read(chunk_path(d, slot, i)) do
+        Err(_) -> Err(err_text("read", chunk_path(d, slot, i)))
+        Ok(s) ->
+          let a = Bytes.to_u8_arr(Bytes.from_string(s))
+          if NativeArray.length_u8(a) != chunk_bytes() do Err("chunk " ++ int_to_string(i) ++ " is " ++ int_to_string(NativeArray.length_u8(a)) ++ " bytes")
+          else read_chunks_go(d, slot, i - 1, n, Cons(C.of_raw(a), acc)) end
+      end
+    end
+  end
+
+  doc "Read every chunk of a slot, in grid order."
+  fn read_chunks(d : String, slot : Int, side : Int) : Result(Array.PVec(CubeForge.Chunk.Chunk), String) do
+    match read_chunks_go(d, slot, side * side - 1, side * side, Nil) do
+      Ok(l) -> Ok(Array.from_list(l))
+      Err(e) -> Err(e)
+    end
+  end
+
+  -- ── Listing ──────────────────────────────────────────────────────────────
+
+  -- slot, seed (-1 = empty), saved_at
+  type SlotInfo = SlotInfo(Int, Int, Int)
+  fn info_slot(i : SlotInfo) : Int do match i do SlotInfo(s, _, _) -> s end end
+  fn info_seed(i : SlotInfo) : Int do match i do SlotInfo(_, s, _) -> s end end
+  fn info_saved_at(i : SlotInfo) : Int do match i do SlotInfo(_, _, t) -> t end end
+  fn info_is_empty(i : SlotInfo) : Bool do info_seed(i) < 0 end
+
+  pfn info_of(d : String, slot : Int, side : Int) : SlotInfo do
+    match read_header(d, slot, side) do
+      Ok(h) -> SlotInfo(slot, h_seed(h), h_saved_at(h))
+      Err(_) -> SlotInfo(slot, -1, 0)
+    end
+  end
+  pfn list_go(d : String, slot : Int, side : Int, acc : List(SlotInfo)) : List(SlotInfo) do
+    if slot < 1 do acc else list_go(d, slot - 1, side, Cons(info_of(d, slot, side), acc)) end
+  end
+  doc "One entry per slot, 1..slots(). A slot whose header is missing or unreadable is empty."
+  fn list(d : String, side : Int) : List(SlotInfo) do list_go(d, slots(), side, Nil) end
+
+  doc "The entry for [slot] in a listing."
+  fn info_for(l : List(SlotInfo), slot : Int) : SlotInfo do
+    match l do
+      Nil -> SlotInfo(slot, -1, 0)
+      Cons(i, rest) -> if info_slot(i) == slot do i else info_for(rest, slot) end
     end
   end
 

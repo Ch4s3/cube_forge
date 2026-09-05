@@ -16,6 +16,10 @@ mod CubeForge.Chunk do
   end
 
   fn new() : Chunk do Chunk(NativeArray.make_u8(65536, 0)) end
+  doc "The chunk's backing bytes, for the save format."
+  fn raw(c : Chunk) : NativeU8Arr do match c do Chunk(a) -> a end end
+  doc "A chunk over [a], which must hold 65536 bytes."
+  fn of_raw(a : NativeU8Arr) : Chunk do Chunk(a) end
 
   @[no_alloc]
   fn get(c : Chunk, x : {Int | 0 <= _ && _ < 16}, y : {Int | 0 <= _ && _ < 256}, z : {Int | 0 <= _ && _ < 16}) : Int do

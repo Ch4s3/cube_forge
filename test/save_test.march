@@ -2,7 +2,10 @@
 mod CubeForge.Test.Save do
 
   import Test
+  needs IO.FileRead
+  needs IO.FileWrite
   alias CubeForge.Save as S
+  alias CubeForge.Chunk as C
 
   pfn near(a : Float, b : Float) : Bool do
     let d = a -. b
@@ -66,6 +69,57 @@ mod CubeForge.Test.Save do
       let s = String.replace(S.encode_header(sample(), 8), "day 812.5", "day soon")
       let _ = Test.assert_err(S.parse_header(s, 8), "day soon")
       ()
+    end
+  end
+
+  pfn tmp() : String do "test_saves_tmp" end
+
+  -- Four chunks, each with a distinct byte at index 1000.
+  pfn four_chunks() : Array.PVec(CubeForge.Chunk.Chunk) do
+    Array.from_list(Cons(C.set_idx(C.new(), 1000, 11), Cons(C.set_idx(C.new(), 1000, 22),
+                    Cons(C.set_idx(C.new(), 1000, 33), Cons(C.set_idx(C.new(), 1000, 44), Nil)))))
+  end
+  pfn fresh_slot(slot : Int) : Unit do
+    let _ = Dir.rm_rf(S.slot_dir(tmp(), slot))
+    let _ = Test.assert_ok(S.write(tmp(), slot, four_chunks(), 2, sample()), "write")
+    ()
+  end
+
+  describe "Save slots" do
+    test "chunks and header round-trip through a slot" do
+      fresh_slot(3)
+      let h = Test.assert_ok(S.check(tmp(), 3, 2), "check")
+      Test.assert_eq_int(S.h_seed(h), 424242, "seed")
+      let cs = Test.assert_ok(S.read_chunks(tmp(), 3, 2), "read")
+      Test.assert_eq_int(C.get_idx(Array.get(cs, 0), 1000), 11, "chunk 0")
+      Test.assert_eq_int(C.get_idx(Array.get(cs, 3), 1000), 44, "chunk 3")
+      Test.assert_eq_int(C.get_idx(Array.get(cs, 3), 1001), 0, "untouched byte")
+    end
+    test "a slot with chunks but no header lists as empty and fails check" do
+      fresh_slot(3)
+      let _ = File.delete(S.header_path(tmp(), 3))
+      Test.assert_true(S.info_is_empty(S.info_for(S.list(tmp(), 2), 3)), "empty")
+      let _ = Test.assert_err(S.check(tmp(), 3, 2), "check")
+      ()
+    end
+    test "a short chunk file fails check" do
+      fresh_slot(3)
+      let _ = File.write(S.chunk_path(tmp(), 3, 1), "abc")
+      let _ = Test.assert_err(S.check(tmp(), 3, 2), "short chunk")
+      let _ = Test.assert_err(S.read_chunks(tmp(), 3, 2), "short read")
+      ()
+    end
+    test "list reports seed and time for a used slot" do
+      fresh_slot(3)
+      let i = S.info_for(S.list(tmp(), 2), 3)
+      Test.assert_eq_int(S.info_seed(i), 424242, "seed")
+      Test.assert_eq_int(S.info_saved_at(i), 1757000000, "time")
+      Test.assert_true(S.info_is_empty(S.info_for(S.list(tmp(), 2), 5)), "slot 5 empty")
+      Test.assert_eq_int(List.length(S.list(tmp(), 2)), 5, "five entries")
+    end
+    test "chunk paths are two-digit" do
+      Test.assert_eq_str(S.chunk_path("d", 1, 7), "d/slot1/chunk_07.bin", "07")
+      Test.assert_eq_str(S.chunk_path("d", 1, 63), "d/slot1/chunk_63.bin", "63")
     end
   end
 end
