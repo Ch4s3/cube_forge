@@ -54,7 +54,48 @@ mod CubeForge.Test.Caves do
     end
   end
 
+  -- Leaks: a lake cell (a source above sea level in a lake column, at or
+  -- under its surface) with an open horizontal neighbour inside the chunk.
+  pfn open(id : Int) : Bool do C.open_for_spring(id) end
+  -- A lake cell beside a notch column is the lake's outlet, not a leak.
+  pfn by_notch(lk : NativeU8Arr, wx : Int, wz : Int) : Bool do
+    CubeForge.Lakes.notch_at(lk, 8, wx + 1, wz) || CubeForge.Lakes.notch_at(lk, 8, wx - 1, wz)
+      || CubeForge.Lakes.notch_at(lk, 8, wx, wz + 1) || CubeForge.Lakes.notch_at(lk, 8, wx, wz - 1)
+  end
+  pfn leaks_col(c : CubeForge.Chunk.Chunk, x : Int, z : Int, y : Int, level : Int, acc : Int) : Int do
+    if y > level do acc
+    else
+      let leak = C.is_source(C.get(c, x, y, z)) && y > C.sea_level()
+                 && ((x + 1 < 16 && open(C.get(c, x + 1, y, z))) || (x > 0 && open(C.get(c, x - 1, y, z)))
+                     || (z + 1 < 16 && open(C.get(c, x, y, z + 1))) || (z > 0 && open(C.get(c, x, y, z - 1))))
+      leaks_col(c, x, z, y + 1, level, if leak do acc + 1 else acc end)
+    end
+  end
+  pfn leaks_chunk(c : CubeForge.Chunk.Chunk, wx0 : Int, wz0 : Int, lk : NativeU8Arr, i : Int, acc : Int) : Int do
+    if i >= 256 do acc
+    else
+      let x = i % 16
+      let z = i / 16
+      let level = CubeForge.Lakes.level_at(lk, 8, wx0 + x, wz0 + z)
+      leaks_chunk(c, wx0, wz0, lk, i + 1, if level == 0 || by_notch(lk, wx0 + x, wz0 + z) do acc else leaks_col(c, x, z, C.sea_level() + 1, level, acc) end)
+    end
+  end
+  pfn leaks_world(seed : Int, lk : NativeU8Arr, ci : Int, acc : Int) : Int do
+    if ci >= 64 do acc
+    else
+      let wx0 = 16 * (ci % 8)
+      let wz0 = 16 * (ci / 8)
+      leaks_world(seed, lk, ci + 1, leaks_chunk(C.generate_lakes(wx0, wz0, seed, lk, 8), wx0, wz0, lk, 0, acc))
+    end
+  end
+
   describe "caves" do
+    test "no worm breaches a lake: an ancient world has no leaking lake cell" do
+      let seed = N.with_age(1234, 100)
+      let lk = CubeForge.Lakes.levels(seed, 8)
+      Test.assert_true(CubeForge.Lakes.summary(lk) / 1000 > 100, "the seed has lakes to breach")
+      Test.assert_eq_int(leaks_world(seed, lk, 0, 0), 0, "lake cells with an open neighbour")
+    end
     test "a young world has no caves at all" do
       let seed = N.with_age(7, 0)
       Test.assert_eq_int(Cv.air_below_surface(C.generate(32, 32, seed), 32, 32, seed), 0, "no air under the surface at age 0")

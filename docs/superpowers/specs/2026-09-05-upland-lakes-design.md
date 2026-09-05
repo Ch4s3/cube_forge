@@ -46,14 +46,18 @@ the lake bed under `level - 5` is dirt, as the sea bed is.
 every tick, and gives it `spring_rate()` — a lake of 400 sources would eat
 the tick budget (`max_cells_per_tick` 250) doing nothing. So the spring list
 takes only sources with somewhere to give: a horizontal or downward
-neighbour that is not water and not solid. In a full lake that is nobody,
-except at the **outlet**: the pour point has a neighbour at its own level
-outside the basin, so the lake overflows there at one unit a tick — a brook
-leaves every upland lake, unasked for. Digging the rim makes the exposed
-sources springs (`springs_upd` on the edited cell's neighbours, which it
-already visits), and the lake drains at the spring rate until the level sits
-below the cut; then the interior is still again. Sources never evaporate, so
-a lake keeps its level.
+neighbour that is not water and not solid. In a full lake that is nobody —
+*including the pour point*: the rim column's block at the lake's level is
+its surface, solid, so a full lake has no outlet at all (the design above
+first claimed it overflowed there; it did not). So the pour finds the
+**notch**: the dry rim column that first relaxes a lake column to the
+lake's level is recorded (`Lakes.notch_at`), one per basin of
+`lake_min_cols()` (6) or more, and the generator digs it one block down.
+The lake cell beside the notch is then a spring, and a brook leaves every
+real lake over its notch at one unit a tick. Digging the rim elsewhere
+makes the exposed sources springs (`springs_after` on the edited cell's
+neighbours), and the lake gives there at the spring rate. Sources never
+evaporate, so a lake keeps its level.
 
 The actor rebuilds its chunk from `(cx, cz, seed)` on `WLoad` and messages
 may not carry arrays (GAPS G44), so each actor computes `Lakes.levels(seed)`
@@ -93,29 +97,50 @@ Measure it (§6) rather than adding a knob.
   hot path does not pay for it. The render side (`is_world_spring`) applies
   the same rule for spray, so a lake is not a thousand emitters.
 
-Lake columns by seed and age, `CF_TERRAIN_STATS` (of 16,384):
+Lake columns by seed and age, `CF_TERRAIN_STATS` (of 16,384). *Corrected
+2026-09-05:* the first counts (729 / 2,321 / 2,283 on seeds 7, 99 and 2024)
+were mostly dips in the sea bed that drained to the border below sea level
+and were poured as "lakes" at that lower level -- a column filled to 55 in
+a sea at 62, a hole in the ocean with walls of water, seen in play. The
+pour's heightmap is floored at sea level now, so the sea is the base every
+basin drains into; `lakes_test` asserts no lake surface sits at or under
+sea level over eight seeds (4,624 such columns before).
 
-| seed | age 0 | age 50 | age 100 |
-|---|---|---|---|
-| 7 | 729 | 420 | 206 |
-| 1234 | 865 | 1041 | 964 |
-| 99 | 1937 | 2321 | 2288 |
-| 2024 | 2283 | 2097 | 1749 |
+| seed | age 50 | age 100 |
+|---|---|---|
+| 7 | 105 | 81 |
+| 1234 | 972 | 970 |
+| 99 | 300 | 419 |
 
 Seed 99 at age 50, windowed, 900 frames: 4 spray springs for 2,321 lake
 columns, worst frame 14.6 ms, flowing water 85 cells at frame 800 (the
 outlets' brooks). The map draws lakes as `~`: a cirque under the snowfields,
 a plateau lake, lowland ponds strung along the valleys.
 
-**Outlets on an ancient world.** Seed 1234 at age 100, 1,500 frames,
-windowed: with valley springs off (lake outlets alone, 25 spray springs)
-flowing water climbs 52 -> 1,100 cells and is still creeping at +40 per 100
-frames at the end; with valley springs too, 63 -> 1,544. Frame rate 105 and
-98 fps against 109 at age 50 (where flow plateaus at ~430); worst frames
-29-37 ms, remesh bursts. An outlet brook that reaches a flat terrace top
-spreads into a sheet whose interior never thins enough to evaporate, which
-is why it plateaus so slowly. Open: a lower rate for lake outlets than for
-springs, or evaporation that reaches a sheet's interior (todos.md).
+**The leak, and the notch (dug into 2026-09-05).** The "outlets" first
+measured here were leaks: a cave worm carving rock beside a lake's basin
+below its surface opened the wall, and every lake cell along it was an
+infinite spring into the tunnel. Seed 1234 at age 100 with valley springs
+off: 26 springs and 739 flowing cells with caves, 1 and 11 with `CF_KARST=0`.
+Worms now leave basin walls alone (`Caves.basin_wall`: any voxel at or
+below a lake's surface in, or beside, a lake column), and `caves_test`
+asserts an ancient world has no lake cell with an open neighbour that is
+not its notch. With that fixed a full lake had no outlet at all (§3), so
+the notch was built; the first cut marked every column of a flat rim a
+pour point (90 outlets a world), and one per basin of six or more is kept.
+
+| seed | age | lake columns | outlets |
+|---|---|---|---|
+| 7 | 50 / 100 | 105 / 81 | 5 / 1 |
+| 1234 | 50 / 100 | 972 / 970 | 10 / 8 |
+| 99 | 50 / 100 | 300 / 419 | 4 / 4 |
+
+(after the sea-level floor above; the first pass counted sea-bed pits).
+
+Seed 1234 windowed, 1,200 frames, everything on: flowing water plateaus at
+~410 cells at age 50 and ~370 at age 100 (it was 1,544 and climbing), 109
+and 106 fps, worst frames 14.9 and 14.7 ms. The table takes ~20 ms with
+the labelling.
 
 ## 7. Tests
 

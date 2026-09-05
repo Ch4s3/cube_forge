@@ -21,10 +21,20 @@
 mod CubeForge.Lakes do
 
   alias CubeForge.Noise as N
+  alias CubeForge.Chunk as C
 
   -- The array holds, per column, a pending spill level (< done_mark()) or a
-  -- settled one (+ done_mark()); the slot past the end is the pass's changed flag.
+  -- settled one (+ done_mark(), + pour_mark() when the column is a basin's
+  -- pour point); the slot past the end is the pass's changed flag.
+  --
+  -- A full lake has no outlet: its rim block at the surface level is solid,
+  -- and the sim's spring rule (a source with an open neighbour) finds nothing
+  -- to give into. So the pour point -- the dry rim column that first relaxes
+  -- a lake column to the lake's level -- is recorded, and the generator digs
+  -- it one block down: a notch. The lake cell beside the notch is then a
+  -- spring at spring_rate(), and a brook leaves the lake over it.
   fn done_mark() : Int do 1000 end
+  fn pour_mark() : Int do 100000 end
   fn unset() : Int do 999 end
 
   pfn at(a : NativeIntArr, i : Int) : Int do NativeArray.get_int(a, i) end
@@ -32,7 +42,10 @@ mod CubeForge.Lakes do
   -- Relax neighbour [j] the level [lv]: it takes max(its height, lv) if that is
   -- lower than what it has. A neighbour brought to exactly lv is pending at
   -- this level, and if its index is behind the scan the pass must run again.
-  pfn relax(sp : NativeIntArr, hs : NativeIntArr, side : Int, j : Int, lv : Int) : NativeIntArr do
+  -- [i] is the settled cell doing the relaxing; when it is dry (its level is its
+  -- own height) and it brings [j] to the level with [j] lower than that, [i] is
+  -- the pour point of the basin [j] belongs to.
+  pfn relax(sp : NativeIntArr, hs : NativeIntArr, side : Int, i : Int, j : Int, lv : Int) : NativeIntArr do
     let v = at(sp, j)
     if v >= done_mark() do sp
     else
@@ -40,7 +53,12 @@ mod CubeForge.Lakes do
       if cand >= v do sp
       else
         let sp1 = NativeArray.set_int(sp, j, cand)
-        if cand == lv do NativeArray.set_int(sp1, side * side, 1) else sp1 end
+        if cand != lv do sp1
+        else
+          let sp2 = NativeArray.set_int(sp1, side * side, 1)
+          let dry = at(hs, i) == lv
+          if dry && at(hs, j) < lv && at(sp2, i) < pour_mark() do NativeArray.set_int(sp2, i, at(sp2, i) + pour_mark()) else sp2 end
+        end
       end
     end
   end
@@ -52,10 +70,10 @@ mod CubeForge.Lakes do
       let x = i % side
       let z = i / side
       let sp1 = NativeArray.set_int(sp, i, lv + done_mark())
-      let sp2 = if x > 0 do relax(sp1, hs, side, i - 1, lv) else sp1 end
-      let sp3 = if x < side - 1 do relax(sp2, hs, side, i + 1, lv) else sp2 end
-      let sp4 = if z > 0 do relax(sp3, hs, side, i - side, lv) else sp3 end
-      let sp5 = if z < side - 1 do relax(sp4, hs, side, i + side, lv) else sp4 end
+      let sp2 = if x > 0 do relax(sp1, hs, side, i, i - 1, lv) else sp1 end
+      let sp3 = if x < side - 1 do relax(sp2, hs, side, i, i + 1, lv) else sp2 end
+      let sp4 = if z > 0 do relax(sp3, hs, side, i, i - side, lv) else sp3 end
+      let sp5 = if z < side - 1 do relax(sp4, hs, side, i, i + side, lv) else sp4 end
       pass_go(sp5, hs, side, lv, i + 1)
     end end
   end
@@ -79,37 +97,132 @@ mod CubeForge.Lakes do
     end
   end
 
-  pfn finish_go(sp : NativeIntArr, hs : NativeIntArr, side : Int, i : Int, out : NativeIntArr) : NativeIntArr do
+  -- ── Basins ──────────────────────────────────────────────────────────────
+  -- Lake columns are labelled by basin (4-connected, same level) with the
+  -- least column index in the basin, by the same sweep-to-a-fixed-point idiom:
+  -- every lake column takes the least label among its lake neighbours until
+  -- nothing changes. A one-column dip is a basin of one, and it gets no
+  -- outlet: a notch and a trickle at every puddle was ninety outlets a world.
+  doc "Columns a basin must hold to get an outlet."
+  fn lake_min_cols() : Int do 6 end
+
+  pfn level_of(sp : NativeIntArr, hs : NativeIntArr, i : Int) : Int do
+    let lv = at(sp, i) % pour_mark() - done_mark()
+    if lv > at(hs, i) do lv else 0 end
+  end
+  pfn label_init(sp : NativeIntArr, hs : NativeIntArr, side : Int, i : Int, lb : NativeIntArr) : NativeIntArr do
+    if i >= side * side do lb
+    else label_init(sp, hs, side, i + 1, NativeArray.set_int(lb, i, if level_of(sp, hs, i) > 0 do i + 1 else 0 end)) end
+  end
+  -- the least label among [i] and neighbour [j] when j is a lake column at the same level
+  pfn least(lb : NativeIntArr, sp : NativeIntArr, hs : NativeIntArr, i : Int, j : Int, m : Int) : Int do
+    let lj = at(lb, j)
+    if lj > 0 && lj < m && level_of(sp, hs, j) == level_of(sp, hs, i) do lj else m end
+  end
+  pfn label_pass(lb : NativeIntArr, sp : NativeIntArr, hs : NativeIntArr, side : Int, i : Int) : NativeIntArr do
+    if i >= side * side do lb
+    else if at(lb, i) == 0 do label_pass(lb, sp, hs, side, i + 1)
+    else
+      let x = i % side
+      let z = i / side
+      let m0 = at(lb, i)
+      let m1 = if x > 0 do least(lb, sp, hs, i, i - 1, m0) else m0 end
+      let m2 = if x < side - 1 do least(lb, sp, hs, i, i + 1, m1) else m1 end
+      let m3 = if z > 0 do least(lb, sp, hs, i, i - side, m2) else m2 end
+      let m4 = if z < side - 1 do least(lb, sp, hs, i, i + side, m3) else m3 end
+      if m4 == m0 do label_pass(lb, sp, hs, side, i + 1)
+      else label_pass(NativeArray.set_int(NativeArray.set_int(lb, i, m4), side * side, 1), sp, hs, side, i + 1) end
+    end end
+  end
+  pfn label_go(lb : NativeIntArr, sp : NativeIntArr, hs : NativeIntArr, side : Int) : NativeIntArr do
+    let lb1 = label_pass(NativeArray.set_int(lb, side * side, 0), sp, hs, side, 0)
+    if at(lb1, side * side) == 1 do label_go(lb1, sp, hs, side) else lb1 end
+  end
+  -- basin sizes, indexed by label - 1
+  pfn count_labels(lb : NativeIntArr, side : Int, i : Int, cn : NativeIntArr) : NativeIntArr do
+    if i >= side * side do cn
+    else
+      let l = at(lb, i)
+      count_labels(lb, side, i + 1, if l == 0 do cn else NativeArray.set_int(cn, l - 1, at(cn, l - 1) + 1) end)
+    end
+  end
+  -- does dry column [i] stand beside a lake column of a basin big enough for
+  -- an outlet. Nested ifs, not &&: it does not short-circuit (GAPS G33), and
+  -- an unguarded neighbour read off the edge is index -1.
+  -- The label of a big-enough basin at [j], or 0.
+  pfn big_beside(lb : NativeIntArr, cn : NativeIntArr, j : Int) : Int do
+    let l = at(lb, j)
+    if l == 0 do 0 else if at(cn, l - 1) >= lake_min_cols() do l else 0 end end
+  end
+  pfn big_beside_at(lb : NativeIntArr, cn : NativeIntArr, j : Int, ok : Bool) : Int do
+    if ok do big_beside(lb, cn, j) else 0 end
+  end
+  -- The label of a big-enough basin beside dry column [i], or 0.
+  pfn basin_beside(lb : NativeIntArr, cn : NativeIntArr, side : Int, i : Int) : Int do
+    let x = i % side
+    let z = i / side
+    let l1 = big_beside_at(lb, cn, i - 1, x > 0)
+    if l1 > 0 do l1
+    else
+      let l2 = big_beside_at(lb, cn, i + 1, x < side - 1)
+      if l2 > 0 do l2
+      else
+        let l3 = big_beside_at(lb, cn, i - side, z > 0)
+        if l3 > 0 do l3 else big_beside_at(lb, cn, i + side, z < side - 1) end
+      end
+    end
+  end
+
+  -- The result is two tables end to end: lake levels, then pour flags -- one
+  -- per basin of at least lake_min_cols(), the first by index. A flat rim at
+  -- the lake's level marks every rim column a pour point (each relaxes its
+  -- own inside neighbour in the same pass); [taken] records which basins
+  -- have their notch. cn is reused for it: its slots are basin sizes by
+  -- label, and a size is set negative once the basin has its notch.
+  pfn finish_go(sp : NativeIntArr, hs : NativeIntArr, side : Int, i : Int, out : NativeIntArr, lb : NativeIntArr, cn : NativeIntArr) : NativeIntArr do
     if i >= side * side do out
     else
-      let lv = at(sp, i) - done_mark()
-      finish_go(sp, hs, side, i + 1, NativeArray.set_int(out, i, if lv > at(hs, i) do lv else 0 end))
+      let v = at(sp, i)
+      let out1 = NativeArray.set_int(out, i, level_of(sp, hs, i))
+      let l = if v >= pour_mark() do basin_beside(lb, cn, side, i) else 0 end
+      if l == 0 do finish_go(sp, hs, side, i + 1, out1, lb, cn)
+      else
+        finish_go(sp, hs, side, i + 1, NativeArray.set_int(out1, side * side + i, 1), lb, NativeArray.set_int(cn, l - 1, 0 - at(cn, l - 1)))
+      end
     end
   end
 
   doc """
   The pour over a square heightmap of [side]: per column, the lake surface
-  height, or 0 where the column is not under a lake. The border drains.
+  height, or 0 where the column is not under a lake; then, in a second table
+  of the same size after the first, 1 where the column is a basin's pour
+  point. The border drains.
   """
   fn pour(hs : NativeIntArr, side : Int) : NativeIntArr do
     let sp = level_go(seed_go(NativeArray.make_int(side * side + 1, 0), hs, side, 0), hs, side, 0)
-    finish_go(sp, hs, side, 0, NativeArray.make_int(side * side, 0))
+    let lb = label_go(label_init(sp, hs, side, 0, NativeArray.make_int(side * side + 1, 0)), sp, hs, side)
+    let cn = count_labels(lb, side, 0, NativeArray.make_int(side * side, 0))
+    finish_go(sp, hs, side, 0, NativeArray.make_int(2 * side * side, 0), lb, cn)
   end
 
+  -- Heights floored at sea level: the sea is the base every basin drains
+  -- into, so a dip in the sea bed that drains to the border below sea level
+  -- is not a basin. It was: a "lake" at 55 in a sea at 62 was a column
+  -- filled to 55, a hole in the ocean with walls of water.
   pfn heights_go(hs : NativeIntArr, side : Int, seed : Int, i : Int) : NativeIntArr do
     if i >= side * side do hs
-    else heights_go(NativeArray.set_int(hs, i, N.height(i % side, i / side, seed)), side, seed, i + 1) end
+    else heights_go(NativeArray.set_int(hs, i, Math.max_int(N.height(i % side, i / side, seed), C.sea_level())), side, seed, i + 1) end
   end
   pfn to_u8_go(lv : NativeIntArr, out : NativeU8Arr, i : Int, count : Int) : NativeU8Arr do
     if i >= count do out
     else to_u8_go(lv, NativeArray.set_u8(out, i, Math.min_int(at(lv, i), 255)), i + 1, count) end
   end
 
-  doc "Lake surface levels for a world of [n] chunks a side at [seed]: one byte per column, 0 where there is no lake. The table every chunk and every water actor generates against."
+  doc "Lake surface levels for a world of [n] chunks a side at [seed]: one byte per column, 0 where there is no lake, followed by one byte per column that is 1 at a pour point (see notch_at). The table every chunk and every water actor generates against."
   fn levels(seed : Int, n : Int) : NativeU8Arr do
     let side = 16 * n
     let lv = pour(heights_go(NativeArray.make_int(side * side, 0), side, seed, 0), side)
-    to_u8_go(lv, NativeArray.make_u8(side * side, 0), 0, side * side)
+    to_u8_go(lv, NativeArray.make_u8(2 * side * side, 0), 0, 2 * side * side)
   end
 
   doc "No lakes: the empty table, which level_at reads as 0 everywhere."
@@ -122,6 +235,13 @@ mod CubeForge.Lakes do
     else NativeArray.get_u8(lk, wx + side * wz) end
   end
 
+  doc "Is world column (wx, wz) a pour point -- the notch a lake overflows through; 0 off the table."
+  fn notch_at(lk : NativeU8Arr, n : Int, wx : Int, wz : Int) : Bool do
+    let side = 16 * n
+    if NativeArray.length_u8(lk) < 2 * side * side || wx < 0 || wz < 0 || wx >= side || wz >= side do false
+    else NativeArray.get_u8(lk, side * side + wx + side * wz) == 1 end
+  end
+
   pfn count_go(lk : NativeU8Arr, i : Int, count : Int, cols : Int, top : Int) : Int do
     if i >= count do cols * 1000 + top
     else
@@ -130,6 +250,11 @@ mod CubeForge.Lakes do
     end
   end
   doc "Lake columns * 1000 + the highest lake surface, for the stats line."
-  fn summary(lk : NativeU8Arr) : Int do count_go(lk, 0, NativeArray.length_u8(lk), 0, 0) end
+  fn summary(lk : NativeU8Arr) : Int do count_go(lk, 0, NativeArray.length_u8(lk) / 2, 0, 0) end
+  pfn notches_go(lk : NativeU8Arr, i : Int, count : Int, acc : Int) : Int do
+    if i >= count do acc else notches_go(lk, i + 1, count, acc + NativeArray.get_u8(lk, count + i)) end
+  end
+  doc "How many pour points the table holds: the lakes' outlets."
+  fn notches(lk : NativeU8Arr) : Int do notches_go(lk, 0, NativeArray.length_u8(lk) / 2, 0) end
 
 end
