@@ -1660,3 +1660,29 @@ worst frame 9.67 ms). The allocation gauge reads 127 live objects per frame;
 the effects summary is rebuilt as a string every frame for the readout
 comparison, which is the obvious thing to make per-second if that number
 ever matters.
+
+
+## Effects summary, stamp-gated (2026-09-05)
+
+`Effects.stamp` packs the whole seconds left on each kind into one integer:
+four float reads, no allocation, and it moves exactly when the summary text
+would (a sweep test over forty seconds with two effects checks every step).
+The frame loop rebuilds the summary only when the stamp at `now` differs
+from the stamp at the previous frame's clock -- which also catches a bite
+this frame, whose timer was a second longer a frame ago -- and the UI keeps
+the last string otherwise. The allocation gauge did not move (127 live
+objects per frame with an effect active, the same as before): the ground
+readout string is the per-frame allocator, not this one. Listed.
+
+
+## The reticle over fungus (2026-09-05)
+
+The crosshair leans 45% of the way from white toward the cap colour of the
+fungus under it: a fruit block's own species, a mycelium block's column
+species from `World.shown`. `Hud.reticle_r/g/b(tint)`; the species is folded
+into the HUD rebuild key, so the bars recolour only when the target's species
+changes and nothing is rebuilt per frame. `docs/fungus-reticle.png`: looking
+straight down at a Lanterncap patch (`CF_PITCH=-140`, a new knob for the
+spawn pitch in hundredths of a radian), the reticle is a warm cream against
+the white it keeps over sky and water. Budget 11.26 ms best of 3 on a machine
+still carrying other sessions' benchmarks.

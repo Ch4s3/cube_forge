@@ -60,6 +60,16 @@ mod CubeForge.Effects do
       summary_go(e, now, k + 1, acc ++ (if acc == "" do "" else "  " end) ++ name(k) ++ " " ++ int_to_string(secs))
     end end
   end
+  -- Whole seconds left on [kind] (the number the summary prints), 0 when inactive.
+  pfn secs_left(e : Effects, kind : Int, now : Float) : Int do
+    if !active(e, kind, now) do 0 else float_to_int(remaining(e, kind, now) +. 0.999) end
+  end
+  pfn stamp_go(e : Effects, now : Float, k : Int, acc : Int) : Int do
+    if k >= kinds() do acc else stamp_go(e, now, k + 1, acc * 64 + secs_left(e, k, now)) end
+  end
+  doc "An integer that changes exactly when `summary` would: the whole seconds left on each kind, packed. Four float reads and no allocation, so a caller can keep the last summary string until this moves."
+  fn stamp(e : Effects, now : Float) : Int do stamp_go(e, now, 0, 0) end
+
   doc "The active effects with whole seconds left, for the HUD; empty when none."
   fn summary(e : Effects, now : Float) : String do summary_go(e, now, 0, "") end
 
