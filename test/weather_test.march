@@ -86,4 +86,23 @@ mod CubeForge.Test.Weather do
     end
   end
 
+  describe "Weather snapshot" do
+    test "pack then unpack reproduces a phase" do
+      let s = Weather.unpack_phase(Weather.pack_phase(Weather.phase_new(3, 42, 0.83, 0.21)))
+      Test.assert_eq_int(Weather.phase_of(s), 3, "phase")
+      Test.assert_eq_int(Weather.left_of(s), 42, "left")
+      Test.assert_true(Weather.intensity_of(s) > 0.829999 && Weather.intensity_of(s) < 0.830001, "intensity")
+      Test.assert_true(Weather.bolt_of(s) > 0.209999 && Weather.bolt_of(s) < 0.210001, "bolt")
+    end
+    test "floats round trip" do
+      let s = Weather.phase_of_floats(Weather.phase_to_floats(Weather.phase_new(2, 150, 0.7, 0.3)))
+      Test.assert_eq_int(Weather.phase_of(s), 2, "phase")
+      Test.assert_eq_int(Weather.left_of(s), 150, "left")
+      Test.assert_true(Weather.intensity_of(s) == 0.7, "intensity exact")
+    end
+    test "a short list unpacks to the start phase" do
+      Test.assert_eq_int(Weather.phase_of(Weather.unpack_phase(Cons(1, Nil))), Weather.p_clear(), "clear")
+    end
+  end
+
 end

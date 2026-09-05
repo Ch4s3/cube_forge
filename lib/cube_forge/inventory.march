@@ -66,6 +66,19 @@ mod CubeForge.Inventory do
     else match i do Inv(a, _, p, x, y, z) -> Inv(a, slot, p, x, y, z) end end
   end
 
+  pfn copy_ints(src : NativeIntArr, dst : NativeIntArr, i : Int, n : Int) : NativeIntArr do
+    if i >= n do dst else copy_ints(src, NativeArray.set_int(dst, i, NativeArray.get_int(src, i)), i + 1, n) end
+  end
+  doc "The 73 ints a save stores: every slot's item and count, then the selected slot."
+  fn to_ints(i : Inv) : NativeIntArr do
+    NativeArray.set_int(copy_ints(cells(i), NativeArray.make_int(2 * slots() + 1, 0), 0, 2 * slots()), 2 * slots(), sel(i))
+  end
+  doc "An inventory from the 73 ints of a save; nothing is being broken."
+  fn of_ints(a : NativeIntArr) : Inv do
+    let s = NativeArray.get_int(a, 2 * slots())
+    Inv(copy_ints(a, NativeArray.make_int(2 * slots(), 0), 0, 2 * slots()), if s < 1 || s > hotbar_slots() do 1 else s end, 0.0, 0, -1, 0)
+  end
+
   doc "Block id in the selected slot, or 0 when it is empty."
   fn selected_id(i : Inv) : Int do item_at(i, sel(i) - 1) end
 

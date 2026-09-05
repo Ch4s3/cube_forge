@@ -1479,3 +1479,52 @@ tick. `tick_all` looks at every column and is the oracle: under a static
 climate the two agree bit for bit over 300 ticks of a contest (tested); under
 a drifting climate the active tick lags by at most `climate_eps` of climate,
 by design.
+
+## Save and load: a start screen and five slots (2026-09-05)
+
+Design in `docs/superpowers/specs/2026-09-05-save-load-design.md`, plan in
+`docs/superpowers/plans/2026-09-05-save-load.md`.
+
+**What shipped.** A start screen (CUBE FORGE, NEW GAME, LOAD GAME, QUIT, the
+seed field) over the freshly generated world; SAVE GAME in the escape menu;
+one slots page for both, five rows and BACK, each used row naming its seed and
+save time. A slot is a directory of 64 raw chunk files plus a text header
+written last, 4 MiB. A save restores the blocks, the player, the inventory,
+the seconds into the day and the weather phase. `CubeForge.Save` owns the
+format; `Menu` grew a mode and a page; `run_session` takes a seed or a slot.
+
+**Round trip** (`scratch/saveload.sh`, seed 7, save at frame 201, load at
+frame 30 of a fresh process):
+
+| | |
+|---|---|
+| save, 64 chunk files + header | 8.7-12.7 ms |
+| read + validate a slot | 4-5 ms |
+| session rebuild after the read (light, occupancy, mesh, upload) | as a new game, ~0.6 s |
+| world hash at save vs at load | 196060934 = 196060934 |
+| player position at exit, both runs | (48.5, 82, 78.5) |
+
+The frame dumps differ by ~15k pixels because the loaded session's first
+water tick and its spray differ, not the terrain; the world hash is the
+oracle.
+
+**Water actors read their own chunk file.** Messages cannot carry byte
+arrays (GAPS G44), so `WLoadSlot` has each actor read its chunk and its four
+neighbours' edge columns from the slot: 64 x 5 reads of 64 KiB. Marked in the
+code as a stopgap until a message can carry the chunk the frame loop already
+read.
+
+**Two findings on the way.**
+
+- *The escape menu had been invisible.* The menu uploaded to VBO slot 247,
+  and the spray pool added later took `CF_SPRAY_SLOT 247` in the shim, so
+  spray's per-frame upload replaced the menu's vertices. The CF_AUTOMENU
+  restart test checks hashes, not pixels, so nothing caught it. Found here
+  from a frame dump of the start screen; fixed on main in the same hour by
+  05c9637, which moved spray to 246, so the menu stays on 247.
+- *Frame dumps of a menu are possible headlessly*: `CF_AUTOSLOTS=<frame>`
+  opens the slots page at that frame, the way CF_AUTOMENU opens the menu, so
+  a layout change can be looked at from a script.
+
+**Cost.** Nothing on the frame path: the slot listing is read once when the
+page opens, and the save is synchronous on the click (one ~10 ms frame).
