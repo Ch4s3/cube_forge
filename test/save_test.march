@@ -122,4 +122,25 @@ mod CubeForge.Test.Save do
       Test.assert_eq_str(Save.chunk_path("d", 1, 63), "d/slot1/chunk_63.bin", "63")
     end
   end
+
+  describe "Save fields" do
+    test "the fields blob round-trips, the wrong size is rejected, and a missing file is an error" do
+      let slot = 4
+      let _ = Dir.rm_rf(Save.slot_dir(tmp(), slot))
+      let n = 2 * 16
+      let bytes = NativeArray.set_u8(NativeArray.set_u8(NativeArray.make_u8(Save.fields_bytes(2), 0), 0, 3), Save.fields_bytes(2) - 1, 200)
+      let _ = Test.assert_ok(Save.write_with_fields(tmp(), slot, four_chunks(), 2, sample(), bytes), "write")
+      let back = Test.assert_ok(Save.read_fields(tmp(), slot, 2), "read")
+      Test.assert_eq_int(NativeArray.get_u8(back, 0), 3, "first byte")
+      Test.assert_eq_int(NativeArray.get_u8(back, Save.fields_bytes(2) - 1), 200, "last byte")
+      let _ = File.write(Save.fields_path(tmp(), slot), "abc")
+      let _ = Test.assert_err(Save.read_fields(tmp(), slot, 2), "short blob")
+      let _ = File.delete(Save.fields_path(tmp(), slot))
+      let _ = Test.assert_err(Save.read_fields(tmp(), slot, 2), "missing blob")
+      let _ = Test.assert_ok(Save.check(tmp(), slot, 2), "the slot itself is still complete")
+      let _ = Dir.rm_rf(Save.slot_dir(tmp(), slot))
+      ()
+    end
+  end
+
 end

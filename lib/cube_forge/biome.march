@@ -462,6 +462,46 @@ mod CubeForge.Biome do
   fn all_rows(n : Int) : NativeU8Arr do NativeArray.make_u8(n, 1) end
 
 
+  -- ── Save and load: the eased axes ────────────────────────────────────────
+  -- Four bytes per column: temperature then moisture, each 16-bit fixed point
+  -- (1/65535, below anything the game can show). The rest of the field is
+  -- rebuilt from the world: heights, water, distances, the temperature base.
+  pfn put16(out : NativeU8Arr, off : Int, v : Float) : NativeU8Arr do
+    let q = float_to_int(clamp01(v) *. 65535.0 +. 0.5)
+    NativeArray.set_u8(NativeArray.set_u8(out, off, q % 256), off + 1, q / 256)
+  end
+  pfn get16(b : NativeU8Arr, off : Int) : Float do
+    int_to_float(NativeArray.get_u8(b, off) + 256 * NativeArray.get_u8(b, off + 1)) /. 65535.0
+  end
+  pfn export_go(ta : NativeFloatArr, ma : NativeFloatArr, n2 : Int, i : Int, out : NativeU8Arr, off : Int) : NativeU8Arr do
+    if i >= n2 do out
+    else export_go(ta, ma, n2, i + 1, put16(put16(out, off + 4 * i, NativeArray.get_float(ta, i)), off + 4 * i + 2, NativeArray.get_float(ma, i)), off) end
+  end
+  doc "Write the eased axes into [out] at [off], four bytes per column."
+  fn axes_to_bytes(f : Field, n : Int, out : NativeU8Arr, off : Int) : NativeU8Arr do
+    match f do Field(_, _, ta, ma, _, _, _, _, _) -> export_go(ta, ma, n * n, 0, out, off) end
+  end
+  pfn import_go(b : NativeU8Arr, off : Int, hs : NativeU8Arr, d : NativeU8Arr, n : Int, i : Int,
+                ta : NativeFloatArr, ma : NativeFloatArr, bs : NativeU8Arr) : Field do
+    if i >= n * n do Field(hs, NativeArray.make_u8(0, 0), ta, ma, bs, NativeArray.make_u8(0, 0), NativeArray.make_float(0, 0.0), d, NativeArray.make_u8(0, 0))
+    else
+      let t = get16(b, off + 4 * i)
+      let m = get16(b, off + 4 * i + 2)
+      let cls = classify(t, m, NativeArray.get_u8(hs, i), NativeArray.get_u8(d, i))
+      import_go(b, off, hs, d, n, i + 1, NativeArray.set_float(ta, i, t), NativeArray.set_float(ma, i, m), NativeArray.set_u8(bs, i, cls))
+    end
+  end
+  doc "A built field with its eased axes replaced from [b] at [off] and every column reclassified from them and set active, so it settles or moves on from where the save left it."
+  fn axes_of_bytes(f : Field, w : CubeForge.World.World, b : NativeU8Arr, off : Int) : Field do
+    let n = cols(w)
+    match f do
+      Field(hs, ws, _, _, _, _, tb, ds, _) ->
+        match import_go(b, off, hs, ds, n, 0, NativeArray.make_float(n * n, 0.0), NativeArray.make_float(n * n, 0.0), NativeArray.make_u8(n * n, 0)) do
+          Field(_, _, ta, ma, bs, _, _, _, _) -> Field(hs, ws, ta, ma, bs, NativeArray.make_u8(n * n, 0), tb, ds, NativeArray.make_u8(n * n, 1))
+        end
+    end
+  end
+
   doc "Eased temperature / moisture / water flag / distance-cap for one column, for diagnostics."
   fn debug_axes(f : Field, wx : Int, wz : Int) : String do
     match f do
