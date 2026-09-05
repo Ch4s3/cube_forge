@@ -69,11 +69,11 @@ mod CubeForge.Chunk do
   fn pine_leaves() : Int do 19 end
   doc "Scree above the treeline: the alpine surface."
   fn gravel() : Int do 20 end
-  doc "Wetland mud."
+  doc "Wetland clay."
   fn clay() : Int do 21 end
-  doc "Deep volcanic rock: the material below the deep stone band (see fill_column_mat)."
+  doc "Deep volcanic rock: the material below the deep stone band."
   fn basalt() : Int do 22 end
-  doc "Frozen water: generation-time only, placed instead of a spring above the snow line."
+  doc "Frozen water: generation-time only, placed instead of a spring at or above the snow line."
   fn ice() : Int do 23 end
   doc "Wetland surface variant alongside clay, picked per column."
   fn mud() : Int do 24 end
@@ -134,6 +134,9 @@ mod CubeForge.Chunk do
   doc "Thickness of the bedrock floor, at y = 0 .. bedrock_depth() - 1."
   fn bedrock_depth() : Int do 3 end
 
+  doc "Below this depth, the deep stone band is basalt instead of plain stone."
+  fn deep_stone_depth() : Int do 24 end
+
   doc """
   Surface block for a column of height [h] whose steepest neighbour differs by
   [slope]. Ordered so a rock face beats altitude, and a cliff beats a beach.
@@ -166,7 +169,8 @@ mod CubeForge.Chunk do
       let id = if y < bedrock_depth() do bedrock()
                else if y == top do surface
                else if y > top - 4 do sub
-               else 3 end end end
+               else if y < deep_stone_depth() do basalt()
+               else 3 end end end end
       fill_column_mat(set(c, x, y, z, id), x, z, y + 1, top, surface, sub)
     end
   end
@@ -322,7 +326,8 @@ mod CubeForge.Chunk do
         let lx = col % 4096 - wx0
         let lz = col / 4096 - wz0
         let h = CubeForge.Noise.height(col % 4096, col / 4096, seed)
-        let c1 = if lx < 0 || lx >= 16 || lz < 0 || lz >= 16 || h < 1 || h >= 255 do c else set(c, lx, h, lz, water()) end
+        let sid = if h >= CubeForge.Noise.snow_line() do ice() else water() end
+        let c1 = if lx < 0 || lx >= 16 || lz < 0 || lz >= 16 || h < 1 || h >= 255 do c else set(c, lx, h, lz, sid) end
         plant_springs_go(c1, wx0, wz0, seed, i + 1, cx0, cz0, span)
       end
     end

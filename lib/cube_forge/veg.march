@@ -52,7 +52,7 @@ mod CubeForge.Veg do
       let h = Biome.height_of(f, x, z)
       if h <= C.sea_level() do false
       else if !cell_says_tree(x, z, seed, b) do false
-      else if W.block_at(w, x, h, z) != Biome.palette(b) do false
+      else if W.block_at(w, x, h, z) != Biome.palette(b, x, z) do false
       else if W.block_at(w, x, h + 1, z) != 0 do false
       else !Biome.is_wet(f, x, z) end end end end
     end
@@ -118,7 +118,7 @@ mod CubeForge.Veg do
       let h = Biome.height_of(f, x, z)
       if h <= C.sea_level() do false
       else if !cell_says_bush(x, z, seed) do false
-      else if W.block_at(w, x, h, z) != Biome.palette(b) do false
+      else if W.block_at(w, x, h, z) != Biome.palette(b, x, z) do false
       else if W.block_at(w, x, h + 1, z) != 0 do false
       else !Biome.is_wet(f, x, z) end end end end
     end
