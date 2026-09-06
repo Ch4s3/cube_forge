@@ -155,6 +155,13 @@ mod CubeForge do
   fn menu_slot() : Int do 247 end
   fn water_slot_base() : Int do 64 end
   fn foliage_slot_base() : Int do 128 end
+  -- The counts array's fourth block: 1 while a chunk's mesh was baked before
+  -- the window last moved under it. Its slots draw with the shim's offset
+  -- until it is rebaked; any rebuild of such a chunk rebuilds every section
+  -- and pass at once, so one buffer never mixes two origins (see shift_scene).
+  fn moved_base() : Int do 192 end
+  pfn is_moved(counts : NativeIntArr, ci : Int) : Bool do NativeArray.get_int(counts, moved_base() + ci) == 1 end
+  pfn clear_moved(counts : NativeIntArr, ci : Int) : NativeIntArr do NativeArray.set_int(counts, moved_base() + ci, 0) end
   fn tick_period() : Int do 10 end
   -- Which frame of the period each phase of the world tick runs on. Spread so
   -- that no frame carries more than one of them; see the frame loop. The
@@ -491,12 +498,17 @@ mod CubeForge do
       let cz = ci / n
       let mask = owed_mask(pend, cx, cz, 0, 0)
       if mask == 0 do drain_go(w, pend, ci + 1, n, counts, meshes, empty, budget)
+      else if is_moved(counts, ci) do
+        -- baked before the window moved: rebake whole, at the current origin
+        let m1 = remesh_sections(w, cx, cz, 65535, 0, Array.get(meshes, ci), empty, pass_all())
+        drain_go(w, clear_chunk(pend, cx, cz, 0), ci + 1, n, clear_moved(upload_chunk_passes(m1, ci, counts, pass_all()), ci),
+                 Array.set(meshes, ci, m1), empty, budget - 16)
       else
         let done = owed_count(pend, cx, cz, 0, 0)
         let m1 = drain_sections(w, cx, cz, pend, 0, Array.get(meshes, ci), empty)
         drain_go(w, clear_chunk(pend, cx, cz, 0), ci + 1, n, upload_chunk_passes(m1, ci, counts, mask),
                  Array.set(meshes, ci, m1), empty, budget - done)
-      end
+      end end
     end end
   end
 
@@ -547,8 +559,12 @@ mod CubeForge do
     if !World.in_bounds(w, cx, cz) do Remeshed(counts, meshes)
     else
       let ci = cx + World.side(w) * cz
-      let m1 = remesh_sections(w, cx, cz, smask, 0, Array.get(meshes, ci), empty, passes)
-      Remeshed(upload_chunk_passes(m1, ci, counts, passes), Array.set(meshes, ci, m1))
+      -- a chunk baked before the window moved is rebaked whole (all sections, all passes)
+      let moved = is_moved(counts, ci)
+      let smask1 = if moved do 65535 else smask end
+      let passes1 = if moved do pass_all() else passes end
+      let m1 = remesh_sections(w, cx, cz, smask1, 0, Array.get(meshes, ci), empty, passes1)
+      Remeshed(clear_moved(upload_chunk_passes(m1, ci, counts, passes1), ci), Array.set(meshes, ci, m1))
     end
   end
 
@@ -1171,6 +1187,15 @@ mod CubeForge do
       Cons(e, rest) -> restore_myc(Myc.restore_chunk(myc, 16 * n, World.ev_cx(e) - World.origin_x(w1), World.ev_cz(e) - World.origin_z(w1), World.ev_cols(e)), w1, n, rest)
     end
   end
+  pfn mark_moved_go(counts : NativeIntArr, n : Int, dx : Int, dz : Int, d : Int) : NativeIntArr do
+    if d >= n * n do counts
+    else mark_moved_go(NativeArray.set_int(counts, moved_base() + d, if shift_src(d, n, dx, dz) >= 0 do 1 else 0 end), n, dx, dz, d + 1) end
+  end
+  pfn owe_moved_go(pend : NativeIntArr, n : Int, dx : Int, dz : Int, d : Int) : NativeIntArr do
+    if d >= n * n do pend
+    else if shift_src(d, n, dx, dz) < 0 do owe_moved_go(pend, n, dx, dz, d + 1)
+    else owe_moved_go(owe_sections(pend, d % n, d / n, 65535, 0, n), n, dx, dz, d + 1) end end
+  end
   pfn shift_scene(sc, dx : Int, dz : Int, seed : Int, workers : Int) do
     match sc do
       Scene(w, counts, outline, hit, ui, pids, flags, meshes, bio, pend, myc) ->
@@ -1183,8 +1208,11 @@ mod CubeForge do
         let t2 = Win.time()
         Win.gfx_shift(dx, dz)
         Win.gfx_upload_occupancy(World.occupancy(w1), 128, 256, 128)
-        let counts1 = remap_bases_go(counts, NativeArray.make_int(3 * water_slot_base(), 0), n, dx, dz, water_slot_base(), 3, 0, 0)
-        let pend1 = remap_bases_go(pend, NativeArray.make_int(1024, 0), n, dx, dz, 64, 16, 0, 0)
+        let counts0 = remap_bases_go(counts, NativeArray.make_int(4 * water_slot_base(), 0), n, dx, dz, water_slot_base(), 3, 0, 0)
+        -- every chunk that moved is flagged, and owes every section, so the
+        -- drain rebakes it at the new origin over the coming frames
+        let counts1 = mark_moved_go(counts0, n, dx, dz, 0)
+        let pend1 = owe_moved_go(remap_bases_go(pend, NativeArray.make_int(1024, 0), n, dx, dz, 64, 16, 0, 0), n, dx, dz, 0)
         let flags1 = remap_ints_go(flags, NativeArray.make_int(n * n, 0), n, dx, dz, 0, 1, 0)
         let t3 = Win.time()
         let band = band_indices(n, dx, dz, n * n - 1, Nil)
@@ -2891,7 +2919,7 @@ mod CubeForge do
     println("  mesh all (greedy sections): " ++ int_to_string(t3 - t2) ++ " ms wall, " ++ float_to_string(int_to_float(t3 - t2) /. int_to_float(n * n)) ++ " ms per chunk (wall / chunks), " ++ int_to_string(nverts) ++ " vertices (" ++ int_to_string(count_water_verts(meshes, 0)) ++ " water, " ++ int_to_string(count_foliage_verts(meshes, 0)) ++ " foliage)")
     if headless do Next(NoStart, settings0)
     else
-      let counts = upload_meshes(meshes, 0, NativeArray.make_int(3 * water_slot_base(), 0))
+      let counts = upload_meshes(meshes, 0, NativeArray.make_int(4 * water_slot_base(), 0))
       let water_col = World.find_water(world)
       let spawn_col = find_spawn_go(world, n, 0, 0, 0)
       let spawn_x = spawn_col % 4096

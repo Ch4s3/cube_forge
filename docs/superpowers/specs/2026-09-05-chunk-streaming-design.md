@@ -154,6 +154,15 @@ the cache. Old slots (files by window index, origin 0) still read.
   coordinates at all. The one thing that had to learn the world's
   coordinates is the biome's temperature octave, read at the world column
   so the climate is the ground's and not the window's.
+- **A moved chunk is rebaked whole.** A mesh is baked at the local origin
+  its chunk had; after a shift a moved slot draws with the shim's -16
+  offset, but the drain and the edit paths rebuild single sections and
+  upload the whole pass buffer, which mixed two origins in one buffer
+  (seen as slabs floating in the sky). So a moved chunk is flagged (the
+  counts array's fourth block) and, while flagged, any rebuild of it
+  rebuilds all sixteen sections and all passes; the shift also owes every
+  moved chunk to the drain, which rebakes them at the new origin over the
+  following seconds.
 - **The band is meshed inline**, in one `pmap` over its eight chunks (12
   ms), rather than deferred to the drain: it is at the window's far edge
   and its vertices are needed by the time it is seen.
