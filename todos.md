@@ -35,6 +35,21 @@ measurements.
 - [x] **World size in the seed; the new-world page** — done 2026-09-05 (terrain-erosion spec, "World size"): 64/96/128-block worlds, the side packed above the age in the seed, NEW GAME asks size and age (RANDOM or set) before START, `CF_SIZE`, slots load at their own side. Above 128 is the literal refactor `world_size_test` names.
 - [x] **Lake outlets on ancient worlds** — resolved 2026-09-05: the creeping flow was cave worms breaching lake basins, not sheets on terraces; worms now keep out of basin walls (`Caves.basin_wall`, `CF_KARST`), and since a full lake turned out to have no outlet at all, the pour point is dug one block down as a notch, one per basin of six or more columns. Flow plateaus at ~400 cells at both ages. See the lakes spec §3 and §6.
 
+## Play
+
+- [x] **Survey and scanning** — done 2026-09-06
+  (`docs/superpowers/specs/2026-09-05-survey-and-scanning-design.md`). The
+  instrument that makes the existing simulation playable: a survey panel (`Q`)
+  showing a place's biome, axes, the inputs the player can change (height,
+  distance to water) and which way it is drifting, plus a drift overlay on the
+  map reusing `Biome.active`. Species advice is gated behind scanning (`E`) a
+  living specimen, so the six climate bands are a reason to explore. Adds no
+  simulation; the canal loop it exposes is already tested by `CF_AUTOCANAL`.
+  Built in two slices: the place half (panel, trend, drift marking) and the
+  species half (scanning, the known bitmask in the save header, the two gated
+  lines). CF_AUTOSURVEY, CF_AUTOSCAN and CF_KNOWN drive it headlessly. The line
+  gap that the design left open measured 0.060 against a 0.045-tall glyph.
+
 ## Engine
 
 - [ ] **Main-thread pinning runtime patch** (GAPS.md G15) — chip spawned, in progress in a separate session.
@@ -58,7 +73,7 @@ measurements.
 - [x] **Settings menu** — done 2026-09-05 (`docs/superpowers/specs/2026-09-05-settings-menu-design.md`): a SETTINGS page on both the start screen and the escape menu with arrow buttons per row for fullscreen, vsync, shadow distance, soft shadows and precipitation. Applied live (shadows and the precipitation clamp read every frame; vsync and fullscreen through two new shim calls), written to `settings.txt` in the save directory on every click, read before the window opens. `CF_FULLSCREEN`, `CF_VSYNC`, `CF_SHADOW_DIST`, `CF_SHADOW_SOFT` override the file and are never written back; `CF_PRECIP` stays a raw cap. `CF_AUTOSETTINGS` scripts a click. Screenshot `docs/settings-menu.png`.
 - [x] **Sound settings** — done 2026-09-05 (`docs/superpowers/specs/2026-09-05-sound-settings-design.md`): SETTINGS is now a hub (GRAPHICS, SOUND, BACK) over two row pages; MASTER, AMBIENCE and MUSIC in steps of 25, scaling the bed gains and the score in March before `set_mix` and `note`, so the shim is untouched. Checked by teeing the null device: master 0 gives an all-zero WAV. `CF_AUTOPAGE` picks which page `CF_AUTOSETTINGS` opens. Screenshot `docs/settings-sound.png`.
 - [x] **Save the fields** — done 2026-09-05: `fields.bin` per slot carries species, vigour, reach, shown and the biome's eased axes; a load restores them and an older slot rebuilds from the seed with a note. RESULTS.md.
-- [x] **Mushrooms as food** — done 2026-09-05: `Effects` subsystem, timed thirty-second effects by species (speed, jump, swim, lantern), eaten by using a cap with nothing in reach, shown on the readout line. `CF_AUTOEAT`.
+- [x] **Mushrooms as food** — done 2026-09-05: `Effects` subsystem, timed thirty-second effects by species (speed, jump, swim, lantern). Eaten with **E** from the selected hotbar slot, or by right-clicking any slot in the open inventory window (2026-09-06; the original aim-at-nothing right-click is gone). `CF_AUTOEAT`, `CF_AUTOEAT_SLOT`.
 - [x] **Perf pass on March main 9ca8a98d** — done 2026-09-05: the relight sweep keeps per-level worklists and runs in place (a body 7 -> 5.2 ms, block-light relight 2.5 -> 1.5); the ground readout is key-gated; GAPS G70 for the read-in-the-writer copy. RESULTS.md.
 - [ ] **Relight, the rest** — the clear and the section diff are a memset and a memcmp per row in the shim now (2026-09-05 perf pass) and it made no measurable difference: a tree relight was 2-5 ms; with the world's chunks in a binary tree (GAPS G82 follow-up) it was 1.8-3.4 ms; with the sweep reading opacity from the occupancy field it is 1.3-2.2 ms, now mostly the seed and the worklist gather. A box sized to the edit's actual reach is what is left.
 - [x] **Tree placement** — done 2026-09-05: `World.set_blocks` writes a tree's or a body's cells with one chunk copy per chunk; 0.8 -> 0.3-0.45 ms, a body 4.2 -> 2 ms.

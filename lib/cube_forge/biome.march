@@ -900,6 +900,55 @@ mod CubeForge.Biome do
   fn temps(f : Field) : NativeFloatArr do match f do Field(_, _, ta, _, _, _, _, _, _) -> ta end end
   doc "The eased moisture array, one entry per column."
   fn moists(f : Field) : NativeFloatArr do match f do Field(_, _, _, ma, _, _, _, _, _) -> ma end end
+  doc "Columns from this one to the nearest water, capped at reach(). The moisture input the player can change by digging."
+  fn water_dist_at(f : Field, wx : Int, wz : Int) : Int do
+    match f do Field(_, _, _, _, _, _, _, ds, _) -> dist_of(NativeArray.get_u8(ds, wx + stride() * wz)) end
+  end
+
+  doc """
+  The reach the nearest water actually has here: reach() for a large body,
+  small_reach() for a small one.
+
+  The survey shows this beside the distance, because the distance alone lies. A
+  column twelve from a pond reads WATER 12 with MOIST 0 and looks like a broken
+  rule; WATER 12 REACH 4 says exactly why it is dry and what would fix it. Two
+  numbers, no prose, and the small-body rule teaches itself.
+  """
+  fn water_reach_at(f : Field, wx : Int, wz : Int) : Int do
+    match f do
+      Field(_, _, _, _, _, _, _, ds, _) ->
+        if is_small(NativeArray.get_u8(ds, wx + stride() * wz)) do small_reach() else reach() end
+    end
+  end
+
+  doc """
+  The biome this column is HEADING for: classify at the targets rather than at
+  the eased axes. Equal to biome_of once the column has settled, and different
+  while it is on its way -- which is the whole of what the survey's trend line
+  reports.
+
+  It deliberately does not consult the hold counter. The two answer different
+  questions: this is a destination the axes reach over minutes at the ease rate,
+  the counter is a thirty-tick debounce at arrival, under three seconds. A column
+  that is grassland and becoming forest is both of those things at once.
+
+  The targets are computed exactly as tick_go computes them, network pulls
+  included, so the answer is the one the tick will actually arrive at rather
+  than an approximation of it.
+  """
+  fn trend_at(f : Field, pulls : NativeF32Arr, scale : Float, sps : NativeU8Arr, vg : NativeF32Arr, n : Int, wx : Int, wz : Int) : Int do
+    match f do
+      Field(hs, _, _, _, _, _, tb, ds, _) ->
+        let i = wx + stride() * wz
+        let h = NativeArray.get_u8(hs, i)
+        let dv = NativeArray.get_u8(ds, i)
+        let cap = CubeForge.Myc.cap()
+        let tt = clamp01(temp_from_base(NativeArray.get_float(tb, i), h) +. clampb(NativeArray.get_f32(pulls, 2 * i) *. scale, cap))
+        let mt = clamp01(moisture_target_of(dv) +. clampb(NativeArray.get_f32(pulls, 2 * i + 1) *. scale, cap))
+        classify_full(tt, mt, h, dist_of(dv), is_small(dv), is_grove(sps, vg, n, wx, wz))
+    end
+  end
+
   doc "The active flags, one entry per column: 1 where the last tick eased the climate or an edit woke the column. What the mycelium tick must look at whatever its own dirty set says."
   fn active(f : Field) : NativeU8Arr do match f do Field(_, _, _, _, _, _, _, _, act) -> act end end
 

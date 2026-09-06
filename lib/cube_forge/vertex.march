@@ -8,8 +8,8 @@
 -- common value in the whole mesh. This does not.
 mod CubeForge.Vertex do
 
-  doc "Floats per vertex: pos.xyz, uv, layer, shade, face, fx."
-  fn floats() : Int do 9 end
+  doc "Floats per vertex: pos.xyz, uv, layer, sky, face, fx, block light. Sky and block light are separate because a varying is interpolated and the old packed pair did not survive it -- see F32Buf.push_vertex."
+  fn floats() : Int do 10 end
 
   doc "Effect: ordinary geometry, lit and fogged as usual."
   fn fx_none() : Int do 0 end

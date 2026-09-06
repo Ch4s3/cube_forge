@@ -80,7 +80,7 @@ mod CubeForge do
     end
   end
 
-  type Frame = Frame(Int, Float, CubeForge.Player.Player, Int, NativeFloatArr, NativeF32Arr, Bool, CubeForge.F32Buf.F32Buf, Bool, Float, Float, Bool, Int, CubeForge.Menu.Menu, CubeForge.F32Buf.F32Buf, Start, Float, Int, CubeForge.Audio.Sched, Staged)   -- ..., inventory open, slot a stack was lifted from (-1 = not dragging), menu, its vertex buffer, what the next session starts from (NoStart = keep playing), worst frame seen after warmup, the frame it was, the note schedule, and any window shift in flight (see Staged)
+  type Frame = Frame(Int, Float, CubeForge.Player.Player, Int, NativeFloatArr, NativeF32Arr, Bool, CubeForge.F32Buf.F32Buf, Bool, Float, Float, Bool, Int, CubeForge.Menu.Menu, CubeForge.F32Buf.F32Buf, Start, Float, Int, CubeForge.Audio.Sched, Bool, Int, Staged)   -- ..., inventory open, slot a stack was lifted from (-1 = not dragging), menu, its vertex buffer, what the next session starts from (NoStart = keep playing), worst frame seen after warmup, the frame it was, the note schedule, whether the survey is open, the species scanned so far as a bitmask, and any window shift in flight (see Staged)
   -- Frames before this are not counted toward the worst frame: the first few
   -- carry one-time costs (the first draw of each buffer, the first time down
   -- every path) that no steady-state budget should be measured against.
@@ -115,13 +115,97 @@ mod CubeForge do
   -- when the inventory actually changed, as before.
   -- [tint]: the species under the crosshair, folded into the rebuild key so the
   -- reticle recolours only when the target's species changes.
-  pfn refresh_hud(u : Ui, open : Bool, drag_from : Int, nx : Float, ny : Float, text : String, fx : String, tint : Int, gkey : Int, ground : String) : Ui do
+  -- ── The survey panel ──────────────────────────────────────────────────────
+  -- What a place IS, which way it is going, and -- the part that teaches the
+  -- levers -- the input beside each value it drives. HEIGHT sits next to TEMP
+  -- and WATER N AWAY next to MOIST because those are the two numbers a player
+  -- can change by digging; nobody is told that digging down warms a place.
+  --
+  -- Percent, not the raw 0..1 float: the glyph set is letters and digits, and a
+  -- decimal point renders blank.
+  pfn pct_of(v : Float) : Int do float_to_int(v *. 100.0 +. 0.5) end
+
+  -- ── The species half, gated behind scanning ───────────────────────────────
+  -- Known is a bitmask, one bit per species. Only scanned species are named:
+  -- the place half is measurement and needs no unlocking, the species half is
+  -- earned by having stood somewhere the thing actually grows.
+  pfn is_known(known : Int, sp : Int) : Bool do int_and(known, pow2(sp - 1)) != 0 end
+
+  -- The best-fitting KNOWN species here, and its fitness. Species.best_for
+  -- answers over all six; this is the same walk restricted to what the player
+  -- has scanned, because naming a species they have never seen would give away
+  -- the discovery the scan exists to reward.
+  pfn best_known_go(known : Int, t : Float, m : Float, sp : Int, best : Int, bf : Float) : Int do
+    if sp > Species.count() do best
+    else
+      let f = if is_known(known, sp) do Species.fitness(sp, t, m) else 0.0 end
+      if f > bf do best_known_go(known, t, m, sp + 1, sp, f) else best_known_go(known, t, m, sp + 1, best, bf) end
+    end
+  end
+
+  -- A known species that does not fit here, and the one axis that is short --
+  -- the hint that turns a survey into a plan. Moisture first: it is the axis a
+  -- player can move by digging a channel, where temperature needs moving earth.
+  pfn shortfall_go(known : Int, t : Float, m : Float, sp : Int) : String do
+    if sp > Species.count() do ""
+    else if !is_known(known, sp) do shortfall_go(known, t, m, sp + 1)
+    else if Species.fitness(sp, t, m) >= Species.viable() do shortfall_go(known, t, m, sp + 1)
+    else if m < Species.m_lo(sp) do "NEEDS WETTER  " ++ Species.name(sp)
+    else if m > Species.m_hi(sp) do "NEEDS DRIER  " ++ Species.name(sp)
+    else if t < Species.t_lo(sp) do "NEEDS WARMER  " ++ Species.name(sp)
+    else if t > Species.t_hi(sp) do "NEEDS COLDER  " ++ Species.name(sp)
+    else shortfall_go(known, t, m, sp + 1) end end end end end end end
+  end
+
+  pfn survey_lines(sc, x : Int, z : Int, scale : Float, known : Int, tint : Int) : List(String) do
+    let bio = scene_biome(sc)
+    let myc = scene_myc(sc)
+    let n = World.side(scene_world(sc)) * 16
+    let here = Biome.biome_of(bio, x, z)
+    let dest = Biome.trend_at(bio, Myc.pulls(myc), scale, Myc.field_species(myc), Myc.field_vigour(myc), n, x, z)
+    let trend = if dest == here do "SETTLED" else "BECOMING " ++ Biome.name(dest) end
+    Cons(Biome.name(here) ++ "   " ++ trend,
+      Cons("TEMP  " ++ int_to_string(pct_of(Biome.temp_of(bio, x, z))) ++ "    HEIGHT " ++ int_to_string(Biome.height_of(bio, x, z)),
+        Cons("MOIST " ++ int_to_string(pct_of(Biome.moist_of(bio, x, z))) ++ "    WATER " ++ int_to_string(Biome.water_dist_at(bio, x, z)) ++ " REACH " ++ int_to_string(Biome.water_reach_at(bio, x, z)),
+          species_lines(known, tint, Biome.temp_of(bio, x, z), Biome.moist_of(bio, x, z)))))
+  end
+
+  -- The gated tail of the panel: nothing before the first scan, and a prompt
+  -- whenever something unscanned is under the reticle.
+  pfn species_lines(known : Int, tint : Int, t : Float, m : Float) : List(String) do
+    let prompt = if tint > 0 do (if is_known(known, tint) do "" else "UNKNOWN SPECIES  SCAN" end) else "" end
+    let best = best_known_go(known, t, m, 1, 0, Species.viable())
+    let thrive = if best > 0 do "WOULD THRIVE  " ++ Species.name(best) ++ " " ++ int_to_string(pct_of(Species.fitness(best, t, m))) else "" end
+    let short = shortfall_go(known, t, m, 1)
+    keep_nonempty(Cons(thrive, Cons(short, Cons(prompt, Nil))))
+  end
+
+  pfn keep_nonempty(ls : List(String)) : List(String) do
+    match ls do
+      Nil -> Nil
+      Cons(t, rest) -> if t == "" do keep_nonempty(rest) else Cons(t, keep_nonempty(rest)) end
+    end
+  end
+
+  -- One string for the rebuild guard: the panel is rebuilt only when its text
+  -- changes, the same way the one-line readout is.
+  pfn join_lines(ls : List(String), acc : String) : String do
+    match ls do
+      Nil -> acc
+      Cons(t, rest) -> join_lines(rest, if acc == "" do t else acc ++ " / " ++ t end)
+    end
+  end
+
+  pfn refresh_hud(u : Ui, open : Bool, drag_from : Int, nx : Float, ny : Float, text : String, lines : List(String), survey : Bool, fx : String, tint : Int, gkey : Int, ground : String) : Ui do
     match u do
       Ui(inv, hb, ic, key, rb, last, ef, _, _, _) ->
         -- the readout rebuilds only when its string changed
+        -- The survey panel supersedes the one-line readout while it is open: same
+        -- buffer, same slot, same guard, more lines. The survey IS the readout,
+        -- expanded, which is why it needs no state of its own.
         let rb1 = if text == last do rb
                   else
-                    let b = Hud.build_readout(rb, text)
+                    let b = if survey do Hud.build_survey(rb, lines) else Hud.build_readout(rb, text) end
                     Win.gfx_upload(readout_slot(), F32Buf.storage(b), F32Buf.len(b))
                     b
                   end
@@ -1697,10 +1781,6 @@ mod CubeForge do
                        if sp > 0 do Inv.give(inv2, Species.spore_item(sp), 1) else inv2 end
                      else inv2 end
           set_inv(sc3, Inv.release(inv3))
-        else if place_now && !frozen && !Ray.is_hit(hit) && Chunk.is_fruit_cap(Inv.selected_id(inv1)) && Inv.can_place(inv1) do
-          -- nothing in reach and a cap in hand: eat it. The species' effect starts
-          -- (or refreshes) for Effects.duration() seconds.
-          eat(sc1, Chunk.fruit_species(Inv.selected_id(inv1)), Inv.consume(inv1), now)
         else if place_now && !frozen && Ray.is_hit(hit) do
           let px = Ray.bx(hit) + Ray.nx(hit)
           let py = Ray.by_(hit) + Ray.ny(hit)
@@ -1720,8 +1800,26 @@ mod CubeForge do
             let sc2 = edit_block(sc1, px, py, pz, id)
             if forced do sc2 else set_inv(sc2, Inv.consume(inv1)) end
           end end end
-        else sc1 end end end
+        else sc1 end end
     end
+  end
+
+  doc """
+  Eat one item from slot [s] (0-based, hotbar then backpack). A slot that is
+  empty, or holds anything but a cap, is left exactly as it was: no bite, no
+  message, nothing consumed.
+
+  Both gestures land here -- E on the selected hotbar slot while playing, and a
+  right-click on any slot while the inventory window is open -- so neither can
+  eat something the other would refuse.
+  """
+  pfn eat_at(sc, s : Int, now : Float) do
+    let inv = ui_inv(scene_ui(sc))
+    let id = Inv.item_at(inv, s)
+    -- `&&` does not short-circuit (GAPS G33), but both reads are bounds-checked
+    if !Inv.edible(id) do sc
+    else if Inv.is_empty_at(inv, s) do sc
+    else eat(sc, Chunk.fruit_species(id), Inv.consume_at(inv, s), now) end end
   end
 
   -- Eat a cap of [sp]: the inventory after the bite, and the effect applied at [now].
@@ -1956,7 +2054,7 @@ mod CubeForge do
 
   -- Frame loop. `max_frames < 0` means run until the window closes.
   -- Run-time knobs read once, outside the frame loop (an Env read allocates).
-  type Knobs = Knobs(Int, Int, String, Bool, Float, Int, Bool, Int, Int, Int, Float, Int, Int, Int, Int, Int, Int, Bool, Int, Int, Int, Int, Int, Int, Int, Bool, Bool, Int, Int, Bool, Int, Int, Int, Int, Int, Int, Bool, Int, Int, Int, Int, Int, Int, Int, CubeForge.Settings.Settings, Int, Int)   -- max_frames, dump_frame, dump_path, autowalk, autospin, autoedit frame (<0 = off), autoswim, autoflow frame (<0 = off), workers, automap frame (<0 = off; forces map view on from this frame, for headless verification), day length in seconds, sun angle override in degrees (<0 = follow the clock), autobreak frame (<0 = off): break the column under the player every 20 frames, for a repeatable edit benchmark, weather pin 0..100 (<0 = follow the actor), CF_PRECIP raw cap override (<0 = the precipitation setting), biome ease rate in percent (100 = one CF_DAY per full swing), draw the biome map in map view, autocanal frame (<0 = off): lay a 9-block line of water three columns east of the player, aim-independent, for the biome end-to-end test, biome migration budget: surface columns retextured per tick, vegetation budget: trees grown or felled per tick, time pin in seconds (<0 = live clock) for the water animation, remesh-all frame (<0 = off): rebuild every section of every chunk at that frame, a ground truth for stale-mesh hunts, automenu frame (<0 = off): open the escape menu at that frame and start a new game five frames later, for the restart test, audio mode (0 off, 1 device, 2 null device -- render a tick per push straight into the WAV, for reproducible headless dumps), audio log, autodive, autoglow frame (<0 = off): place a glow cap three columns east of the player, through edit_block, for the block-light end-to-end check, myc rate in percent, draw the mycelium map overlay in map view, autoplant frame (<0 = off): plant the fittest species three columns east of the player, myc migration budget (surface columns per retexture slot; glow changes batch under one relight per slot), autoplant species override (0 = fittest), autospore frame (<0 = off): give three spores and plant one through the item path thirty frames later, fruit budget (bodies per fruit slot), fruit rate in percent, autostart (skip the start screen), autosave frame (<0 = off) and slot, autoload frame (<0 = off, first session only) and slot, autoslots frame (<0 = off): open the slots page at that frame, for a headless look at it, climate feedback from the network in percent (0 = none), autosettings frame (<0 = off): open the settings page at that frame and click the shadow row's right arrow five frames later, for the settings file end-to-end check, the settings as read from disk and the mask of fields an environment variable overrides (both for writing the file, see Settings.merge), autopage: which menu page CF_AUTOSETTINGS opens (2 hub, 3 graphics, 4 sound)
+  type Knobs = Knobs(Int, Int, String, Bool, Float, Int, Bool, Int, Int, Int, Float, Int, Int, Int, Int, Int, Int, Bool, Int, Int, Int, Int, Int, Int, Int, Bool, Bool, Int, Int, Bool, Int, Int, Int, Int, Int, Int, Bool, Int, Int, Int, Int, Int, Int, Int, CubeForge.Settings.Settings, Int, Int, Int, Int)   -- max_frames, dump_frame, dump_path, autowalk, autospin, autoedit frame (<0 = off), autoswim, autoflow frame (<0 = off), workers, automap frame (<0 = off; forces map view on from this frame, for headless verification), day length in seconds, sun angle override in degrees (<0 = follow the clock), autobreak frame (<0 = off): break the column under the player every 20 frames, for a repeatable edit benchmark, weather pin 0..100 (<0 = follow the actor), CF_PRECIP raw cap override (<0 = the precipitation setting), biome ease rate in percent (100 = one CF_DAY per full swing), draw the biome map in map view, autocanal frame (<0 = off): lay a 9-block line of water three columns east of the player, aim-independent, for the biome end-to-end test, biome migration budget: surface columns retextured per tick, vegetation budget: trees grown or felled per tick, time pin in seconds (<0 = live clock) for the water animation, remesh-all frame (<0 = off): rebuild every section of every chunk at that frame, a ground truth for stale-mesh hunts, automenu frame (<0 = off): open the escape menu at that frame and start a new game five frames later, for the restart test, audio mode (0 off, 1 device, 2 null device -- render a tick per push straight into the WAV, for reproducible headless dumps), audio log, autodive, autoglow frame (<0 = off): place a glow cap three columns east of the player, through edit_block, for the block-light end-to-end check, myc rate in percent, draw the mycelium map overlay in map view, autoplant frame (<0 = off): plant the fittest species three columns east of the player, myc migration budget (surface columns per retexture slot; glow changes batch under one relight per slot), autoplant species override (0 = fittest), autospore frame (<0 = off): give three spores and plant one through the item path thirty frames later, fruit budget (bodies per fruit slot), fruit rate in percent, autostart (skip the start screen), autosave frame (<0 = off) and slot, autoload frame (<0 = off, first session only) and slot, autoslots frame (<0 = off): open the slots page at that frame, for a headless look at it, climate feedback from the network in percent (0 = none), autosettings frame (<0 = off): open the settings page at that frame and click the shadow row's right arrow five frames later, for the settings file end-to-end check, the settings as read from disk and the mask of fields an environment variable overrides (both for writing the file, see Settings.merge), autopage: which menu page CF_AUTOSETTINGS opens (2 hub, 3 graphics, 4 sound), autosurvey frame (<0 = off): open the survey panel from that frame, autoscan frame (<0 = off): scan the column three east of the player
 
   doc "Write the session into [slot]. Prints the outcome; true on success."
   -- The fields blob: species, vigour, reach, shown, then the eased axes.
@@ -1976,13 +2074,13 @@ mod CubeForge do
     end
   end
 
-  pfn save_game(slot : Int, w : CubeForge.World.World, p : CubeForge.Player.Player, inv : CubeForge.Inventory.Inv, seed : Int, day : Float, wxpid, bio : CubeForge.Biome.Field, myc : CubeForge.Myc.Net) : Bool do
+  pfn save_game(slot : Int, w : CubeForge.World.World, p : CubeForge.Player.Player, inv : CubeForge.Inventory.Inv, seed : Int, day : Float, wxpid, bio : CubeForge.Biome.Field, myc : CubeForge.Myc.Net, known : Int) : Bool do
     let ts0 = Win.time()
     let wx = match Weather.call_snapshot(wxpid) do
       Ok(l) -> Weather.phase_to_floats(Weather.unpack_phase(l))
       Err(_) -> Weather.phase_to_floats(Weather.start())
     end
-    let h = Save.header_new(seed, DateTime.now(), Player.to_floats(p), Inv.to_ints(inv), day, wx)
+    let h = Save.header_new(seed, DateTime.now(), Player.to_floats(p), Inv.to_ints(inv), day, wx, known)
     match Save.write_world(Save.dir(), slot, World.chunks(w), World.side(w), World.origin_x(w), World.origin_z(w), World.cache(w), World.gen_hashes(w), h, fields_blob(w, bio, myc)) do
       Ok(_) ->
         println("saved slot " ++ int_to_string(slot) ++ " in " ++ ms(Win.time() -. ts0) ++ ", world hash " ++ int_to_string(World.state_hash(w)))
@@ -2028,11 +2126,11 @@ mod CubeForge do
   -- [t0]: the clock at session start; [day0]: seconds into the day at that moment, so the sun continues from a save.
   fn frame_loop(f : Frame, k : Knobs, sc_in, nchunks : Int, proj : NativeFloatArr, map_proj : NativeFloatArr, fps : Fps, wxpid, seed : Int, first : Bool, t0 : Float, day0 : Float) : Frame do
     match f do
-      Frame(frame, last_t, player_in, sample, view, vp, map_mode, marker, flash, wcache, bcache, inv_open, drag_from, menu, menubuf, next_seed, worst, worst_at, sched, staged_in) ->
+      Frame(frame, last_t, player_in, sample, view, vp, map_mode, marker, flash, wcache, bcache, inv_open, drag_from, menu, menubuf, next_seed, worst, worst_at, sched, survey, known, staged_in) ->
         match k do
-        Knobs(max_frames, dump_frame, dump_path, autowalk, autospin, autoedit, autoswim, autoflow, workers, automap, day_len, sun_deg, autoinv, autobreak, weather_pin, precip_cap, biome_rate, biome_map, autocanal, biome_budget, veg_budget, time_pin, remesh_all_at, automenu, audio_mode, audio_log, autodive, autoglow, myc_rate, myc_map, autoplant, myc_budget, autoplant_species, autospore, fruit_budget, fruit_rate, autostart, autosave, autosave_slot, autoload, autoload_slot, autoslots, myc_feedback, autosettings, settings_disk, settings_mask, autopage) ->
+        Knobs(max_frames, dump_frame, dump_path, autowalk, autospin, autoedit, autoswim, autoflow, workers, automap, day_len, sun_deg, autoinv, autobreak, weather_pin, precip_cap, biome_rate, biome_map, autocanal, biome_budget, veg_budget, time_pin, remesh_all_at, automenu, audio_mode, audio_log, autodive, autoglow, myc_rate, myc_map, autoplant, myc_budget, autoplant_species, autospore, fruit_budget, fruit_rate, autostart, autosave, autosave_slot, autoload, autoload_slot, autoslots, myc_feedback, autosettings, settings_disk, settings_mask, autopage, autosurvey, autoscan) ->
         if Win.should_close() || (max_frames >= 0 && frame >= max_frames) || !is_no_start(next_seed) do
-          Frame(frame, last_t, player_in, sample, view, vp, map_mode, marker, flash, wcache, bcache, inv_open, drag_from, menu, menubuf, next_seed, worst, worst_at, sched, staged_in)
+          Frame(frame, last_t, player_in, sample, view, vp, map_mode, marker, flash, wcache, bcache, inv_open, drag_from, menu, menubuf, next_seed, worst, worst_at, sched, survey, known, staged_in)
         else
           In.poll()
           -- Streaming: one chunk of shift, toward the player, while their chunk
@@ -2091,6 +2189,12 @@ mod CubeForge do
           if esc do CubeForge.Ffi.Input.capture_cursor(!ui_open) else () end
           if In.button_pressed(In.button_left()) && !ui_open do CubeForge.Ffi.Input.capture_cursor(true) else () end
           let map_mode0 = if In.key_pressed(In.key_m()) do !map_mode else map_mode end
+          -- Q toggles the survey. Read as an edge like the other panels: a held
+          -- key would toggle every frame.
+          let survey0 = if In.key_pressed(In.key_q()) do !survey else survey end
+          -- CF_AUTOSURVEY=<frame>: open the panel from that frame, so a headless
+          -- run can print and assert its text.
+          let survey1 = if autosurvey >= 0 && frame >= autosurvey do true else survey0 end
           let map_mode1 = if automap >= 0 && frame >= automap do true else map_mode0 end
           let now = Win.time()
           let dt = if now -. last_t > 0.1 do 0.1 else now -. last_t end
@@ -2138,6 +2242,26 @@ mod CubeForge do
                           set_inv(sc, Inv.move_stack(ui_inv(scene_ui(sc)), drag1, hovered))
                         else sc end
           let drag2 = if dropped do -1 else drag1 end
+          -- ── Eating ────────────────────────────────────────────────────────
+          -- E eats the selected hotbar slot while playing; a right-click on a
+          -- slot eats it while the inventory window is open. The key is inert
+          -- with a panel up (the window has its own gesture) and the click is
+          -- free there, since `interact` never runs while one is open.
+          --
+          -- CF_AUTOEAT=<frame> presses E thirty frames after putting a cap in
+          -- the inventory; with CF_AUTOEAT_SLOT=<slot> it right-clicks that slot
+          -- with the window open instead. Both drive the real gestures rather
+          -- than calling the bite directly, which is what the knob used to do.
+          let autoeat = Env.get_int("CF_AUTOEAT", -1)
+          let autoeat_slot = Env.get_int("CF_AUTOEAT_SLOT", -1)
+          let scripted_eat = autoeat >= 0 && frame == autoeat + 30
+          let sel_now = Inv.sel(ui_inv(scene_ui(sc_drag)))
+          let gesture_slot = Inv.eat_slot(inv_open2, ui_open, In.button_pressed(In.button_right()), hovered,
+                                          In.key_pressed(In.key_e()), sel_now)
+          let eat_slot = if !scripted_eat do gesture_slot
+                         else if autoeat_slot >= 0 do autoeat_slot
+                         else sel_now - 1 end end
+          let sc_eat = if eat_slot >= 0 do eat_at(sc_drag, eat_slot, now) else sc_drag end
           -- ── Menu ────────────────────────────────────────────────────────────
           let m_hover = if Menu.is_open(menu1) do Menu.item_at(menu1, ndc_x, ndc_y) else -1 end
           let menu2 = if Menu.is_open(menu1) do menu_keys(Menu.set_focus(Menu.expire_status(menu1, frame), m_hover)) else menu1 end
@@ -2188,12 +2312,16 @@ mod CubeForge do
           -- CF_AUTOLOAD drive the same two paths for the headless round-trip test.
           let on_slots = Menu.page(menu2) == Menu.page_slots()
           let slot_click = if m_click && on_slots && m_hover < Menu.item_back(menu2) do Menu.slot_of_item(m_hover) else 0 end
+          -- [known] here is the mask as of the start of this frame, not after a
+          -- scan in it. A save needs the escape menu open and a scan needs the
+          -- world under the reticle, so the two cannot land on one frame; the
+          -- ordering is stated rather than engineered around.
           let save_slot = if autosave >= 0 && frame == autosave do autosave_slot
                           else if slot_click > 0 && !Menu.is_start(menu3) do slot_click else 0 end end
           let load_slot = if first && autoload >= 0 && frame == autoload do autoload_slot
                           else if slot_click > 0 && Menu.is_start(menu3) do slot_click else 0 end end
           let menu4 = if save_slot > 0 do
-                        let saved = save_game(save_slot, scene_world(sc_drag), player, ui_inv(scene_ui(sc_drag)), seed, now -. t0 +. day0, wxpid, scene_biome(sc_drag), scene_myc(sc_drag))
+                        let saved = save_game(save_slot, scene_world(sc_drag), player, ui_inv(scene_ui(sc_drag)), seed, now -. t0 +. day0, wxpid, scene_biome(sc_drag), scene_myc(sc_drag), known)
                         Menu.set_slots(Menu.set_status(menu3, save_slot, if saved do Menu.status_saved() else Menu.status_failed() end, frame), Save.list(Save.dir(), -1))
                       else menu3 end
           -- A slot is validated while this world still runs, so a bad slot never leaves you without one.
@@ -2224,8 +2352,8 @@ mod CubeForge do
           let scripted_place = autoedit >= 0 && frame == autoedit + 120
           let place_water = (autoedit >= 0 && frame == autoedit + 180) || (autoflow >= 0 && frame == autoflow)
           -- No breaking or placing while the inventory is open: those clicks are drags.
-          let sc0 = if ui_open do sc_drag
-                    else interact(sc_drag, player1, In.button(In.button_left()) || scripted_hold, In.button_pressed(In.button_right()) || scripted_place || place_water,
+          let sc0 = if ui_open do sc_eat
+                    else interact(sc_eat, player1, In.button(In.button_left()) || scripted_hold, In.button_pressed(In.button_right()) || scripted_place || place_water,
                                   if place_water do Chunk.id_of_level(7) else -1 end, if scripted_place do 1 else if scripted_sel > 0 do scripted_sel else selected_key() end end, dt, seed, now, frozen) end
           -- CF_AUTOFLOW: break the source again 600 frames after placing it
           let sc0b = if autoflow >= 0 && frame == autoflow + 600 do break_sources_near(sc0, player1) else sc0 end
@@ -2246,11 +2374,14 @@ mod CubeForge do
           -- the column three east through the same path a hotbar spore takes.
           let sc0d3 = if autospore >= 0 && frame == autospore do give_spores(sc0d_pre, player1) else sc0d_pre end
           let sc0d4 = if autospore >= 0 && frame == autospore + 30 do use_spore(sc0d3, player1) else sc0d3 end
-          -- CF_AUTOEAT=<frame>: a Frostcap cap into the inventory, eaten thirty
-          -- frames later through the same function a hotbar bite takes.
-          let autoeat = Env.get_int("CF_AUTOEAT", -1)
-          let sc0d5 = if autoeat >= 0 && frame == autoeat do set_inv(sc0d4, Inv.give(ui_inv(scene_ui(sc0d4)), Chunk.fruit_cap(1), 1)) else sc0d4 end
-          let sc0d = if autoeat >= 0 && frame == autoeat + 30 do eat(sc0d5, 1, Inv.take_one(ui_inv(scene_ui(sc0d5)), Chunk.fruit_cap(1)), now) else sc0d5 end
+          -- CF_AUTOEAT=<frame>: a Frostcap cap into the inventory. The bite
+          -- itself is thirty frames later, through the eat gesture above.
+          -- CF_AUTOEAT_SLOT puts the cap in that slot instead of the first free
+          -- one, so the backpack path can be scripted.
+          let sc0d = if autoeat >= 0 && frame == autoeat do
+                       let inv0 = ui_inv(scene_ui(sc0d4))
+                       set_inv(sc0d4, if autoeat_slot >= 0 do Inv.set_slot(inv0, autoeat_slot, Chunk.fruit_cap(1), 1) else Inv.give(inv0, Chunk.fruit_cap(1), 1) end)
+                     else sc0d4 end
           -- The world tick, spread over three frames of the period rather than
           -- landing in one. The phases were already sequential and each is a
           -- whole step on its own; running them in the same frame only ever
@@ -2515,9 +2646,9 @@ mod CubeForge do
           if map_mode1 do
             Win.gfx_upload(Marker.slot(), F32Buf.storage(marker1), F32Buf.len(marker1))
             CubeForge.Ffi.Window.gfx_draw_marker(Marker.slot(), Marker.vertex_count())
-            if biome_map do
+            if biome_map || survey1 do
               let bn = World.side(scene_world(sc1)) * 16
-              if frame % tick_period() == 0 do Win.biome_map_upload(Biome.field_biomes(scene_biome(sc1)), bn) else () end
+              if frame % tick_period() == 0 do Win.biome_map_upload(Biome.field_biomes(scene_biome(sc1)), Biome.active(scene_biome(sc1)), bn) else () end
               CubeForge.Ffi.Window.gfx_draw_marker(biome_map_slot(), bn * bn * 6)
             else () end
             if myc_map do
@@ -2554,10 +2685,40 @@ mod CubeForge do
           let readout = if fx_line == "" do ground else if ground == "" do fx_line else ground ++ "   " ++ fx_line end end
           -- the species under the crosshair: a fruit block's own, a mycelium block's column
           let tint = if Ray.is_hit(hit_now) && !map_mode1 do target_species(scene_world(sc1), Ray.bx(hit_now), Ray.by_(hit_now), Ray.bz(hit_now)) else 0 end
-          let sc2 = scene_with_ui(sc1, refresh_hud(scene_ui(sc1), inv_open2, drag2, ndc_x, ndc_y, readout, fx_line, tint, gkey, ground))
+          -- X scans the specimen under the reticle -- not E, which main bound to
+          -- eating while this was being built. target_species resolves a
+          -- fruit block to its own species and a mycelium block to the species
+          -- its column shows, which is the "either one" the design settled on:
+          -- fruit is what a player notices, mycelium is the species' presence.
+          -- Scanning is idempotent -- the bit is already set the second time.
+          -- CF_AUTOSCAN scans the column three east of the player, the same
+          -- aim-independent spot CF_AUTOPLANT plants at, because a scripted run
+          -- looks wherever the spawn happens to face -- usually the sky.
+          let auto_scan_now = if autoscan >= 0 do frame == autoscan else false end
+          -- The knob reads the mycelium FIELD, not the shown surface a player
+          -- scans. A planted patch lives in the field at once but only becomes a
+          -- mycelium block when the migration's cursor and budget reach it,
+          -- which is hundreds of frames of waiting a scripted run should not
+          -- have to do. The player's path below is the shown surface, unchanged.
+          let auto_sp = if auto_scan_now do
+              let ppos = Player.position(player1)
+              Myc.species_of(scene_myc(sc1), World.side(scene_world(sc1)) * 16,
+                             float_to_int(Math.floor(V.x(ppos))) + 3, float_to_int(Math.floor(V.z(ppos))))
+            else 0 end
+          let scan_sp = if auto_scan_now do auto_sp else (if In.key_pressed(In.key_x()) do tint else 0 end) end
+          let known1 = if scan_sp > 0 do int_or(known, pow2(scan_sp - 1)) else known end
+          if known1 != known do println("scanned " ++ Species.name(scan_sp)) else () end
+          -- Survey: the column under the reticle, or the one the player stands
+          -- on when nothing is targeted, so the panel always has a subject.
+          let sx = if Ray.is_hit(hit_now) do Ray.bx(hit_now) else float_to_int(V.x(Player.position(player1))) end
+          let sz = if Ray.is_hit(hit_now) do Ray.bz(hit_now) else float_to_int(V.z(Player.position(player1))) end
+          let slines = if survey1 && !map_mode1 do survey_lines(sc1, sx, sz, int_to_float(myc_feedback) /. 100.0, known1, tint) else Nil end
+          let panel_on = if survey1 do !map_mode1 else false end
+          let hud_text = if panel_on do join_lines(slines, "") else readout end
+          let sc2 = scene_with_ui(sc1, refresh_hud(scene_ui(sc1), inv_open2, drag2, ndc_x, ndc_y, hud_text, slines, panel_on, fx_line, tint, gkey, ground))
           Win.gfx_draw_hud(hotbar_slot(), hud_verts(scene_ui(sc2)), false)
           Win.gfx_draw_hud(icon_slot(), icon_verts(scene_ui(sc2)), true)
-          if readout != "" do Win.gfx_draw_hud(readout_slot(), readout_verts(scene_ui(sc2)), false) else () end
+          if hud_text != "" do Win.gfx_draw_hud(readout_slot(), readout_verts(scene_ui(sc2)), false) else () end
           -- Untextured, like the hotbar: build_menu emits colour-in-uv vertices.
           if Menu.is_open(menu2) do Win.gfx_draw_hud(menu_slot(), F32Buf.len(menubuf1) / Vx.floats(), false) else () end
           let sc1 = if remesh_all_at >= 0 && frame == remesh_all_at do remesh_everything(sc1) else sc1 end
@@ -2604,6 +2765,7 @@ mod CubeForge do
             -- "the mesh always equals a full rebuild" but "what the queue
             -- finishes equals a full rebuild", so the oracle settles it first.
             let scq = drain(sc1, 4096, false)
+            println("  survey: " ++ join_lines(survey_lines(sc1, sx, sz, int_to_float(myc_feedback) /. 100.0, known1, tint), ""))
             println("  state: biome " ++ int_to_string(Biome.state_hash(scene_biome(scq), World.side(scene_world(scq)) * 16)) ++ " myc " ++ int_to_string(Myc.state_hash(scene_myc(scq), World.side(scene_world(scq)) * 16))
                     ++ " world " ++ int_to_string(World.state_hash(scene_world(scq)))
                     ++ " mesh " ++ int_to_string(mesh_hash(scene_meshes(scq), World.side(scene_world(scq)))))
@@ -2617,7 +2779,7 @@ mod CubeForge do
           if frame == 200 do
             println("live-object delta over frames 100..200: " ++ int_to_string(Win.live_allocs() - sample1) ++ " (" ++ int_to_string((Win.live_allocs() - sample1) / 100) ++ " per frame); resident " ++ int_to_string(Win.rss_bytes() / 1048576) ++ " MB")
           else () end
-          frame_loop(Frame(frame + 1, now, player1, sample1, view1, vp1, map_mode1, marker1, flash1, wnow, bnow, inv_open2, drag2, menu5, menubuf1, next_seed1, worst1, worst_at1, sched1, staged1), k, sc2, nchunks, proj, map_proj, fps1, wxpid, seed, first, t0, day0)
+          frame_loop(Frame(frame + 1, now, player1, sample1, view1, vp1, map_mode1, marker1, flash1, wnow, bnow, inv_open2, drag2, menu5, menubuf1, next_seed1, worst1, worst_at1, sched1, survey1, known1, staged1), k, sc2, nchunks, proj, map_proj, fps1, wxpid, seed, first, t0, day0)
         end
         end
     end
@@ -2742,6 +2904,20 @@ mod CubeForge do
   end
 
   -- Full-screen quad in NDC for the underwater tint: layer 1 (water), shade 0.6. Built once.
+  -- The six species colours as 18 floats, 0..1, for the shader's filament
+  -- overlay. One source of truth: Species.colour_* is what the map overlay and
+  -- the texture tiles use too.
+  pfn species_rgb_go(a : NativeF32Arr, sp : Int) : NativeF32Arr do
+    if sp > 6 do a
+    else
+      let i = 3 * (sp - 1)
+      let a1 = NativeArray.set_f32(a, i, int_to_float(Species.colour_r(sp)) /. 255.0)
+      let a2 = NativeArray.set_f32(a1, i + 1, int_to_float(Species.colour_g(sp)) /. 255.0)
+      species_rgb_go(NativeArray.set_f32(a2, i + 2, int_to_float(Species.colour_b(sp)) /. 255.0), sp + 1)
+    end
+  end
+  pfn species_rgb() : NativeF32Arr do species_rgb_go(NativeArray.make_f32(18, 0.0), 1) end
+
   pfn underwater_quad() : CubeForge.F32Buf.F32Buf do
     let v = fn (b, x, y, u, t) -> b |> F32Buf.push3(x, y, 0.0) |> F32Buf.push(u) |> F32Buf.push(t) |> F32Buf.push(Texture.water_layer()) |> F32Buf.push(0.6) |> F32Buf.push(0.0) |> F32Buf.push(Vx.plain())
     F32Buf.new(64) |> v(-1.0, -1.0, 0.0, 0.0) |> v(1.0, -1.0, 4.0, 0.0) |> v(1.0, 1.0, 4.0, 3.0)
@@ -3006,7 +3182,13 @@ mod CubeForge do
       -- Session-invariant GL state: uploaded once and reused by every session.
       if !headless do
         Win.spray_init(Env.get_int("CF_SPRAY", 512))
-        Win.gfx_upload_texture(Texture.checkerboard(), Texture.size(), Texture.size(), Texture.layers())
+        Win.gfx_upload_texture(Texture.checkerboard_tinted(Env.get_int("CF_MYC_TINT", Texture.myc_tint())), Texture.size(), Texture.size(), Texture.layers())
+        -- The filament overlay: which layers are mycelium, the six species
+        -- colours, and how strongly the shader draws threads in them.
+        Win.gfx_set_myc(float_to_int(Texture.myc_layer(0, 1)), Texture.myc_layer_count(), species_rgb(),
+                        int_to_float(Env.get_int("CF_MYC_BRANCH", Species.branch_strength())) /. 100.0,
+                        int_to_float(Env.get_int("CF_MYC_BRANCH_SCALE", Species.branch_scale())) /. 100.0,
+                        int_to_float(Env.get_int("CF_MYC_BRANCH_SHARP", Species.branch_sharp())) /. 100.0)
         let uq = underwater_quad()
         Win.gfx_upload(underwater_slot(), F32Buf.storage(uq), F32Buf.len(uq))
       else () end
@@ -3032,7 +3214,7 @@ mod CubeForge do
         else () end
       else () end
       let knobs = Knobs(max_frames, Env.get_int("CF_DUMP_FRAME", 30), Env.get("CF_DUMP", ""), Env.get_int("CF_AUTOWALK", 0) == 1,
-                        int_to_float(Env.get_int("CF_AUTOSPIN", 0)) /. 1000.0 /. Player.mouse_sens(), Env.get_int("CF_AUTOEDIT", -1), autoswim, Env.get_int("CF_AUTOFLOW", -1), workers, Env.get_int("CF_AUTOMAP", -1), int_to_float(Env.get_int("CF_DAY", 1800)), Env.get_int("CF_SUN", -1), Env.get_int("CF_AUTOINV", -1), Env.get_int("CF_AUTOBREAK", -1), Env.get_int("CF_WEATHER", -1), Env.get_int("CF_PRECIP", -1), Env.get_int("CF_BIOME_RATE", 100), Env.get_int("CF_BIOME_MAP", 0) == 1, Env.get_int("CF_AUTOCANAL", -1), Env.get_int("CF_BIOME_BUDGET", 32), Env.get_int("CF_VEG_BUDGET", 1), Env.get_int("CF_TIME", -1), Env.get_int("CF_REMESH_ALL_AT", -1), Env.get_int("CF_AUTOMENU", -1), audio_mode, Env.get_int("CF_AUDIO_LOG", 0) == 1, Env.get_int("CF_AUTODIVE", 0) == 1, Env.get_int("CF_AUTOGLOW", -1), Env.get_int("CF_MYC_RATE", 100), Env.get_int("CF_MYC_MAP", 0) == 1, Env.get_int("CF_AUTOPLANT", -1), Env.get_int("CF_MYC_BUDGET", 64), Env.get_int("CF_AUTOPLANT_SPECIES", 0), Env.get_int("CF_AUTOSPORE", -1), Env.get_int("CF_FRUIT_BUDGET", 1), Env.get_int("CF_FRUIT_RATE", 100), Env.get_int("CF_AUTOSTART", 0) == 1, Env.get_int("CF_AUTOSAVE", -1), Env.get_int("CF_AUTOSAVE_SLOT", 1), Env.get_int("CF_AUTOLOAD", -1), Env.get_int("CF_AUTOLOAD_SLOT", 1), Env.get_int("CF_AUTOSLOTS", -1), Env.get_int("CF_MYC_FEEDBACK", 100), Env.get_int("CF_AUTOSETTINGS", -1), settings_disk, settings_mask, Env.get_int("CF_AUTOPAGE", Menu.page_graphics()))
+                        int_to_float(Env.get_int("CF_AUTOSPIN", 0)) /. 1000.0 /. Player.mouse_sens(), Env.get_int("CF_AUTOEDIT", -1), autoswim, Env.get_int("CF_AUTOFLOW", -1), workers, Env.get_int("CF_AUTOMAP", -1), int_to_float(Env.get_int("CF_DAY", 1800)), Env.get_int("CF_SUN", -1), Env.get_int("CF_AUTOINV", -1), Env.get_int("CF_AUTOBREAK", -1), Env.get_int("CF_WEATHER", -1), Env.get_int("CF_PRECIP", -1), Env.get_int("CF_BIOME_RATE", 100), Env.get_int("CF_BIOME_MAP", 0) == 1, Env.get_int("CF_AUTOCANAL", -1), Env.get_int("CF_BIOME_BUDGET", 32), Env.get_int("CF_VEG_BUDGET", 1), Env.get_int("CF_TIME", -1), Env.get_int("CF_REMESH_ALL_AT", -1), Env.get_int("CF_AUTOMENU", -1), audio_mode, Env.get_int("CF_AUDIO_LOG", 0) == 1, Env.get_int("CF_AUTODIVE", 0) == 1, Env.get_int("CF_AUTOGLOW", -1), Env.get_int("CF_MYC_RATE", 100), Env.get_int("CF_MYC_MAP", 0) == 1, Env.get_int("CF_AUTOPLANT", -1), Env.get_int("CF_MYC_BUDGET", 64), Env.get_int("CF_AUTOPLANT_SPECIES", 0), Env.get_int("CF_AUTOSPORE", -1), Env.get_int("CF_FRUIT_BUDGET", 1), Env.get_int("CF_FRUIT_RATE", 100), Env.get_int("CF_AUTOSTART", 0) == 1, Env.get_int("CF_AUTOSAVE", -1), Env.get_int("CF_AUTOSAVE_SLOT", 1), Env.get_int("CF_AUTOLOAD", -1), Env.get_int("CF_AUTOLOAD_SLOT", 1), Env.get_int("CF_AUTOSLOTS", -1), Env.get_int("CF_MYC_FEEDBACK", 100), Env.get_int("CF_AUTOSETTINGS", -1), settings_disk, settings_mask, Env.get_int("CF_AUTOPAGE", Menu.page_graphics()), Env.get_int("CF_AUTOSURVEY", -1), Env.get_int("CF_AUTOSCAN", -1))
       let pids = Array.from_list(spawn_water(n * n - 1, n, Nil))
       let wxpid = Weather.spawn_weather()
       session_loop(FromSeed(seed), settings0, true, n, workers, headless, seed_env >= 0, knobs, proj, map_proj, pids, wxpid, autoswim)
@@ -3194,6 +3376,14 @@ mod CubeForge do
         Loaded(h, _, _) -> Inv.of_ints(Save.h_inventory(h))
         NoLoad -> Inv.new()
       end
+      -- What the player has scanned, restored from the save. A save written
+      -- before scanning existed has no such line and reads 0: nothing known.
+      -- CF_KNOWN overrides it, so the gated lines can be exercised headlessly
+      -- without walking the world to find six species.
+      let known0 = match loaded do
+        Loaded(h, _, _) -> Save.h_known(h)
+        NoLoad -> Env.get_int("CF_KNOWN", 0)
+      end
       if Env.get_int("CF_ALLOC_PROBE", 0) == 1 do alloc_probe(world, proj) else () end
       let t4 = Win.time()
       -- The actor pool outlives a session: a new game reseeds the existing chunk
@@ -3229,8 +3419,8 @@ mod CubeForge do
         NoLoad -> t4
       end
       let menu0 = if first && Env.get_int("CF_AUTOSTART", 0) == 0 do Menu.new_start(seed, settings0) else Menu.new(seed, settings0) end
-      match frame_loop(Frame(0, t4, player, 0, NativeArray.make_float(16, 0.0), NativeArray.make_f32(16, 0.0), false, F32Buf.new(64), Env.get_int("CF_FLASH", 0) == 1, 0.0, 0.0, false, -1, menu0, F32Buf.new(2048), NoStart, 0.0, -1, Audio.sched_start(0), NoShift), k, scene, n * n, proj, map_proj, fps0, wxpid, seed, first, t4, day0) do
-        Frame(frames, _, p, _, _, _, _, _, _, _, _, _, _, mfin, _, ns, worst, worst_at, _, _) ->
+      match frame_loop(Frame(0, t4, player, 0, NativeArray.make_float(16, 0.0), NativeArray.make_f32(16, 0.0), false, F32Buf.new(64), Env.get_int("CF_FLASH", 0) == 1, 0.0, 0.0, false, -1, menu0, F32Buf.new(2048), NoStart, 0.0, -1, Audio.sched_start(0), false, known0, NoShift), k, scene, n * n, proj, map_proj, fps0, wxpid, seed, first, t4, day0) do
+        Frame(frames, _, p, _, _, _, _, _, _, _, _, _, _, mfin, _, ns, worst, worst_at, _, _, _, _) ->
           let t5 = Win.time()
           println("ran " ++ int_to_string(frames) ++ " frames in " ++ ms(t5 -. t4) ++ " (" ++ float_to_string(int_to_float(frames) /. (t5 -. t4)) ++ " fps, vsync on); player ended at " ++ V.to_string(Player.position(p)))
           println("worst frame after warmup: " ++ ms(worst) ++ " at frame " ++ int_to_string(worst_at))

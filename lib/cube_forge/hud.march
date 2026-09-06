@@ -69,7 +69,7 @@ mod CubeForge.Hud do
   end
 
   pfn vert(b : CubeForge.F32Buf.F32Buf, x : Float, y : Float, shade : Float) : CubeForge.F32Buf.F32Buf do
-    b |> B.push3(x, y, 0.0) |> B.push(1.0) |> B.push(1.0) |> B.push(1.0) |> B.push(shade) |> B.push(0.0) |> B.push(Vx.plain())
+    b |> B.push3(x, y, 0.0) |> B.push(1.0) |> B.push(1.0) |> B.push(1.0) |> B.push(shade) |> B.push(0.0) |> B.push(Vx.plain()) |> B.push(0.0)
   end
 
   pfn rect(b : CubeForge.F32Buf.F32Buf, x0 : Float, y0 : Float, x1 : Float, y1 : Float, shade : Float) : CubeForge.F32Buf.F32Buf do
@@ -130,15 +130,46 @@ mod CubeForge.Hud do
     emit_text(B.clear(b), String.to_uppercase(t), -0.97, 0.90, menu_px(), menu_py())
   end
 
+  doc """
+  The survey panel: up to five lines down the left, under the ground readout.
+
+  Drawn at settings_px() rather than menu_px(): five lines of a 3x5 glyph font
+  at menu size crowd the left third of the screen, which was the one thing the
+  design left open until it could be seen against a real frame.
+
+  The lines are built by the caller and passed already uppercased -- the glyph
+  set is letters and digits, and punctuation renders blank.
+  """
+  fn survey_px() : Float do settings_px() end
+  fn survey_py() : Float do 0.009 end
+  -- Must exceed the glyph height, which is five rows of survey_py(): at 0.030
+  -- against a 0.045-tall glyph the lines drew through each other. Measured
+  -- against a real frame rather than guessed, which is what the design left open.
+  fn survey_line_gap() : Float do 0.060 end
+  fn survey_top() : Float do 0.80 end
+
+  pfn survey_go(b : CubeForge.F32Buf.F32Buf, ls : List(String), i : Int) : CubeForge.F32Buf.F32Buf do
+    match ls do
+      Nil -> b
+      Cons(t, rest) ->
+        survey_go(emit_text(b, String.to_uppercase(t), 0.0 -. 0.97, survey_top() -. int_to_float(i) *. survey_line_gap(), survey_px(), survey_py()), rest, i + 1)
+    end
+  end
+
+  doc "Build the survey panel from its lines, topmost first."
+  fn build_survey(b : CubeForge.F32Buf.F32Buf, ls : List(String)) : CubeForge.F32Buf.F32Buf do
+    survey_go(B.clear(b), ls, 0)
+  end
+
   -- ── Hotbar ────────────────────────────────────────────────────────────────
   -- Untextured-path colour: (u, v, layer) * shade is the RGB.
   pfn cvert(b : CubeForge.F32Buf.F32Buf, x : Float, y : Float, r : Float, g : Float, bl : Float) : CubeForge.F32Buf.F32Buf do
-    b |> B.push3(x, y, 0.0) |> B.push(r) |> B.push(g) |> B.push(bl) |> B.push(1.0) |> B.push(0.0) |> B.push(Vx.plain())
+    b |> B.push3(x, y, 0.0) |> B.push(r) |> B.push(g) |> B.push(bl) |> B.push(1.0) |> B.push(0.0) |> B.push(Vx.plain()) |> B.push(0.0)
   end
   -- Same, with an alpha: the HUD is drawn with SRC_ALPHA blending, so this is
   -- what lets the inventory dim the world instead of erasing it.
   pfn avert(b : CubeForge.F32Buf.F32Buf, x : Float, y : Float, r : Float, g : Float, bl : Float, a : Float) : CubeForge.F32Buf.F32Buf do
-    b |> B.push3(x, y, 0.0) |> B.push(r) |> B.push(g) |> B.push(bl) |> B.push(1.0) |> B.push(0.0) |> B.push(Vx.pack(Vx.fx_none(), a))
+    b |> B.push3(x, y, 0.0) |> B.push(r) |> B.push(g) |> B.push(bl) |> B.push(1.0) |> B.push(0.0) |> B.push(Vx.pack(Vx.fx_none(), a)) |> B.push(0.0)
   end
   pfn arect(b : CubeForge.F32Buf.F32Buf, x0 : Float, y0 : Float, x1 : Float, y1 : Float, r : Float, g : Float, bl : Float, a : Float) : CubeForge.F32Buf.F32Buf do
     b |> avert(x0, y0, r, g, bl, a) |> avert(x1, y0, r, g, bl, a) |> avert(x1, y1, r, g, bl, a)
@@ -150,7 +181,7 @@ mod CubeForge.Hud do
   end
   -- textured quad sampling texture layer [layer], uv 0..1
   pfn tvert(b : CubeForge.F32Buf.F32Buf, x : Float, y : Float, u : Float, v : Float, layer : Float) : CubeForge.F32Buf.F32Buf do
-    b |> B.push3(x, y, 0.0) |> B.push(u) |> B.push(v) |> B.push(layer) |> B.push(1.0) |> B.push(0.0) |> B.push(Vx.plain())
+    b |> B.push3(x, y, 0.0) |> B.push(u) |> B.push(v) |> B.push(layer) |> B.push(1.0) |> B.push(0.0) |> B.push(Vx.plain()) |> B.push(0.0)
   end
   pfn trect(b : CubeForge.F32Buf.F32Buf, x0 : Float, y0 : Float, x1 : Float, y1 : Float, layer : Float) : CubeForge.F32Buf.F32Buf do
     b |> tvert(x0, y0, 0.0, 0.0, layer) |> tvert(x1, y0, 1.0, 0.0, layer) |> tvert(x1, y1, 1.0, 1.0, layer)

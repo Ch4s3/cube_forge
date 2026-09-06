@@ -50,6 +50,18 @@ mod CubeForge.Species do
     if t == 0 do 1 else if t == 1 do 3 else 8 end end
   end
 
+  doc """
+  How strongly the shader draws mycelium filaments over a surface, in percent.
+  The tile carries a wash of the species colour (CubeForge.Texture.myc_tint);
+  this is the branching thread drawn on top, in world space so it crosses block
+  boundaries. CF_MYC_BRANCH overrides it.
+  """
+  fn branch_strength() : Int do 60 end
+  doc "Filament frequency, in percent of one thread cell per block: higher is finer. CF_MYC_BRANCH_SCALE."
+  fn branch_scale() : Int do 500 end
+  doc "Where a ridge starts counting as a thread, in percent: higher is thinner. CF_MYC_BRANCH_SHARP."
+  fn branch_sharp() : Int do 93 end
+
   -- Colour, for the map overlay and the phase 3 textures.
   fn colour_r(id : Int) : Int do
     if id == 1 do 200 else if id == 2 do 120 else if id == 3 do 230 else if id == 4 do 255 else if id == 5 do 80 else if id == 6 do 240 else 0 end end end end end end
