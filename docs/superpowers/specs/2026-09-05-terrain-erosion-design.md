@@ -83,3 +83,43 @@ Setting it: `CF_AGE=<0..100>` on the command line sets or overrides the age
 printed seed reproduces alone; an unset seed gets a random age). In the menu,
 `-` and `=` move the age by 5 and `R` rerolls the seed and the age together;
 the digits the player types are the base seed. Slot rows show `SEED n AGE a`.
+
+## World size
+
+*Superseded 2026-09-05 by chunk streaming* (`2026-09-05-chunk-streaming-design.md`):
+the world is unbounded and the 8x8 window slides with the player, so the
+size row and `CF_SIZE` were removed. The size byte in the seed is ignored
+and every seed reproduces. The account below is kept as built.
+
+
+*Built 2026-09-05.* A world is a seed, an age and a size. The side in chunks
+(4, 6 or 8: 64, 96 or 128 blocks) rides in the seed's byte above the age
+(`Noise.with_size`, `size_of`; 2^40), so it reaches saves, the startup
+print and every generator the way the age does; a plain seed reads as the
+full size, so every seed printed before this reproduces.
+
+**Smaller, not larger.** 128 is the most the fixed-width fields are written
+for -- the light and occupancy arrays and their refinement-typed index
+bounds, the shader's `WORLD` constant, the shim's skylight lookup and coarse
+occupancy -- and a smaller world uses their top-left corner. The per-column
+fields (biome, mycelium, shown species) are allocated and indexed at the
+world's own width; the biome accessors and the mesher read that width from
+the array's length (`Biome.side_of`) rather than the literal, and the
+world's shown array is sized by its side. `World.size()` is now the maximum;
+`World.side(w)` is the world's own. A world above 128 blocks is the literal
+refactor `world_size_test` describes, in March and in C, and is not built.
+
+**Asking.** NEW GAME opens the new-world page: a WORLD SIZE row and a WORLD
+AGE row with an arrow button at either end (the age runs RANDOM, 0, 5 ..
+100; RANDOM draws from the clock at START), the seed field (digits, R
+rerolls), START and BACK. The seed field left the main page. On the command
+line `CF_SIZE=<4..8>` sets the side. A save slot loads at the side it was
+saved with (the seed says), whatever the session started at: a 64-block
+slot loaded from a 128-block session comes back with the same world hash,
+and the slot rows show `SEED n AGE a SIZE b`.
+
+**Measured.** Seed 1234 at age 50: 64 blocks builds its biome field in 19
+ms, 96 in 71, 128 in 168; all three run at 106-113 fps windowed with a
+14 ms worst frame. One guard was found by it: the block-light emitter box
+was clamped to the fixed width, not the world's, and looked up a chunk past
+a 96-block world's last one.

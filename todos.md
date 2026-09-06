@@ -32,6 +32,7 @@ measurements.
 - [x] **Lakes above sea level** — done 2026-09-05 (`docs/superpowers/specs/2026-09-05-upland-lakes-design.md`) — priority-flood pour of every closed basin to its rim; only the outlet is a spring, so a lake overflows as a brook.
 - [x] **Climate-shaped ground** — done 2026-09-05 (`docs/superpowers/specs/2026-09-05-climate-shaped-ground-design.md`) — dunes where hot and dry, glacier tongues in cold valleys above the snow line with moraines and U-troughs, bog pools on wet flats; temperature moves into `Noise`.
 - [x] **Caves and karst** — done 2026-09-05 (`docs/superpowers/specs/2026-09-05-caves-and-karst-design.md`) — worms carved per 32-block cell above the water table, joined into networks and pitted with sinkholes as the world ages; age 0 has none.
+- [x] **World size in the seed; the new-world page** — done 2026-09-05 (terrain-erosion spec, "World size"): 64/96/128-block worlds, the side packed above the age in the seed, NEW GAME asks size and age (RANDOM or set) before START, `CF_SIZE`, slots load at their own side. Above 128 is the literal refactor `world_size_test` names.
 - [x] **Lake outlets on ancient worlds** — resolved 2026-09-05: the creeping flow was cave worms breaching lake basins, not sheets on terraces; worms now keep out of basin walls (`Caves.basin_wall`, `CF_KARST`), and since a full lake turned out to have no outlet at all, the pour point is dug one block down as a notch, one per basin of six or more columns. Flow plateaus at ~400 cells at both ages. See the lakes spec §3 and §6.
 
 ## Engine
@@ -74,7 +75,7 @@ measurements.
 - [ ] **Weather that changes the world** — snow settling as blocks, rain feeding the `WaterChunk` actors, wet-surface darkening, splashes where particles die. **Blocked on real biomes**, not on effort: `2026-09-03-terrain-biomes-design.md` shipped altitude banding (`sea_level` 62, `snow_line` 95, granite by slope), not biome regions, so nothing can answer "what kind of place is this?" to key an accumulation or drying rate off. Needs a region map (temperature/humidity fbm per column) first — its own design. Also lands on the chunk remesh path, the dirty flags and the water protocol at once, and rain-as-a-source needs a rule or ponds grow without bound under finite-level flow.
 
 - [ ] **Texture atlas via stb_image** — real block textures; needs `Bytes` across FFI fixed first (GAPS.md G8).
-- [ ] **Chunk streaming with actors** — infinite world, chunk lifecycle as actor state, supervision under load.
+- [x] **Chunk streaming** — done 2026-09-05, design at `docs/superpowers/specs/2026-09-05-chunk-streaming-design.md`: a fixed 8x8 window slides over an unbounded world; every 128 becomes the window, generation is already per column, lakes pour per tile, evicted dirty chunks are cached and saved by world coordinates. A shift is ~84 ms (see the spec §7 for the breakdown and the open items: cache growth, the biome shift, the sky sweep's box).
 - [ ] **Save/load through the CAS** — persistence keyed by BLAKE3 chunk hashes.
 
 ## Compiler patches (from GAPS.md "Compiler patches")

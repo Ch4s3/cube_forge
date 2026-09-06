@@ -350,30 +350,6 @@ mod CubeForge.Mesher do
 
   -- ── Sections: 16x16x16 slabs, sy = y / 16 ──────────────────────────────────
 
-  -- A quad whose uv runs to (uw, vh) so the repeating texture tiles per block.
-  -- Each corner carries its own shade, and the triangulation flips when the
-  -- default c0-c2 diagonal is the darker pair (see should_flip).
-  pfn quad_sized(b : CubeForge.F32Buf.F32Buf,
-                 x0 : Float, y0 : Float, z0 : Float, x1 : Float, y1 : Float, z1 : Float,
-                 x2 : Float, y2 : Float, z2 : Float, x3 : Float, y3 : Float, z3 : Float,
-                 uw : Float, vh : Float, layer : Float,
-                 s0 : Float, s1 : Float, s2 : Float, s3 : Float, face : Float) : CubeForge.F32Buf.F32Buf do
-    if should_flip(s0, s1, s2, s3) do
-      b |> vert(x1, y1, z1, uw, 0.0, layer, s1, face)
-        |> vert(x2, y2, z2, uw, vh, layer, s2, face)
-        |> vert(x3, y3, z3, 0.0, vh, layer, s3, face)
-        |> vert(x1, y1, z1, uw, 0.0, layer, s1, face)
-        |> vert(x3, y3, z3, 0.0, vh, layer, s3, face)
-        |> vert(x0, y0, z0, 0.0, 0.0, layer, s0, face)
-    else
-      b |> vert(x0, y0, z0, 0.0, 0.0, layer, s0, face)
-        |> vert(x1, y1, z1, uw, 0.0, layer, s1, face)
-        |> vert(x2, y2, z2, uw, vh, layer, s2, face)
-        |> vert(x0, y0, z0, 0.0, 0.0, layer, s0, face)
-        |> vert(x2, y2, z2, uw, vh, layer, s2, face)
-        |> vert(x3, y3, z3, 0.0, vh, layer, s3, face)
-    end
-  end
 
   -- The face key for direction d of the block [id] at (x, y, z): 0 when there
   -- is no visible face, else the block id plus the four corner light/AO values
@@ -399,7 +375,7 @@ mod CubeForge.Mesher do
       let k2 = corner_pack(la, lb, sps, occ, oxi, ozi, nx, ny, nz, ux, uz, vy, vz)
       let k3 = corner_pack(la, lb, sps, occ, oxi, ozi, nx, ny, nz, 0 - ux, 0 - uz, vy, vz)
       -- mycelium takes its texture from the column's shown species
-      let sp = if C.is_myc(id) do NativeArray.get_u8(sps, oxi + x + 128 * (ozi + z)) else 0 end
+      let sp = if C.is_myc(id) do NativeArray.get_u8(sps, oxi + x + CubeForge.Biome.side_of(sps) * (ozi + z)) else 0 end
       key_of(id, k0, k1, k2, k3, sp)
     end
   end
@@ -470,15 +446,6 @@ mod CubeForge.Mesher do
     end
   end
 
-  -- Emit one merged rectangle for direction d, slice a, mask cell (u, v), size
-  -- wd x h: written by the shim (cf_mesh_quad) from this integer description,
-  -- the key, and the layer table. The March version -- quad_sized and its six
-  -- vert calls, the four pack_shades, layer_for_key -- built some sixty boxed
-  -- Floats per rectangle, and the allocator was 60% of a section's mesh time.
-  pfn emit_rect(b : CubeForge.F32Buf.F32Buf, d : Int, sy : Int, a : Int, u : Int, v : Int, wd : Int, h : Int, key : Int,
-                ox : Float, oz : Float, layers : NativeF32Arr) : CubeForge.F32Buf.F32Buf do
-    B.push_quad(b, d, sy, a, u, v, wd, h, key, ox, oz, layers)
-  end
 
   -- Every slice of direction d that holds a face, in slice order.
   -- The masks are read only from here on: the shim merges each slice from its

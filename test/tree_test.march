@@ -11,24 +11,34 @@ mod CubeForge.Test.Tree do
 
   describe "Tree" do
     test "a power-of-two count round-trips by index and by list" do
-      let t = Tr.from_list(ints(63, Nil))
+      let t = Tr.from_list(ints(63, Nil), -1)
       Test.assert_eq_int(Tr.length(t), 64, "length")
       Test.assert_true(all_match(t, 0, 64), "every index reads back")
       Test.assert_eq_int(List.length(Tr.to_list(t)), 64, "to_list length")
     end
     test "set replaces one element and leaves the rest" do
-      let t = Tr.set(Tr.from_list(ints(63, Nil)), 37, 999)
+      let t = Tr.set(Tr.from_list(ints(63, Nil), -1), 37, 999)
       Test.assert_eq_int(Tr.get(t, 37), 999, "the set one")
       Test.assert_eq_int(Tr.get(t, 36), 360, "its neighbour")
       Test.assert_eq_int(Tr.get(t, 63), 630, "the last")
     end
     test "a count that is not a power of two is padded and still indexes correctly" do
-      let t = Tr.from_list(ints(8, Nil))
+      let t = Tr.from_list(ints(8, Nil), -1)
       Test.assert_eq_int(Tr.length(t), 9, "nine")
       Test.assert_true(all_match(t, 0, 9), "all nine")
       Test.assert_eq_int(Tr.get(Tr.set(t, 8, 5), 8), 5, "the last is settable")
-      Test.assert_eq_int(Tr.length(Tr.from_list(Cons(1, Nil))), 1, "one leaf")
-      Test.assert_eq_int(Tr.get(Tr.from_list(Cons(7, Nil)), 0), 7, "and it reads")
+      Test.assert_eq_int(Tr.length(Tr.from_list(Cons(1, Nil), -1)), 1, "one leaf")
+      Test.assert_eq_int(Tr.get(Tr.from_list(Cons(7, Nil), -1), 0), 7, "and it reads")
+    end
+    test "out of range reads the fill and writes nothing; an empty list is all fill" do
+      let t = Tr.from_list(ints(8, Nil), -1)
+      Test.assert_eq_int(Tr.get(t, 9), -1, "past the end")
+      Test.assert_eq_int(Tr.get(t, -3), -1, "before the start")
+      Test.assert_eq_int(Tr.get(Tr.set(t, 9, 5), 8), 80, "a set past the end changes nothing")
+      Test.assert_eq_int(Tr.length(Tr.set(t, 9, 5)), 9, "nor the length")
+      let e = Tr.from_list(Nil, -1)
+      Test.assert_eq_int(Tr.length(e), 0, "empty")
+      Test.assert_eq_int(Tr.get(e, 0), -1, "reads fill")
     end
   end
 

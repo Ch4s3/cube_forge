@@ -749,8 +749,15 @@ mod CubeForge.Light do
     else
       let x = x0 + i % bw
       let z = z0 + i / bw
-      let c = CubeForge.World.chunk_at(w, CubeForge.World.floor_div16(x), CubeForge.World.floor_div16(z))
-      seed_emit_box_go(seed_emit_col_go(lb, c, CubeForge.World.mod16(x), CubeForge.World.mod16(z), x, z, y0, y1), w, x0, bw, z0, y0, y1, i + 1, n)
+      let cx = CubeForge.World.floor_div16(x)
+      let cz = CubeForge.World.floor_div16(z)
+      -- the box is clamped to the fixed width, not the world's: a column past
+      -- the last chunk of a smaller world has no chunk and no emitter
+      if !CubeForge.World.in_bounds(w, cx, cz) do seed_emit_box_go(lb, w, x0, bw, z0, y0, y1, i + 1, n)
+      else
+        let c = CubeForge.World.chunk_at(w, cx, cz)
+        seed_emit_box_go(seed_emit_col_go(lb, c, CubeForge.World.mod16(x), CubeForge.World.mod16(z), x, z, y0, y1), w, x0, bw, z0, y0, y1, i + 1, n)
+      end
     end
   end
 
@@ -879,6 +886,107 @@ mod CubeForge.Light do
     if ci >= n * n do o
     else occ_go(occ_chunk_go(o, CubeForge.World.chunk_at(w, ci % n, ci / n), ci % n, ci / n, 0, stop), w, ci + 1, n, stop)
     end
+  end
+
+  -- ── Shifting the window ────────────────────────────────────────────────
+  -- The window slid by (dx, dz) chunks: local voxel (x, z) is what was at
+  -- (x + 16dx, z + 16dz), and the band that came in is dark until lit below.
+  -- Rows are blits: an x shift copies 112 bytes per (y, z) row, a z shift one
+  -- contiguous run per y layer. dx and dz are -1, 0 or 1, one of them zero.
+  pfn shift_rows_go(src : NativeU8Arr, dst : NativeU8Arr, s : Int, r : Int, rows : Int, stride : Int) : NativeU8Arr do
+    if r >= rows do dst
+    else
+      let len = 128 - (if s < 0 do 0 - s else s end)
+      let xs0 = if s > 0 do s else 0 end
+      let xd0 = if s > 0 do 0 else 0 - s end
+      shift_rows_go(src, CubeForge.Ffi.Window.u8_blit(dst, r * stride + xd0, src, r * stride + xs0, len), s, r + 1, rows, stride)
+    end
+  end
+  -- z shift of the light layout (x + 128 (z + 128 y)): per y, rows z form one run of 128 bytes each
+  pfn shift_z_go(src : NativeU8Arr, dst : NativeU8Arr, s : Int, y : Int) : NativeU8Arr do
+    if y >= 256 do dst
+    else
+      let len = 128 - (if s < 0 do 0 - s else s end)
+      let zs0 = if s > 0 do s else 0 end
+      let zd0 = if s > 0 do 0 else 0 - s end
+      shift_z_go(src, CubeForge.Ffi.Window.u8_blit(dst, 128 * (zd0 + 128 * y), src, 128 * (zs0 + 128 * y), 128 * len), s, y + 1)
+    end
+  end
+  doc "A light field (skylight or block light) moved by [dx], [dz] chunks; the band that came in is dark."
+  fn shift_field(la : NativeU8Arr, dx : Int, dz : Int) : NativeU8Arr do
+    if dx != 0 do shift_rows_go(la, new(), 16 * dx, 0, 32768, 128)
+    else if dz != 0 do shift_z_go(la, new(), 16 * dz, 0)
+    else copy_field(la, new()) end end
+  end
+  -- z shift of the occupancy layout (x + 128 (y + 256 z)): a z slab is one run of 128 * 256 bytes
+  pfn shift_occ_z_go(src : NativeU8Arr, dst : NativeU8Arr, s : Int, z : Int) : NativeU8Arr do
+    let len = 128 - (if s < 0 do 0 - s else s end)
+    let zs0 = if s > 0 do s else 0 end
+    let zd0 = if s > 0 do 0 else 0 - s end
+    if z >= len do dst
+    else shift_occ_z_go(src, CubeForge.Ffi.Window.u8_blit(dst, 32768 * (zd0 + z), src, 32768 * (zs0 + z), 32768), s, z + 1) end
+  end
+  doc "The occupancy field moved by [dx], [dz] chunks; the band that came in is empty."
+  fn shift_occ(o : NativeU8Arr, dx : Int, dz : Int) : NativeU8Arr do
+    if dx != 0 do shift_rows_go(o, new(), 16 * dx, 0, 32768, 128)
+    else if dz != 0 do shift_occ_z_go(o, new(), 16 * dz, 0)
+    else copy_field(o, new()) end end
+  end
+
+  -- The band of new chunks, local chunk coordinates [cx0, cx1] x [cz0, cz1].
+  pfn seed_band_go(la : NativeU8Arr, w : CubeForge.World.World, cx0 : Int, cx1 : Int, cz0 : Int, cz1 : Int, cx : Int, cz : Int) : NativeU8Arr do
+    if cz > cz1 do la
+    else if cx > cx1 do seed_band_go(la, w, cx0, cx1, cz0, cz1, cx0, cz + 1)
+    else seed_band_go(seed_chunk_go(la, CubeForge.World.chunk_at(w, cx, cz), cx, cz, 0), w, cx0, cx1, cz0, cz1, cx + 1, cz) end end
+  end
+  pfn occ_band_go(o : NativeU8Arr, w : CubeForge.World.World, cx0 : Int, cx1 : Int, cz0 : Int, cz1 : Int, cx : Int, cz : Int, stop : Int) : NativeU8Arr do
+    if cz > cz1 do o
+    else if cx > cx1 do occ_band_go(o, w, cx0, cx1, cz0, cz1, cx0, cz + 1, stop)
+    else occ_band_go(occ_chunk_go(o, CubeForge.World.chunk_at(w, cx, cz), cx, cz, 0, stop), w, cx0, cx1, cz0, cz1, cx + 1, cz, stop) end end
+  end
+  -- The highest non-air voxel over the band and the chunks the sweep's
+  -- apron reaches (one chunk either side): above it everything is sky and
+  -- the sweep has nothing to do. The world's sky floor is a mountain
+  -- somewhere; the band's own is usually lower, and the box's height is
+  -- the sweep's cost.
+  pfn band_top_go(w : CubeForge.World.World, cx0 : Int, cx1 : Int, cz0 : Int, cz1 : Int, cx : Int, cz : Int, acc : Int) : Int do
+    if cz > cz1 do acc
+    else if cx > cx1 do band_top_go(w, cx0, cx1, cz0, cz1, cx0, cz + 1, acc)
+    else
+      let t = if CubeForge.World.in_bounds(w, cx, cz) do chunk_top(CubeForge.World.chunk_at(w, cx, cz), 65535) else 0 end
+      band_top_go(w, cx0, cx1, cz0, cz1, cx + 1, cz, if t > acc do t else acc end)
+    end end
+  end
+  fn band_top(w : CubeForge.World.World, cx0 : Int, cx1 : Int, cz0 : Int, cz1 : Int) : Int do
+    clampi(band_top_go(w, cx0 - 1, cx1 + 1, cz0 - 1, cz1 + 1, cx0 - 1, cz0 - 1, 0) + 2, 0, 255)
+  end
+
+  doc """
+  Light the band of chunks [cx0, cx1] x [cz0, cz1] (local chunk coordinates)
+  that a shift brought in: seed their sky columns, then sweep the band widened
+  by relight_radius() so light from the chunks that stayed crosses the seam,
+  up to the band's own top (band_top). [la] must be uniquely owned (a fresh
+  shift_field result).
+  """
+  fn light_band(la : NativeU8Arr, w : CubeForge.World.World, cx0 : Int, cx1 : Int, cz0 : Int, cz1 : Int) : NativeU8Arr do
+    let r = relight_radius()
+    let la1 = seed_band_go(la, w, cx0, cx1, cz0, cz1, cx0, cz0)
+    sweep_box_lists(la1, w, clampi(16 * cx0 - r, 0, 127), clampi(16 * cx1 + 15 + r, 0, 127), 0, band_top(w, cx0, cx1, cz0, cz1),
+                    clampi(16 * cz0 - r, 0, 127), clampi(16 * cz1 + 15 + r, 0, 127))
+  end
+  doc "light_band for the block-light field: re-seed the band's emitters, then sweep."
+  fn light_band_block(lb : NativeU8Arr, w : CubeForge.World.World, cx0 : Int, cx1 : Int, cz0 : Int, cz1 : Int) : NativeU8Arr do
+    let r = relight_radius()
+    let bw = 16 * (cx1 - cx0 + 1)
+    let bd = 16 * (cz1 - cz0 + 1)
+    let top = band_top(w, cx0, cx1, cz0, cz1)
+    let lb1 = seed_emit_box_go(lb, w, 16 * cx0, bw, 16 * cz0, 0, top, 0, bw * bd)
+    sweep_box_lists(lb1, w, clampi(16 * cx0 - r, 0, 127), clampi(16 * cx1 + 15 + r, 0, 127), 0, top,
+                    clampi(16 * cz0 - r, 0, 127), clampi(16 * cz1 + 15 + r, 0, 127))
+  end
+  doc "The occupancy of the band of chunks [cx0, cx1] x [cz0, cz1] written into [o] (a fresh shift_occ result)."
+  fn occ_band(o : NativeU8Arr, w : CubeForge.World.World, cx0 : Int, cx1 : Int, cz0 : Int, cz1 : Int) : NativeU8Arr do
+    occ_band_go(o, w, cx0, cx1, cz0, cz1, cx0, cz0, (sky_floor(w) + 1) * chunk_layer())
   end
 
   doc "Byte stored for an occluding voxel. 255, not 1: the GPU side is a normalized GL_R8 texture, where a stored 1 samples back as 1/255 and would never register as solid."

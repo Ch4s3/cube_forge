@@ -139,7 +139,7 @@ mod CubeForge.Test.Fruit do
       let w0 = flat_world()
       let f = CubeForge.Myc.plant_patch(CubeForge.Myc.build(n), n, 40, 40, 3)
       let bio = CubeForge.Biome.build(w0, 7)
-      let shown = shown_of(f, n, 0, Wf.shown_new())
+      let shown = shown_of(f, n, 0, Wf.shown_new(8))
       let picks = Fr.candidates(f, shown, w0, bio, 7, 0, n * n, 100, 1000.0)
       Test.assert_true(List.length(picks) > 0, "at scale 1000 every eligible cell rolls")
       Test.assert_true(List.length(picks) <= 100, "budget")
@@ -149,10 +149,10 @@ mod CubeForge.Test.Fruit do
       let w1 = Fr.stamp(w0, 3, first % n, 70, first / n, 7)
       Test.assert_false(has_entry(Fr.candidates(f, shown, w1, bio, 7, 0, n * n, 100, 1000.0), first), "occupied")
       -- a body whose ground no longer shows a species is nobody's candidate: the migration fells it
-      let none = Fr.candidates(f, Wf.shown_new(), w1, bio, 7, 0, n * n, 100, 1000.0)
+      let none = Fr.candidates(f, Wf.shown_new(8), w1, bio, 7, 0, n * n, 100, 1000.0)
       Test.assert_eq_int(List.length(none), 0, "nothing shown, nothing grows")
       -- an empty world scans without a single block read: the same answer, and fast
-      Test.assert_eq_int(List.length(Fr.candidates(CubeForge.Myc.build(n), Wf.shown_new(), w0, bio, 7, 0, n * n, 100, 1000.0)), 0, "empty field")
+      Test.assert_eq_int(List.length(Fr.candidates(CubeForge.Myc.build(n), Wf.shown_new(8), w0, bio, 7, 0, n * n, 100, 1000.0)), 0, "empty field")
     end
     test "a grove fruits three times as fast" do
       Test.assert_true(Math.abs(Fr.biome_rate(CubeForge.Biome.b_grove()) -. 3.0) < 0.0001, "grove 3x")
@@ -160,7 +160,7 @@ mod CubeForge.Test.Fruit do
       let n = 128
       let w0 = flat_world()
       let f = CubeForge.Myc.plant_patch(CubeForge.Myc.build(n), n, 40, 40, 3)
-      let shown = shown_of(f, n, 0, Wf.shown_new())
+      let shown = shown_of(f, n, 0, Wf.shown_new(8))
       let bio = CubeForge.Biome.build(w0, 7)
       -- at scale 20 every small cell rolls (0.05 * 20 = 1); at a third of that some do not.
       -- A column that rolls at 20 and not at 20/3, forced grove, rolls at 20/3.

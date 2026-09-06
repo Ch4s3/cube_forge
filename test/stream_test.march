@@ -1,0 +1,149 @@
+-- Chunk streaming: the window slides a chunk and every field slides with it,
+-- the band that came in is generated, lit and filled, and sliding back
+-- regenerates what was dropped.
+mod CubeForge.Test.Stream do
+
+  import Test
+  alias CubeForge.World as W
+  alias CubeForge.Chunk as C
+  alias CubeForge.Light as L
+  alias CubeForge.Noise as N
+
+  pfn seed() : Int do N.with_age(1234, 50) end
+
+  pfn chunk_hash(c : CubeForge.Chunk.Chunk, i : Int, h : Int) : Int do
+    if i >= 65536 do h else chunk_hash(c, i + 1, (h * 131 + C.get_idx(c, i)) % 1073741789) end
+  end
+  -- Sampled voxels of the skylight field agree between w1 at x and w0 at x + 16, away from the band.
+  pfn light_agrees(a : NativeU8Arr, b : NativeU8Arr, i : Int) : Bool do
+    if i >= 500 do true
+    else
+      let x = i * 7 % 96
+      let y = 40 + i * 13 % 120
+      let z = i * 11 % 128
+      if L.get(a, x, y, z) == L.get(b, x + 16, y, z) do light_agrees(a, b, i + 1) else false end
+    end
+  end
+  pfn occ_agrees(a : NativeU8Arr, b : NativeU8Arr, i : Int) : Bool do
+    if i >= 500 do true
+    else
+      let x = i * 7 % 96
+      let y = 40 + i * 13 % 120
+      let z = i * 11 % 128
+      if NativeArray.get_u8(a, L.occ_index(x, y, z)) == NativeArray.get_u8(b, L.occ_index(x + 16, y, z)) do occ_agrees(a, b, i + 1) else false end
+    end
+  end
+  -- Every column of the band that came in has full skylight above its surface.
+  -- -1 when every column is lit; else z * 100000 + y * 100 + the light found there.
+  pfn band_lit(w : CubeForge.World.World, la : NativeU8Arr, x : Int, z : Int) : Int do
+    if z >= 128 do -1
+    else
+      -- two above the ground, or above the sea where the ground is under it
+      let y = Math.max_int(W.surface_y(w, x, z), C.sea_level()) + 2
+      let l = L.get(la, x, y, z)
+      if l == L.max_level() do band_lit(w, la, x, z + 1) else z * 100000 + y * 100 + l end
+    end
+  end
+  -- Every voxel below the band's surface that is solid is occupied, sampled.
+  pfn band_occ(w : CubeForge.World.World, o : NativeU8Arr, i : Int) : Bool do
+    if i >= 200 do true
+    else
+      let x = 112 + i % 16
+      let z = i * 5 % 128
+      let y = W.surface_y(w, x, z) - 1
+      -- the field says what the block says: solid ground occupies, water under a sea surface has its opacity
+      let want = L.occ_value(W.block_at(w, x, y, z))
+      if y < 1 || NativeArray.get_u8(o, L.occ_index(x, y, z)) == want do band_occ(w, o, i + 1) else false end
+    end
+  end
+
+  describe "the window shifts" do
+    test "a shift by one chunk in x moves every chunk over and generates the far column" do
+      let w0 = W.generate(8, seed(), 1)
+      let w1 = W.shift(w0, 1, 0, seed(), 1, Nil)
+      Test.assert_eq_int(W.origin_x(w1), 1, "origin moved")
+      Test.assert_eq_int(W.origin_z(w1), 0, "only in x")
+      Test.assert_eq_int(chunk_hash(W.chunk_at(w1, 0, 0), 0, 7), chunk_hash(W.chunk_at(w0, 1, 0), 0, 7), "local 0 is the old local 1")
+      Test.assert_eq_int(chunk_hash(W.chunk_at(w1, 3, 5), 0, 7), chunk_hash(W.chunk_at(w0, 4, 5), 0, 7), "and so on across the window")
+      let fresh = C.generate_lakes(16 * 8, 16 * 3, seed(), CubeForge.Lakes.tile_of_chunk(seed(), 8, 3))
+      Test.assert_eq_int(chunk_hash(W.chunk_at(w1, 7, 3), 0, 7), chunk_hash(fresh, 0, 7), "the band is the world's chunk 8, generated")
+      Test.assert_eq_int(W.world_x(w1, 0), 16, "local block 0 is world block 16")
+    end
+    test "the light and occupancy fields slide with the chunks and the band is lit and filled" do
+      let w0 = W.generate(8, seed(), 1)
+      let w0l = W.relight_all(w0)
+      let w1 = W.shift(w0l, 1, 0, seed(), 1, Nil)
+      Test.assert_true(light_agrees(W.light(w1), W.light(w0l), 0), "skylight slid")
+      Test.assert_true(occ_agrees(W.occupancy(w1), W.occupancy(w0l), 0), "occupancy slid")
+      Test.assert_eq_int(band_lit(w1, W.light(w1), 120, 0), -1, "the new column has sky above every surface (z * 100000 + y * 100 + light)")
+      Test.assert_true(band_occ(w1, W.occupancy(w1), 0), "the new column's ground is occupied")
+    end
+    test "shifting back regenerates what was dropped, identically" do
+      let w0 = W.generate(8, seed(), 1)
+      let w2 = W.shift(W.shift(w0, 1, 0, seed(), 1, Nil), -1, 0, seed(), 1, Nil)
+      Test.assert_eq_int(W.origin_x(w2), 0, "back at the origin")
+      Test.assert_eq_int(chunk_hash(W.chunk_at(w2, 0, 4), 0, 7), chunk_hash(W.chunk_at(w0, 0, 4), 0, 7), "the regenerated column is the original")
+      Test.assert_eq_int(W.state_hash(w2), W.state_hash(w0), "the whole window is the original")
+    end
+    test "a shift in z slides the other way" do
+      let w0 = W.generate(8, seed(), 1)
+      let w1 = W.shift(w0, 0, -1, seed(), 1, Nil)
+      Test.assert_eq_int(W.origin_z(w1), -1, "origin moved in z")
+      Test.assert_eq_int(chunk_hash(W.chunk_at(w1, 2, 1), 0, 7), chunk_hash(W.chunk_at(w0, 2, 0), 0, 7), "local z 1 is the old z 0")
+      let fresh = C.generate_lakes(16 * 2, 16 * -1, seed(), CubeForge.Lakes.tile_of_chunk(seed(), 2, -1))
+      Test.assert_eq_int(chunk_hash(W.chunk_at(w1, 2, 0), 0, 7), chunk_hash(fresh, 0, 7), "the band is world chunk z -1")
+    end
+  end
+
+  describe "the evicted cache" do
+    test "an edited chunk that leaves the window comes back with its edit; a clean one is regenerated" do
+      let w0 = W.set_block(W.generate(8, seed(), 1), 5, 200, 5, 3)   -- a stone block in the air of local chunk (0, 0)
+      Test.assert_true(W.is_dirty(w0, 0, 0), "the write marked the chunk")
+      Test.assert_true(!W.is_dirty(w0, 1, 0), "and only that chunk")
+      let w1 = W.shift(w0, 1, 0, seed(), 1, Nil)
+      Test.assert_eq_int(List.length(W.cache(w1)), 1, "one dirty chunk was cached")
+      Test.assert_eq_int(W.block_at(w1, 5 + 16 * 7, 200, 5), 0, "the band that came in is fresh")
+      let w2 = W.shift(w1, -1, 0, seed(), 1, Nil)
+      Test.assert_eq_int(W.block_at(w2, 5, 200, 5), 3, "the edit is back")
+      Test.assert_true(W.is_dirty(w2, 0, 0), "and the chunk is dirty again")
+      Test.assert_eq_int(List.length(W.cache(w2)), 0, "the cache gave it back")
+      Test.assert_eq_int(List.length(W.restored(w2)), 1, "the shift reports it")
+    end
+    test "a dirty chunk back at its generation is dropped, not cached" do
+      let w0 = W.generate(8, seed(), 1)
+      let was = W.block_at(w0, 5, 200, 5)
+      let w1 = W.set_block(W.set_block(w0, 5, 200, 5, 3), 5, 200, 5, was)   -- written, and written back
+      Test.assert_true(W.is_dirty(w1, 0, 0), "the chunk is flagged")
+      let w2 = W.shift(w1, 1, 0, seed(), 1, Nil)
+      Test.assert_eq_int(List.length(W.cache(w2)), 0, "but it hashed to its generation, so it was dropped")
+    end
+    test "a column blob carries fungus and shown species across an eviction" do
+      let n = 128
+      let m0 = CubeForge.Myc.plant(CubeForge.Myc.build(n), n, 5, 5, 2)
+      let b = CubeForge.Myc.chunk_bytes(m0, n, 0, 0)
+      let m1 = CubeForge.Myc.restore_chunk(CubeForge.Myc.build(n), n, 3, 2, b)
+      Test.assert_eq_int(CubeForge.Myc.species_of(m1, n, 48 + 5, 32 + 5), 2, "the planting landed in chunk (3, 2)")
+      Test.assert_eq_int(CubeForge.Myc.species_of(m1, n, 5, 5), 0, "and nowhere else")
+    end
+  end
+
+  describe "the fields shift" do
+    test "the biome field slides and scans the band" do
+      let w0 = W.generate(8, seed(), 1)
+      let f0 = CubeForge.Biome.build(w0, seed())
+      let w1 = W.shift(w0, 1, 0, seed(), 1, Nil)
+      let f1 = CubeForge.Biome.shift(f0, w1, 1, 0, seed())
+      Test.assert_eq_int(CubeForge.Biome.height_of(f1, 0, 5), CubeForge.Biome.height_of(f0, 16, 5), "a height slid")
+      Test.assert_eq_int(CubeForge.Biome.height_of(f1, 120, 9), W.surface_y(w1, 120, 9), "the band was scanned")
+      Test.assert_true(CubeForge.Biome.temp_of(f1, 40, 40) == CubeForge.Biome.temp_of(f0, 56, 40), "temperature slid")
+    end
+    test "the mycelium field slides" do
+      let f0 = CubeForge.Myc.plant(CubeForge.Myc.build(128), 128, 40, 40, 1)
+      let f1 = CubeForge.Myc.shift(f0, 128, 1, 0)
+      Test.assert_eq_int(CubeForge.Myc.species_of(f1, 128, 24, 40), 1, "the planting slid 16 columns")
+      Test.assert_eq_int(CubeForge.Myc.species_of(f1, 128, 40, 40), 0, "and left its old column")
+      Test.assert_true(CubeForge.Myc.is_dirty(f1, 128, 100, 100), "everything is marked")
+    end
+  end
+
+end
