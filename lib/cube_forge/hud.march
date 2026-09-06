@@ -69,7 +69,7 @@ mod CubeForge.Hud do
   end
 
   pfn vert(b : CubeForge.F32Buf.F32Buf, x : Float, y : Float, shade : Float) : CubeForge.F32Buf.F32Buf do
-    b |> B.push3(x, y, 0.0) |> B.push(1.0) |> B.push(1.0) |> B.push(1.0) |> B.push(shade) |> B.push(0.0) |> B.push(Vx.plain())
+    b |> B.push3(x, y, 0.0) |> B.push(1.0) |> B.push(1.0) |> B.push(1.0) |> B.push(shade) |> B.push(0.0) |> B.push(Vx.plain()) |> B.push(0.0)
   end
 
   pfn rect(b : CubeForge.F32Buf.F32Buf, x0 : Float, y0 : Float, x1 : Float, y1 : Float, shade : Float) : CubeForge.F32Buf.F32Buf do
@@ -133,12 +133,12 @@ mod CubeForge.Hud do
   -- ── Hotbar ────────────────────────────────────────────────────────────────
   -- Untextured-path colour: (u, v, layer) * shade is the RGB.
   pfn cvert(b : CubeForge.F32Buf.F32Buf, x : Float, y : Float, r : Float, g : Float, bl : Float) : CubeForge.F32Buf.F32Buf do
-    b |> B.push3(x, y, 0.0) |> B.push(r) |> B.push(g) |> B.push(bl) |> B.push(1.0) |> B.push(0.0) |> B.push(Vx.plain())
+    b |> B.push3(x, y, 0.0) |> B.push(r) |> B.push(g) |> B.push(bl) |> B.push(1.0) |> B.push(0.0) |> B.push(Vx.plain()) |> B.push(0.0)
   end
   -- Same, with an alpha: the HUD is drawn with SRC_ALPHA blending, so this is
   -- what lets the inventory dim the world instead of erasing it.
   pfn avert(b : CubeForge.F32Buf.F32Buf, x : Float, y : Float, r : Float, g : Float, bl : Float, a : Float) : CubeForge.F32Buf.F32Buf do
-    b |> B.push3(x, y, 0.0) |> B.push(r) |> B.push(g) |> B.push(bl) |> B.push(1.0) |> B.push(0.0) |> B.push(Vx.pack(Vx.fx_none(), a))
+    b |> B.push3(x, y, 0.0) |> B.push(r) |> B.push(g) |> B.push(bl) |> B.push(1.0) |> B.push(0.0) |> B.push(Vx.pack(Vx.fx_none(), a)) |> B.push(0.0)
   end
   pfn arect(b : CubeForge.F32Buf.F32Buf, x0 : Float, y0 : Float, x1 : Float, y1 : Float, r : Float, g : Float, bl : Float, a : Float) : CubeForge.F32Buf.F32Buf do
     b |> avert(x0, y0, r, g, bl, a) |> avert(x1, y0, r, g, bl, a) |> avert(x1, y1, r, g, bl, a)
@@ -150,7 +150,7 @@ mod CubeForge.Hud do
   end
   -- textured quad sampling texture layer [layer], uv 0..1
   pfn tvert(b : CubeForge.F32Buf.F32Buf, x : Float, y : Float, u : Float, v : Float, layer : Float) : CubeForge.F32Buf.F32Buf do
-    b |> B.push3(x, y, 0.0) |> B.push(u) |> B.push(v) |> B.push(layer) |> B.push(1.0) |> B.push(0.0) |> B.push(Vx.plain())
+    b |> B.push3(x, y, 0.0) |> B.push(u) |> B.push(v) |> B.push(layer) |> B.push(1.0) |> B.push(0.0) |> B.push(Vx.plain()) |> B.push(0.0)
   end
   pfn trect(b : CubeForge.F32Buf.F32Buf, x0 : Float, y0 : Float, x1 : Float, y1 : Float, layer : Float) : CubeForge.F32Buf.F32Buf do
     b |> tvert(x0, y0, 0.0, 0.0, layer) |> tvert(x1, y0, 1.0, 0.0, layer) |> tvert(x1, y1, 1.0, 1.0, layer)

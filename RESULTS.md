@@ -2279,3 +2279,53 @@ pixels differing from 100. Chunk streaming did not cost reproducibility.
 458 tests (three new ones pin the dial: 0 is the bare base, the default shows
 but less than 100, and the thread count thins as it comes down), lint clean,
 budget 6.44 ms.
+
+
+## The black bands under glowing fungus were a vertex-interpolation bug (2026-09-06)
+
+Reported as "those fungal stripes shouldn't be black". They were not the
+texture: a mycelium layer's darkest texel is its base's darkest texel, and
+fungus only ever lightens it (grass 70,140,60; Lanterncap over grass at 60,
+85,145,61). The bands were the sky term of the lighting, destroyed in transit.
+
+Sky and block light shared one vertex float: `2 * round(blk * 255) + sky`,
+unpacked in the fragment shader with `floor` and a subtraction. A varying is
+interpolated across the triangle, and that unpack is not linear, so between
+two corners that are **both fully sunlit** but differ in block light the
+decoded sky ran
+
+    1.0  1.4  1.8  0.2  0.6  1.0  1.4  1.8  0.2  0.6  1.0
+
+a sawtooth. The troughs are the black bands, and the peaks above 1 are the
+blown-out bright bands beside them. It appeared only where a block glowed,
+which is why fungus wore the blame: with a non-glowing species the same
+ground rendered flat and clean, and with a glowing one it looked terraced.
+
+**Fix: the two channels are separate attributes.** The vertex goes 9 floats to
+10 (pos.xyz, uv, layer, sky, face, fx, block light) and the packed word is
+split on the CPU -- in `F32Buf.push_vertex` and the shim's `cf_vert` and
+`cf_f32_stamp` -- so it never reaches a varying. Two channels cannot share one
+interpolated scalar; no encoding fixes that, because interpolation is linear
+and any unpack is not.
+
+`docs/fungus-blockband.png` is the same patch before and after. At midnight the
+glow still does its job: ground luminance median 33 under a glowing species
+against 9 under a non-glowing one, and even, with no banding.
+
+Two things the vertex growing from 9 to 10 turned up, both silent until they
+were not:
+
+- **`cf_f32_stamp` had `n % 9` and `i += 9` of its own**, so every model
+  template (mushrooms, fronds, bushes) aborted the moment the vertex grew.
+- **Floats-per-quad was the literal `54` in four places**, twice in
+  `F32Buf.push_quad`/`push_slice` and twice in the shim's `cf_mesh_slice`,
+  which reserve and write the same buffer. They drifted apart and quads went
+  missing (a six-quad slab meshed as five). Both sides now say it once:
+  `F32Buf.quad_floats()` and `CF_QUAD_FLOATS`.
+
+460 tests, lint clean, budget 6.61 ms with the 11% wider vertex. Two new tests:
+one asserts the old packing is *not* interpolation-safe (both corners decode to
+sky 1.0, three tenths of the way across it decodes to 0.2), the other that
+`push_vertex` lands sky in slot 6 and block light in slot 9. A point test of
+the encode/decode passed throughout and could never have caught this -- the bug
+lives between the vertices, not at them.

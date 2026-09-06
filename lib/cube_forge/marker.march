@@ -13,7 +13,7 @@ mod CubeForge.Marker do
   fn half_size() : Float do 1.5 end
 
   pfn v(b : CubeForge.F32Buf.F32Buf, x : Float, y : Float, z : Float, r : Float, g : Float, bl : Float) : CubeForge.F32Buf.F32Buf do
-    b |> B.push3(x, y, z) |> B.push(r) |> B.push(g) |> B.push(bl) |> B.push(1.0) |> B.push(0.0) |> B.push(Vx.plain())
+    b |> B.push3(x, y, z) |> B.push(r) |> B.push(g) |> B.push(bl) |> B.push(1.0) |> B.push(0.0) |> B.push(Vx.plain()) |> B.push(0.0)
   end
 
   doc "Rebuild [b] (cleared in place) with a flat marker quad centred over (px, pz)."
