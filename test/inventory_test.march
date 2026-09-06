@@ -278,4 +278,55 @@ mod CubeForge.Test.Inventory do
     end
   end
 
+  describe "Inventory.edible" do
+    test "every species' cap is food and nothing else is" do
+      Test.assert_true(Inv.edible(C.fruit_cap(1)), "Frostcap cap")
+      Test.assert_true(Inv.edible(C.fruit_cap(6)), "Sunshelf cap")
+      Test.assert_false(Inv.edible(C.fruit_stem(3)), "a stem is a building block")
+      Test.assert_false(Inv.edible(C.fruit_small(3)), "a small mushroom is not carried, let alone eaten")
+      Test.assert_false(Inv.edible(CubeForge.Species.spore_item(2)), "spores are planted, not eaten")
+      Test.assert_false(Inv.edible(1), "grass")
+      Test.assert_false(Inv.edible(C.water()), "water")
+      Test.assert_false(Inv.edible(0), "an empty slot")
+    end
+  end
+
+  describe "Inventory.eat_slot" do
+    test "the window's right-click eats the hovered slot, hotbar or backpack" do
+      Test.assert_eq_int(Inv.eat_slot(true, true, true, 20, false, 1), 20, "a backpack slot under the cursor")
+      Test.assert_eq_int(Inv.eat_slot(true, true, true, 0, false, 5), 0, "a hotbar slot, not the selected one")
+      Test.assert_eq_int(Inv.eat_slot(true, true, true, 0 - 1, false, 1), 0 - 1, "the gap between slots eats nothing")
+      Test.assert_eq_int(Inv.eat_slot(true, true, false, 20, false, 1), 0 - 1, "hovering without clicking eats nothing")
+    end
+    test "the eat key eats the selected hotbar slot while playing" do
+      Test.assert_eq_int(Inv.eat_slot(false, false, false, 0 - 1, true, 3), 2, "slot 3 selected is index 2")
+      Test.assert_eq_int(Inv.eat_slot(false, false, false, 0 - 1, false, 3), 0 - 1, "no key, no bite")
+    end
+    test "the key is inert while a panel is up, where the click takes over" do
+      Test.assert_eq_int(Inv.eat_slot(true, true, false, 5, true, 3), 0 - 1, "the inventory window is open")
+      Test.assert_eq_int(Inv.eat_slot(false, true, false, 0 - 1, true, 3), 0 - 1, "the escape menu is open")
+    end
+  end
+
+  describe "Inventory.consume_at" do
+    test "takes one from that slot and leaves the others alone" do
+      let i0 = Inv.set_slot(Inv.set_slot(Inv.new(), 0, C.fruit_cap(1), 2), 20, C.fruit_cap(5), 3)
+      let i1 = Inv.consume_at(i0, 20)
+      Test.assert_eq_int(Inv.count_at(i1, 20), 2, "the backpack slot went down by one")
+      Test.assert_eq_int(Inv.count_at(i1, 0), 2, "the hotbar slot is untouched")
+      Test.assert_eq_int(Inv.sel(i1), 1, "and the selection did not move")
+    end
+    test "the last one empties the slot, with no stale id left" do
+      let i1 = Inv.consume_at(Inv.set_slot(Inv.new(), 12, C.fruit_cap(2), 1), 12)
+      Test.assert_eq_int(Inv.count_at(i1, 12), 0, "empty")
+      Test.assert_eq_int(Inv.item_at(i1, 12), 0, "and it forgot what it held")
+    end
+    test "an empty or out-of-range slot changes nothing" do
+      let i0 = Inv.set_slot(Inv.new(), 0, C.fruit_cap(1), 2)
+      Test.assert_eq_int(grand_total(Inv.consume_at(i0, 5), 0, 0), 2, "an empty slot")
+      Test.assert_eq_int(grand_total(Inv.consume_at(i0, 0 - 1), 0, 0), 2, "below the range")
+      Test.assert_eq_int(grand_total(Inv.consume_at(i0, Inv.slots()), 0, 0), 2, "past the range")
+    end
+  end
+
 end

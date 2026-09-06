@@ -1646,6 +1646,8 @@ hint that the name is the problem (GAPS G65 has the same shape). The pair is
 
 **Food.** A cap is food. Using one with nothing in reach eats it: one is
 consumed and the species' effect starts, or refreshes, for thirty seconds.
+(That gesture was replaced on 2026-09-06 by an eat key and a right-click in
+the inventory window -- see "Eating from the inventory" below.)
 `CubeForge.Effects` holds four until-times and answers multipliers for a
 clock; `Player.update_with` takes them (walk speed, jump speed, swim speed,
 both horizontal and vertical); the lantern effect forces the flashlight on;
@@ -1954,3 +1956,450 @@ layer (89), so no shader or vertex-format change.
   "expected CubeForge.Model.Set but got Set" -- renamed `Templates`; the
   alias `M` is taken by `CubeForge.Math.Mat4` across the test binary.
 - 378 tests (365 before).
+
+## Perf pass: the drain, the mesher, the relight's edges (2026-09-05)
+
+Method: a `slow frame` line under `CF_AUTOFLOW` names every frame over 4 ms
+with its phase of the period; a `drain chunk` line times each chunk's remesh
+and upload; `CF_VEG_LOG=1` splits a tree edit into blocks / relight /
+occupancy / rescan; and `sample` on the release binary (outside the sandbox,
+`-mayDie`) gave call graphs -- once on the pinned scenario, twice on
+`CF_WORKERS=1 CF_MESH_REPS=80`, a serial mesher loop that is pure mesher.
+The mesh hash on the `state:` line at frame 30 of the pinned scenario
+(`380281180`) was the oracle for every mesher change: it did not move once.
+
+**What the frame looked like.** The worst frames were the ODD phases at 5-9 ms:
+the mesh drain, four sections a frame, with an opaque section at 0.6-1.0 ms.
+Water sections were 0.05 ms; the cost was retexturing and fungus migration
+owing ~10 opaque sections a period. Phase 6 (a tree or body) was 6-9 ms.
+
+**Where a section's time went** (serial mesher profile): the allocator. Every
+Float in March is a heap object; a rectangle was some sixty of them across
+quad_sized, pack_shade, layer_for (a chain of boxed literal returns, 15% by
+itself) -- `march_alloc` + `march_alloc_float` + `decrc` + free were ~60% of
+mesh time. The six-direction mask fill I rewrote first was a minor term.
+
+| change | measure | before | after |
+|---|---|---|---|
+| per-phase drain budgets (3 odd / 2 retexture / 1 water, field / 0 veg) | worst frame | 10.6 ms | 10.1 |
+| one-pass mask fill (six directions from one cell walk) | opaque section | 0.7 ms | ~0.6 (noise) |
+| `F32Buf.push_vertex`: one cell rebuild per vertex, not nine | serial mesh-all x3 | 788-899 ms | (small) |
+| `cf_mesh_quad`: the rectangle written in C from ints + key + layer table | opaque section | 0.6 | 0.45 |
+| `cf_mesh_slice`: the whole per-slice greedy merge in C, mask read only | opaque section | 0.45 | **0.22-0.29** |
+| `F32Buf.grow` as one blit; section buffers start at 16k floats | serial mesh-all x3 | 788-899 | **398-400 ms** |
+| the same | startup mesh all, 64 chunks | 270 ms | **197 ms** |
+| `cf_gfx_sync_box`: one texture box + exact coarse recount | tree edit, occupancy | 0.6 ms | **0.02** |
+| staged upload: sixteen `glBufferSubData` become one | drain uploads over 1 ms | 7-8 of 44 | **0 of 44** |
+| double-buffered mesh VBOs, capacity kept | (no measurable change on its own; kept for the staging) | | |
+| `cf_u8_zero_box` / `cf_mark_box`: the relight's clear and section diff | tree relight | 2-5 ms | 2-5 ms (no change) |
+| **frame budget** (`frame_budget.sh 16 400 3`) | worst frame | **10.6-11.6 ms** | **8.2 ms** |
+
+Two things that did not pay: the relight's box clear and diff in C (the
+March versions were not where the relight's time is -- the sweep and the
+seed are), and GL_DYNAMIC_DRAW / double buffering for the upload stalls (the
+stall was per call; staging fixed it, the buffers stayed).
+
+**Layout notes for the shim work.** An extern's borrowed array arrives with
+rc 2 (the borrow itself), so a "write through a borrowed reference" guard of
+rc == 1 trips; cf_mesh_slice consumes and returns the buffer and hands the
+count back in the reserved slot past the worst-case region. The relight's
+field is the World's and was silently copy-on-write on its first byte; the
+copy is explicit now (`copy_prefix(la, volume())`) so the shim's clear can
+insist on a unique field, at the cost it always had.
+
+**Left on the table, measured.** A tree edit is now: blocks 0.8-1.3 ms
+(Veg.plant: a 64 KB chunk copy per `set_block`, ~40 of them, and a chunk
+lookup per candidate cell), relight 2-5 ms (the sweep and the seed), rescan
+0.3. And a finding that touches everything: `Array.PVec.get` walks a 32-long
+list at the leaf and computes the tail's length by walking it, so a chunk
+lookup on a 64-chunk world is ~50 pointer hops (`Array.lst_nth` in every
+profile, 2% of the frame); `World.block_at` pays it per voxel in the relight's
+`give_level`. GAPS G82. Phase 6 is the worst frame now: 6.1 ms mean, 8.6 max.
+
+432 tests. `CF_VEG_LOG` and the `slow frame` / `drain chunk` lines stay as
+diagnostics; the shim additions are `cf_f32_stamp`, `cf_mesh_quad`,
+`cf_mesh_slice`, `cf_u8_zero_box`, `cf_mark_box`, `cf_gfx_sync_box`, all under
+the blit's rc == 1 contract.
+
+## G82 followed up: the world's chunks in a binary tree (2026-09-05)
+
+`probes/pvec_get` timed the stdlib vector against a complete binary tree of
+64 leaves, one million gets and a hundred thousand sets each, release build:
+
+| | `Array.PVec` | `CubeForge.Tree` |
+|---|---|---|
+| get, indices spread | 112 ns | 72 ns |
+| get, index 0 / index 63 | 61 / 154 ns | |
+| set | 860 ns | 200 ns |
+
+Per call the gap is modest; the volume is not. `World.chunk_at` is a `get`
+and `World.set_block` a `set`, and the relight, the water scan, the biome's
+water flags, vegetation and fruit all go through `World.block_at` a voxel at a
+time. The world now keeps its chunks in `CubeForge.Tree` (six matches to a
+chunk, six node allocations to replace one; `World.chunks` converts to a PVec
+for the save format). Same seed, same pinned scenario, mesh hash unchanged:
+
+| | before | after |
+|---|---|---|
+| tree edit, relight | 2.3-5.8 ms | **1.8-3.4 ms** |
+| tree edit, blocks | 0.8-1.3 ms | 0.7-0.9 ms |
+| biome field build at startup | 228 ms | **123 ms** |
+| skylight + block-light flood at startup | 150 ms | 141 ms |
+| startup mesh all | 197 ms | 185 ms |
+| **frame budget, worst frame** | 8.2 ms | **5.7-6.6 ms** (two runs) |
+
+The sampler had put `Array.lst_nth` at 2% of the frame. That was the top of
+the stack only: the rest of a `get` -- `trie_get`, `get` itself, the tail
+length walk, and the cache misses a 50-hop list walk means -- did not show
+under one name. A structure change the profile rated at 2% took a third off
+the worst frame. 438 tests.
+## The relight box, and where the frame's memory goes (2026-09-05)
+
+**The relight box is sized to the light around the edit.** `Light.reach`:
+the brightest level at the edit voxel or beside it before the edit, plus the
+new block's emission, capped at 15. Light lost by placing a block was at most
+the voxel's own level; light gained by breaking one is at most a neighbour's
+level less one, and an opening sky shaft shows as the voxel above at 15. A
+level L propagates L - 1 steps, so a box of radius L holds every voxel that
+can move, and the clear, the seed, the before-copy, the section diff and the
+sweep are all passes over that box. Surface edits in daylight still get 15;
+a block-light edit beside mycelium glowing at 3 gets a 5-wide box instead of
+33. Oracle tests for a dim gallery and for a block-light edit beside dim
+mycelium added; all "incremental equals full flood" tests pass.
+
+| | before | after |
+|---|---|---|
+| a fruit body's slot (stamp, both relights, occupancy, rescan), median of 40 | ~6 ms | **3.8 ms** |
+| budget | 10.25 ms | 10.03 ms best of 3 |
+
+**The 139 live objects a frame are a leak, and it is large.** `cf_rss_bytes`
+(the shim, from `task_info`) gives the gauge a byte view: the process grows
+~1.8 MB a frame, 5.7 GB resident after 2,400 frames, identically on the old
+toolchain pin. Stage probes on a frame: the water tick retains 4.6 MB per
+tick, the biome slice ~350 KB every frame, the mycelium tick 480 KB, the
+drain ~100 KB; every stage that replaces part of the world leaves the old
+part alive. The stack pointer does not move between frames, so the loop is a
+true tail call, and making its parameters owned through identity functions
+changed nothing. `MARCH_TRACE_GC=1`'s allocation log (25 GB for 140 frames)
+gives the survivors: 64 KB chunk arrays at 29 a frame, 4 MB light fields,
+0.5 MB relight prefix copies, the field arrays, and thousands of 32-byte
+list cells. Three compiler-side causes, each with a repro:
+
+1. **A library-defined type gets no deep drop (GAPS G79).** Type definitions
+   are registered under qualified names; use sites carry the short name;
+   `Repr.find_variant` is exact. The drop pass found no constructors for
+   essentially every library type, freed each dying cell shallowly and leaked
+   its children. `probes/drop_xmod` (WHICH=1,2): 2.1 GB -> 8 MB with the fix
+   on the March branch `fix/drop-short-type-names` (checkout under the
+   session scratchpad). On this project it freed the field arrays (16 KB
+   survivors 811 -> 247, 131 KB 392 -> 106) but not the chunks.
+2. **A closure environment is freed shallowly (G80).** Every captured value
+   leaks. `probes/drop_xmod` WHICH=5: a thousand closures capturing 1 MB each,
+   called once and dropped, leave 1.07 GB resident. This is the chunk leak:
+   `Array.set`'s two update paths capture the new element in a closure, so
+   every persistent-vector update in every March program leaks the element.
+   WHICH=4 (a 64-element vector, 4,000 replacements of 64 KB arrays): 339 MB
+   resident against 4 MB live. Needs a per-closure-type drop or a runtime
+   release that knows the capture layout; not attempted here.
+3. **A named binding unused in one arm of a lifted closure is never released
+   (G81).** `Array.set`'s `lst_set` bound the replaced element as `h` and left
+   it unused in the replacing arm; the IR has no release for it, where a
+   wildcard gets one. Fixed in the stdlib on the same March branch by matching
+   with `_` in that arm; the probe still leaks through (2).
+
+Until the toolchain carries those fixes the project pins March main
+unchanged (`watch-9ca8a98d`). Two project-side releases added on the way,
+`Biome.release` and `Myc.release`, destructure a replaced field so its arrays
+die as bindings; harmless with the fix, and they cover (1) for those two
+types without it. The four colliding short type names (Field, Relit, Felled,
+Sweep across modules) were renamed unique; a collision also forces Boxed in
+the compiler and is worth avoiding regardless.
+
+
+
+## The relight reads opacity from the occupancy field (2026-09-05)
+
+The sweep's remaining cost was `World.block_at` per neighbour, to learn
+whether the neighbour is air, water (opacity 2), leaves (6) or opaque. The
+occupancy field already held a byte per voxel for the shadow texture; it now
+holds `Light.occ_value`: 255 where the block is opaque (what the shader, the
+AO and the coarse counts read as solid, unchanged), else the block's opacity.
+The sweep reads that byte and never fetches the block.
+
+What made it correct: the field has to be complete. Two attempts said so.
+The first wrote the finer byte only where `set_occupied` was called and read
+water as air wherever the water actors had applied cells or leaf decay had
+run -- the relight-equals-full-flood tests failed and the mesh hash moved. The
+second used the byte only for solid neighbours and gained nothing: the reads
+are on air and water. So every block write now keeps the byte -- there are
+exactly two writers, `World.set_block` and `World.set_cells`, and
+`set_occupied` is gone -- and every World constructor builds the field, so a
+relight never runs against a stale one.
+
+| | before | after |
+|---|---|---|
+| tree edit, relight | 1.8-3.4 ms | **1.3-2.2 ms** |
+| frame budget, worst frame | 5.7-6.6 ms | **5.75 ms** |
+| mesh hash at frame 30 | 380281180 | 380281180 |
+
+A side effect worth knowing: a bush edit now pays ~0.3 ms it did not before.
+Its leaves were written with `set_block` alone and never touched the
+occupancy field; now every edit's first write to that shared 4 MB field is a
+copy-on-write. Trees paid it already through `set_occupied`.
+
+Not kept from this stretch: a VAO per mesh slot (six alternating runs were
+noise, so 192 attribute-pointer sets a frame are not where a quiet frame's
+time is on this driver). Kept: the shim's `getenv("CF_DEBUG")` on every draw
+call is now read once.
+
+## Tree placement in one write; the copy-on-write that remains (2026-09-05)
+
+`World.set_blocks` takes a list of packed cells, splits them by chunk and
+applies each chunk's cells through `set_cells`: one chunk copy per chunk
+touched, one pass over the occupancy bytes. `Veg.plant`, `Veg.fell`,
+`Fruit.stamp` and `Fruit.fell` gather their cells against the world as it
+stands and write once, where each used to call `set_block` per block and copy
+the 64 KB chunk every time.
+
+| | before | after |
+|---|---|---|
+| tree edit, blocks | 0.8-0.9 ms | **0.3-0.45 ms** |
+| a fruit body | 4.2 ms | **~2.0 ms** |
+| bush edit, blocks | 0.3 ms | 0.3 ms |
+
+The bush number is the finding. A bush is nine cells, and with the occupancy
+write skipped as an experiment its blocks cost 0.02 ms: the 0.3 ms is the
+first byte written into the World's 4 MB occupancy field copying it, because
+the field is shared at that moment. `Win.arr_rc` (a new diagnostic, the
+array's refcount word as the shim sees it) reads 2 for the occupancy field and
+5-8 for the light field at the start of a tree edit. Moving the vegetation
+branch into a helper so the old scene is not named in an else arm changed
+nothing. The extra reference is somewhere else in the frame; the same copy is
+what `relight_marked` pays explicitly for the light field. Left open, with
+the diagnostic in place.
+
+Hash at frame 30 unchanged through all of it (103332325 since main's
+relight-box merge). 440 tests.
+
+
+## Pinned to March main 7eb8d76a (2026-09-05)
+
+`watch-7eb8d76a`: March main after the two fixes from the leak work (GAPS G79
+and G81) were merged, built with `make install PREFIX=...` plus the `stdlib`
+symlink, March's own 706 tests green. On this project: 440 tests, budget
+6.47 ms best of 3, the allocation gauge **139 -> 86 objects a frame**. What
+remains is G80, closure captures never released, open in March.
+
+
+## The light oracle: what the mesh hash was saying (2026-09-05)
+
+The frame-30 mesh hash moved on main's relight-box commit (380281180 ->
+103332325). Every change of this pass had held it, so the question was
+whether main's relight was wrong. The dump frame now prints a **light oracle**:
+both light fields against a flood from scratch, as counts of differing voxels
+and the first few with their kept/flooded values. Bisected with the same
+oracle patch on three builds, seed 7, frames 30 and 300:
+
+| build | sky | block |
+|---|---|---|
+| before both changes (14fdab3) | 18 / 43 | 0 / 0 |
+| this pass's occupancy-byte sweep alone (33a555c) | 18 / 43 | 0 / 0 |
+| main's reach-sized box alone (e7029a6) | 44 / 88 | 0 / 19 |
+
+So the occupancy-byte sweep is exact, and main's commit did introduce wrong
+light -- but the 18 and 43 were already there. Two causes, both found:
+
+1. **Water moves without a relight.** Every voxel in the base count is kept at
+   15 where a fresh flood says 13, at y 63-83 -- water (opacity 2) that the
+   actors moved through `set_cells` after the flood. Nine voxels by frame 3,
+   before any other edit. Deliberate: a region relight per changed section
+   would be tens of milliseconds a tick for a one- or two-level shade under
+   moving water. Recorded as an accepted approximation in `todos.md`.
+2. **Multi-block edits were relit from one voxel.** A tree, a fruit body and
+   a batch of mycelium each called the relight at their centre, so a box of
+   radius 15 round the trunk missed the shade a canopy casts four columns out
+   (visible as kept 14 against 15 from frame 6, the first tree), and with
+   main's reach-sized box the mycelium batch's window -- taken within 4 of an
+   anchor on the promise of a radius-15 box -- got a box of the anchor's own
+   dim light and left emitters outside it: the 19 block-light voxels.
+
+`Light.relight_region_marked` / `relight_block_region_marked` take the edited
+region and grow it by a radius; `World.relight_region_marked` uses
+`Light.region_reach` -- the brightest light in and round the region before
+the edit, or the brightest emission in it after -- so a tree in daylight gets
+15 and a glowing patch in a dark wood gets its glow. Trees, bushes, bodies
+and the mycelium anchor use it; a single block still uses `reach` at the
+voxel. A fixed radius 15 for regions was tried first and put the worst frame
+at 11.3 ms through the mycelium batch's 39-wide box; the reach brought it
+back.
+
+| | before | after |
+|---|---|---|
+| light oracle, frame 30 / 300 | sky 44 / 88, block 0 / 19 | **sky 18 / 42 (all water), block 0 / 0** |
+| tree edit, relight | 1.3-2.2 ms (wrong box) | 1.7-2.9 ms |
+| frame budget, worst frame | 5.7-6.7 | 6.46 ms |
+
+A new test plants a tree and checks the region relight against a full flood.
+441 tests. The oracle stays in the dump: a non-zero block count, or a sky
+count whose first voxels are not the 15/13 water pattern, is a relight bug.
+
+## Eating from the inventory (2026-09-06)
+
+Spec `docs/superpowers/specs/2026-09-06-eating-from-the-inventory-design.md`.
+A cap has been food since the effects work, but the only way to eat one was to
+hold it in the selected hotbar slot, aim at **nothing**, and right-click. That
+gesture is gone. Two deliberate ones replace it:
+
+- **E** eats the selected hotbar slot, whatever the player is aiming at, and
+  is inert while the inventory window or the escape menu is up.
+- **A right-click on any slot** while the inventory window is open eats that
+  slot -- hotbar or backpack. Left-click keeps drag and drop, and right-click
+  did nothing in the window before, since `interact` never runs while a panel
+  is open. This is the half that matters: caps pile up in the backpack, and
+  they used to have to be dragged into the hotbar before they could be eaten.
+
+Two functions carry the rules, so the gestures cannot disagree and both are
+unit-testable without a window. `Inventory.edible(id)` is the only answer to
+what is food (caps, and nothing else). `Inventory.eat_slot(window_open,
+ui_open, right_click, hovered, eat_key, sel)` is the only answer to which slot
+a bite addresses, or -1; whether that slot *holds* food is deliberately not its
+question, so an inedible slot is a no-op rather than a refused gesture. The
+frame loop reads both and calls `eat_at`, which consumes one through the new
+`Inventory.consume_at` (consume was hard-wired to the selected hotbar slot) and
+applies the species effect as before -- thirty seconds, refreshing.
+
+`CF_AUTOEAT=<frame>` used to call the bite directly and so tested nothing about
+the gesture. It now puts a Frostcap cap in the inventory and presses the key
+thirty frames later; `CF_AUTOEAT_SLOT=<slot>` puts the cap in that slot and
+eats from there instead. Both print `ate a Frostcap cap: JUMP 30` and the dump
+shows `effects: JUMP 30`, from the hotbar and from backpack slot 20.
+
+448 tests (441 before): what is edible, which slot each gesture addresses,
+consuming from a given slot, and the last one emptying it. Mesh hash, light
+oracle and frame budget unmoved (380281180, sky 18 block 0, 6.42 ms).
+
+The one thing not covered headless is the mouse itself: the scripted knob
+supplies the slot, so the click-to-slot rule is tested through `eat_slot`
+rather than through a real right-click over a real cursor position.
+
+## The mycelium skin, dialled back (2026-09-06)
+
+Mycelium showed too strongly: on grassland the ground read as a change of
+biome rather than a skin over one. `Texture.myc_tint()` is one dial over both
+halves of the texel formula -- how many texels are threads, and how far a
+texel is pulled toward the species colour -- as twelfths, so 100 is exactly
+the old fractions (a third of texels, two-thirds species colour on a thread,
+a sixth elsewhere) and 0 is the bare surface, byte for byte. **The default is
+now 60.** `CF_MYC_TINT` overrides it, which is how the comparison below was
+rendered from one build.
+
+Judged on a mature patch on open grassland (seed 11, `CF_PITCH=-115`), at 100,
+60, 35 and 18, against a control with no fungus: `docs/fungus-tint.png`. At 60
+the ground keeps its own green with a warm cast; at 35 it is nearly plain
+grass; 18 is indistinguishable at a glance.
+
+Two things the comparison settled that guessing would not have:
+
+- **A glowing species' loudness is mostly its light, not its texture.** The
+  first ladder used Lanterncap, whose surface mycelium emits 6, and the
+  panels differed as much in banding as in colour. Repeating it with
+  Meadowbell, which does not glow, isolated the dial. The glow is deliberately
+  untouched: lit ground at night is what glowing fungus is for.
+- **The first scene was worthless and looked fine.** Planting at the seed-7
+  spawn now lands in a grove, where the surface is bush leaves: leaves carry
+  no mycelium, so `wanted 4 shown 0` and four tint settings rendered four
+  identical frames. The readout line at the dumped column is what caught it.
+
+Verification note: a raw `cmp` of two frame dumps always differs, because the
+FPS counter is drawn into the frame. `scratch/cmpframe.py` masks it, and by
+that measure two identical runs match exactly (0 differing pixels) and the
+shipped default matches an explicit `CF_MYC_TINT=60` (0), against 1.79M
+pixels differing from 100. Chunk streaming did not cost reproducibility.
+
+458 tests (three new ones pin the dial: 0 is the bare base, the default shows
+but less than 100, and the thread count thins as it comes down), lint clean,
+budget 6.44 ms.
+
+
+## The black bands under glowing fungus were a vertex-interpolation bug (2026-09-06)
+
+Reported as "those fungal stripes shouldn't be black". They were not the
+texture: a mycelium layer's darkest texel is its base's darkest texel, and
+fungus only ever lightens it (grass 70,140,60; Lanterncap over grass at 60,
+85,145,61). The bands were the sky term of the lighting, destroyed in transit.
+
+Sky and block light shared one vertex float: `2 * round(blk * 255) + sky`,
+unpacked in the fragment shader with `floor` and a subtraction. A varying is
+interpolated across the triangle, and that unpack is not linear, so between
+two corners that are **both fully sunlit** but differ in block light the
+decoded sky ran
+
+    1.0  1.4  1.8  0.2  0.6  1.0  1.4  1.8  0.2  0.6  1.0
+
+a sawtooth. The troughs are the black bands, and the peaks above 1 are the
+blown-out bright bands beside them. It appeared only where a block glowed,
+which is why fungus wore the blame: with a non-glowing species the same
+ground rendered flat and clean, and with a glowing one it looked terraced.
+
+**Fix: the two channels are separate attributes.** The vertex goes 9 floats to
+10 (pos.xyz, uv, layer, sky, face, fx, block light) and the packed word is
+split on the CPU -- in `F32Buf.push_vertex` and the shim's `cf_vert` and
+`cf_f32_stamp` -- so it never reaches a varying. Two channels cannot share one
+interpolated scalar; no encoding fixes that, because interpolation is linear
+and any unpack is not.
+
+`docs/fungus-blockband.png` is the same patch before and after. At midnight the
+glow still does its job: ground luminance median 33 under a glowing species
+against 9 under a non-glowing one, and even, with no banding.
+
+Two things the vertex growing from 9 to 10 turned up, both silent until they
+were not:
+
+- **`cf_f32_stamp` had `n % 9` and `i += 9` of its own**, so every model
+  template (mushrooms, fronds, bushes) aborted the moment the vertex grew.
+- **Floats-per-quad was the literal `54` in four places**, twice in
+  `F32Buf.push_quad`/`push_slice` and twice in the shim's `cf_mesh_slice`,
+  which reserve and write the same buffer. They drifted apart and quads went
+  missing (a six-quad slab meshed as five). Both sides now say it once:
+  `F32Buf.quad_floats()` and `CF_QUAD_FLOATS`.
+
+460 tests, lint clean, budget 6.61 ms with the 11% wider vertex. Two new tests:
+one asserts the old packing is *not* interpolation-safe (both corners decode to
+sky 1.0, three tenths of the way across it decodes to 0.2), the other that
+`push_vertex` lands sky in slot 6 and block light in slot 9. A point test of
+the encode/decode passed throughout and could never have caught this -- the bug
+lives between the vertices, not at them.
+
+
+## Branching filaments, drawn in the shader (2026-09-06)
+
+The tile gives mycelium a warm cast; this gives it threads. They are drawn in
+the fragment shader, not baked into the texture, for one reason: **a tile
+cannot branch across a block boundary.** Sixteen edge-connection variants per
+(base, species) would be 672 layers against the atlas's 92, and the threads
+would still repeat every block. Fed world-space coordinates instead, a
+filament crosses from block to block unbroken and the pattern never tiles.
+
+`hyphae(p)` is ridged, domain-warped value noise: the ridge is where the noise
+crosses its midpoint, and that line wanders and forks, which is what reads as
+branching. Two octaves, one warp, sixteen `hash12` calls per mycelium
+fragment.
+
+The shader needs no new vertex data. The layer index already carries the
+species -- mycelium layers run `myc_first + 6 * base + (species - 1)` -- so
+`(layer - first) % 6` is the species, and the six colours arrive once at
+startup in a uniform, from `Species.colour_*`, the same source the map overlay
+and the tiles use. Guarded on `u_unlit == 0 && u_use_tex == 1`, so overlays and
+the map are untouched.
+
+Defaults `Species.branch_strength` 60, `branch_scale` 500, `branch_sharp` 93,
+each overridable (`CF_MYC_BRANCH`, `CF_MYC_BRANCH_SCALE`, `CF_MYC_BRANCH_SHARP`)
+-- the settings were chosen by sweeping them from one build. Scale is the
+knob that matters: at 100 the threads were blurred smudges several blocks
+wide; from about 450 up they read as filaments.
+`docs/fungus-filaments.png` is the tile alone against the tile with threads.
+
+Cost is under the noise floor. Wild world, 600 frames: 284 fps with, 267
+without. Standing in a patch that fills the screen: 269 with, 259 without --
+the "with" runs measured faster both times, which is how much of a difference
+there is to find. Budget 6.32 ms, 460 tests, lint clean.

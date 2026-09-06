@@ -160,42 +160,49 @@ mod CubeForge.Veg do
 
   -- ── World edits: the tree's blocks ─────────────────────────────────────────
   doc "Stamp a tree of [trunk] logs of [species] (Trees.oak/pine/palm) rooted on ground [base] at (tx, tz), only into air. Returns the world."
+  -- The blocks are gathered against the world as it stands and written in one
+  -- World.set_blocks: a chunk copy per chunk touched, not per block, which was
+  -- most of a tree edit's 0.8 ms of placement.
   fn plant(w : CubeForge.World.World, tx : Int, tz : Int, base : Int, trunk : Int, species : Int) : CubeForge.World.World do
-    plant_go(w, tx, tz, base, trunk, species, 0)
+    W.set_blocks(w, plant_go(w, tx, tz, base, trunk, species, 0, Nil))
   end
-  pfn plant_go(w : CubeForge.World.World, tx : Int, tz : Int, base : Int, trunk : Int, species : Int, i : Int) : CubeForge.World.World do
-    if i >= 81 * (trunk + 2) do w
+  pfn in_world(x : Int, y : Int, z : Int) : Bool do
+    if x < 0 || z < 0 || x >= 128 || z >= 128 do false else y >= 0 && y < 256 end
+  end
+  pfn plant_go(w : CubeForge.World.World, tx : Int, tz : Int, base : Int, trunk : Int, species : Int, i : Int, acc : List(Int)) : List(Int) do
+    if i >= 81 * (trunk + 2) do acc
     else
       let x = tx - 4 + i % 9
       let z = tz - 4 + (i / 9) % 9
       let y = base + 1 + i / 81
       let id = Trees.block_of_tree(tx, tz, base, trunk, species, x, y, z)
-      let w1 = if id != 0 && y < 256 && W.block_at(w, x, y, z) == 0 do W.set_occupied(W.set_block(w, x, y, z, id), x, y, z, CubeForge.Light.occludes(id)) else w end
-      plant_go(w1, tx, tz, base, trunk, species, i + 1)
+      let take = if id == 0 do false else if !in_world(x, y, z) do false else W.block_at(w, x, y, z) == 0 end end
+      plant_go(w, tx, tz, base, trunk, species, i + 1, if take do Cons(W.pack_cell(x, y, z, id), acc) else acc end)
     end
   end
 
   doc "Fell the tree rooted at (x, base, z): the logs, then exactly the leaves its own shape says it owns. Not World.decay_leaves -- that searches a (2r+1)^3 box for a log around every leaf in a (2r+1)^3 box, up to five million reads per tree, and took seconds. A tree of known trunk and species is ~730 predicate checks. Where two canopies overlap a few shared leaves go with the felled tree; the standing one keeps its trunk and the rest."
   fn fell(w : CubeForge.World.World, x : Int, z : Int, base : Int) : CubeForge.World.World do
     let species = Trees.species_of_log(W.block_at(w, x, base + 1, z))
-    match fell_logs(w, x, z, base + 1) do
-      Felled(w1, ty) -> unleaf_go(w1, x, z, base, ty - base, species, 0)
-    end
+    -- the trunk's top, from the world as it stands; the logs and the leaves go in one write
+    let ty = trunk_top(w, x, z, base + 1)
+    W.set_blocks(w, unleaf_go(w, x, z, base, ty - base, species, 0, log_cells(x, z, base + 1, ty, Nil)))
   end
-  type Felled = Felled(CubeForge.World.World, Int)
-  pfn fell_logs(w : CubeForge.World.World, x : Int, z : Int, y : Int) : Felled do
-    if y >= 256 || !is_log(W.block_at(w, x, y, z)) do Felled(w, y - 1)
-    else fell_logs(W.set_occupied(W.set_block(w, x, y, z, 0), x, y, z, false), x, z, y + 1) end
+  pfn trunk_top(w : CubeForge.World.World, x : Int, z : Int, y : Int) : Int do
+    if y >= 256 || !is_log(W.block_at(w, x, y, z)) do y - 1 else trunk_top(w, x, z, y + 1) end
   end
-  pfn unleaf_go(w : CubeForge.World.World, tx : Int, tz : Int, base : Int, trunk : Int, species : Int, i : Int) : CubeForge.World.World do
-    if i >= 81 * (trunk + 2) do w
+  pfn log_cells(x : Int, z : Int, y : Int, ty : Int, acc : List(Int)) : List(Int) do
+    if y > ty do acc else log_cells(x, z, y + 1, ty, Cons(W.pack_cell(x, y, z, 0), acc)) end
+  end
+  pfn unleaf_go(w : CubeForge.World.World, tx : Int, tz : Int, base : Int, trunk : Int, species : Int, i : Int, acc : List(Int)) : List(Int) do
+    if i >= 81 * (trunk + 2) do acc
     else
       let x = tx - 4 + i % 9
       let z = tz - 4 + (i / 9) % 9
       let y = base + 1 + i / 81
       let want = Trees.block_of_tree(tx, tz, base, trunk, species, x, y, z)
-      let w1 = if y < 256 && C.is_foliage(want) && W.block_at(w, x, y, z) == want do W.set_occupied(W.set_block(w, x, y, z, 0), x, y, z, false) else w end
-      unleaf_go(w1, tx, tz, base, trunk, species, i + 1)
+      let take = if !C.is_foliage(want) do false else if !in_world(x, y, z) do false else W.block_at(w, x, y, z) == want end end
+      unleaf_go(w, tx, tz, base, trunk, species, i + 1, if take do Cons(W.pack_cell(x, y, z, 0), acc) else acc end)
     end
   end
 

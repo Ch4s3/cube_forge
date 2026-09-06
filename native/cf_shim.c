@@ -23,6 +23,7 @@
 #include <stdint.h>
 #include <math.h>
 #include <pthread.h>
+#include <mach/mach.h>
 
 /* ── NativeArray payload access ──────────────────────────────────────────────
  * March's NativeArray heap layout (runtime/march_runtime.c, NATIVE_ARR_HDR):
@@ -188,13 +189,26 @@ void cf_win_set_fullscreen(int64_t on) {
 }
 
 /* ── GL: shader program + one VAO shared by every mesh ──────────────────────
- * Vertex layout (9 floats): pos.xyz, uv, layer, shade, face, fx.
+ * Vertex layout (10 floats): pos.xyz, uv, layer, sky, face, fx, block light.
+ *
+ * Sky and block light are SEPARATE attributes and must stay that way. They
+ * were once one float, sky in the fraction and block light as an even integer
+ * above it, unpacked in the fragment shader. A varying is interpolated across
+ * the triangle, and the unpack is not linear: between two corners that are
+ * both fully sunlit but differ in block light, the decoded sky ran 1.0, 1.4,
+ * 1.8, 0.2, 0.6, 1.0 -- a sawtooth that painted near-black bands over lit
+ * ground wherever a glowing block stood. Two channels cannot share one
+ * interpolated scalar.
  * `fx` packs an effect id and an alpha: effect * 256 + alpha*255, exact
  * because floats hold integers to 2^24. Effect 1 is precipitation.
  * `face` is 0..5 (+y -y +x -x +z -z); the vertex shader turns it into a normal
  * for the flashlight and into the directional multiplier that used to be baked
  * into `shade` by the mesher.                                                  */
-#define CF_VERT_FLOATS 9
+#define CF_VERT_FLOATS 10
+/* Floats in one merged rectangle: six vertices. Every reserve on both sides of
+ * the FFI is stated in these terms -- a literal here and a literal in
+ * F32Buf.push_quad drifted apart the moment the vertex grew. */
+#define CF_QUAD_FLOATS (6 * CF_VERT_FLOATS)
 #define CF_PRECIP_SLOT 249
 static GLuint g_prog = 0, g_vao = 0;
 static GLint  g_u_vp = -1, g_u_tex = -1;
@@ -207,9 +221,13 @@ static const char *VS =
     "layout(location=3) in float a_shade;\n"
     "layout(location=4) in float a_face;\n"
     "layout(location=5) in float a_fx;\n"
+    "layout(location=6) in float a_blk;\n"
     "uniform mat4 u_vp;\n"
     "uniform float u_time;\n"
-    "out vec2 v_uv; out float v_layer; out float v_shade;\n"
+    /* The slot's offset: a chunk mesh is baked at the window-local origin it
+     * had when meshed, and the window has since slid (cf_gfx_shift). */
+    "uniform vec2 u_off;\n"
+    "out vec2 v_uv; out float v_layer; out float v_shade; out float v_blk;\n"
     "out vec3 v_world; out vec3 v_normal; out float v_fx;\n"
     "const vec3 NORMALS[6] = vec3[6](vec3(0,1,0), vec3(0,-1,0), vec3(1,0,0), vec3(-1,0,0), vec3(0,0,1), vec3(0,0,-1));\n"
     "void main(){\n"
@@ -219,7 +237,8 @@ static const char *VS =
      * fog see the block the game logic sees. */
     "  int fe = int(a_fx + 0.5) >> 8;\n"
     "  vec3 p = a_pos;\n"
-    "  if (fe >= 2) p.y += 0.03 * sin(u_time * 1.7 + a_pos.x * 1.3 + a_pos.z * 0.9);\n"
+    "  p.xz += u_off;\n"
+    "  if (fe >= 2) p.y += 0.03 * sin(u_time * 1.7 + p.x * 1.3 + p.z * 0.9);\n"
     "  gl_Position = u_vp * vec4(p,1.0);\n"
     "  v_uv=a_uv; v_layer=a_layer;\n"
     /* v_shade is the packed shade word (see Vertex.pack_shade): sky x AO in
@@ -228,12 +247,13 @@ static const char *VS =
      * used to be folded in here is replaced by a real N.L against a sun that
      * moves, computed per fragment. */
     "  v_shade = a_shade;\n"
-    "  v_world = a_pos; v_normal = NORMALS[f];\n"
+    "  v_blk = a_blk;\n"
+    "  v_world = a_pos + vec3(u_off.x, 0.0, u_off.y); v_normal = NORMALS[f];\n"
     "  v_fx = a_fx;\n"
     "}\n";
 static const char *FS =
     "#version 330 core\n"
-    "in vec2 v_uv; in float v_layer; in float v_shade;\n"
+    "in vec2 v_uv; in float v_layer; in float v_shade; in float v_blk;\n"
     "in vec3 v_world; in vec3 v_normal; in float v_fx;\n"
     "uniform sampler2DArray u_tex;\n"
     "uniform int u_use_tex;\n"
@@ -254,6 +274,12 @@ static const char *FS =
     "uniform float u_overcast;\n"
     "uniform float u_bolt;\n"
     "uniform float u_time;\n"
+    "uniform vec3  u_species[6];\n"
+    "uniform int   u_myc_first;\n"
+    "uniform int   u_myc_count;\n"
+    "uniform float u_branch;\n"
+    "uniform float u_branch_scale;\n"
+    "uniform float u_branch_sharp;\n"
     "out vec4 o_color;\n"
     /* The beam shape never varies at runtime, only its position, aim and
      * on/off state, so the cone half-angles are constants rather than uniforms. */
@@ -374,6 +400,27 @@ static const char *FS =
     "  return smoothstep(0.75, 1.0, hit / maxDist);\n"
     "}\n"
     "float hash12(vec2 v){ return fract(sin(dot(v, vec2(12.9898, 78.233))) * 43758.5453); }\n"
+    "float vnoise(vec2 p){\n"
+    "  vec2 i = floor(p), f = fract(p);\n"
+    "  f = f * f * (3.0 - 2.0 * f);\n"
+    "  float a = hash12(i), b = hash12(i + vec2(1.0, 0.0));\n"
+    "  float c = hash12(i + vec2(0.0, 1.0)), d = hash12(i + vec2(1.0, 1.0));\n"
+    "  return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);\n"
+    "}\n"
+    /* Hyphae: ridged, domain-warped value noise. The ridge is where the
+     * noise crosses its midpoint, which wanders and FORKS -- that fork is
+     * what reads as branching, and no tile can produce it because the
+     * threads have to run on across a block boundary. Fed world-space
+     * coordinates, so a filament crosses from block to block unbroken and
+     * the pattern never repeats. The warp keeps the ridges from reading as
+     * contour lines on a map. */
+    "float hyphae(vec2 p){\n"
+    "  vec2 w = p * u_branch_scale;\n"
+    "  vec2 q = w + 0.75 * vec2(vnoise(w * 0.55), vnoise(w * 0.55 + 19.7));\n"
+    "  float n = 0.65 * vnoise(q * 1.15) + 0.35 * vnoise(q * 2.60);\n"
+    "  float ridge = 1.0 - abs(2.0 * n - 1.0);\n"
+    "  return smoothstep(u_branch_sharp, 1.0, ridge);\n"
+    "}\n"
     /* Hard shadows are one ray. Soft shadows spread SOFT_TAPS over a small cone:
      * because the rays diverge, the penumbra widens with distance from the
      * caster on its own, which is what real soft shadows do. The cone is rotated
@@ -409,8 +456,8 @@ static const char *FS =
     /* The shade float packs two channels (see Vertex.pack_shade): sky shade in
      * [0, 1], and block-light shade in even integers above it. Overlays push a
      * plain shade in [0, 1], which decodes as sky-only and leaves them alone. */
-    "  float sk = v_shade - 2.0 * floor(v_shade * 0.5);\n"
-    "  float bl = floor(v_shade * 0.5) / 255.0;\n"
+    "  float sk = v_shade;\n"
+    "  float bl = v_blk;\n"
     "  float spd = float(fxw & 255) / 255.0 * 7.0;\n"
     /* Flowing water scrolls its ripple along the flow; still water drifts;
      * fast or falling water blends toward the foam layer. */
@@ -421,6 +468,19 @@ static const char *FS =
     "  float foam = (fe == 11) ? 1.0 : ((fe >= 2 && fe <= 9) ? spd / 7.0 : 0.0);\n"
     "  if (foam > 0.0 && u_use_tex == 1) t = mix(t, texture(u_tex, vec3(uv * 1.5, 16.0)), foam * 0.7);\n"
     "  if (u_cutout == 1 && t.a < 0.5) discard;\n"
+    /* Mycelium wears its species colour twice: a wash baked into the tile
+     * (CubeForge.Texture.myc_tint) and these filaments, drawn here because
+     * they must not stop at a block edge. The layer index carries the
+     * species -- layers are myc_first + 6 * base + (species - 1) -- so no
+     * vertex channel is needed. Overlays (u_unlit) are not the world. */
+    "  if (u_branch > 0.0 && u_unlit == 0 && u_use_tex == 1) {\n"
+    "    int mycl = int(v_layer + 0.5) - u_myc_first;\n"
+    "    if (mycl >= 0 && mycl < u_myc_count) {\n"
+    "      vec3 an = abs(v_normal);\n"
+    "      vec2 pw = (an.y > 0.5) ? v_world.xz : ((an.x > 0.5) ? v_world.zy : v_world.xy);\n"
+    "      t.rgb = mix(t.rgb, u_species[mycl % 6], hyphae(pw) * u_branch);\n"
+    "    }\n"
+    "  }\n"
     "  float moon = clamp((MOON_UNTIL - u_sun) / MOON_UNTIL, 0.0, 1.0);\n"
     /* Cloud does not remove light, it diffuses it: ambient rises as the direct
      * term falls, which is why an overcast day is flat rather than dark.
@@ -504,13 +564,33 @@ static GLuint compile(GLenum kind, const char *src) {
 }
 
 #define CF_MAX_MESHES 256
+/* Two VBOs per mesh slot. An upload goes to the one the last frame did NOT
+ * draw, so glBufferSubData never waits on a buffer the GPU still reads; the
+ * drain trace had 1-4 ms stalls in it on a single buffer, orphaning or not. */
 static GLuint g_vbo[CF_MAX_MESHES];
+static GLuint g_vbo_b[CF_MAX_MESHES];
+static unsigned char g_vbo_cur[CF_MAX_MESHES];
+static int64_t g_vbo_cap[2][CF_MAX_MESHES];   /* floats allocated per buffer; grown, never shrunk */
+static inline GLuint vbo_of(int64_t slot) { return g_vbo_cur[slot] ? g_vbo_b[slot] : g_vbo[slot]; }
+/* A VAO per mesh slot was tried (2026-09-05 perf pass): 192 chunk draws a frame as one bind and one draw each. A/B over six alternating runs was noise, so the shared VAO stays. */
+static int g_debug = -1;
+static inline int cf_debug(void) { if (g_debug < 0) g_debug = getenv("CF_DEBUG") != NULL; return g_debug; }
+static GLint  g_u_species = -1;
+static GLint  g_u_myc_first = -1;
+static GLint  g_u_myc_count = -1;
+static GLint  g_u_branch = -1;
+static GLint  g_u_branch_scale = -1;
+static GLint  g_u_branch_sharp = -1;
 static GLint  g_u_use_tex = -1;
 static GLint  g_u_cutout = -1;
 static GLint  g_u_sun = -1, g_u_eye = -1, g_u_dir = -1, g_u_flash = -1;
 static GLint  g_u_sundir = -1, g_u_moondir = -1, g_u_unlit = -1;
 static GLint  g_u_time = -1;
 static GLint  g_u_fog_density = -1, g_u_fog_color = -1, g_u_overcast = -1, g_u_bolt = -1;
+static GLint  g_u_off = -1;
+/* Per-slot window offset (blocks, x and z): zero for a slot uploaded since the
+ * last shift, -16 per chunk the window has slid since for one that was not. */
+static float  g_off[CF_MAX_MESHES][2];
 /* The clear colour, kept so the fog can reuse it: fog colour IS sky colour,
  * so distant geometry dissolves into the horizon instead of popping at the
  * far plane, and the two can never drift apart. */
@@ -538,6 +618,12 @@ int64_t cf_gfx_init(void) {
     glDeleteShader(vs); glDeleteShader(fs);
     g_u_vp = glGetUniformLocation(g_prog, "u_vp");
     g_u_tex = glGetUniformLocation(g_prog, "u_tex");
+    g_u_species   = glGetUniformLocation(g_prog, "u_species");
+    g_u_myc_first = glGetUniformLocation(g_prog, "u_myc_first");
+    g_u_myc_count = glGetUniformLocation(g_prog, "u_myc_count");
+    g_u_branch    = glGetUniformLocation(g_prog, "u_branch");
+    g_u_branch_scale = glGetUniformLocation(g_prog, "u_branch_scale");
+    g_u_branch_sharp = glGetUniformLocation(g_prog, "u_branch_sharp");
     g_u_use_tex = glGetUniformLocation(g_prog, "u_use_tex");
     g_u_cutout = glGetUniformLocation(g_prog, "u_cutout");
     g_u_sun = glGetUniformLocation(g_prog, "u_sun");
@@ -556,9 +642,11 @@ int64_t cf_gfx_init(void) {
     g_u_overcast = glGetUniformLocation(g_prog, "u_overcast");
     g_u_bolt = glGetUniformLocation(g_prog, "u_bolt");
     g_u_time = glGetUniformLocation(g_prog, "u_time");
-    if (getenv("CF_DEBUG")) fprintf(stderr, "cf: uniforms occ=%d shadow=%d sundir=%d unlit=%d\n", g_u_occ, g_u_shadow, g_u_sundir, g_u_unlit);
+    g_u_off = glGetUniformLocation(g_prog, "u_off");
+    if (cf_debug()) fprintf(stderr, "cf: uniforms occ=%d shadow=%d sundir=%d unlit=%d\n", g_u_occ, g_u_shadow, g_u_sundir, g_u_unlit);
     glGenVertexArrays(1, &g_vao);
     glGenBuffers(CF_MAX_MESHES, g_vbo);
+    glGenBuffers(CF_MAX_MESHES, g_vbo_b);
     glUseProgram(g_prog);
     glUniform1i(g_u_tex, 0);
     glUniform1i(g_u_use_tex, 0);
@@ -569,25 +657,60 @@ int64_t cf_gfx_init(void) {
 /* Upload the first `nfloats` floats of a March NativeF32Arr into mesh slot `slot`. */
 void cf_gfx_upload(int64_t slot, void *arr, int64_t nfloats) {
     if (slot < 0 || slot >= CF_MAX_MESHES) return;
+    g_off[slot][0] = g_off[slot][1] = 0.0f;   /* baked at the current local origin */
     if (nfloats > narr_len(arr)) nfloats = narr_len(arr);
-    glBindBuffer(GL_ARRAY_BUFFER, g_vbo[slot]);
+    g_vbo_cur[slot] ^= 1;
+    glBindBuffer(GL_ARRAY_BUFFER, vbo_of(slot));
     glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(nfloats * 4), narr_data(arr), GL_STATIC_DRAW);
-    if (getenv("CF_DEBUG")) { const float *f = narr_data(arr); fprintf(stderr, "cf: upload slot=%lld nfloats=%lld arrlen=%lld first=%g %g %g %g %g %g %g glerr=%d\n", (long long)slot, (long long)nfloats, (long long)narr_len(arr), f[0],f[1],f[2],f[3],f[4],f[5],f[6], (int)glGetError()); }
+    if (cf_debug()) { const float *f = narr_data(arr); fprintf(stderr, "cf: upload slot=%lld nfloats=%lld arrlen=%lld first=%g %g %g %g %g %g %g glerr=%d\n", (long long)slot, (long long)nfloats, (long long)narr_len(arr), f[0],f[1],f[2],f[3],f[4],f[5],f[6], (int)glGetError()); }
 }
 
+/* The parts of one upload are staged in a scratch buffer and sent with ONE
+ * glBufferSubData when the last of them lands (offset + n reaches the total
+ * upload_begin announced). Sixteen sections were sixteen calls, and the drain
+ * trace showed the driver charging 1-4 ms for some of them; one call is one
+ * charge. A part sequence that never completes is flushed by the next begin. */
+static float  *g_stage = NULL;
+static int64_t g_stage_cap = 0, g_stage_total = 0, g_stage_filled = 0, g_stage_slot = -1;
+static void cf_stage_flush(void) {
+    if (g_stage_slot < 0 || g_stage_filled <= 0) { g_stage_slot = -1; return; }
+    glBindBuffer(GL_ARRAY_BUFFER, vbo_of(g_stage_slot));
+    glBufferSubData(GL_ARRAY_BUFFER, 0, (GLsizeiptr)(g_stage_filled * 4), g_stage);
+    g_stage_slot = -1; g_stage_filled = 0;
+}
 /* Assemble a VBO from several March buffers: reserve `nfloats` floats, then
  * copy parts at float offsets. GL 3.3 core / GLES 3.0: glBufferData(NULL) +
  * glBufferSubData. */
 void cf_gfx_upload_begin(int64_t slot, int64_t nfloats) {
     if (slot < 0 || slot >= CF_MAX_MESHES) return;
-    glBindBuffer(GL_ARRAY_BUFFER, g_vbo[slot]);
-    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(nfloats * 4), NULL, GL_STATIC_DRAW);
+    g_off[slot][0] = g_off[slot][1] = 0.0f;
+    cf_stage_flush();
+    if (nfloats > g_stage_cap) { free(g_stage); g_stage_cap = nfloats + nfloats / 2 + 1024; g_stage = (float *)malloc((size_t)g_stage_cap * 4); }
+    g_stage_slot = nfloats > 0 ? slot : -1; g_stage_total = nfloats; g_stage_filled = 0;
+    g_vbo_cur[slot] ^= 1;
+    glBindBuffer(GL_ARRAY_BUFFER, vbo_of(slot));
+    /* Reallocate only when the mesh outgrows the buffer, with headroom; a
+     * smaller mesh reuses the store and the parts land by glBufferSubData
+     * alone. The other buffer of the pair is the one the last frame drew, so
+     * nothing here waits on the GPU. */
+    int64_t *cap = &g_vbo_cap[g_vbo_cur[slot]][slot];
+    if (nfloats > *cap) {
+        *cap = nfloats + nfloats / 2 + 1024;
+        glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(*cap * 4), NULL, GL_DYNAMIC_DRAW);
+    }
 }
 void cf_gfx_upload_part(int64_t slot, int64_t offset, void *arr, int64_t nfloats) {
     if (slot < 0 || slot >= CF_MAX_MESHES || nfloats <= 0) return;
     if (nfloats > narr_len(arr)) nfloats = narr_len(arr);
-    glBindBuffer(GL_ARRAY_BUFFER, g_vbo[slot]);
-    glBufferSubData(GL_ARRAY_BUFFER, (GLintptr)(offset * 4), (GLsizeiptr)(nfloats * 4), narr_data(arr));
+    if (slot != g_stage_slot || offset + nfloats > g_stage_total) {
+        /* not the upload in progress: send it straight */
+        glBindBuffer(GL_ARRAY_BUFFER, vbo_of(slot));
+        glBufferSubData(GL_ARRAY_BUFFER, (GLintptr)(offset * 4), (GLsizeiptr)(nfloats * 4), narr_data(arr));
+        return;
+    }
+    memcpy(g_stage + offset, narr_data(arr), (size_t)nfloats * 4);
+    if (offset + nfloats > g_stage_filled) g_stage_filled = offset + nfloats;
+    if (g_stage_filled >= g_stage_total) cf_stage_flush();
 }
 
 void cf_gfx_begin_frame(double r, double g, double b) {
@@ -602,12 +725,13 @@ void cf_gfx_begin_frame(double r, double g, double b) {
 void cf_gfx_set_view_proj(void *arr) {
     if (narr_len(arr) < 16) return;
     glUniformMatrix4fv(g_u_vp, 1, GL_FALSE, (const float *)narr_data(arr));
-    if (getenv("CF_DEBUG")) { const float *f = narr_data(arr); fprintf(stderr, "cf: vp loc=%d diag=%g %g %g %g glerr=%d\n", g_u_vp, f[0], f[5], f[10], f[15], (int)glGetError()); }
+    if (cf_debug()) { const float *f = narr_data(arr); fprintf(stderr, "cf: vp loc=%d diag=%g %g %g %g glerr=%d\n", g_u_vp, f[0], f[5], f[10], f[15], (int)glGetError()); }
 }
 
 void cf_gfx_draw(int64_t slot, int64_t nverts) {
     if (slot < 0 || slot >= CF_MAX_MESHES || nverts <= 0) return;
-    glBindBuffer(GL_ARRAY_BUFFER, g_vbo[slot]);
+    glUniform2f(g_u_off, g_off[slot][0], g_off[slot][1]);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo_of(slot));
     GLsizei stride = CF_VERT_FLOATS * sizeof(float);
     glEnableVertexAttribArray(0); glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void *)0);
     glEnableVertexAttribArray(1); glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, stride, (void *)(3 * 4));
@@ -615,8 +739,58 @@ void cf_gfx_draw(int64_t slot, int64_t nverts) {
     glEnableVertexAttribArray(3); glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, stride, (void *)(6 * 4));
     glEnableVertexAttribArray(4); glVertexAttribPointer(4, 1, GL_FLOAT, GL_FALSE, stride, (void *)(7 * 4));
     glEnableVertexAttribArray(5); glVertexAttribPointer(5, 1, GL_FLOAT, GL_FALSE, stride, (void *)(8 * 4));
+    glEnableVertexAttribArray(6); glVertexAttribPointer(6, 1, GL_FLOAT, GL_FALSE, stride, (void *)(9 * 4));
     glDrawArrays(GL_TRIANGLES, 0, (GLsizei)nverts);
-    if (getenv("CF_DEBUG")) { fprintf(stderr, "cf: draw slot=%lld nverts=%lld glerr=%d prog=%u vao=%u\n", (long long)slot, (long long)nverts, (int)glGetError(), g_prog, g_vao); }
+    if (cf_debug()) { fprintf(stderr, "cf: draw slot=%lld nverts=%lld glerr=%d prog=%u vao=%u\n", (long long)slot, (long long)nverts, (int)glGetError(), g_prog, g_vao); }
+}
+
+/* ── The window slid ──────────────────────────────────────────────────────
+ * The world's window moved by (dx, dz) chunks (CubeForge.World.shift). The
+ * chunk mesh slots -- three ranges of 64: opaque, water, foliage -- move
+ * with their chunks: local slot d after the shift is what was at d + dx +
+ * 8 dz, and its offset gains -16 dx, -16 dz because its vertices are still
+ * baked where the chunk used to be. The handles of the slots that left are
+ * handed to the slots that came in (their contents are stale until March
+ * uploads a mesh, and March zeroes those slots' vertex counts). Every
+ * particle, spray emitter and spring the shim holds is in window
+ * coordinates too, so it moves 16 blocks the other way; a spring that left
+ * the window is dropped. */
+static void cf_shift_particles(int64_t dx, int64_t dz);   /* defined with the particle state, below */
+void cf_gfx_shift(int64_t dx, int64_t dz) {
+    /* A slot's state is its VBO pair, which of the two the last upload went
+     * to, both capacities and its offset: all of it moves with the chunk. */
+    for (int base = 0; base < 192; base += 64) {
+        GLuint olda[64], oldb[64]; unsigned char oldcur[64]; int64_t oldcap[2][64]; float oldoff[64][2]; int used[64];
+        for (int i = 0; i < 64; i++) {
+            olda[i] = g_vbo[base + i]; oldb[i] = g_vbo_b[base + i]; oldcur[i] = g_vbo_cur[base + i];
+            oldcap[0][i] = g_vbo_cap[0][base + i]; oldcap[1][i] = g_vbo_cap[1][base + i];
+            oldoff[i][0] = g_off[base + i][0]; oldoff[i][1] = g_off[base + i][1]; used[i] = 0;
+        }
+        int has[64];
+        for (int d = 0; d < 64; d++) {
+            int64_t sx = d % 8 + dx, sz = d / 8 + dz;
+            has[d] = 0;
+            if (sx >= 0 && sx < 8 && sz >= 0 && sz < 8) {
+                int s = (int)(sx + 8 * sz);
+                g_vbo[base + d] = olda[s]; g_vbo_b[base + d] = oldb[s]; g_vbo_cur[base + d] = oldcur[s];
+                g_vbo_cap[0][base + d] = oldcap[0][s]; g_vbo_cap[1][base + d] = oldcap[1][s];
+                used[s] = 1; has[d] = 1;
+                g_off[base + d][0] = oldoff[s][0] - 16.0f * (float)dx;
+                g_off[base + d][1] = oldoff[s][1] - 16.0f * (float)dz;
+            }
+        }
+        int u = 0;
+        for (int d = 0; d < 64; d++) {
+            if (has[d]) continue;
+            while (u < 64 && used[u]) u++;
+            if (u >= 64) break;
+            g_vbo[base + d] = olda[u]; g_vbo_b[base + d] = oldb[u]; g_vbo_cur[base + d] = oldcur[u];
+            g_vbo_cap[0][base + d] = oldcap[0][u]; g_vbo_cap[1][base + d] = oldcap[1][u];
+            used[u] = 1;
+            g_off[base + d][0] = g_off[base + d][1] = 0.0f;
+        }
+    }
+    cf_shift_particles(dx, dz);
 }
 
 /* Upload an RGBA8 texture array (layer-major, row-major, 4 bytes/texel) from a
@@ -679,7 +853,7 @@ void cf_gfx_upload_occupancy(void *arr, int64_t w, int64_t h, int64_t d) {
     for (int64_t z = 0; z < d; z++)
         for (int64_t y = 0; y < h; y++)
             for (int64_t x = 0; x < w; x++)
-                if (fine[x + w * (y + h * z)]) {
+                if (fine[x + w * (y + h * z)] == 255) {   /* the byte is the light opacity; 255 alone is solid */
                     size_t ci = (size_t)(x / CF_OCC_CS)
                               + (size_t)g_occ_cw * ((size_t)(y / CF_OCC_CS)
                               + (size_t)g_occ_ch * (size_t)(z / CF_OCC_CS));
@@ -731,6 +905,56 @@ void cf_gfx_set_voxel(int64_t x, int64_t y, int64_t z, int64_t solid) {
             glTexSubImage3D(GL_TEXTURE_3D, 0, (GLint)(x / CF_OCC_CS), (GLint)(y / CF_OCC_CS),
                             (GLint)(z / CF_OCC_CS), 1, 1, 1, GL_RED, GL_UNSIGNED_BYTE, &cv);
         }
+    }
+    glActiveTexture(GL_TEXTURE0);
+}
+
+/* Sync the box [x0..x1] x [y0..y1] x [z0..z1] of the occupancy texture from
+ * the world's occupancy array (x + 128 * (y + 256 * z), the texture's own
+ * layout, so one glTexSubImage3D with unpack strides does the box), then
+ * recount every coarse cell the box touches from the array. A tree edit used
+ * to make 729 one-texel calls here (0.6 ms), and each call bumped the coarse
+ * count whether or not the voxel had changed. The recount is exact. */
+void cf_gfx_sync_box(void *arr, int64_t x0, int64_t y0, int64_t z0, int64_t x1, int64_t y1, int64_t z1) {
+    if (!g_occ) return;
+    if (narr_len(arr) < g_occ_w * g_occ_h * g_occ_d) return;
+    if (x0 < 0) x0 = 0; if (y0 < 0) y0 = 0; if (z0 < 0) z0 = 0;
+    if (x1 >= g_occ_w) x1 = g_occ_w - 1; if (y1 >= g_occ_h) y1 = g_occ_h - 1; if (z1 >= g_occ_d) z1 = g_occ_d - 1;
+    if (x0 > x1 || y0 > y1 || z0 > z1) return;
+    const unsigned char *a = (const unsigned char *)narr_data(arr);
+    /* the fine texture: the box straight out of the array. The array holds
+     * 0 / occ_solid; the texture wants 0 / 255, so stage the box. */
+    int64_t bw = x1 - x0 + 1, bh = y1 - y0 + 1, bd = z1 - z0 + 1;
+    unsigned char *stage = (unsigned char *)malloc((size_t)(bw * bh * bd));
+    if (!stage) return;
+    for (int64_t z = z0; z <= z1; z++)
+        for (int64_t y = y0; y <= y1; y++)
+            for (int64_t x = x0; x <= x1; x++)
+                stage[(x - x0) + bw * ((y - y0) + bh * (z - z0))] = a[x + g_occ_w * (y + g_occ_h * z)] == 255 ? 255 : 0;
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_3D, g_occ);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexSubImage3D(GL_TEXTURE_3D, 0, (GLint)x0, (GLint)y0, (GLint)z0, (GLsizei)bw, (GLsizei)bh, (GLsizei)bd, GL_RED, GL_UNSIGNED_BYTE, stage);
+    free(stage);
+    if (g_occ_count && g_occ_c) {
+        glActiveTexture(GL_TEXTURE2);
+        glBindTexture(GL_TEXTURE_3D, g_occ_c);
+        for (int64_t cz = z0 / CF_OCC_CS; cz <= z1 / CF_OCC_CS; cz++)
+            for (int64_t cy = y0 / CF_OCC_CS; cy <= y1 / CF_OCC_CS; cy++)
+                for (int64_t cx = x0 / CF_OCC_CS; cx <= x1 / CF_OCC_CS; cx++) {
+                    uint16_t n = 0;
+                    for (int64_t z = cz * CF_OCC_CS; z < (cz + 1) * CF_OCC_CS && z < g_occ_d; z++)
+                        for (int64_t y = cy * CF_OCC_CS; y < (cy + 1) * CF_OCC_CS && y < g_occ_h; y++)
+                            for (int64_t x = cx * CF_OCC_CS; x < (cx + 1) * CF_OCC_CS && x < g_occ_w; x++)
+                                if (a[x + g_occ_w * (y + g_occ_h * z)] == 255) n++;
+                    size_t ci = (size_t)cx + (size_t)g_occ_cw * ((size_t)cy + (size_t)g_occ_ch * (size_t)cz);
+                    uint16_t before = g_occ_count[ci];
+                    g_occ_count[ci] = n;
+                    if ((before > 0) != (n > 0)) {
+                        unsigned char cv = n ? 255 : 0;
+                        glTexSubImage3D(GL_TEXTURE_3D, 0, (GLint)cx, (GLint)cy, (GLint)cz, 1, 1, 1, GL_RED, GL_UNSIGNED_BYTE, &cv);
+                    }
+                }
     }
     glActiveTexture(GL_TEXTURE0);
 }
@@ -846,6 +1070,7 @@ static void pcl_vert(float *v, float x, float y, float z,
     v[6] = 1.0f;                    /* shade: unlit, so this is a pass-through */
     v[7] = 0.0f;                    /* face */
     v[8] = fx;                      /* effect 1 + alpha, packed */
+    v[9] = 0.0f;                    /* block light: overlays and particles carry none */
 }
 
 /* Step every live particle, rebuild the geometry, and upload it. One call per
@@ -1132,7 +1357,7 @@ void cf_gfx_draw_lines(int64_t slot, int64_t nverts) {
     glDisable(GL_DEPTH_TEST);
     cf_unlit_begin();
     glUniform1i(g_u_use_tex, 0);
-    glBindBuffer(GL_ARRAY_BUFFER, g_vbo[slot]);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo_of(slot));
     GLsizei stride = CF_VERT_FLOATS * sizeof(float);
     glEnableVertexAttribArray(0); glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void *)0);
     glEnableVertexAttribArray(1); glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, stride, (void *)(3 * 4));
@@ -1180,6 +1405,263 @@ void *cf_f32_blit(void *dst, int64_t di, void *src, int64_t si, int64_t n) {
     memcpy((float *)narr_data(dst) + di, (const float *)narr_data(src) + si, (size_t)n * 4);
     return dst;
 }
+
+/* The f64 twin, for the biome field's NativeFloatArr columns (a window
+ * shift slides them a row at a time). Same rc == 1 contract. */
+void *cf_f64_blit(void *dst, int64_t di, void *src, int64_t si, int64_t n) {
+    int64_t rc = *(int64_t *)dst;
+    if (rc != 1) { fprintf(stderr, "cf_f64_blit: destination is shared (rc=%lld); refusing to write in place\n", (long long)rc); abort(); }
+    if (n <= 0) return dst;
+    if (di < 0 || si < 0 || di + n > narr_len(dst) || si + n > narr_len(src)) {
+        fprintf(stderr, "cf_f64_blit: out of range (di=%lld si=%lld n=%lld dst=%lld src=%lld)\n",
+                (long long)di, (long long)si, (long long)n, (long long)narr_len(dst), (long long)narr_len(src));
+        abort();
+    }
+    memcpy((double *)narr_data(dst) + di, (const double *)narr_data(src) + si, (size_t)n * 8);
+    return dst;
+}
+
+/* Stamp a model template: copy n floats (whole 9-float vertices) from src[si..]
+ * into dst[di..], adding (dx, dy, dz) to each vertex's position and writing
+ * [shade] into its shade slot. The March version did this with nine boxed-Float
+ * reads and three boxed-Float adds per vertex; the profile put a bush stamp at
+ * thousands of allocations. Same rc == 1 contract as cf_f32_blit. */
+void *cf_f32_stamp(void *dst, int64_t di, void *src, int64_t si, int64_t n, double dx, double dy, double dz, double shade) {
+    int64_t rc = *(int64_t *)dst;
+    if (rc != 1) { fprintf(stderr, "cf_f32_stamp: destination is shared (rc=%lld); refusing to write in place\n", (long long)rc); abort(); }
+    if (n <= 0) return dst;
+    if (di < 0 || si < 0 || di + n > narr_len(dst) || si + n > narr_len(src) || n % CF_VERT_FLOATS != 0) {
+        fprintf(stderr, "cf_f32_stamp: out of range (di=%lld si=%lld n=%lld dst=%lld src=%lld)\n",
+                (long long)di, (long long)si, (long long)n, (long long)narr_len(dst), (long long)narr_len(src));
+        abort();
+    }
+    float *d = (float *)narr_data(dst) + di;
+    const float *s = (const float *)narr_data(src) + si;
+    /* [shade] arrives packed and is split into the two light attributes, as in
+     * cf_vert: the template's own slots 6 and 9 are placeholders. */
+    double blk = floor(shade * 0.5);
+    for (int64_t i = 0; i < n; i += CF_VERT_FLOATS) {
+        d[i + 0] = (float)((double)s[i + 0] + dx);
+        d[i + 1] = (float)((double)s[i + 1] + dy);
+        d[i + 2] = (float)((double)s[i + 2] + dz);
+        d[i + 3] = s[i + 3]; d[i + 4] = s[i + 4]; d[i + 5] = s[i + 5];
+        d[i + 6] = (float)(shade - 2.0 * blk);
+        d[i + 7] = s[i + 7]; d[i + 8] = s[i + 8];
+        d[i + 9] = (float)(blk / 255.0);
+    }
+    return dst;
+}
+
+/* ── The greedy mesher's quad, written here ──────────────────────────────────
+ * One merged rectangle of the section mesher: 6 vertices x CF_VERT_FLOATS floats at
+ * dst[at..], from the integer description the greedy pass has (direction d,
+ * section sy, slice a, mask cell (u, v), size wd x h, the packed key) plus the
+ * chunk origin and the texture-layer table. This is Mesher.emit_rect and
+ * quad_sized, Vertex.pack_shade, Mesher.corner_sky/corner_blk and should_flip
+ * in C, arithmetic in the same order in double so the floats come out
+ * bit-identical (the mesh hash is the oracle). Why here: every Float in March
+ * is a heap object, and a quad in March was some sixty of them; the profile
+ * put 60% of a section's mesh time in the allocator.
+ *
+ * Key layout (Mesher.key_of): id in the low 8 bits, four 10-bit corners c0..c3
+ * at 2^8, 2^18, 2^28, 2^38 in mask (u, v) order, the shown species at 2^48.
+ * Corner (Mesher.pack_corner): skylight in the low nibble, AO 0..3 above it,
+ * block light 0..15 above that.
+ * Layers: tab[id * 6 + d] for a block face; tab[1536 + k * 6 + (sp - 1)] for
+ * mycelium base index k shown with species sp (Texture.layer_table). */
+static double cf_corner_ao(int64_t p) { return 0.55 + 0.15 * (double)((p / 16) % 4); }
+static double cf_corner_sky(int64_t p) { return ((double)(p % 16) / 15.0) * cf_corner_ao(p); }
+static double cf_corner_blk(int64_t p) { return ((double)(p / 64) / 15.0) * cf_corner_ao(p); }
+static double cf_clamp01(double v) { return v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v); }
+static double cf_pack_shade(double sky, double blk) { return 2.0 * (double)(int64_t)(cf_clamp01(blk) * 255.0 + 0.5) + cf_clamp01(sky); }
+static double cf_brightness(double p) { double h = floor(p / 2.0); return (p - 2.0 * h) + h / 255.0; }
+/* [shade] arrives packed (see cf_pack_shade / CubeForge.Vertex.pack_shade) and is
+ * split HERE, on the CPU, into the two attributes the GPU interpolates. The
+ * packed form never reaches a varying -- see the layout note above. */
+static void cf_vert(float *o, double x, double y, double z, double u, double v, double layer, double shade, double face) {
+    double blk = floor(shade * 0.5);
+    o[0] = (float)x; o[1] = (float)y; o[2] = (float)z; o[3] = (float)u; o[4] = (float)v;
+    o[5] = (float)layer; o[6] = (float)(shade - 2.0 * blk); o[7] = (float)face; o[8] = 255.0f;
+    o[9] = (float)(blk / 255.0);
+}
+static void cf_quad_into(float *o, int64_t d, int64_t sy, int64_t a, int64_t u, int64_t v, int64_t wd, int64_t h,
+                         int64_t key, double ox, double oz, const float *tab, int64_t ntab);
+void *cf_mesh_quad(void *dst, int64_t at, int64_t d, int64_t sy, int64_t a, int64_t u, int64_t v, int64_t wd, int64_t h,
+                   int64_t key, double ox, double oz, void *layers) {
+    int64_t rc = *(int64_t *)dst;
+    if (rc != 1) { fprintf(stderr, "cf_mesh_quad: destination is shared (rc=%lld); refusing to write in place\n", (long long)rc); abort(); }
+    if (at < 0 || at + 6 * CF_VERT_FLOATS > narr_len(dst)) { fprintf(stderr, "cf_mesh_quad: out of range (at=%lld dst=%lld)\n", (long long)at, (long long)narr_len(dst)); abort(); }
+    cf_quad_into((float *)narr_data(dst) + at, d, sy, a, u, v, wd, h, key, ox, oz, (const float *)narr_data(layers), narr_len(layers));
+    return dst;
+}
+
+/* One slice of the greedy pass: the 256 keys of mask[base..base+256) (mask
+ * index u + 16 * v), merged into rectangles in the mesher's scan order --
+ * first unclaimed cell in index order, widest run along u of the same key,
+ * tallest stack of such rows along v -- each written as a quad at dst[at..].
+ * Works on a local copy of the slice, so the March mask is read only. dst is
+ * consumed and returned like cf_f32_blit's; the caller reserves 256 * CF_QUAD_FLOATS + 1
+ * floats past [at], and the number of floats written comes back in the slot
+ * at dst[at + 256 * CF_QUAD_FLOATS], past anything this call wrote, for the caller to
+ * read and adopt as the new length (an extern returns one value, and the
+ * buffer is the one that must come back). Replaces Mesher.greedy_go: its
+ * per-cell variant rebuild and run scans were a third of a section's mesh
+ * time (RESULTS, the perf pass of 2026-09-05). */
+void *cf_mesh_slice(void *dst, int64_t at, void *mask, int64_t base, int64_t d, int64_t sy, int64_t a,
+                    double ox, double oz, void *layers) {
+    int64_t rc = *(int64_t *)dst;
+    if (rc != 1) { fprintf(stderr, "cf_mesh_slice: destination is shared (rc=%lld); refusing to write in place\n", (long long)rc); abort(); }
+    if (at < 0 || at + 256 * CF_QUAD_FLOATS + 1 > narr_len(dst) || base < 0 || base + 256 > narr_len(mask)) {
+        fprintf(stderr, "cf_mesh_slice: out of range (at=%lld dst=%lld base=%lld mask=%lld)\n", (long long)at, (long long)narr_len(dst), (long long)base, (long long)narr_len(mask));
+        abort();
+    }
+    int64_t m[256];
+    memcpy(m, (const int64_t *)narr_data(mask) + base, 256 * sizeof(int64_t));
+    const float *tab = (const float *)narr_data(layers);
+    int64_t ntab = narr_len(layers);
+    float *o = (float *)narr_data(dst) + at;
+    int64_t written = 0;
+    for (int64_t i = 0; i < 256; i++) {
+        int64_t key = m[i];
+        if (key == 0) continue;
+        int64_t u = i % 16, v = i / 16;
+        int64_t wd = 1;
+        while (u + wd < 16 && m[u + wd + 16 * v] == key) wd++;
+        int64_t h = 1;
+        for (;;) {
+            if (v + h >= 16) break;
+            int ok = 1;
+            for (int64_t k = 0; k < wd; k++) if (m[u + k + 16 * (v + h)] != key) { ok = 0; break; }
+            if (!ok) break;
+            h++;
+        }
+        for (int64_t k = 0; k < wd * h; k++) m[u + k % wd + 16 * (v + k / wd)] = 0;
+        cf_quad_into(o + written, d, sy, a, u, v, wd, h, key, ox, oz, tab, ntab);
+        written += CF_QUAD_FLOATS;
+    }
+    o[256 * CF_QUAD_FLOATS] = (float)written;
+    return dst;
+}
+
+static void cf_quad_into(float *o, int64_t d, int64_t sy, int64_t a, int64_t u, int64_t v, int64_t wd, int64_t h,
+                         int64_t key, double ox, double oz, const float *tab, int64_t ntab) {
+    int64_t id = key % 256;
+    int64_t c0 = (key / 256) % 1024, c1 = (key / 262144) % 1024, c2 = (key / 268435456) % 1024, c3 = (key / 274877906944LL) % 1024;
+    int64_t sp = (key / 281474976710656LL) % 256;
+    double layer;
+    if (id >= 26 && id <= 46 && sp > 0) {
+        int64_t k = (id - 26) / 3;
+        int64_t idx = 1536 + k * 6 + (sp - 1);
+        if (idx >= ntab) { fprintf(stderr, "cf_mesh_quad: layer table too short (%lld)\n", (long long)ntab); abort(); }
+        layer = tab[idx];
+    } else {
+        int64_t idx = id * 6 + d;
+        if (idx >= ntab) { fprintf(stderr, "cf_mesh_quad: layer table too short (%lld)\n", (long long)ntab); abort(); }
+        layer = tab[idx];
+    }
+    double s0 = cf_pack_shade(cf_corner_sky(c0), cf_corner_blk(c0));
+    double s1 = cf_pack_shade(cf_corner_sky(c1), cf_corner_blk(c1));
+    double s2 = cf_pack_shade(cf_corner_sky(c2), cf_corner_blk(c2));
+    double s3 = cf_pack_shade(cf_corner_sky(c3), cf_corner_blk(c3));
+    double fw = (double)wd, fh = (double)h;
+    /* the four corners in quad_sized's order, its uv extents, and its shades */
+    double X[4], Y[4], Z[4], S[4], uw, vh;
+    if (d <= 1) {
+        double x = ox + (double)u, z = oz + (double)v, y = (double)(sy * 16 + a);
+        double x1 = x + fw, z1 = z + fh;
+        if (d == 0) {
+            X[0]=x;  Y[0]=y+1.0; Z[0]=z;   X[1]=x;  Y[1]=y+1.0; Z[1]=z1;  X[2]=x1; Y[2]=y+1.0; Z[2]=z1;  X[3]=x1; Y[3]=y+1.0; Z[3]=z;
+            uw = fh; vh = fw; S[0]=s0; S[1]=s3; S[2]=s2; S[3]=s1;
+        } else {
+            X[0]=x;  Y[0]=y; Z[0]=z;   X[1]=x1; Y[1]=y; Z[1]=z;  X[2]=x1; Y[2]=y; Z[2]=z1;  X[3]=x; Y[3]=y; Z[3]=z1;
+            uw = fw; vh = fh; S[0]=s0; S[1]=s1; S[2]=s2; S[3]=s3;
+        }
+    } else if (d <= 3) {
+        double x = ox + (double)a, z = oz + (double)u, y = (double)(sy * 16 + v);
+        double z1 = z + fw, y1 = y + fh;
+        if (d == 2) {
+            X[0]=x+1.0; Y[0]=y;  Z[0]=z;   X[1]=x+1.0; Y[1]=y1; Z[1]=z;  X[2]=x+1.0; Y[2]=y1; Z[2]=z1;  X[3]=x+1.0; Y[3]=y; Z[3]=z1;
+            uw = fh; vh = fw; S[0]=s0; S[1]=s3; S[2]=s2; S[3]=s1;
+        } else {
+            X[0]=x; Y[0]=y;  Z[0]=z1;  X[1]=x; Y[1]=y1; Z[1]=z1;  X[2]=x; Y[2]=y1; Z[2]=z;  X[3]=x; Y[3]=y; Z[3]=z;
+            uw = fh; vh = fw; S[0]=s1; S[1]=s2; S[2]=s3; S[3]=s0;
+        }
+    } else {
+        double x = ox + (double)u, z = oz + (double)a, y = (double)(sy * 16 + v);
+        double x1 = x + fw, y1 = y + fh;
+        if (d == 4) {
+            X[0]=x1; Y[0]=y;  Z[0]=z+1.0;  X[1]=x1; Y[1]=y1; Z[1]=z+1.0;  X[2]=x; Y[2]=y1; Z[2]=z+1.0;  X[3]=x; Y[3]=y; Z[3]=z+1.0;
+            uw = fh; vh = fw; S[0]=s1; S[1]=s2; S[2]=s3; S[3]=s0;
+        } else {
+            X[0]=x; Y[0]=y;  Z[0]=z;  X[1]=x; Y[1]=y1; Z[1]=z;  X[2]=x1; Y[2]=y1; Z[2]=z;  X[3]=x1; Y[3]=y; Z[3]=z;
+            uw = fh; vh = fw; S[0]=s0; S[1]=s3; S[2]=s2; S[3]=s1;
+        }
+    }
+    double face = (double)d;
+    int flip = cf_brightness(S[0]) + cf_brightness(S[2]) < cf_brightness(S[1]) + cf_brightness(S[3]);
+    if (flip) {
+        cf_vert(o + 0,  X[1], Y[1], Z[1], uw,  0.0, layer, S[1], face);
+        cf_vert(o + 10,  X[2], Y[2], Z[2], uw,  vh,  layer, S[2], face);
+        cf_vert(o + 20, X[3], Y[3], Z[3], 0.0, vh,  layer, S[3], face);
+        cf_vert(o + 30, X[1], Y[1], Z[1], uw,  0.0, layer, S[1], face);
+        cf_vert(o + 40, X[3], Y[3], Z[3], 0.0, vh,  layer, S[3], face);
+        cf_vert(o + 50, X[0], Y[0], Z[0], 0.0, 0.0, layer, S[0], face);
+    } else {
+        cf_vert(o + 0,  X[0], Y[0], Z[0], 0.0, 0.0, layer, S[0], face);
+        cf_vert(o + 10,  X[1], Y[1], Z[1], uw,  0.0, layer, S[1], face);
+        cf_vert(o + 20, X[2], Y[2], Z[2], uw,  vh,  layer, S[2], face);
+        cf_vert(o + 30, X[0], Y[0], Z[0], 0.0, 0.0, layer, S[0], face);
+        cf_vert(o + 40, X[2], Y[2], Z[2], uw,  vh,  layer, S[2], face);
+        cf_vert(o + 50, X[3], Y[3], Z[3], 0.0, vh,  layer, S[3], face);
+    }
+}
+
+/* ── Relight box helpers: the light field is x + 128 * (z + 128 * y) ─────────
+ * Zero the box [x0..x1] x [y0..y1] x [z0..z1] of a light field: one memset per
+ * row. Same rc == 1 contract as cf_u8_blit. Light.zero_box_go did this a byte
+ * at a time; a tree's relight clears ~35k voxels twice (sky and block light). */
+void *cf_u8_zero_box(void *a, int64_t x0, int64_t x1, int64_t y0, int64_t y1, int64_t z0, int64_t z1) {
+    int64_t rc = *(int64_t *)a;
+    if (rc != 1) { fprintf(stderr, "cf_u8_zero_box: field is shared (rc=%lld); refusing to write in place\n", (long long)rc); abort(); }
+    if (x0 < 0 || y0 < 0 || z0 < 0 || x1 >= 128 || y1 >= 256 || z1 >= 128 || narr_len(a) < 4194304) {
+        fprintf(stderr, "cf_u8_zero_box: out of range\n"); abort();
+    }
+    unsigned char *d = (unsigned char *)narr_data(a);
+    for (int64_t y = y0; y <= y1; y++)
+        for (int64_t z = z0; z <= z1; z++)
+            memset(d + x0 + 128 * (z + 128 * y), 0, (size_t)(x1 - x0 + 1));
+    return a;
+}
+
+/* Mark, in a 1024-int marks array (slot cx + 8 * cz + 64 * sy), every chunk
+ * section in which the two light fields differ inside the box. Light.mark_box
+ * compared a voxel at a time in March; here a row is one memcmp and only a
+ * differing row is walked. [marks] is consumed and returned; [a] and [b] are
+ * read only. */
+void *cf_mark_box(void *marks, void *a, void *b, int64_t x0, int64_t x1, int64_t y0, int64_t y1, int64_t z0, int64_t z1) {
+    int64_t rc = *(int64_t *)marks;
+    if (rc != 1) { fprintf(stderr, "cf_mark_box: marks are shared (rc=%lld); refusing to write in place\n", (long long)rc); abort(); }
+    if (x0 < 0 || y0 < 0 || z0 < 0 || x1 >= 128 || y1 >= 256 || z1 >= 128 || narr_len(marks) < 1024) {
+        fprintf(stderr, "cf_mark_box: out of range\n"); abort();
+    }
+    int64_t need = x1 + 128 * (z1 + 128 * y1) + 1;
+    if (narr_len(a) < need || narr_len(b) < need) { fprintf(stderr, "cf_mark_box: fields too short\n"); abort(); }
+    const unsigned char *pa = (const unsigned char *)narr_data(a);
+    const unsigned char *pb = (const unsigned char *)narr_data(b);
+    int64_t *m = (int64_t *)narr_data(marks);
+    for (int64_t y = y0; y <= y1; y++)
+        for (int64_t z = z0; z <= z1; z++) {
+            int64_t row = x0 + 128 * (z + 128 * y);
+            if (memcmp(pa + row, pb + row, (size_t)(x1 - x0 + 1)) == 0) continue;
+            for (int64_t x = x0; x <= x1; x++)
+                if (pa[row + x - x0] != pb[row + x - x0]) m[(x / 16) + 8 * (z / 16) + 64 * (y / 16)] = 1;
+        }
+    return marks;
+}
+
+/* Diagnostic: the refcount word of a March array, as the extern sees it (the
+ * borrow for this call is included, so a uniquely owned array reads 2). */
+int64_t cf_arr_rc(void *a) { return *(int64_t *)a; }
 
 /* The u8 twin of cf_f32_blit, for the skylight field: copy n bytes from
  * src[si..] into dst[di..] under the same rc == 1 contract. The lighting sweep
@@ -1237,6 +1719,20 @@ void cf_gfx_set_sky(double sx, double sy, double sz, double mx, double my, doubl
 void cf_gfx_set_time(double t) {
     glUseProgram(g_prog);
     glUniform1f(g_u_time, (float)t);
+}
+
+/* The mycelium filament overlay: which texture layers are mycelium, the
+ * species colours they are drawn in (3 floats each, 0..1), and how strongly.
+ * Set once at startup -- none of it changes while a world runs. */
+void cf_gfx_set_myc(int64_t first, int64_t count, void *rgb, double branch, double scale, double sharp) {
+    if (!g_prog) return;
+    glUseProgram(g_prog);
+    glUniform3fv(g_u_species, (GLsizei)(narr_len(rgb) / 3), (const float *)narr_data(rgb));
+    glUniform1i(g_u_myc_first, (int)first);
+    glUniform1i(g_u_myc_count, (int)count);
+    glUniform1f(g_u_branch, (float)branch);
+    glUniform1f(g_u_branch_scale, (float)scale);
+    glUniform1f(g_u_branch_sharp, (float)sharp);
 }
 
 void cf_gfx_set_weather(double fog_density, double overcast, double bolt) {
@@ -1317,4 +1813,29 @@ double  cf_in_mouse_dy(void)          { return g_in.mouse_dy; }
 double  cf_in_scroll_dy(void)         { return g_in.scroll_dy; }
 void    cf_in_capture_cursor(int64_t on) {
     if (g_win) glfwSetInputMode(g_win, GLFW_CURSOR, on ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_NORMAL);
+}
+
+/* The particle half of cf_gfx_shift: precipitation, spray and its emitters,
+ * and the springs move 16 blocks per chunk the window slid; a spring that
+ * left the window is dropped. */
+static void cf_shift_particles(int64_t dx, int64_t dz) {
+    float bx = 16.0f * (float)dx, bz = 16.0f * (float)dz;
+    for (int64_t i = 0; i < g_pcl_cap; i++) { g_pcl[i * 4 + 0] -= bx; g_pcl[i * 4 + 2] -= bz; }
+    for (int64_t i = 0; i < g_spray_live; i++) { g_spray[i * 7 + 0] -= bx; g_spray[i * 7 + 2] -= bz; }
+    for (int64_t i = 0; i < g_nemit; i++) { g_emit[i][0] -= (int32_t)(16 * dx); g_emit[i][2] -= (int32_t)(16 * dz); }
+    for (int64_t i = 0; i < g_nsprings; ) {
+        g_springs[i][0] -= (int32_t)(16 * dx); g_springs[i][2] -= (int32_t)(16 * dz);
+        if (g_springs[i][0] < 0 || g_springs[i][0] >= 128 || g_springs[i][2] < 0 || g_springs[i][2] >= 128) {
+            g_springs[i][0] = g_springs[g_nsprings - 1][0]; g_springs[i][1] = g_springs[g_nsprings - 1][1]; g_springs[i][2] = g_springs[g_nsprings - 1][2];
+            g_nsprings--;
+        } else i++;
+    }
+}
+
+/* Current resident set size in bytes (the allocation gauge's byte view). */
+int64_t cf_rss_bytes(void) {
+    struct mach_task_basic_info info;
+    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO, (task_info_t)&info, &count) != KERN_SUCCESS) return -1;
+    return (int64_t)info.resident_size;
 }

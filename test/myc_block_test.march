@@ -153,10 +153,56 @@ mod CubeForge.Test.MycBlock do
   describe "World.with_shown" do
     test "replaces the shown array whole" do
       let w0 = CubeForge.World.generate(1, 1, 1)
-      let sh = NativeArray.set_u8(CubeForge.World.shown_new(), 7 + 128 * 9, 5)
+      -- strided by the world's own width: one chunk, 16 columns a side
+      let sh = NativeArray.set_u8(CubeForge.World.shown_new(1), 7 + 16 * 9, 5)
       let w1 = CubeForge.World.with_shown(w0, sh)
       Test.assert_eq_int(CubeForge.World.shown_at(w1, 7, 9), 5, "from the array")
       Test.assert_eq_int(CubeForge.World.shown_at(w1, 8, 9), 0, "elsewhere empty")
+    end
+  end
+
+
+  -- Total absolute difference between a mycelium layer and the plain layer of
+  -- its base, over every texel: how strongly the network shows on that surface.
+  pfn layer_diff(a : NativeU8Arr, myc : Int, base : Int, i : Int, acc : Int) : Int do
+    if i >= 1024 do acc
+    else
+      let d = NativeArray.get_u8(a, myc * 1024 + i) - NativeArray.get_u8(a, base * 1024 + i)
+      layer_diff(a, myc, base, i + 1, acc + (if d < 0 do 0 - d else d end))
+    end
+  end
+  -- grass x Meadowbell against plain grass
+  pfn grass_diff(tint : Int) : Int do
+    layer_diff(Tx.checkerboard_tinted(tint), float_to_int(Tx.myc_layer(0, 3)), 0, 0, 0)
+  end
+
+  describe "Texture.myc_tint" do
+    test "0 is the bare surface, 100 the original strength, and the default sits between" do
+      Test.assert_eq_int(grass_diff(0), 0, "at 0 a mycelium layer is exactly its base")
+      let full = grass_diff(100)
+      Test.assert_true(full > 0, "at 100 the network shows")
+      let now = grass_diff(Tx.myc_tint())
+      Test.assert_true(now > 0, "the default still shows")
+      Test.assert_true(now < full, "and is subtler than the original")
+      Test.assert_true(grass_diff(35) < now, "lower is subtler still")
+    end
+
+    test "the threads thin out as the tint comes down" do
+      -- a texel differing by more than a sixth of the range is a thread
+      Test.assert_true(thread_count(Tx.checkerboard_tinted(100), 3) > thread_count(Tx.checkerboard_tinted(Tx.myc_tint()), 3), "fewer thread texels at the default than at 100")
+      Test.assert_eq_int(thread_count(Tx.checkerboard_tinted(0), 3), 0, "none at 0")
+    end
+  end
+
+  pfn thread_count(a : NativeU8Arr, sp : Int) : Int do
+    thread_go(a, float_to_int(Tx.myc_layer(0, sp)), 0, 0)
+  end
+  pfn thread_go(a : NativeU8Arr, myc : Int, i : Int, acc : Int) : Int do
+    if i >= 256 do acc
+    else
+      let dr = NativeArray.get_u8(a, myc * 1024 + i * 4) - NativeArray.get_u8(a, i * 4)
+      let d = if dr < 0 do 0 - dr else dr end
+      thread_go(a, myc, i + 1, if d > 42 do acc + 1 else acc end)
     end
   end
 

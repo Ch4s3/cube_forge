@@ -1,0 +1,76 @@
+-- Tree — a complete binary tree over a power-of-two count of values, indexed
+-- by position. The stdlib's Array.PVec keeps 32 values per leaf in a LIST and
+-- walks its tail to find its length, so a get on a 64-element vector is ~50
+-- pointer hops and a set rebuilds a 32-long list (GAPS G82). Here a get is
+-- log2(n) matches and a set allocates log2(n) nodes: for the world's 64
+-- chunks, six of each. Measured in probes/pvec_get: get 72 ns against 112,
+-- set 200 ns against 860.
+--
+-- Sizes that are not a power of two are padded up with the fill value; the
+-- padding is never indexed. The tree is total: a get outside the logical
+-- length answers the fill, a set outside it changes nothing (no panics in
+-- library code), so an empty list makes a tree of nothing but fill.
+mod CubeForge.Tree do
+
+  type Node(a) = Leaf(a) | Fork(Node(a), Node(a))
+  -- logical length, leaves in the tree (a power of two), the root, the fill
+  type Tree(a) = Tree(Int, Int, Node(a), a)
+
+  pfn pow2_at_least(n : Int, p : Int) : Int do if p >= n do p else pow2_at_least(n, p * 2) end end
+
+  pfn nth(xs : List(a), i : Int, first : a) : a do
+    match xs do
+      Nil -> first
+      Cons(h, t) -> if i == 0 do h else nth(t, i - 1, first) end
+    end
+  end
+  -- build leaves [lo, lo + n) from the list, padding past its end with [first]
+  pfn build(xs : List(a), lo : Int, n : Int, first : a) : Node(a) do
+    if n == 1 do Leaf(nth(xs, lo, first))
+    else Fork(build(xs, lo, n / 2, first), build(xs, lo + n / 2, n / 2, first)) end
+  end
+
+  doc "A tree over the list, in order; [fill] pads it to a power of two and answers a get out of range."
+  fn from_list(xs : List(a), fill : a) : Tree(a) do
+    let n = List.length(xs)
+    let leaves = pow2_at_least(n, 1)
+    Tree(n, leaves, build(xs, 0, leaves, fill), fill)
+  end
+
+  fn length(t : Tree(a)) : Int do match t do Tree(n, _, _, _) -> n end end
+
+  pfn get_go(nd : Node(a), i : Int, half : Int) : a do
+    match nd do
+      Leaf(v) -> v
+      Fork(l, r) -> if i < half do get_go(l, i, half / 2) else get_go(r, i - half, half / 2) end
+    end
+  end
+  doc "Element i; the fill out of range."
+  fn get(t : Tree(a), i : Int) : a do
+    match t do
+      Tree(n, leaves, root, fill) ->
+        if i < 0 || i >= n do fill else get_go(root, i, leaves / 2) end
+    end
+  end
+
+  pfn set_go(nd : Node(a), i : Int, half : Int, v : a) : Node(a) do
+    match nd do
+      Leaf(_) -> Leaf(v)
+      Fork(l, r) -> if i < half do Fork(set_go(l, i, half / 2, v), r) else Fork(l, set_go(r, i - half, half / 2, v)) end
+    end
+  end
+  doc "The tree with element i replaced; unchanged out of range."
+  fn set(t : Tree(a), i : Int, v : a) : Tree(a) do
+    match t do
+      Tree(n, leaves, root, fill) ->
+        if i < 0 || i >= n do t else Tree(n, leaves, set_go(root, i, leaves / 2, v), fill) end
+    end
+  end
+
+  pfn to_list_go(t : Tree(a), i : Int, acc : List(a)) : List(a) do
+    if i < 0 do acc else to_list_go(t, i - 1, Cons(get(t, i), acc)) end
+  end
+  doc "The elements in order."
+  fn to_list(t : Tree(a)) : List(a) do to_list_go(t, length(t) - 1, Nil) end
+
+end

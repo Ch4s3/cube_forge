@@ -14,15 +14,35 @@ mod CubeForge.Noise do
   -- vegetation and every other consumer of the seed see the same world at any age.
   doc "Ages run 0 (young: sharp ridges, blocky mesas, shallow valleys) to max_age() (ancient: worn, flowing, deeply cut)."
   fn max_age() : Int do 100 end
-  doc "One unit of age in the packed seed: 2^32, clear of any 30-bit seed plus the offsets the layers add."
+  doc "One unit of age in the packed seed: 2^32, clear of any 30-bit seed plus the offsets the layers add. The age is the byte there."
   fn age_unit() : Int do 4294967296 end
+  doc "One unit of world size in the packed seed: 2^40, the byte above the age. A world is a seed, an age and a size, in one number."
+  fn size_unit() : Int do 1099511627776 end
   fn clamp_age(age : Int) : Int do if age < 0 do 0 else if age > max_age() do max_age() else age end end end
-  doc "The 32-bit seed proper, with the age stripped."
+  doc "The 32-bit seed proper, with the age and size stripped."
   fn base_seed(seed : Int) : Int do int_and(seed, 4294967295) end
   doc "The age packed into a seed; 0 for a plain seed."
-  fn age_of(seed : Int) : Int do clamp_age(seed / age_unit()) end
-  doc "The packed seed for base seed [seed] at [age]. Any age already in [seed] is replaced."
-  fn with_age(seed : Int, age : Int) : Int do base_seed(seed) + clamp_age(age) * age_unit() end
+  fn age_of(seed : Int) : Int do clamp_age((seed / age_unit()) % 256) end
+  doc "The packed seed for base seed [seed] at [age]. Any age already in [seed] is replaced; the size stays."
+  fn with_age(seed : Int, age : Int) : Int do base_seed(seed) + clamp_age(age) * age_unit() + size_byte(seed) * size_unit() end
+
+  -- ── World size in the seed ──────────────────────────────────────────────
+  -- The side in chunks, 4..8 (64..128 blocks). 8 is the most the fixed-width
+  -- fields (light, occupancy, the shader's WORLD) are written for; a smaller
+  -- world uses the top-left corner of them. The byte is 0 for a plain seed,
+  -- which reads as the full size, so every seed printed before this reproduces.
+  fn min_size() : Int do 4 end
+  fn max_size() : Int do 8 end
+  fn default_size() : Int do 8 end
+  pfn size_byte(seed : Int) : Int do (seed / size_unit()) % 256 end
+  fn clamp_size(n : Int) : Int do if n < min_size() do min_size() else if n > max_size() do max_size() else n end end end
+  doc "The world side in chunks packed into a seed; default_size() for a plain seed."
+  fn size_of(seed : Int) : Int do
+    let b = size_byte(seed)
+    if b == 0 do default_size() else clamp_size(b) end
+  end
+  doc "The packed seed for [seed] at world side [n] chunks. Any size already in [seed] is replaced; the age stays."
+  fn with_size(seed : Int, n : Int) : Int do base_seed(seed) + age_of(seed) * age_unit() + clamp_size(n) * size_unit() end
   doc "Age as a fraction of max_age, 0..1."
   fn age_frac(seed : Int) : Float do int_to_float(age_of(seed)) /. int_to_float(max_age()) end
 
