@@ -36,7 +36,7 @@ measurements.
 
 ## Play
 
-- [ ] **Survey and scanning** — designed 2026-09-05
+- [x] **Survey and scanning** — done 2026-09-06
   (`docs/superpowers/specs/2026-09-05-survey-and-scanning-design.md`). The
   instrument that makes the existing simulation playable: a survey panel (`Q`)
   showing a place's biome, axes, the inputs the player can change (height,
@@ -44,9 +44,10 @@ measurements.
   map reusing `Biome.active`. Species advice is gated behind scanning (`E`) a
   living specimen, so the six climate bands are a reason to explore. Adds no
   simulation; the canal loop it exposes is already tested by `CF_AUTOCANAL`.
-  Decided: a scan reads fruit or mycelium, either one; the trend ignores the
-  hold counter, which debounces arrival over ~3s while the trend names a
-  destination minutes away. Open: panel legibility against a real frame.
+  Built in two slices: the place half (panel, trend, drift marking) and the
+  species half (scanning, the known bitmask in the save header, the two gated
+  lines). CF_AUTOSURVEY, CF_AUTOSCAN and CF_KNOWN drive it headlessly. The line
+  gap that the design left open measured 0.060 against a 0.045-tall glyph.
 
 ## Engine
 
