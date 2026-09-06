@@ -34,6 +34,19 @@ measurements.
 - [x] **Caves and karst** — done 2026-09-05 (`docs/superpowers/specs/2026-09-05-caves-and-karst-design.md`) — worms carved per 32-block cell above the water table, joined into networks and pitted with sinkholes as the world ages; age 0 has none.
 - [x] **Lake outlets on ancient worlds** — resolved 2026-09-05: the creeping flow was cave worms breaching lake basins, not sheets on terraces; worms now keep out of basin walls (`Caves.basin_wall`, `CF_KARST`), and since a full lake turned out to have no outlet at all, the pour point is dug one block down as a notch, one per basin of six or more columns. Flow plateaus at ~400 cells at both ages. See the lakes spec §3 and §6.
 
+## Play
+
+- [ ] **Survey and scanning** — designed 2026-09-05
+  (`docs/superpowers/specs/2026-09-05-survey-and-scanning-design.md`). The
+  instrument that makes the existing simulation playable: a survey panel (`Q`)
+  showing a place's biome, axes, the inputs the player can change (height,
+  distance to water) and which way it is drifting, plus a drift overlay on the
+  map reusing `Biome.active`. Species advice is gated behind scanning (`E`) a
+  living specimen, so the six climate bands are a reason to explore. Adds no
+  simulation; the canal loop it exposes is already tested by `CF_AUTOCANAL`.
+  Open: trend versus the hold counter; panel legibility; scanning fruit or
+  mycelium.
+
 ## Engine
 
 - [ ] **Main-thread pinning runtime patch** (GAPS.md G15) — chip spawned, in progress in a separate session.
