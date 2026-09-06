@@ -1078,15 +1078,50 @@ mod CubeForge do
   -- keeps its mesh (the shim moved its slot and offsets it), a chunk that came
   -- in is meshed now and uploaded. Returns the list and threads the counts.
   type ShiftMeshes = ShiftMeshes(List(CubeForge.ChunkMesh.ChunkMesh), NativeIntArr)
-  pfn remap_meshes_go(old, w1 : CubeForge.World.World, n : Int, dx : Int, dz : Int, d : Int, counts : NativeIntArr, empty : CubeForge.Chunk.Chunk, acc : List(CubeForge.ChunkMesh.ChunkMesh)) : ShiftMeshes do
+  -- The band's local indices, for the parallel mesh below.
+  pfn band_indices(n : Int, dx : Int, dz : Int, d : Int, acc : List(Int)) : List(Int) do
+    if d < 0 do acc else band_indices(n, dx, dz, d - 1, if shift_src(d, n, dx, dz) < 0 do Cons(d, acc) else acc end) end
+  end
+  pfn nth_mesh(ms : List(CubeForge.ChunkMesh.ChunkMesh), idx : List(Int), d : Int) : CubeForge.ChunkMesh.ChunkMesh do
+    match idx do
+      Cons(i, rest) -> match ms do
+        Cons(m, mrest) -> if i == d do m else nth_mesh(mrest, rest, d) end
+        Nil -> CM.build(CubeForge.World.generate(1, 1, 1), 0, 0, Chunk.new())
+      end
+      Nil -> CM.build(CubeForge.World.generate(1, 1, 1), 0, 0, Chunk.new())
+    end
+  end
+  -- The eight new chunks are meshed in one pmap (the mesher is pure over the
+  -- world) and uploaded; a moved chunk keeps its mesh.
+  pfn remap_meshes_go(old, w1 : CubeForge.World.World, n : Int, dx : Int, dz : Int, d : Int, counts : NativeIntArr, empty : CubeForge.Chunk.Chunk,
+                      band : List(Int), fresh : List(CubeForge.ChunkMesh.ChunkMesh), acc : List(CubeForge.ChunkMesh.ChunkMesh)) : ShiftMeshes do
     if d < 0 do ShiftMeshes(acc, counts)
     else
       let s = shift_src(d, n, dx, dz)
-      if s >= 0 do remap_meshes_go(old, w1, n, dx, dz, d - 1, counts, empty, Cons(Array.get(old, s), acc))
+      if s >= 0 do remap_meshes_go(old, w1, n, dx, dz, d - 1, counts, empty, band, fresh, Cons(Array.get(old, s), acc))
       else
-        let m = CM.build(w1, d % n, d / n, empty)
-        remap_meshes_go(old, w1, n, dx, dz, d - 1, upload_chunk(m, d, counts), empty, Cons(m, acc))
+        let m = nth_mesh(fresh, band, d)
+        remap_meshes_go(old, w1, n, dx, dz, d - 1, upload_chunk(m, d, counts), empty, band, fresh, Cons(m, acc))
       end
+    end
+  end
+  -- Springs in the band's chunks only: the shim slid the rest and the flags remapped.
+  pfn spring_band(w : CubeForge.World.World, f : CubeForge.Biome.Field, n : Int, band : List(Int), flags : NativeIntArr) : NativeIntArr do
+    match band do
+      Nil -> flags
+      Cons(d, rest) -> spring_band(w, f, n, rest, spring_chunk_go(w, f, n, d % n, d / n, 0, flags))
+    end
+  end
+  pfn spring_chunk_go(w : CubeForge.World.World, f : CubeForge.Biome.Field, n : Int, cx : Int, cz : Int, j : Int, flags : NativeIntArr) : NativeIntArr do
+    if j >= 256 do flags
+    else
+      let x = 16 * cx + j % 16
+      let z = 16 * cz + j / 16
+      let h = Biome.height_of(f, x, z)
+      if is_world_spring(w, x, h, z) do
+        Win.spring_set(x, h, z, true)
+        spring_chunk_go(w, f, n, cx, cz, j + 1, NativeArray.set_int(flags, cx + n * cz, 1))
+      else spring_chunk_go(w, f, n, cx, cz, j + 1, flags) end
     end
   end
   -- The actor pool after a shift: a moved chunk keeps its actor; the actors of
@@ -1142,19 +1177,29 @@ mod CubeForge do
         let n = World.side(w)
         let t0 = Win.time()
         let w1 = World.shift(w, dx, dz, seed, workers, leaving_blobs(w, myc, n, dx, dz, n * n - 1, Nil))
+        let t1 = Win.time()
         let bio1 = Biome.shift(bio, w1, dx, dz, seed)
         let myc1 = restore_myc(Myc.shift(myc, 16 * n, dx, dz), w1, n, World.restored(w1))
+        let t2 = Win.time()
         Win.gfx_shift(dx, dz)
         Win.gfx_upload_occupancy(World.occupancy(w1), 128, 256, 128)
         let counts1 = remap_bases_go(counts, NativeArray.make_int(3 * water_slot_base(), 0), n, dx, dz, water_slot_base(), 3, 0, 0)
         let pend1 = remap_bases_go(pend, NativeArray.make_int(1024, 0), n, dx, dz, 64, 16, 0, 0)
         let flags1 = remap_ints_go(flags, NativeArray.make_int(n * n, 0), n, dx, dz, 0, 1, 0)
-        let rm = remap_meshes_go(meshes, w1, n, dx, dz, n * n - 1, counts1, Chunk.new(), Nil)
+        let t3 = Win.time()
+        let band = band_indices(n, dx, dz, n * n - 1, Nil)
+        let fresh = List.pmap_n(band, fn d -> CM.build(w1, d % n, d / n, Chunk.new()), workers)
+        let rm = remap_meshes_go(meshes, w1, n, dx, dz, n * n - 1, counts1, Chunk.new(), band, fresh, Nil)
+        let t4 = Win.time()
         let pids1 = Array.from_list(remap_pids_go(pids, w1, n, dx, dz, n * n - 1, freed_pids_go(pids, n, dx, dz, n * n - 1, Nil), seed, Nil))
-        let flags2 = spring_flags(w1, bio1, 0, n, flags1, false)
+        let flags2 = spring_band(w1, bio1, n, band, flags1)
         match rm do
           ShiftMeshes(mlist, counts2) ->
-            println("window shift (" ++ int_to_string(dx) ++ "," ++ int_to_string(dz) ++ ") -> origin (" ++ int_to_string(World.origin_x(w1)) ++ "," ++ int_to_string(World.origin_z(w1)) ++ ") in " ++ ms(Win.time() -. t0))
+            -- CF_STREAM_LOG=1: one line per shift with where its time went
+            if Env.get_int("CF_STREAM_LOG", 0) == 1 do
+              println("window shift (" ++ int_to_string(dx) ++ "," ++ int_to_string(dz) ++ ") -> origin (" ++ int_to_string(World.origin_x(w1)) ++ "," ++ int_to_string(World.origin_z(w1)) ++ ") in " ++ ms(Win.time() -. t0)
+                      ++ ": world " ++ ms(t1 -. t0) ++ " fields " ++ ms(t2 -. t1) ++ " gl+remap " ++ ms(t3 -. t2) ++ " mesh " ++ ms(t4 -. t3) ++ " actors+springs " ++ ms(Win.time() -. t4))
+            else () end
             Scene(w1, counts2, outline, hit, ui, pids1, flags2, Array.from_list(mlist), bio1, pend1, myc1)
         end
     end
@@ -1887,7 +1932,7 @@ mod CubeForge do
                       else if m_click && !on_main && m_hover == Menu.item_back(menu2b) do Menu.set_page(menu2b, Menu.page_main())
                       else menu2b end end end end end
           let next_a = if start && !play_here do FromSeed(start_seed) else next_seed end
-          if start && !play_here do println("new game, seed " ++ int_to_string(start_seed) ++ " (base " ++ int_to_string(CubeForge.Noise.base_seed(start_seed)) ++ ", age " ++ int_to_string(CubeForge.Noise.age_of(start_seed)) ++ ", size " ++ int_to_string(16 * CubeForge.Noise.size_of(start_seed)) ++ ")") else () end
+          if start && !play_here do println("new game, seed " ++ int_to_string(start_seed) ++ " (base " ++ int_to_string(CubeForge.Noise.base_seed(start_seed)) ++ ", age " ++ int_to_string(CubeForge.Noise.age_of(start_seed)) ++ ")") else () end
           -- Slot rows: save in escape mode, load on the start screen. CF_AUTOSAVE and
           -- CF_AUTOLOAD drive the same two paths for the headless round-trip test.
           let on_slots = Menu.page(menu2) == Menu.page_slots()
@@ -2647,16 +2692,13 @@ mod CubeForge do
     let workers = Env.get_int("CF_WORKERS", System.cpu_count())
     -- CF_SEED unset: a new world each run, seeded from the clock, at a random age.
     -- The (packed) seed is always printed, so any world can be reproduced with
-    -- CF_SEED=<n> alone. CF_AGE=<0..100> sets or overrides the age (Noise.with_age);
-    -- CF_SIZE=<4..8> the side in chunks (Noise.with_size).
+    -- CF_SEED=<n> alone. CF_AGE=<0..100> sets or overrides the age (Noise.with_age).
     let seed_env = Env.get_int("CF_SEED", -1)
     let age_env = Env.get_int("CF_AGE", -1)
-    let size_env = Env.get_int("CF_SIZE", -1)
     let entropy = int_and(System.monotonic_time() * 2654435761 + unix_time_ms(), 1073741823)
-    let seed_a = if age_env >= 0 do CubeForge.Noise.with_age(if seed_env >= 0 do seed_env else entropy end, age_env)
-                 else if seed_env >= 0 do seed_env
-                 else CubeForge.Noise.with_age(entropy, int_and(entropy * 40503 + 7919, 1073741823) % (CubeForge.Noise.max_age() + 1)) end end
-    let seed = if size_env > 0 do CubeForge.Noise.with_size(seed_a, size_env) else seed_a end
+    let seed = if age_env >= 0 do CubeForge.Noise.with_age(if seed_env >= 0 do seed_env else entropy end, age_env)
+               else if seed_env >= 0 do seed_env
+               else CubeForge.Noise.with_age(entropy, int_and(entropy * 40503 + 7919, 1073741823) % (CubeForge.Noise.max_age() + 1)) end end
     let headless = Env.get_int("CF_HEADLESS", 0) == 1
     -- Graphics settings: the file, then any environment override on top. The
     -- overridden fields are remembered so they are never written back.
@@ -2764,9 +2806,9 @@ mod CubeForge do
       _ -> NoLoad
     end
     let seed = loaded_seed(loaded, start)
-    -- The world's side comes with its seed (Noise.size_of), 4..n_max chunks;
-    -- the actor pool and the fixed-width fields are n_max's.
-    let n = Math.min_int(CubeForge.Noise.size_of(seed), n_max)
+    -- The window is always n_max chunks a side: the world is unbounded (chunk
+    -- streaming), and a seed's size byte is ignored.
+    let n = n_max
     -- stage 1: terrain (independent chunks). The scalar generator is a benchmark
     -- reference only, so a loaded world skips it.
     let t0 = System.monotonic_time()
@@ -2841,7 +2883,7 @@ mod CubeForge do
       let naive_verts = mesh_all_naive(world, n, workers)
       println("  naive mesher for comparison: " ++ int_to_string(System.monotonic_time() - tn0) ++ " ms wall, " ++ int_to_string(naive_verts) ++ " vertices")
     else () end
-    println("seed " ++ int_to_string(seed) ++ " (base " ++ int_to_string(CubeForge.Noise.base_seed(seed)) ++ ", age " ++ int_to_string(CubeForge.Noise.age_of(seed)) ++ ", size " ++ int_to_string(16 * n) ++ ")"
+    println("seed " ++ int_to_string(seed) ++ " (base " ++ int_to_string(CubeForge.Noise.base_seed(seed)) ++ ", age " ++ int_to_string(CubeForge.Noise.age_of(seed)) ++ ")"
             ++ (if from_env do " (CF_SEED)" else " (set CF_SEED to reproduce)" end))
     println("world " ++ int_to_string(n) ++ "x" ++ int_to_string(n) ++ " chunks, " ++ int_to_string(workers) ++ " workers, "
             ++ int_to_string(Env.get_int("MARCH_NUM_SCHEDULERS", 4)) ++ " scheduler threads (MARCH_NUM_SCHEDULERS)")

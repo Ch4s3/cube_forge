@@ -141,4 +141,58 @@ the cache. Old slots (files by window index, origin 0) still read.
 
 ## 7. Measured
 
-(Filled in as built.)
+*Built 2026-09-05*, in the four phases above, with these departures:
+
+- **Coordinates.** The design's Phase 1 (world coordinates for the player,
+  meshes and edits, a `u_origin` in the shader) was not built. Everything
+  the engine holds stays window-local, and a shift translates the few
+  things that float: the player by 16 blocks, and in the shim the mesh
+  slots (a moved slot draws with a -16 offset, `u_off`, reset when March
+  uploads a mesh baked at the current origin), the precipitation and spray
+  particles, the spray emitters and the springs. Lighting, biome,
+  vegetation, fungus, the mesher and the water sim were not touched for
+  coordinates at all. The one thing that had to learn the world's
+  coordinates is the biome's temperature octave, read at the world column
+  so the climate is the ground's and not the window's.
+- **The band is meshed inline**, in one `pmap` over its eight chunks (12
+  ms), rather than deferred to the drain: it is at the window's far edge
+  and its vertices are needed by the time it is seen.
+- **Springs** are scanned over the band only (3 ms; the whole window was
+  35).
+- **Lake tiles** are kept in the world, at most four, so a shift inside a
+  tile does not pour it again (26 ms when it does).
+- **The cache** keys on the dirty flag `set_chunk` sets, so a chunk the
+  water sim or the fungus touched is kept too; after a load every window
+  chunk is marked dirty (it may differ from its generation). The cache
+  therefore grows with most of the visited area, 64 KB a chunk plus a 1 KB
+  column blob. Open: a content hash against regeneration to drop chunks
+  that merely moved water, and a bound on the cache with spill to disk.
+- **The size row and `CF_SIZE`** went; the world has no size. A seed's size
+  byte is ignored and still reproduces.
+
+A shift, seed 1234 at age 50, walking south (`CF_STREAM_LOG=1`):
+
+| stage | ms |
+|---|---|
+| world: generate 8 chunks (pmap) | 12 |
+| world: slide three voxel fields (blits) | 1-2 |
+| world: light the band (sky) | 19 |
+| world: light the band (block light) | 6 |
+| world: occupancy of the band | 5 |
+| biome and mycelium field shifts | 22 |
+| shim shift, occupancy upload, array remaps | 4 |
+| mesh the band (pmap) and upload | 12 |
+| actors and springs | 3 |
+| **a shift within a tile** | **84** |
+| a shift that pours a new tile | +26 |
+
+Frame rate on the walk 105 fps against 110 standing; the worst frame is
+the shift. Open: the biome shift is element-wise over nine arrays (a blit
+of the u8 ones and an f32 store would halve it), and the sky sweep's box
+could stop at the band's lowest ground rather than y = 0.
+
+Persistence: a walk across two shifts saved to a scratch slot (origin
+`0 -2`, twelve cached chunks, 90 files) and loaded back with the same
+world hash at 108 fps. `stream_test` covers the shift of every field, the
+shift back regenerating the original, the cache round trip of an edited
+chunk, and a fungus column blob.

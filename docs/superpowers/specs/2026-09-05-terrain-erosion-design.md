@@ -86,6 +86,12 @@ the digits the player types are the base seed. Slot rows show `SEED n AGE a`.
 
 ## World size
 
+*Superseded 2026-09-05 by chunk streaming* (`2026-09-05-chunk-streaming-design.md`):
+the world is unbounded and the 8x8 window slides with the player, so the
+size row and `CF_SIZE` were removed. The size byte in the seed is ignored
+and every seed reproduces. The account below is kept as built.
+
+
 *Built 2026-09-05.* A world is a seed, an age and a size. The side in chunks
 (4, 6 or 8: 64, 96 or 128 blocks) rides in the seed's byte above the age
 (`Noise.with_size`, `size_of`; 2^40), so it reaches saves, the startup

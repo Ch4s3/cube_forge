@@ -245,16 +245,6 @@ mod CubeForge.Save do
   -- FileError is private to the stdlib, so the message names the path, not the cause.
   pfn err_text(what : String, path : String) : String do "cannot " ++ what ++ " " ++ path end
 
-  pfn write_chunks_go(d : String, slot : Int, chunks : Array.PVec(CubeForge.Chunk.Chunk), i : Int, n : Int) : Result(Unit, String) do
-    if i >= n do Ok(())
-    else
-      match File.write(chunk_path(d, slot, i), Bytes.to_string(Bytes.from_u8_arr(C.raw(Array.get(chunks, i))))) do
-        Ok(_) -> write_chunks_go(d, slot, chunks, i + 1, n)
-        Err(_) -> Err(err_text("write", chunk_path(d, slot, i)))
-      end
-    end
-  end
-
   pfn write_fields(d : String, slot : Int, fields : NativeU8Arr) : Result(Unit, String) do
     if NativeArray.length_u8(fields) == 0 do Ok(())
     else
@@ -358,19 +348,6 @@ mod CubeForge.Save do
   end
 
   -- Sizes come from reading the file: File.stat's record is private to the stdlib.
-  pfn check_chunks_go(d : String, slot : Int, i : Int, n : Int) : Result(Unit, String) do
-    if i >= n do Ok(())
-    else
-      match File.read(chunk_path(d, slot, i)) do
-        Err(_) -> Err(err_text("read", chunk_path(d, slot, i)))
-        Ok(s) ->
-          let size = String.byte_size(s)
-          if size != chunk_bytes() do Err("chunk " ++ int_to_string(i) ++ " is " ++ int_to_string(size) ++ " bytes")
-          else check_chunks_go(d, slot, i + 1, n) end
-      end
-    end
-  end
-
   pfn check_window_go(d : String, slot : Int, side : Int, ox : Int, oz : Int, i : Int) : Result(Unit, String) do
     if i >= side * side do Ok(())
     else

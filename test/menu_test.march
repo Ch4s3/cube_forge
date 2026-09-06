@@ -164,7 +164,7 @@ mod CubeForge.Test.Menu do
     end
     test "slot rows name the slot, its seed or EMPTY, and BACK" do
       let m = with_slot(slots_page(), 2, 7, 1757000000)
-      Test.assert_eq_str(Menu.label(m, 1), "SLOT 2 SEED 7 AGE 0 SIZE 128", "used")
+      Test.assert_eq_str(Menu.label(m, 1), "SLOT 2 SEED 7 AGE 0", "used")
       Test.assert_eq_str(Menu.label(m, 0), "SLOT 1 EMPTY", "empty")
       Test.assert_eq_str(Menu.label(m, Menu.item_back(m)), "BACK", "back")
       Test.assert_eq_int(Menu.slot_of_item(4), 5, "item 4 is slot 5")
@@ -181,30 +181,18 @@ mod CubeForge.Test.Menu do
       Test.assert_eq_str(Menu.label(Menu.set_status(m, 2, Menu.status_failed(), 100), 1), "FAILED", "failed")
       Test.assert_eq_str(Menu.label(m, 0), "SLOT 1 EMPTY", "other rows unchanged")
       Test.assert_eq_str(Menu.label(Menu.expire_status(m, 130), 1), "SAVED", "still shown at 30 frames")
-      Test.assert_eq_str(Menu.label(Menu.expire_status(m, 160), 1), "SLOT 2 SEED 7 AGE 0 SIZE 128", "gone at 60")
+      Test.assert_eq_str(Menu.label(Menu.expire_status(m, 160), 1), "SLOT 2 SEED 7 AGE 0", "gone at 60")
     end
   end
 
   describe "new-world page" do
     test "two arrow rows, START, BACK, and the seed field; every centre resolves" do
       let wp = world_page()
-      Test.assert_eq_int(Menu.items(wp), 8, "six row parts, START, BACK")
+      Test.assert_eq_int(Menu.items(wp), 5, "three row parts, START, BACK")
       Test.assert_true(centres_ok(wp, 0), "every box's centre is its own")
       Test.assert_eq_str(Menu.label(wp, Menu.item_start()), "START", "start")
       Test.assert_eq_str(Menu.label(wp, Menu.item_back(wp)), "BACK", "back is last")
-      Test.assert_eq_str(Menu.label(wp, Menu.settings_item(Menu.world_row_size(), Menu.part_body())), "WORLD SIZE", "size row")
       Test.assert_eq_str(Menu.label(wp, Menu.settings_item(Menu.world_row_age(), Menu.part_body())), "WORLD AGE", "age row")
-    end
-    test "the size row steps 64, 96, 128 and clamps; the seed carries it" do
-      let wp = world_page()
-      Test.assert_eq_str(Menu.value_label(wp, Menu.settings_item(Menu.world_row_size(), Menu.part_body())), "128 BLOCKS", "a plain seed is the full size")
-      let smaller = Menu.click(wp, Menu.settings_item(Menu.world_row_size(), Menu.part_left()))
-      Test.assert_eq_int(Menu.size(smaller), 6, "one step down is 96")
-      let smallest = Menu.click(Menu.click(smaller, Menu.settings_item(Menu.world_row_size(), Menu.part_left())), Menu.settings_item(Menu.world_row_size(), Menu.part_left()))
-      Test.assert_eq_int(Menu.size(smallest), 4, "clamped at 64")
-      Test.assert_eq_int(CubeForge.Noise.size_of(Menu.seed(smallest)), 4, "packed into the seed")
-      Test.assert_eq_int(Menu.base_seed(smallest), 7, "the digits are untouched")
-      Test.assert_eq_int(Menu.size(Menu.click(wp, Menu.settings_item(Menu.world_row_size(), Menu.part_right()))), 8, "clamped at 128")
     end
     test "the age row runs RANDOM, 0, 5 .. 100, and START draws a random age from the clock" do
       let wp = world_page()

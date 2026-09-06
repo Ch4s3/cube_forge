@@ -68,7 +68,7 @@ measurements.
 - [ ] **Weather that changes the world** — snow settling as blocks, rain feeding the `WaterChunk` actors, wet-surface darkening, splashes where particles die. **Blocked on real biomes**, not on effort: `2026-09-03-terrain-biomes-design.md` shipped altitude banding (`sea_level` 62, `snow_line` 95, granite by slope), not biome regions, so nothing can answer "what kind of place is this?" to key an accumulation or drying rate off. Needs a region map (temperature/humidity fbm per column) first — its own design. Also lands on the chunk remesh path, the dirty flags and the water protocol at once, and rain-as-a-source needs a rule or ponds grow without bound under finite-level flow.
 
 - [ ] **Texture atlas via stb_image** — real block textures; needs `Bytes` across FFI fixed first (GAPS.md G8).
-- [ ] **Chunk streaming** — in progress 2026-09-05, design at `docs/superpowers/specs/2026-09-05-chunk-streaming-design.md`: a fixed 8x8 window slides over an unbounded world; every 128 becomes the window, generation is already per column, lakes pour per tile, evicted dirty chunks are cached and saved by world coordinates.
+- [x] **Chunk streaming** — done 2026-09-05, design at `docs/superpowers/specs/2026-09-05-chunk-streaming-design.md`: a fixed 8x8 window slides over an unbounded world; every 128 becomes the window, generation is already per column, lakes pour per tile, evicted dirty chunks are cached and saved by world coordinates. A shift is ~84 ms (see the spec §7 for the breakdown and the open items: cache growth, the biome shift, the sky sweep's box).
 - [ ] **Save/load through the CAS** — persistence keyed by BLAKE3 chunk hashes.
 
 ## Compiler patches (from GAPS.md "Compiler patches")

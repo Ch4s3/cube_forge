@@ -57,10 +57,9 @@ mod CubeForge.Menu do
   fn settings_row(i : Int) : Int do i / 3 end
   fn settings_part(i : Int) : Int do i % 3 end
   fn settings_item(row : Int, part : Int) : Int do row * 3 + part end
-  doc "The new-world page's rows."
-  fn world_row_size() : Int do 0 end
-  fn world_row_age() : Int do 1 end
-  fn world_rows() : Int do 2 end
+  doc "The new-world page's rows: the age. (A size row came and went: the world is unbounded now, streamed as a window around the player.)"
+  fn world_row_age() : Int do 0 end
+  fn world_rows() : Int do 1 end
   doc "START on the new-world page: after its two rows."
   fn item_start() : Int do world_rows() * 3 end
   doc "Pages laid out as arrow rows."
@@ -152,16 +151,11 @@ mod CubeForge.Menu do
       let dir = if part == part_right() do 1 else -1 end
       if part == part_body() do m
       else if page(m) == page_settings() do set_settings(m, Settings.step(settings(m), settings_row(item), dir))
-      else if settings_row(item) == world_row_size() do step_size(m, dir)
-      else step_age(m, dir) end end end
+      else step_age(m, dir) end end
     end
   end
 
-  -- ── The new world's size and age ──────────────────────────────────────────
-  doc "Sizes step by two chunks: 64, 96, 128 blocks."
-  fn size_step() : Int do 2 end
-  doc "Move the size by [dir] steps, clamped to Noise.min_size()..max_size(); the digits and age stay."
-  fn step_size(m : Menu, dir : Int) : Menu do set_seed(m, N.with_size(seed(m), size(m) + dir * size_step())) end
+  -- ── The new world's age ───────────────────────────────────────────────────
   doc """
   Move the age row by [dir]: the row runs RANDOM, 0, 5, .. 100. Below 0 is
   RANDOM; above RANDOM is 0. Past 100 stays.
@@ -175,8 +169,6 @@ mod CubeForge.Menu do
   fn start_seed(m : Menu, entropy : Int) : Int do
     if random_age(m) do N.with_age(seed(m), int_and(entropy * 2246822519 + 3266489917, max_seed()) % (N.max_age() + 1)) else seed(m) end
   end
-  doc "The size row's text: blocks a side."
-  fn size_label(m : Menu) : String do int_to_string(16 * size(m)) ++ " BLOCKS" end
   doc "The age row's text: RANDOM, or the age."
   fn age_label(m : Menu) : String do if random_age(m) do "RANDOM" else int_to_string(age(m)) end end
 
@@ -300,8 +292,7 @@ mod CubeForge.Menu do
       if part == part_left() do "<"
       else if part == part_right() do ">"
       else if page(m) == page_settings() do Settings.name(settings_row(i))
-      else if settings_row(i) == world_row_size() do "WORLD SIZE"
-      else "WORLD AGE" end end end end
+      else "WORLD AGE" end end end
     else
       let slot = slot_of_item(i)
       if status_kind(m) != status_none() && status_slot(m) == slot do
@@ -310,8 +301,7 @@ mod CubeForge.Menu do
         let info = Save.info_for(slot_infos(m), slot)
         "SLOT " ++ int_to_string(slot)
           ++ (if Save.info_is_empty(info) do " EMPTY"
-              else " SEED " ++ int_to_string(N.base_seed(Save.info_seed(info))) ++ " AGE " ++ int_to_string(N.age_of(Save.info_seed(info)))
-                   ++ " SIZE " ++ int_to_string(16 * N.size_of(Save.info_seed(info))) end)
+              else " SEED " ++ int_to_string(N.base_seed(Save.info_seed(info))) ++ " AGE " ++ int_to_string(N.age_of(Save.info_seed(info))) end)
       end
     end end end end
   end
@@ -321,7 +311,7 @@ mod CubeForge.Menu do
     if !is_arrow_page(m) || i >= arrow_rows(m) * 3 || settings_part(i) != part_body() do ""
     else
       let row = settings_row(i)
-      if page(m) == page_world() do (if row == world_row_size() do size_label(m) else age_label(m) end)
+      if page(m) == page_world() do age_label(m)
       else if status_kind(m) == status_failed() && status_slot(m) == row do "FAILED"
       else Settings.label(settings(m), row) end end
     end
