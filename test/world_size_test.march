@@ -8,11 +8,12 @@
 -- 85 unverified obligations became 100.
 --
 -- So the agreement is asserted here instead. Raising World.size() -- the
--- MAXIMUM side; a world's own side is World.side(w), 4..8, from its seed --
+-- MAXIMUM side, and under chunk streaming the side of the window itself --
 -- fails these tests, and each one names the literal to change with it. That
 -- is the whole point: the coupling is real, and it should be loud rather
--- than silent. (The C shim's shader WORLD constant, skylight lookup and
--- coarse occupancy are written for 128 too.)
+-- than silent. (The C shim carries the same number as CF_WORLD_CHUNKS and
+-- CF_WORLD_SIDE, and its shader's WORLD constant is a literal;
+-- cf_gfx_upload_occupancy aborts if the dimensions March passes it disagree.)
 mod CubeForge.WorldSizeTest do
 
   alias CubeForge.World as W
@@ -22,7 +23,7 @@ mod CubeForge.WorldSizeTest do
   describe "world size" do
     test "the column stride matches the chunk grid" do
       Test.assert_eq_int(W.cols(), 16 * W.size(), "cols() is size() chunks of 16")
-      Test.assert_eq_int(W.cols(), 128, "the literal every index bound is written as")
+      Test.assert_eq_int(W.cols(), 192, "the literal every index bound is written as")
     end
 
     test "the light field's dimensions match the world" do
@@ -30,7 +31,7 @@ mod CubeForge.WorldSizeTest do
       Test.assert_eq_int(L.size_z(), W.cols(), "and as deep")
       Test.assert_eq_int(L.size_y(), C.size_y(), "and as tall as a chunk")
       Test.assert_eq_int(L.volume(), L.size_x() * L.size_y() * L.size_z(), "volume is the product")
-      Test.assert_eq_int(L.volume(), 4194304, "the literal in index()'s result bound and new()")
+      Test.assert_eq_int(L.volume(), 9437184, "the literal in index()'s result bound and new()")
     end
 
     test "the two layer strides are what they claim, and are not the same thing" do
@@ -56,6 +57,14 @@ mod CubeForge.WorldSizeTest do
       Test.assert_eq_int(L.occ_index(L.size_x() - 1, L.size_y() - 1, L.size_z() - 1), L.volume() - 1, "and it is the same size")
     end
 
+    test "the marks array has a slot per chunk section" do
+      -- The marks and pending arrays are indexed by mark_slot, whose two strides
+      -- are the chunk count and the side. Both moved with the window.
+      Test.assert_eq_int(L.mark_slot(0, 1, 0), W.size(), "a chunk row steps by the side")
+      Test.assert_eq_int(L.mark_slot(0, 0, 1), W.size() * W.size(), "a section steps by the chunk count")
+      Test.assert_eq_int(L.mark_slot(W.size() - 1, W.size() - 1, 15), W.size() * W.size() * 16 - 1, "the last section is the last slot")
+    end
+
     test "a smaller world's biome field is strided by its own width" do
       -- The fixed-width fields (light, occupancy) are World.size() wide and a
       -- smaller world uses their corner; the per-column fields are allocated
@@ -68,7 +77,7 @@ mod CubeForge.WorldSizeTest do
       Test.assert_eq_int(CubeForge.Biome.side_of(CubeForge.Biome.field_biomes(f)), 64, "the field is 64 wide")
     end
     test "the biome field's stride is the world's" do
-      -- Biome's accessors index hs/ws/bs as wx + 128 * wz, and the field is
+      -- Biome's accessors index hs/ws/bs as wx + 192 * wz, and the field is
       -- allocated at the world's runtime size. If those disagree the field reads
       -- the wrong column and nothing errors.
       Test.assert_eq_int(CubeForge.Biome.stride(), W.cols(), "the accessors' stride is the world's width")

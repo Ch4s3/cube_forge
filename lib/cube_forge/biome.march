@@ -122,7 +122,7 @@ mod CubeForge.Biome do
   accessors are written against, and world_size_test asserts they agree. It is a
   literal for the same reason Light.index's bounds are -- see World.cols.
   """
-  fn stride() : Int do 128 end
+  fn stride() : Int do 192 end
   doc "The width of a field from one of its arrays: the world's columns per side. The accessors index by this, so a field built for a 64-wide world reads right."
   fn side_of(hs : NativeU8Arr) : Int do float_to_int(Math.sqrt(int_to_float(NativeArray.length_u8(hs))) +. 0.5) end
 
@@ -479,12 +479,14 @@ mod CubeForge.Biome do
   -- against the world AFTER all the block writes gives what a fold of note_edit
   -- against each intermediate world gives: heights and the water flag both read
   -- only the column being edited.
-  doc "Pack a single-column edit for note_edits: x and z under 128, y and id under 256."
-  fn pack_edit(x : Int, y : Int, z : Int, id : Int) : Int do ((x * 128 + z) * 256 + y) * 256 + id end
+  doc "Pack a single-column edit for note_edits: x and z under 192, y and id under 256."
+  -- Written from stride() rather than the literal, so the x divisor cannot
+  -- drift from the x multiplier when the window's side moves (see World.pack_cell).
+  fn pack_edit(x : Int, y : Int, z : Int, id : Int) : Int do ((x * stride() + z) * 256 + y) * 256 + id end
   pfn edit_id(v : Int) : Int do v % 256 end
   pfn edit_y(v : Int) : Int do (v / 256) % 256 end
-  pfn edit_z(v : Int) : Int do (v / 65536) % 128 end
-  pfn edit_x(v : Int) : Int do v / 8388608 end
+  pfn edit_z(v : Int) : Int do (v / 65536) % stride() end
+  pfn edit_x(v : Int) : Int do v / (65536 * stride()) end
 
   -- One array threaded, the rest borrowed: the light.march idiom. Wrapping the
   -- two arrays in a variant to return both at once would give each a refcount of

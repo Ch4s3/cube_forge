@@ -2240,3 +2240,259 @@ back.
 A new test plants a tree and checks the region relight against a full flood.
 441 tests. The oracle stays in the dump: a non-zero block count, or a sky
 count whose first voxels are not the 15/13 water pattern, is a relight bug.
+
+
+## The window shift, staged over four frames (2026-09-06)
+
+Reported as "big FPS drops and 58 fps most of the time". The 58 fps is vsync:
+uncapped, the same scripted walk (`CF_AUTOWALK`, seed 7) runs at 228 fps with
+a **2.8 ms** mean frame and a 9.9 ms worst quiet frame. Nothing in the steady
+state is near the 16.7 ms budget. What breaks it is the window shift, which
+ran whole on one frame, once every 16 blocks walked (~3 s).
+
+`CF_FRAME_LOG=1` prints one line per frame with its elapsed time; it is what
+these distributions are read off.
+
+### Where a shift's 63-100 ms went
+
+| | ms |
+|---|---|
+| `World.shift` | 45-78 |
+| ├ chunk pmap + tree rebuild | 14-15 |
+| ├ sky light band | 10-12 |
+| ├ block light + occupancy band | 11-12 |
+| ├ shown/dirty/hash + field slides | 5-6 |
+| └ lake tiles + evict | 3.3-3.8 |
+| band mesh (8 chunks) | 6-9 |
+| GL shift + remap | 5.4 |
+| biome / myc / actors / springs | 6-9 |
+
+### The band was lit against occupancy it did not have yet
+
+`Light.sweep_box_lists` reads a neighbour's opacity out of the world's
+occupancy field, and `World.shift` swept both light bands *before* `occ_band`
+filled the incoming band -- which `shift_occ` leaves zeroed. Every freshly
+streamed chunk was lit as if it were air. The light oracle after one shift:
+
+| | sky | block |
+|---|---|---|
+| before | **17 995** | 0 |
+| after (frames 400 / 1200 / 2000) | **42 / 13 / 9** | 0 / 0 / 0 |
+
+The remainder is the accepted 15/13 water pattern already recorded above. The
+same expression also returned the pre-shift `gh` instead of `gh1`, so the
+generation hashes went stale after every shift; both are one edit.
+
+### Parallel bands, then four stages
+
+The two bands are independent once the occupancy is in, so they run as a pair:
+`World.shift` 45-47 -> **31.5 ms**, a whole shift 63-67 -> **45 ms**.
+
+`World.shift` then splits into `shift_blocks` and `shift_light`, and the frame
+loop pays a shift one stage a frame, carried in the `Frame` (never the Scene,
+so every staging frame still renders a coherent world). The world is frozen
+for those frames: water, retexturing, vegetation, fruit and the player's edits
+all sit out, because each stage is computed from the snapshot before it. The
+biome and mycelium field ticks are *not* frozen -- they touch only their own
+fields, which the commit slides from whatever the scene holds -- so they keep
+their "every column once a period" invariant. Nor is the mesh drain.
+
+| stage | ms (median of 3, first shift in brackets) |
+|---|---|
+| blocks | 25.8 (45.2, with the first lake-tile pour) |
+| light | 9.3 |
+| mesh | 5.2 |
+| commit | 9.1 |
+
+### Two spikes that were not the shift
+
+A **20-70 ms frame a few frames after every shift**: the commit makes all 64
+moved chunks owe all 16 sections, and `drain_go` rebaked one whole chunk per
+frame regardless of budget, landing on whichever was dense with foliage. A
+moved chunk does have to be rebaked whole -- its vertices carry the old origin
+and a buffer may never mix two -- but not in one frame. It now rebuilds a
+budget of sections a frame into the March mesh and uploads only once it owes
+nothing; until then the offset old buffer draws, which is correct.
+
+A **35-110 ms frame on the first water slot after a commit**: the eight
+incoming chunks were flagged live, so the tick called eight actors that each
+had a `WLoad` queued ahead of the request and replied with nothing. A freshly
+generated chunk has only sea and lakes at rest, so it is no longer flagged; it
+loads in the background, and a spring (`spring_band`) or water spilling at the
+seam still wakes it. A chunk restored from the cache *is* flagged -- it may
+have been mid-flow when the window dropped it.
+
+### Net
+
+Uncapped, 6000 frames, 3 shifts. Worst frame per shift, before -> after:
+
+| | before | after |
+|---|---|---|
+| the shift's own frame | 74 ms | **26 ms** (blocks stage) |
+| the water slot after it | 90 ms | **36 ms** |
+| mean frame | 2.99 ms | 2.67 ms |
+| p99 | 7.92 ms | 6.68 ms |
+
+456 tests. Light oracle at the accepted baseline through four shifts.
+
+Still over budget, and both named rather than fixed: the `blocks` stage at
+25 ms (of which ~14 is eight parallel chunk generations -- it would have to
+generate the band in halves to fit), and the water reload at 36 ms, which is
+the actors regenerating chunks `shift_blocks` has already generated, because
+a message may not carry a native array (GAPS G44).
+
+
+## The window grows to 12 chunks (2026-09-06)
+
+The pop-in half of the report. The window was 8 chunks and the player is held
+in its central 2x2, so terrain simply ended 48-80 blocks out with clear-weather
+fog at 0.002 -- 9-15% opacity at that range, which hides nothing. The window is
+now **12 chunks, 192 blocks**, and the view distance 80-112 blocks.
+
+`World.size()` is the one number, but it cannot be derived into the places that
+need it: a refinement predicate that calls a function has no SMT translation
+(see the header of `world_size_test`). So the literals moved with it, and
+`world_size_test` asserts they agree. What that test did **not** cover, and now
+partly does, was the four bugs this shook out:
+
+1. **`World.cell_x` kept the old divisor.** `pack_cell` packs
+   `((x * cols + z) * 256 + y) * 256 + id`; `cell_z` was updated to 192 and
+   `cell_x` kept `v / 8388608` (= 128 * 65536). Every multi-block write -- every
+   tree, bush and fruit body -- landed at the wrong x. `Biome.pack_edit` had the
+   same shape and the same latent bug. Both unpackers are now written from
+   `cols()` / `stride()` so the divisor cannot drift from the multiplier.
+2. **The shim kept its own copies of four UI slot numbers.** `CF_PRECIP_SLOT`
+   249, `CF_BIOME_SLOT` 248, `CF_MYC_SLOT` 244 and `CF_SPRAY_SLOT` 246 are bound
+   directly in C as well as being named in March. At 144 chunks those are chunk
+   slots, so the spray upload clobbered a chunk's VBO: a segfault on the first
+   frame. The UI slots are now named functions in March from 500 up, and the C
+   defines carry a comment tying them to that list.
+3. **36 relight clamps were `clampi(..., 0, 127)`.** Nothing searching for `128`
+   finds them. Every incremental relight stopped at x or z 127, so the last
+   chunk column's light was never repaired: 2158 wrong sky voxels by frame 12,
+   all at x >= 180. Now `size_x() - 1` / `size_z() - 1`.
+4. **The light oracle compared only the first 4194304 bytes** -- the old volume,
+   less than half the new field. It now reads `Light.volume()`.
+
+The shift trigger was a fifth: `shift_dx`/`shift_dz` tested `lx < 3 || lx > 4`,
+the central 2x2 of an 8-chunk window. On a 12-chunk window that held the player
+three chunks from one edge and seven from the other -- the whole view distance
+the change was for. Now `World.size() / 2 - 1` and `/ 2`.
+
+`cf_gfx_upload_occupancy` aborts if the dimensions March passes it disagree with
+the shim's `CF_WORLD_SIDE`, so the two halves cannot silently drift again.
+
+### What it costs
+
+Seed 11, release, uncapped, the staged shift of the pass above:
+
+| stage | 8 chunks | 12 chunks |
+|---|---|---|
+| blocks | 25.8 ms | **46.9** |
+| light | 9.3 | **16.2** |
+| mesh | 5.2 | **6.3** |
+| commit | 9.1 | **22.5** |
+| whole shift | 48 | **91** |
+| mean frame | 2.67 | 3.8-5.2 |
+
+144 chunks instead of 64: 529k vertices against 218k, three fields of 9.4 MB
+against 4.2. The shift roughly doubled, as a band of 12 chunks and a field slide
+of 9.4 MB must. Three of the four stages still fit a frame; `blocks` at 47 ms
+does not, and splitting it means generating the band in halves.
+
+### Open: 139 stale block-light voxels
+
+The light oracle at frame 30 reads sky 47, block 139. The sky count is the
+accepted "water moves without a relight" pattern (15/13) and is proportionate to
+2.25x the area and 33 springs against 11. The block count is a regression -- it
+was 0 at 8 chunks -- and is NOT explained. What is known:
+
+- Two clusters, hugging x = 0 and z = 0, kept 1-2 against a flooded 0.
+- They need wild fungus to exist, but the count is identical at
+  `CF_MYC_BUDGET` 0, 1, 8 and 64, so the mycelium migration is not writing them.
+- They still appear with every block-mutating phase frozen (water, retexturing,
+  vegetation, fruit and the player's edits all skipped).
+- Under that freeze `World.state_hash` still changes twice per 10-frame period,
+  after the frames whose phase is 2 and 6 -- and every probe *within* those
+  frames, up to and including the one just before the drain, reads the old hash.
+  So blocks are changing outside every writer the frame loop knows about. That,
+  not the light, is the thing to chase.
+
+
+## The water reload, and the bug underneath it (2026-09-06)
+
+### 144 actors pouring the same four lakes
+
+A water actor cannot be handed its chunk -- a message may not carry a native
+array (GAPS G44) -- so `WLoad` regenerates the chunk from the seed. Timing
+`load_sim` (`CF_WATER_LOG=1`, one line per load) said where that went:
+
+| | per load, 144 loads at startup |
+|---|---|
+| the lake tile | **157-214 ms** (median 555 under contention) |
+| the chunk | 4-20 ms |
+| four neighbours' edges | 9-48 ms |
+
+`Lakes.tile` pours a priority-flood over a 128x128 tile. It is a pure function
+of (seed, tx, tz) and a 12-chunk window plus its apron touches nine of them, so
+144 actors were pouring the same nine tiles: **78 seconds** of summed wall.
+
+Memoised in the shim, because actors share a process and nothing else. One
+call, `cf_lake_get`, with the hit flag in the LAST byte of the caller's buffer
+(sized one longer than the tile for it) so the test and the fetch cannot race;
+`cf_lake_put` keeps the first writer of a key. Both take a mutex -- these run on
+scheduler threads. 32 slots, 32 KB each.
+
+A memo alone did nothing: 144 actors start together, all miss, and all pour.
+So the main thread pours the window's nine tiles first, in parallel, before a
+single `WLoad` goes out (`warm_lake_tiles`, 34 ms), and every actor then hits.
+
+| | before | after |
+|---|---|---|
+| tile, per load | med 555 ms | **0.0 ms** |
+| tile, all 144 loads | 78 325 ms | **42.7 ms** |
+| water tick `calls`, after a commit | 35-110 ms | **2-3 ms** |
+| water tick `calls`, over a whole run | — | med 2.15, p99 3.85, max 23.1 ms |
+
+### The bug: two different lakes
+
+Chasing the last of it turned up what the previous entry left open.
+`World.generate` poured **one `Lakes.levels(seed, n)` over the whole window**;
+`World.shift_blocks` and every water actor use **`Lakes.tile_of_chunk`, a fixed
+128-block grid**. Those two agreed only while the window was itself 128 blocks
+-- `Lakes.levels(seed, 8)` *is* tile (0, 0). At 192 they do not, so the world
+generated one set of lakes and then changed to another at the first shift,
+while the actors had been simulating the second set all along.
+
+`World.generate` now generates against `tile_for` like the shift does, warming
+its four tiles first (the memo makes that cheap) and keeping them so the first
+shifts reuse them. Both symptoms the previous entry recorded as open went with
+it:
+
+| | before | after |
+|---|---|---|
+| light oracle, block, frame 30 | 139 | **2** |
+| `World.state_hash` over frames 0-7, every phase frozen | changed twice | **constant** |
+
+The sky count stays at the accepted water pattern (25 at frame 1 rising to 86
+by 120, against 18-43 at 8 chunks with a third of the springs).
+
+Note this changes world generation: a seed makes different lakes than it did,
+and slots written before this will not match. `Lakes.levels` stays for the
+bounded-world tests and `CF_TERRAIN_STATS`.
+
+### Where the frame budget is now
+
+Seed 7, release, uncapped, 19 899 frames, 11 shifts:
+
+| | ms |
+|---|---|
+| mean frame | 4.08 |
+| p99 | 9.41 |
+| max | 55.3 |
+| frames over 16.67 | 34 (0.17%), all of them shift stages |
+| shift: blocks / light / mesh / commit | 47.3 / 21.6 / 6.0 / 21.8 (medians) |
+
+The shift's own stages are all that break budget now. `blocks` is ~14 ms of
+twelve parallel chunk generations plus the field slides; splitting it means
+generating the band in halves.

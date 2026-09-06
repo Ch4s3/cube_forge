@@ -26,16 +26,25 @@
 -- so a chunk reads it by world column.
 mod CubeForge.Lakes do
 
+  needs IO.Foreign   -- the shim memoises the pour (see tile)
+  needs Window
+
   alias CubeForge.Noise as N
   alias CubeForge.Chunk as C
 
   -- A poured table: origin x and z in blocks, side in blocks, then the levels
   -- and pour flags end to end (see pour).
+  -- origin x, origin z, side in blocks, and the table: one level byte per
+  -- column then one notch byte per column, so 2 * side * side of them. The
+  -- array may be LONGER than that -- `tile` hands the shim's memo a buffer with
+  -- one spare byte for its hit flag -- so read the count from side, never from
+  -- the array's length.
   type Tile = Tile(Int, Int, Int, NativeU8Arr)
 
   doc "Side of a tile in blocks: eight chunks, the window."
   fn tile_size() : Int do 128 end
   fn tile_ox(t : Tile) : Int do match t do Tile(ox, _, _, _) -> ox end end
+  pfn tile_bytes(t : Tile) : NativeU8Arr do match t do Tile(_, _, _, b) -> b end end
   fn tile_oz(t : Tile) : Int do match t do Tile(_, oz, _, _) -> oz end end
   fn tile_side(t : Tile) : Int do match t do Tile(_, _, s, _) -> s end end
   fn tile_table(t : Tile) : NativeU8Arr do match t do Tile(_, _, _, a) -> a end end
@@ -245,8 +254,31 @@ mod CubeForge.Lakes do
   doc "The table for a world of [n] chunks a side at origin 0: what a bounded world of that size generates against, and the tests."
   fn levels(seed : Int, n : Int) : Tile do pour_at(seed, 0, 0, 16 * n) end
 
-  doc "The tile (tx, tz): world columns 128tx .. 128tx+127. What a streamed chunk generates against."
-  fn tile(seed : Int, tx : Int, tz : Int) : Tile do pour_at(seed, tile_size() * tx, tile_size() * tz, tile_size()) end
+  doc """
+  The tile (tx, tz): world columns 128tx .. 128tx+127. What a streamed chunk
+  generates against.
+
+  Memoised in the shim. The pour is 157-214 ms and it is a pure function of
+  (seed, tx, tz), but every water actor called this on WLoad -- 144 actors
+  pouring the same handful of tiles, which was the whole cost of a chunk reload
+  and the 35-110 ms frame on the first water tick after a shift. Actors cannot
+  share a March value (a message may not carry a native array, GAPS G44), so
+  the shim is the only place they can share the result.
+
+  The buffer is one byte longer than the tile: [lake_get] answers hit or miss
+  in that last byte, so the test and the fetch are a single call.
+  """
+  fn tile(seed : Int, tx : Int, tz : Int) : Tile do
+    let side = tile_size()
+    let n = 2 * side * side
+    let buf = CubeForge.Ffi.Window.lake_get(NativeArray.make_u8(n + 1, 0), seed, tx, tz)
+    if NativeArray.get_u8(buf, n) == 1 do Tile(side * tx, side * tz, side, buf)
+    else
+      let t = pour_at(seed, side * tx, side * tz, side)
+      CubeForge.Ffi.Window.lake_put(seed, tx, tz, tile_bytes(t))
+      t
+    end
+  end
 
   doc "The tile world chunk (cx, cz) lies in."
   fn tile_of_chunk(seed : Int, cx : Int, cz : Int) : Tile do tile(seed, floor_div(cx, 8), floor_div(cz, 8)) end
@@ -293,16 +325,16 @@ mod CubeForge.Lakes do
   end
   doc "Lake columns * 1000 + the highest lake surface, for the stats line."
   fn summary(t : Tile) : Int do
-    let lk = tile_table(t)
-    count_go(lk, 0, NativeArray.length_u8(lk) / 2, 0, 0)
+    let side = tile_side(t)
+    count_go(tile_table(t), 0, side * side, 0, 0)
   end
   pfn notches_go(lk : NativeU8Arr, i : Int, count : Int, acc : Int) : Int do
     if i >= count do acc else notches_go(lk, i + 1, count, acc + NativeArray.get_u8(lk, count + i)) end
   end
   doc "How many pour points the table holds: the lakes' outlets."
   fn notches(t : Tile) : Int do
-    let lk = tile_table(t)
-    notches_go(lk, 0, NativeArray.length_u8(lk) / 2, 0)
+    let side = tile_side(t)
+    notches_go(tile_table(t), 0, side * side, 0)
   end
 
 end

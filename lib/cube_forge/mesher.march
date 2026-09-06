@@ -187,7 +187,7 @@ mod CubeForge.Mesher do
   pfn occluded(occ : NativeU8Arr, oxi : Int, ozi : Int, x : Int, y : Int, z : Int) : Bool do
     let wx = oxi + x
     let wz = ozi + z
-    if wx < 0 || wx >= 128 || y < 0 || y >= 256 || wz < 0 || wz >= 128 do false
+    if wx < 0 || wx >= 192 || y < 0 || y >= 256 || wz < 0 || wz >= 192 do false
     else NativeArray.get_u8(occ, CubeForge.Light.occ_index(wx, y, wz)) == CubeForge.Light.occ_solid() end
   end
 

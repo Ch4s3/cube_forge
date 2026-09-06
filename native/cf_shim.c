@@ -196,7 +196,11 @@ void cf_win_set_fullscreen(int64_t on) {
  * for the flashlight and into the directional multiplier that used to be baked
  * into `shade` by the mesher.                                                  */
 #define CF_VERT_FLOATS 9
-#define CF_PRECIP_SLOT 249
+/* These four slots are bound directly here as well as being named on the
+ * March side; they MUST match the slot map in cube_forge.march. They were
+ * 249/248/244/246, which the 12-chunk window turned into chunk slots -- the
+ * spray upload then clobbered a chunk's VBO. Keep the two lists together. */
+#define CF_PRECIP_SLOT 505
 static GLuint g_prog = 0, g_vao = 0;
 static GLint  g_u_vp = -1, g_u_tex = -1;
 
@@ -290,7 +294,7 @@ static const char *FS =
     "const float DIRECT = 0.62;\n"
     /* World dimensions, for turning voxel coordinates into texture coordinates
      * and for knowing when a ray has left the world. */
-    "const vec3 WORLD = vec3(128.0, 256.0, 128.0);\n"
+    "const vec3 WORLD = vec3(192.0, 256.0, 192.0);\n"   /* = CF_WORLD_SIDE, checked in cf_gfx_upload_occupancy */
     "const int  MAX_STEPS = 256;\n"
     "const float SOFT_SPREAD = 0.035;\n"
     "const int SOFT_TAPS = 2;\n"
@@ -508,7 +512,19 @@ static GLuint compile(GLenum kind, const char *src) {
     return s;
 }
 
-#define CF_MAX_MESHES 256
+/* The streaming window is CF_WORLD_CHUNKS chunks a side, so the light and
+ * occupancy fields are CF_WORLD_SIDE = 16 * CF_WORLD_CHUNKS wide and deep.
+ * These must agree with CubeForge.World.size() and CubeForge.Light.size_x();
+ * world_size_test asserts the March half, and cf_gfx_upload_occupancy checks
+ * this half against the dimensions March passes it. The shader's WORLD
+ * constant below is written out as a literal and is checked there too. */
+#define CF_WORLD_CHUNKS 12
+#define CF_WORLD_SIDE   (16 * CF_WORLD_CHUNKS)
+#define CF_WORLD_VOL    ((int64_t)CF_WORLD_SIDE * 256 * CF_WORLD_SIDE)
+#define CF_CHUNK_SLOTS  (CF_WORLD_CHUNKS * CF_WORLD_CHUNKS)
+/* 3 passes of CF_CHUNK_SLOTS, then the named UI slots from 500 (see the slot
+ * map in cube_forge.march). */
+#define CF_MAX_MESHES 512
 /* Two VBOs per mesh slot. An upload goes to the one the last frame did NOT
  * draw, so glBufferSubData never waits on a buffer the GPU still reads; the
  * drain trace had 1-4 ms stalls in it on a single buffer, orphaning or not. */
@@ -691,19 +707,20 @@ static void cf_shift_particles(int64_t dx, int64_t dz);   /* defined with the pa
 void cf_gfx_shift(int64_t dx, int64_t dz) {
     /* A slot's state is its VBO pair, which of the two the last upload went
      * to, both capacities and its offset: all of it moves with the chunk. */
-    for (int base = 0; base < 192; base += 64) {
-        GLuint olda[64], oldb[64]; unsigned char oldcur[64]; int64_t oldcap[2][64]; float oldoff[64][2]; int used[64];
-        for (int i = 0; i < 64; i++) {
+    for (int base = 0; base < 3 * CF_CHUNK_SLOTS; base += CF_CHUNK_SLOTS) {
+        GLuint olda[CF_CHUNK_SLOTS], oldb[CF_CHUNK_SLOTS]; unsigned char oldcur[CF_CHUNK_SLOTS];
+        int64_t oldcap[2][CF_CHUNK_SLOTS]; float oldoff[CF_CHUNK_SLOTS][2]; int used[CF_CHUNK_SLOTS];
+        for (int i = 0; i < CF_CHUNK_SLOTS; i++) {
             olda[i] = g_vbo[base + i]; oldb[i] = g_vbo_b[base + i]; oldcur[i] = g_vbo_cur[base + i];
             oldcap[0][i] = g_vbo_cap[0][base + i]; oldcap[1][i] = g_vbo_cap[1][base + i];
             oldoff[i][0] = g_off[base + i][0]; oldoff[i][1] = g_off[base + i][1]; used[i] = 0;
         }
-        int has[64];
-        for (int d = 0; d < 64; d++) {
-            int64_t sx = d % 8 + dx, sz = d / 8 + dz;
+        int has[CF_CHUNK_SLOTS];
+        for (int d = 0; d < CF_CHUNK_SLOTS; d++) {
+            int64_t sx = d % CF_WORLD_CHUNKS + dx, sz = d / CF_WORLD_CHUNKS + dz;
             has[d] = 0;
-            if (sx >= 0 && sx < 8 && sz >= 0 && sz < 8) {
-                int s = (int)(sx + 8 * sz);
+            if (sx >= 0 && sx < CF_WORLD_CHUNKS && sz >= 0 && sz < CF_WORLD_CHUNKS) {
+                int s = (int)(sx + CF_WORLD_CHUNKS * sz);
                 g_vbo[base + d] = olda[s]; g_vbo_b[base + d] = oldb[s]; g_vbo_cur[base + d] = oldcur[s];
                 g_vbo_cap[0][base + d] = oldcap[0][s]; g_vbo_cap[1][base + d] = oldcap[1][s];
                 used[s] = 1; has[d] = 1;
@@ -712,10 +729,10 @@ void cf_gfx_shift(int64_t dx, int64_t dz) {
             }
         }
         int u = 0;
-        for (int d = 0; d < 64; d++) {
+        for (int d = 0; d < CF_CHUNK_SLOTS; d++) {
             if (has[d]) continue;
-            while (u < 64 && used[u]) u++;
-            if (u >= 64) break;
+            while (u < CF_CHUNK_SLOTS && used[u]) u++;
+            if (u >= CF_CHUNK_SLOTS) break;
             g_vbo[base + d] = olda[u]; g_vbo_b[base + d] = oldb[u]; g_vbo_cur[base + d] = oldcur[u];
             g_vbo_cap[0][base + d] = oldcap[0][u]; g_vbo_cap[1][base + d] = oldcap[1][u];
             used[u] = 1;
@@ -752,6 +769,14 @@ static int64_t g_occ_w = 0, g_occ_h = 0, g_occ_d = 0;
 
 void cf_gfx_upload_occupancy(void *arr, int64_t w, int64_t h, int64_t d) {
     if (narr_len(arr) < w * h * d) { fprintf(stderr, "cf: occupancy array too small\n"); return; }
+    /* March, this file and the shader's WORLD constant all carry the window's
+     * side independently; a mismatch would mis-index shadows silently. */
+    if (w != CF_WORLD_SIDE || d != CF_WORLD_SIDE) {
+        fprintf(stderr, "cf: occupancy is %lldx%lld but the shim is built for %d; "
+                        "CF_WORLD_CHUNKS and CubeForge.World.size() disagree\n",
+                (long long)w, (long long)d, CF_WORLD_SIDE);
+        abort();
+    }
     GLint maxdim = 0;
     glGetIntegerv(GL_MAX_3D_TEXTURE_SIZE, &maxdim);
     /* GL 3.3 only guarantees 256, and the world's Y is exactly 256. Any real GPU
@@ -773,7 +798,7 @@ void cf_gfx_upload_occupancy(void *arr, int64_t w, int64_t h, int64_t d) {
     glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
-    /* Coarse level. Occupancy is indexed x + 128 * (y + 256 * z), matching
+    /* Coarse level. Occupancy is indexed x + CF_WORLD_SIDE * (y + 256 * z), matching
      * CubeForge.Light.occ_index. */
     g_occ_cw = (int)((w + CF_OCC_CS - 1) / CF_OCC_CS);
     g_occ_ch = (int)((h + CF_OCC_CS - 1) / CF_OCC_CS);
@@ -842,7 +867,7 @@ void cf_gfx_set_voxel(int64_t x, int64_t y, int64_t z, int64_t solid) {
 }
 
 /* Sync the box [x0..x1] x [y0..y1] x [z0..z1] of the occupancy texture from
- * the world's occupancy array (x + 128 * (y + 256 * z), the texture's own
+ * the world's occupancy array (x + CF_WORLD_SIDE * (y + 256 * z), the texture's own
  * layout, so one glTexSubImage3D with unpack strides does the box), then
  * recount every coarse cell the box touches from the array. A tree edit used
  * to make 729 one-texel calls here (0.6 ms), and each call bumped the coarse
@@ -967,11 +992,11 @@ static float pcl_rnd(int64_t a, int64_t b) {
     return (float)((h >> 40) & 0xFFFFFF) / 16777216.0f;
 }
 
-/* Skylight lookup, matching CubeForge.Light.index: x + 128 * (z + 128 * y),
+/* Skylight lookup, matching CubeForge.Light.index: x + CF_WORLD_SIDE * (z + CF_WORLD_SIDE * y),
  * and 0 (sealed) outside the world. */
 static int pcl_sky(const unsigned char *la, int x, int y, int z) {
-    if (x < 0 || x >= 128 || y < 0 || y >= 256 || z < 0 || z >= 128) return 0;
-    return la[(size_t)x + 128 * ((size_t)z + 128 * (size_t)y)];
+    if (x < 0 || x >= CF_WORLD_SIDE || y < 0 || y >= 256 || z < 0 || z >= CF_WORLD_SIDE) return 0;
+    return la[(size_t)x + CF_WORLD_SIDE * ((size_t)z + CF_WORLD_SIDE * (size_t)y)];
 }
 
 static void pcl_respawn(int64_t i, float ex, float ey, float ez, int64_t tick) {
@@ -1083,7 +1108,7 @@ void cf_precip_frame(void *light, int64_t live, int64_t snow,
  * quads is 98k vertices, far past what March can push per tick (GAPS G68). Drawn
  * through the marker path (unlit, untextured, depth-tested) at y = 259, under
  * the marker at 260 and above any terrain. */
-#define CF_BIOME_SLOT 248
+#define CF_BIOME_SLOT 504
 #define CF_BIOME_Y    259.0f
 /* Order matches CubeForge.Biome: tundra, taiga, grassland, forest, desert,
  * wetland, beach, alpine, oasis, grove. */
@@ -1124,7 +1149,7 @@ void cf_biome_map_upload(void *biomes, int64_t n) {
  * Same shape as the biome map, one layer above it. Species colours mirror
  * CubeForge.Species.colour_*; brightness is vigour. A column with no species
  * gets a degenerate quad so the draw count stays n*n*6. */
-#define CF_MYC_SLOT 244
+#define CF_MYC_SLOT 500
 static const float CF_MYC_RGB[7][3] = {
     {0.0f, 0.0f, 0.0f},
     {200/255.0f, 230/255.0f, 255/255.0f}, {120/255.0f, 90/255.0f, 60/255.0f}, {230/255.0f, 200/255.0f, 90/255.0f},
@@ -1185,7 +1210,7 @@ int64_t cf_spring_count(void) { return g_nsprings; }
  * White, short-lived, up then down. Fed by an emitter queue March fills from
  * the water actors' drop entries, by every spring's mouth bubbling, and by a
  * burst when a spring is placed. Same idioms as the precipitation pool. */
-#define CF_SPRAY_SLOT 246
+#define CF_SPRAY_SLOT 502
 #define CF_SPRAY_LIFE 0.6f
 static float  *g_spray = NULL;     /* x y z vx vy vz life, 7 floats */
 static float  *g_spray_vtx = NULL;
@@ -1527,24 +1552,24 @@ static void cf_quad_into(float *o, int64_t d, int64_t sy, int64_t a, int64_t u, 
     }
 }
 
-/* ── Relight box helpers: the light field is x + 128 * (z + 128 * y) ─────────
+/* ── Relight box helpers: the light field is x + CF_WORLD_SIDE * (z + CF_WORLD_SIDE * y) ──
  * Zero the box [x0..x1] x [y0..y1] x [z0..z1] of a light field: one memset per
  * row. Same rc == 1 contract as cf_u8_blit. Light.zero_box_go did this a byte
  * at a time; a tree's relight clears ~35k voxels twice (sky and block light). */
 void *cf_u8_zero_box(void *a, int64_t x0, int64_t x1, int64_t y0, int64_t y1, int64_t z0, int64_t z1) {
     int64_t rc = *(int64_t *)a;
     if (rc != 1) { fprintf(stderr, "cf_u8_zero_box: field is shared (rc=%lld); refusing to write in place\n", (long long)rc); abort(); }
-    if (x0 < 0 || y0 < 0 || z0 < 0 || x1 >= 128 || y1 >= 256 || z1 >= 128 || narr_len(a) < 4194304) {
+    if (x0 < 0 || y0 < 0 || z0 < 0 || x1 >= CF_WORLD_SIDE || y1 >= 256 || z1 >= CF_WORLD_SIDE || narr_len(a) < CF_WORLD_VOL) {
         fprintf(stderr, "cf_u8_zero_box: out of range\n"); abort();
     }
     unsigned char *d = (unsigned char *)narr_data(a);
     for (int64_t y = y0; y <= y1; y++)
         for (int64_t z = z0; z <= z1; z++)
-            memset(d + x0 + 128 * (z + 128 * y), 0, (size_t)(x1 - x0 + 1));
+            memset(d + x0 + CF_WORLD_SIDE * (z + CF_WORLD_SIDE * y), 0, (size_t)(x1 - x0 + 1));
     return a;
 }
 
-/* Mark, in a 1024-int marks array (slot cx + 8 * cz + 64 * sy), every chunk
+/* Mark, in a marks array of CF_CHUNK_SLOTS * 16 ints (slot cx + CF_WORLD_CHUNKS * cz + CF_CHUNK_SLOTS * sy), every chunk
  * section in which the two light fields differ inside the box. Light.mark_box
  * compared a voxel at a time in March; here a row is one memcmp and only a
  * differing row is walked. [marks] is consumed and returned; [a] and [b] are
@@ -1552,22 +1577,82 @@ void *cf_u8_zero_box(void *a, int64_t x0, int64_t x1, int64_t y0, int64_t y1, in
 void *cf_mark_box(void *marks, void *a, void *b, int64_t x0, int64_t x1, int64_t y0, int64_t y1, int64_t z0, int64_t z1) {
     int64_t rc = *(int64_t *)marks;
     if (rc != 1) { fprintf(stderr, "cf_mark_box: marks are shared (rc=%lld); refusing to write in place\n", (long long)rc); abort(); }
-    if (x0 < 0 || y0 < 0 || z0 < 0 || x1 >= 128 || y1 >= 256 || z1 >= 128 || narr_len(marks) < 1024) {
+    if (x0 < 0 || y0 < 0 || z0 < 0 || x1 >= CF_WORLD_SIDE || y1 >= 256 || z1 >= CF_WORLD_SIDE || narr_len(marks) < CF_CHUNK_SLOTS * 16) {
         fprintf(stderr, "cf_mark_box: out of range\n"); abort();
     }
-    int64_t need = x1 + 128 * (z1 + 128 * y1) + 1;
+    int64_t need = x1 + CF_WORLD_SIDE * (z1 + CF_WORLD_SIDE * y1) + 1;
     if (narr_len(a) < need || narr_len(b) < need) { fprintf(stderr, "cf_mark_box: fields too short\n"); abort(); }
     const unsigned char *pa = (const unsigned char *)narr_data(a);
     const unsigned char *pb = (const unsigned char *)narr_data(b);
     int64_t *m = (int64_t *)narr_data(marks);
     for (int64_t y = y0; y <= y1; y++)
         for (int64_t z = z0; z <= z1; z++) {
-            int64_t row = x0 + 128 * (z + 128 * y);
+            int64_t row = x0 + CF_WORLD_SIDE * (z + CF_WORLD_SIDE * y);
             if (memcmp(pa + row, pb + row, (size_t)(x1 - x0 + 1)) == 0) continue;
             for (int64_t x = x0; x <= x1; x++)
-                if (pa[row + x - x0] != pb[row + x - x0]) m[(x / 16) + 8 * (z / 16) + 64 * (y / 16)] = 1;
+                if (pa[row + x - x0] != pb[row + x - x0]) m[(x / 16) + CF_WORLD_CHUNKS * (z / 16) + CF_CHUNK_SLOTS * (y / 16)] = 1;
         }
     return marks;
+}
+
+/* ── Lake tile cache ─────────────────────────────────────────────────────────
+ * CubeForge.Lakes.tile pours a priority-flood over a 128x128 tile: 157-214 ms
+ * measured. Every water actor called it on WLoad, so 144 actors poured the
+ * same handful of tiles -- the whole cost of a chunk reload, and the 35-110 ms
+ * frame on the first water tick after a window shift.
+ *
+ * The pour is a pure function of (seed, tx, tz), so it is memoised here: the
+ * actors share one process, and this is the only place they can share anything
+ * (a message may not carry a native array -- GAPS G44).
+ *
+ * cf_lake_get is one call, not a hit test followed by a fetch, so two threads
+ * cannot race between them: the hit flag is the LAST byte of the caller's
+ * array, which is sized one longer than the tile for it. Called from actor
+ * threads, so both entry points take the lock. */
+#define CF_LAKE_SLOTS 32
+static struct { int64_t seed, tx, tz; unsigned char *bytes; size_t n; int used; } g_lake[CF_LAKE_SLOTS];
+static int64_t g_lake_next = 0;
+static pthread_mutex_t g_lake_mu = PTHREAD_MUTEX_INITIALIZER;
+
+void *cf_lake_get(void *out, int64_t seed, int64_t tx, int64_t tz) {
+    int64_t rc = *(int64_t *)out;
+    if (rc != 1) { fprintf(stderr, "cf_lake_get: destination is shared (rc=%lld)\n", (long long)rc); abort(); }
+    int64_t len = narr_len(out);
+    if (len < 1) { fprintf(stderr, "cf_lake_get: destination too small\n"); abort(); }
+    size_t n = (size_t)(len - 1);            /* the last byte is the hit flag */
+    unsigned char *d = (unsigned char *)narr_data(out);
+    d[n] = 0;
+    pthread_mutex_lock(&g_lake_mu);
+    for (int i = 0; i < CF_LAKE_SLOTS; i++) {
+        if (g_lake[i].used && g_lake[i].seed == seed && g_lake[i].tx == tx && g_lake[i].tz == tz && g_lake[i].n == n) {
+            memcpy(d, g_lake[i].bytes, n);
+            d[n] = 1;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_lake_mu);
+    return out;
+}
+
+void cf_lake_put(int64_t seed, int64_t tx, int64_t tz, void *arr) {
+    size_t n = (size_t)narr_len(arr);
+    if (n == 0) return;
+    const unsigned char *src = (const unsigned char *)narr_data(arr);
+    pthread_mutex_lock(&g_lake_mu);
+    /* already there (another thread poured the same tile): keep the first */
+    for (int i = 0; i < CF_LAKE_SLOTS; i++)
+        if (g_lake[i].used && g_lake[i].seed == seed && g_lake[i].tx == tx && g_lake[i].tz == tz) {
+            pthread_mutex_unlock(&g_lake_mu); return;
+        }
+    int i = (int)(g_lake_next % CF_LAKE_SLOTS);
+    g_lake_next++;
+    unsigned char *b = (unsigned char *)malloc(n);
+    if (!b) { pthread_mutex_unlock(&g_lake_mu); return; }
+    memcpy(b, src, n);
+    free(g_lake[i].bytes);
+    g_lake[i].bytes = b; g_lake[i].n = n;
+    g_lake[i].seed = seed; g_lake[i].tx = tx; g_lake[i].tz = tz; g_lake[i].used = 1;
+    pthread_mutex_unlock(&g_lake_mu);
 }
 
 /* Diagnostic: the refcount word of a March array, as the extern sees it (the
@@ -1722,7 +1807,7 @@ static void cf_shift_particles(int64_t dx, int64_t dz) {
     for (int64_t i = 0; i < g_nemit; i++) { g_emit[i][0] -= (int32_t)(16 * dx); g_emit[i][2] -= (int32_t)(16 * dz); }
     for (int64_t i = 0; i < g_nsprings; ) {
         g_springs[i][0] -= (int32_t)(16 * dx); g_springs[i][2] -= (int32_t)(16 * dz);
-        if (g_springs[i][0] < 0 || g_springs[i][0] >= 128 || g_springs[i][2] < 0 || g_springs[i][2] >= 128) {
+        if (g_springs[i][0] < 0 || g_springs[i][0] >= CF_WORLD_SIDE || g_springs[i][2] < 0 || g_springs[i][2] >= CF_WORLD_SIDE) {
             g_springs[i][0] = g_springs[g_nsprings - 1][0]; g_springs[i][1] = g_springs[g_nsprings - 1][1]; g_springs[i][2] = g_springs[g_nsprings - 1][2];
             g_nsprings--;
         } else i++;

@@ -64,6 +64,8 @@ mod CubeForge.Ffi.Window do
     fn x_gfx_dump_bmp(path: String): Int = "cf_gfx_dump_bmp"
     fn x_live_allocs(): Int = "march_live_allocs"
     fn x_arr_rc(a: NativeU8Arr): Int = "cf_arr_rc"
+    fn x_lake_get(consume out: NativeU8Arr, seed: Int, tx: Int, tz: Int): NativeU8Arr = "cf_lake_get"
+    fn x_lake_put(seed: Int, tx: Int, tz: Int, a: NativeU8Arr): Unit = "cf_lake_put"
     fn x_rss_bytes(): Int = "cf_rss_bytes"
     fn x_gfx_upload_texture(pixels: NativeU8Arr, w: Int, h: Int, layers: Int): Unit = "cf_gfx_upload_texture"
   end
@@ -164,6 +166,10 @@ mod CubeForge.Ffi.Window do
   fn f64_blit(dst : NativeFloatArr, di : Int, src : NativeFloatArr, si : Int, n : Int) : NativeFloatArr do x_f64_blit(dst, di, src, si, n) end
   doc "Diagnostic: the refcount of a byte array as the shim sees it; a uniquely owned array reads 2 (the call's own borrow)."
   fn arr_rc(a : NativeU8Arr) : Int do x_arr_rc(a) end
+  doc "Look a poured lake tile up in the shim's cache. [out] is the tile's bytes plus ONE more: that last byte comes back 1 on a hit and 0 on a miss, so the test and the fetch are one call and two threads cannot race between them."
+  fn lake_get(out : NativeU8Arr, seed : Int, tx : Int, tz : Int) : NativeU8Arr do x_lake_get(out, seed, tx, tz) end
+  doc "Remember a poured lake tile. The first writer of a key wins, so two threads pouring the same tile agree."
+  fn lake_put(seed : Int, tx : Int, tz : Int, a : NativeU8Arr) : Unit do x_lake_put(seed, tx, tz, a) end
   doc "Zero the box of a light field (x + 128 * (z + 128 * y)) in place: see cf_u8_zero_box."
   fn u8_zero_box(a : NativeU8Arr, x0 : Int, x1 : Int, y0 : Int, y1 : Int, z0 : Int, z1 : Int) : NativeU8Arr do x_u8_zero_box(a, x0, x1, y0, y1, z0, z1) end
   doc "Mark every chunk section in which light fields [a] and [b] differ inside the box, into the 1024-int marks array: see cf_mark_box."

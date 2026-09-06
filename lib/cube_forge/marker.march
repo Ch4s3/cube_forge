@@ -30,6 +30,6 @@ mod CubeForge.Marker do
   end
 
   fn vertex_count() : Int do 6 end
-  fn slot() : Int do 250 end
+  fn slot() : Int do 506 end
 
 end
