@@ -85,20 +85,24 @@ mod CubeForge.Fruit do
   end
 
   -- ── World edits ──────────────────────────────────────────────────────────
-  pfn stamp_go(w : CubeForge.World.World, sp : Int, bx : Int, base : Int, bz : Int, seed : Int, i : Int, rows : Int) : CubeForge.World.World do
-    if i >= 81 * rows do w
+  pfn in_world(x : Int, y : Int, z : Int) : Bool do
+    if x < 0 || z < 0 || x >= 128 || z >= 128 do false else y >= 0 && y < 256 end
+  end
+  -- Gathered, then written in one World.set_blocks (a chunk copy per chunk, not per block).
+  pfn stamp_go(w : CubeForge.World.World, sp : Int, bx : Int, base : Int, bz : Int, seed : Int, i : Int, rows : Int, acc : List(Int)) : List(Int) do
+    if i >= 81 * rows do acc
     else
       let x = bx - 4 + i % 9
       let z = bz - 4 + (i / 9) % 9
       let y = base + 1 + i / 81
       let id = block_of_body(sp, bx, base, bz, seed, x, y, z)
-      let w1 = if id != 0 && y < 256 && W.block_at(w, x, y, z) == 0 do W.set_block(w, x, y, z, id) else w end
-      stamp_go(w1, sp, bx, base, bz, seed, i + 1, rows)
+      let take = if id == 0 do false else if !in_world(x, y, z) do false else W.block_at(w, x, y, z) == 0 end end
+      stamp_go(w, sp, bx, base, bz, seed, i + 1, rows, if take do Cons(W.pack_cell(x, y, z, id), acc) else acc end)
     end
   end
   doc "Stamp the body of [sp] on ground [base] at (bx, bz), only into air."
   fn stamp(w : CubeForge.World.World, sp : Int, bx : Int, base : Int, bz : Int, seed : Int) : CubeForge.World.World do
-    stamp_go(w, sp, bx, base, bz, seed, 0, height_of(sp, bx, bz, seed))
+    W.set_blocks(w, stamp_go(w, sp, bx, base, bz, seed, 0, height_of(sp, bx, bz, seed), Nil))
   end
 
   type Harvest = Harvest(CubeForge.World.World, Int, Int)
@@ -106,24 +110,24 @@ mod CubeForge.Fruit do
   fn felled_stems(f : Harvest) : Int do match f do Harvest(_, s, _) -> s end end
   fn felled_caps(f : Harvest) : Int do match f do Harvest(_, _, c) -> c end end
 
-  pfn fell_go(w : CubeForge.World.World, sp : Int, bx : Int, base : Int, bz : Int, seed : Int, i : Int, rows : Int, stems : Int, caps : Int) : Harvest do
-    if i >= 81 * rows do Harvest(w, stems, caps)
+  type Gathered = Gathered(List(Int), Int, Int)
+  pfn fell_go(w : CubeForge.World.World, sp : Int, bx : Int, base : Int, bz : Int, seed : Int, i : Int, rows : Int, acc : List(Int), stems : Int, caps : Int) : Gathered do
+    if i >= 81 * rows do Gathered(acc, stems, caps)
     else
       let x = bx - 4 + i % 9
       let z = bz - 4 + (i / 9) % 9
       let y = base + 1 + i / 81
       let want = block_of_body(sp, bx, base, bz, seed, x, y, z)
-      let there = if want != 0 && y < 256 do W.block_at(w, x, y, z) == want else false end
-      if !there do fell_go(w, sp, bx, base, bz, seed, i + 1, rows, stems, caps)
-      else
-        let w1 = W.set_block(w, x, y, z, 0)
-        fell_go(w1, sp, bx, base, bz, seed, i + 1, rows, if C.is_fruit_stem(want) do stems + 1 else stems end, if C.is_fruit_cap(want) do caps + 1 else caps end)
-      end
+      let there = if want == 0 do false else if !in_world(x, y, z) do false else W.block_at(w, x, y, z) == want end end
+      if !there do fell_go(w, sp, bx, base, bz, seed, i + 1, rows, acc, stems, caps)
+      else fell_go(w, sp, bx, base, bz, seed, i + 1, rows, Cons(W.pack_cell(x, y, z, 0), acc), if C.is_fruit_stem(want) do stems + 1 else stems end, if C.is_fruit_cap(want) do caps + 1 else caps end) end
     end
   end
-  doc "Remove exactly the blocks the body's shape owns, counting the stems and caps that were actually there."
+  doc "Remove exactly the blocks the body's shape owns, counting the stems and caps that were actually there. One write."
   fn fell(w : CubeForge.World.World, sp : Int, bx : Int, base : Int, bz : Int, seed : Int) : Harvest do
-    fell_go(w, sp, bx, base, bz, seed, 0, height_of(sp, bx, bz, seed), 0, 0)
+    match fell_go(w, sp, bx, base, bz, seed, 0, height_of(sp, bx, bz, seed), Nil, 0, 0) do
+      Gathered(cells, stems, caps) -> Harvest(W.set_blocks(w, cells), stems, caps)
+    end
   end
 
 

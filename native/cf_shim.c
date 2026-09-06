@@ -1570,6 +1570,10 @@ void *cf_mark_box(void *marks, void *a, void *b, int64_t x0, int64_t x1, int64_t
     return marks;
 }
 
+/* Diagnostic: the refcount word of a March array, as the extern sees it (the
+ * borrow for this call is included, so a uniquely owned array reads 2). */
+int64_t cf_arr_rc(void *a) { return *(int64_t *)a; }
+
 /* The u8 twin of cf_f32_blit, for the skylight field: copy n bytes from
  * src[si..] into dst[di..] under the same rc == 1 contract. The lighting sweep
  * copies the whole 4 MB field once per level, which is a memcpy here and 4.2M
