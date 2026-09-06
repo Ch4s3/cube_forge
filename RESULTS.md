@@ -2631,3 +2631,44 @@ The lesson worth keeping is not any of those. It is that the oracle was made to
 NAME what broke -- species, pose, the stray piece's size and its first cell --
 after bisecting by hand cost three ninety-second runs. The diagnostic paid for
 itself twice over in the same session.
+
+## Birds and fish, redesigned from the ground up
+
+The previous builder was a box with parts attached, and every improvement to
+it -- rounding, tapering, feet -- made better parts on the wrong skeleton. The
+moa that came out of it had a head the size of a fist glued to a beach ball, a
+plank for a tail, and no neck at all. A bird is a SMALL HEAD ON A THIN NECK over
+a teardrop; a fish is a laterally compressed loft that tapers to a peduncle.
+Neither is a box, and no amount of refining a box gets there.
+
+**Two primitives.** A LOFT is an ellipse swept along a path with its radii
+following a profile: the body, the neck, the beak, a leg. A SHEET is a thin
+plate: a wing, a tail fan, a fin. That is the whole vocabulary. Consecutive loft
+slices overlap by construction, so a loft is connected without anyone checking;
+a sheet's root is buried inside the loft it hangs off, so it cannot detach. The
+connectivity oracle still runs, but on this builder it is a guard rather than a
+bug-finder -- it caught two, both a notch or a sweep stepping in two axes at
+once on a 32-cell grid, the same class as before.
+
+**One profile curve.** Two half-ellipses meeting at a peak: a smooth egg, fat
+where the row says and drawn to a point at both ends. With the peak at 45% it is
+a bird's chest, at 35% a fish's shoulder, at 50% a penguin's belly. A fish's
+width follows the square root of it, which keeps the body deep further aft --
+the peduncle is most of what makes a fish look like it swims.
+
+**The neck is a tube from the shoulder to a small ball.** Head size and neck
+thickness are rows of their own now. A neck as wide as the head is not a neck;
+a head sized to the body makes every bird a duck.
+
+| | before | after |
+|---|---|---|
+| quads over 54 bodies | 43,869 | 83,723 |
+| largest body | 2,524 | 7,160 (Mossmoa, 128 grid) |
+| startup | 3.5 s | 2.8-2.9 s |
+| live flocks, frame rate | within noise | -4% (132-134 vs 138-141) |
+| live flocks, worst frame | +1 ms | +0.5 ms |
+| frame budget gate | 10.5 ms | 5.5 ms |
+
+The quads doubled and the startup FELL: a loft fills fewer cells than the boxes
+it replaces, and the bounding-box greedy pass scales with what is filled. The
+frame budget number is mostly a quieter machine, and is reported as measured.
