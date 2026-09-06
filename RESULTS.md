@@ -1646,6 +1646,8 @@ hint that the name is the problem (GAPS G65 has the same shape). The pair is
 
 **Food.** A cap is food. Using one with nothing in reach eats it: one is
 consumed and the species' effect starts, or refreshes, for thirty seconds.
+(That gesture was replaced on 2026-09-06 by an eat key and a right-click in
+the inventory window -- see "Eating from the inventory" below.)
 `CubeForge.Effects` holds four until-times and answers multipliers for a
 clock; `Player.update_with` takes them (walk speed, jump speed, swim speed,
 both horizontal and vertical); the lantern effect forces the flashlight on;
