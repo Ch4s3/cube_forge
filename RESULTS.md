@@ -2240,3 +2240,42 @@ back.
 A new test plants a tree and checks the region relight against a full flood.
 441 tests. The oracle stays in the dump: a non-zero block count, or a sky
 count whose first voxels are not the 15/13 water pattern, is a relight bug.
+
+## Eating from the inventory (2026-09-06)
+
+Spec `docs/superpowers/specs/2026-09-06-eating-from-the-inventory-design.md`.
+A cap has been food since the effects work, but the only way to eat one was to
+hold it in the selected hotbar slot, aim at **nothing**, and right-click. That
+gesture is gone. Two deliberate ones replace it:
+
+- **E** eats the selected hotbar slot, whatever the player is aiming at, and
+  is inert while the inventory window or the escape menu is up.
+- **A right-click on any slot** while the inventory window is open eats that
+  slot -- hotbar or backpack. Left-click keeps drag and drop, and right-click
+  did nothing in the window before, since `interact` never runs while a panel
+  is open. This is the half that matters: caps pile up in the backpack, and
+  they used to have to be dragged into the hotbar before they could be eaten.
+
+Two functions carry the rules, so the gestures cannot disagree and both are
+unit-testable without a window. `Inventory.edible(id)` is the only answer to
+what is food (caps, and nothing else). `Inventory.eat_slot(window_open,
+ui_open, right_click, hovered, eat_key, sel)` is the only answer to which slot
+a bite addresses, or -1; whether that slot *holds* food is deliberately not its
+question, so an inedible slot is a no-op rather than a refused gesture. The
+frame loop reads both and calls `eat_at`, which consumes one through the new
+`Inventory.consume_at` (consume was hard-wired to the selected hotbar slot) and
+applies the species effect as before -- thirty seconds, refreshing.
+
+`CF_AUTOEAT=<frame>` used to call the bite directly and so tested nothing about
+the gesture. It now puts a Frostcap cap in the inventory and presses the key
+thirty frames later; `CF_AUTOEAT_SLOT=<slot>` puts the cap in that slot and
+eats from there instead. Both print `ate a Frostcap cap: JUMP 30` and the dump
+shows `effects: JUMP 30`, from the hotbar and from backpack slot 20.
+
+448 tests (441 before): what is edible, which slot each gesture addresses,
+consuming from a given slot, and the last one emptying it. Mesh hash, light
+oracle and frame budget unmoved (380281180, sky 18 block 0, 6.42 ms).
+
+The one thing not covered headless is the mouse itself: the scripted knob
+supplies the slot, so the click-to-slot rule is tested through `eat_slot`
+rather than through a real right-click over a real cursor position.
