@@ -1835,3 +1835,67 @@ layer (89), so no shader or vertex-format change.
   "expected CubeForge.Model.Set but got Set" -- renamed `Templates`; the
   alias `M` is taken by `CubeForge.Math.Mat4` across the test binary.
 - 378 tests (365 before).
+
+## Perf pass: the drain, the mesher, the relight's edges (2026-09-05)
+
+Method: a `slow frame` line under `CF_AUTOFLOW` names every frame over 4 ms
+with its phase of the period; a `drain chunk` line times each chunk's remesh
+and upload; `CF_VEG_LOG=1` splits a tree edit into blocks / relight /
+occupancy / rescan; and `sample` on the release binary (outside the sandbox,
+`-mayDie`) gave call graphs -- once on the pinned scenario, twice on
+`CF_WORKERS=1 CF_MESH_REPS=80`, a serial mesher loop that is pure mesher.
+The mesh hash on the `state:` line at frame 30 of the pinned scenario
+(`380281180`) was the oracle for every mesher change: it did not move once.
+
+**What the frame looked like.** The worst frames were the ODD phases at 5-9 ms:
+the mesh drain, four sections a frame, with an opaque section at 0.6-1.0 ms.
+Water sections were 0.05 ms; the cost was retexturing and fungus migration
+owing ~10 opaque sections a period. Phase 6 (a tree or body) was 6-9 ms.
+
+**Where a section's time went** (serial mesher profile): the allocator. Every
+Float in March is a heap object; a rectangle was some sixty of them across
+quad_sized, pack_shade, layer_for (a chain of boxed literal returns, 15% by
+itself) -- `march_alloc` + `march_alloc_float` + `decrc` + free were ~60% of
+mesh time. The six-direction mask fill I rewrote first was a minor term.
+
+| change | measure | before | after |
+|---|---|---|---|
+| per-phase drain budgets (3 odd / 2 retexture / 1 water, field / 0 veg) | worst frame | 10.6 ms | 10.1 |
+| one-pass mask fill (six directions from one cell walk) | opaque section | 0.7 ms | ~0.6 (noise) |
+| `F32Buf.push_vertex`: one cell rebuild per vertex, not nine | serial mesh-all x3 | 788-899 ms | (small) |
+| `cf_mesh_quad`: the rectangle written in C from ints + key + layer table | opaque section | 0.6 | 0.45 |
+| `cf_mesh_slice`: the whole per-slice greedy merge in C, mask read only | opaque section | 0.45 | **0.22-0.29** |
+| `F32Buf.grow` as one blit; section buffers start at 16k floats | serial mesh-all x3 | 788-899 | **398-400 ms** |
+| the same | startup mesh all, 64 chunks | 270 ms | **197 ms** |
+| `cf_gfx_sync_box`: one texture box + exact coarse recount | tree edit, occupancy | 0.6 ms | **0.02** |
+| staged upload: sixteen `glBufferSubData` become one | drain uploads over 1 ms | 7-8 of 44 | **0 of 44** |
+| double-buffered mesh VBOs, capacity kept | (no measurable change on its own; kept for the staging) | | |
+| `cf_u8_zero_box` / `cf_mark_box`: the relight's clear and section diff | tree relight | 2-5 ms | 2-5 ms (no change) |
+| **frame budget** (`frame_budget.sh 16 400 3`) | worst frame | **10.6-11.6 ms** | **8.2 ms** |
+
+Two things that did not pay: the relight's box clear and diff in C (the
+March versions were not where the relight's time is -- the sweep and the
+seed are), and GL_DYNAMIC_DRAW / double buffering for the upload stalls (the
+stall was per call; staging fixed it, the buffers stayed).
+
+**Layout notes for the shim work.** An extern's borrowed array arrives with
+rc 2 (the borrow itself), so a "write through a borrowed reference" guard of
+rc == 1 trips; cf_mesh_slice consumes and returns the buffer and hands the
+count back in the reserved slot past the worst-case region. The relight's
+field is the World's and was silently copy-on-write on its first byte; the
+copy is explicit now (`copy_prefix(la, volume())`) so the shim's clear can
+insist on a unique field, at the cost it always had.
+
+**Left on the table, measured.** A tree edit is now: blocks 0.8-1.3 ms
+(Veg.plant: a 64 KB chunk copy per `set_block`, ~40 of them, and a chunk
+lookup per candidate cell), relight 2-5 ms (the sweep and the seed), rescan
+0.3. And a finding that touches everything: `Array.PVec.get` walks a 32-long
+list at the leaf and computes the tail's length by walking it, so a chunk
+lookup on a 64-chunk world is ~50 pointer hops (`Array.lst_nth` in every
+profile, 2% of the frame); `World.block_at` pays it per voxel in the relight's
+`give_level`. GAPS G71. Phase 6 is the worst frame now: 6.1 ms mean, 8.6 max.
+
+432 tests. `CF_VEG_LOG` and the `slow frame` / `drain chunk` lines stay as
+diagnostics; the shim additions are `cf_f32_stamp`, `cf_mesh_quad`,
+`cf_mesh_slice`, `cf_u8_zero_box`, `cf_mark_box`, `cf_gfx_sync_box`, all under
+the blit's rc == 1 contract.

@@ -306,8 +306,16 @@ mod CubeForge.Light do
   pfn zero_plane(la : NativeU8Arr, x0 : Int, x1 : Int, y : Int, z : Int, z1 : Int) : NativeU8Arr do
     if z > z1 do la else zero_plane(zero_row(la, x0, x1, y, z), x0, x1, y, z + 1, z1) end
   end
+  -- One memset per row in the shim (cf_u8_zero_box); the byte-at-a-time
+  -- version above it is kept as the reference the tests can compare against.
   pfn zero_box_go(la : NativeU8Arr, x0 : Int, x1 : Int, y : Int, y1 : Int, z0 : Int, z1 : Int) : NativeU8Arr do
-    if y > y1 do la else zero_box_go(zero_plane(la, x0, x1, y, z0, z1), x0, x1, y + 1, y1, z0, z1) end
+    if y > y1 do la else CubeForge.Ffi.Window.u8_zero_box(la, x0, x1, y, y1, z0, z1) end
+  end
+  doc "The shim's box clear, for tests."
+  fn zero_box(la : NativeU8Arr, x0 : Int, x1 : Int, y : Int, y1 : Int, z0 : Int, z1 : Int) : NativeU8Arr do zero_box_go(la, x0, x1, y, y1, z0, z1) end
+  doc "The byte-at-a-time box clear, for tests that check the shim's against it."
+  fn zero_box_slow(la : NativeU8Arr, x0 : Int, x1 : Int, y : Int, y1 : Int, z0 : Int, z1 : Int) : NativeU8Arr do
+    if y > y1 do la else zero_box_slow(zero_plane(la, x0, x1, y, z0, z1), x0, x1, y + 1, y1, z0, z1) end
   end
 
   -- Re-seed the sky column of every (x, z) in the box, over the box's y range
@@ -549,8 +557,15 @@ mod CubeForge.Light do
   pfn mark_plane(m : NativeIntArr, a : NativeU8Arr, b : NativeU8Arr, x0 : Int, x1 : Int, y : Int, z : Int, z1 : Int) : NativeIntArr do
     if z > z1 do m else mark_plane(mark_row(m, a, b, x0, x1, y, z), a, b, x0, x1, y, z + 1, z1) end
   end
+  -- A memcmp per row in the shim (cf_mark_box), walking only rows that differ.
   pfn mark_box(m : NativeIntArr, a : NativeU8Arr, b : NativeU8Arr, x0 : Int, x1 : Int, y : Int, y1 : Int, z0 : Int, z1 : Int) : NativeIntArr do
-    if y > y1 do m else mark_box(mark_plane(m, a, b, x0, x1, y, z0, z1), a, b, x0, x1, y + 1, y1, z0, z1) end
+    if y > y1 do m else CubeForge.Ffi.Window.mark_box(m, a, b, x0, x1, y, y1, z0, z1) end
+  end
+  doc "The shim's section diff, for tests."
+  fn mark_box_fast(m : NativeIntArr, a : NativeU8Arr, b : NativeU8Arr, x0 : Int, x1 : Int, y : Int, y1 : Int, z0 : Int, z1 : Int) : NativeIntArr do mark_box(m, a, b, x0, x1, y, y1, z0, z1) end
+  doc "The voxel-at-a-time section diff, for tests that check the shim's against it."
+  fn mark_box_slow(m : NativeIntArr, a : NativeU8Arr, b : NativeU8Arr, x0 : Int, x1 : Int, y : Int, y1 : Int, z0 : Int, z1 : Int) : NativeIntArr do
+    if y > y1 do m else mark_box_slow(mark_plane(m, a, b, x0, x1, y, z0, z1), a, b, x0, x1, y + 1, y1, z0, z1) end
   end
 
   doc "The 16-bit section mask for chunk (cx, cz), read out of a marks array."
@@ -593,7 +608,11 @@ mod CubeForge.Light do
     let sy1 = clampi(ey + r + 1, 0, 255)
     let above_len = if sy1 >= 254 do volume() else (sy1 + 2) * 16384 end
     let above = copy_prefix(la, above_len)
-    let la1 = zero_box_go(la, cx0, cx1, cy0, cy1, cz0, cz1)
+    -- The field is the World's, so it is shared here; the first byte written
+    -- used to copy all 4 MB silently (copy-on-write) and every later write
+    -- landed in the copy. The copy is now explicit, so the shim's clear can
+    -- insist on a unique field and the cost is what it always was.
+    let la1 = zero_box_go(copy_prefix(la, volume()), cx0, cx1, cy0, cy1, cz0, cz1)
     let la2 = seed_box_go(la1, w, above, cx0, cx1 - cx0 + 1, cz0, cy1, cy0, 0, (cx1 - cx0 + 1) * (cz1 - cz0 + 1))
     -- scan box: one wider, so the unchanged voxels around the edit feed inward
     let sx0 = clampi(ex - r - 1, 0, 127)
@@ -697,7 +716,8 @@ mod CubeForge.Light do
     -- is a contiguous prefix of the flat index, so every copy is that prefix.
     let plen = if sy1 >= 254 do volume() else (sy1 + 2) * 16384 end
     let before = copy_prefix(lb, plen)
-    let lb1 = zero_box_go(lb, cx0, cx1, cy0, cy1, cz0, cz1)
+    -- an explicit copy of the shared field, as in relight_marked
+    let lb1 = zero_box_go(copy_prefix(lb, volume()), cx0, cx1, cy0, cy1, cz0, cz1)
     let lb2 = seed_emit_box_go(lb1, w, cx0, cx1 - cx0 + 1, cz0, cy0, cy1, 0, (cx1 - cx0 + 1) * (cz1 - cz0 + 1))
     -- scan box: one wider, so the unchanged voxels around the edit feed inward
     let sx0 = clampi(ex - r - 1, 0, 127)

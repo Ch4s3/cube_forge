@@ -14,7 +14,7 @@ mod CubeForge.Test.Veg do
     if i < 0 do acc else flat_chunks(i - 1, h, Cons(flat_cells(C.new(), 0, h), acc)) end
   end
   pfn flat_world(h : Int) : CubeForge.World.World do
-    CubeForge.World.World(Array.from_list(flat_chunks(63, h, Nil)), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.World.shown_new(), 8, CubeForge.Model.build())
+    CubeForge.World.World(Array.from_list(flat_chunks(63, h, Nil)), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.World.shown_new(), 8, CubeForge.World.default_models())
   end
   -- top the first chunk with grass so trees have their palette block under them
   pfn grass_top16(w : CubeForge.World.World, i : Int, h : Int) : CubeForge.World.World do

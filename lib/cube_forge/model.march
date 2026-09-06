@@ -240,7 +240,7 @@ mod CubeForge.Model do
 
   fn face_float(d : Int) : Float do int_to_float(d) end
   pfn vert(b : CubeForge.F32Buf.F32Buf, x : Float, y : Float, z : Float, k : Int, d : Int) : CubeForge.F32Buf.F32Buf do
-    b |> B.push3(x, y, z) |> B.push(palette_u(k)) |> B.push(palette_v(k)) |> B.push(palette_layer()) |> B.push(1.0) |> B.push(face_float(d)) |> B.push(Vx.plain())
+    B.push_vertex(b, x, y, z, palette_u(k), palette_v(k), palette_layer(), 1.0, face_float(d), Vx.plain())
   end
   pfn quad(b : CubeForge.F32Buf.F32Buf, x0 : Float, y0 : Float, z0 : Float, x1 : Float, y1 : Float, z1 : Float,
            x2 : Float, y2 : Float, z2 : Float, x3 : Float, y3 : Float, z3 : Float, k : Int, d : Int) : CubeForge.F32Buf.F32Buf do
@@ -304,12 +304,12 @@ mod CubeForge.Model do
 
   -- ── The set: every template in one blob ─────────────────────────────────
   -- All templates: a float blob and count() + 1 offsets into it.
-  type Templates = Templates(NativeF32Arr, NativeIntArr)
+  type Templates = Templates(NativeF32Arr, NativeIntArr, NativeF32Arr)   -- template blob, offsets, the texture layer table the shim reads (World.default_models fills it)
 
   pfn build_go(k : Int, blob : CubeForge.F32Buf.F32Buf, offs : NativeIntArr) : Templates do
     if k >= count() do
       let n = B.len(blob)
-      Templates(B.storage(blob), NativeArray.set_int(offs, count(), n))
+      Templates(B.storage(blob), NativeArray.set_int(offs, count(), n), NativeArray.make_f32(1, 0.0))
     else
       let n = B.len(blob)
       build_go(k + 1, B.append(blob, template(shape(k))), NativeArray.set_int(offs, k, n))
@@ -319,12 +319,15 @@ mod CubeForge.Model do
   fn build() : Templates do build_go(0, B.new(4096), NativeArray.make_int(count() + 1, 0)) end
 
   doc "First float of template k in the blob."
-  fn offset(s : Templates, k : Int) : Int do match s do Templates(_, o) -> NativeArray.get_int(o, k) end end
+  fn offset(s : Templates, k : Int) : Int do match s do Templates(_, o, _) -> NativeArray.get_int(o, k) end end
   doc "Floats in template k."
-  fn floats(s : Templates, k : Int) : Int do match s do Templates(_, o) -> NativeArray.get_int(o, k + 1) - NativeArray.get_int(o, k) end end
+  fn floats(s : Templates, k : Int) : Int do match s do Templates(_, o, _) -> NativeArray.get_int(o, k + 1) - NativeArray.get_int(o, k) end end
   doc "Float i of the blob."
-  fn at(s : Templates, i : Int) : Float do match s do Templates(d, _) -> NativeArray.get_f32(d, i) end end
-  fn blob(s : Templates) : NativeF32Arr do match s do Templates(d, _) -> d end end
+  fn at(s : Templates, i : Int) : Float do match s do Templates(d, _, _) -> NativeArray.get_f32(d, i) end end
+  fn blob(s : Templates) : NativeF32Arr do match s do Templates(d, _, _) -> d end end
+  doc "The texture layer table the shim's quad emitter reads: layer_for_face(id, d) at id * 6 + d for ids 0..255, then Texture.myc_layer(k, sp) at 1536 + k * 6 + (sp - 1). Texture builds it; World.default_models puts it here."
+  fn layers(s : Templates) : NativeF32Arr do match s do Templates(_, _, l) -> l end end
+  fn with_layers(s : Templates, l : NativeF32Arr) : Templates do match s do Templates(d, o, _) -> Templates(d, o, l) end end
   doc "Quads in template k."
   fn faces(s : Templates, k : Int) : Int do floats(s, k) / (6 * Vx.floats()) end
 

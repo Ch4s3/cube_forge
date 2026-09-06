@@ -189,6 +189,16 @@ mod CubeForge.Texture do
   fn icon_layer(id : Int) : Float do if id == 4 do 15.0 else if CubeForge.Species.is_spore(id) do spore_layer(CubeForge.Species.species_of_item(id)) else layer_for(id) end end end
 
   fn layers() : Int do 92 end
+
+  -- ── The layer table for the shim's quad emitter ─────────────────────────
+  pfn layer_tab_go(t : NativeF32Arr, i : Int) : NativeF32Arr do
+    if i >= 1536 do t else layer_tab_go(NativeArray.set_f32(t, i, layer_for_face(i / 6, i % 6)), i + 1) end
+  end
+  pfn myc_tab_go(t : NativeF32Arr, j : Int) : NativeF32Arr do
+    if j >= 42 do t else myc_tab_go(NativeArray.set_f32(t, 1536 + j, myc_layer(j / 6, j % 6 + 1)), j + 1) end
+  end
+  doc "Every block face's texture layer in one array: layer_for_face(id, d) at id * 6 + d for ids 0..255, then myc_layer(k, sp) at 1536 + k * 6 + (sp - 1). cf_mesh_quad reads it instead of calling back into layer_for per rectangle, which was a chain of boxed-Float returns."
+  fn layer_table() : NativeF32Arr do myc_tab_go(layer_tab_go(NativeArray.make_f32(1536 + 42, 0.0), 0), 0) end
   fn water_layer() : Float do 1.0 end
   doc "Texture layer for a block id on face direction [d] (0 +y, 1 -y, 2 +x, 3 -x, 4 +z, 5 -z)."
   fn layer_for_face(id : Int, d : Int) : Float do

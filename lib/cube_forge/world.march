@@ -63,6 +63,8 @@ mod CubeForge.World do
   fn shown_new() : NativeU8Arr do NativeArray.make_u8(16384, 0) end
   doc "The species each column's surface currently displays (0 = none). The mesher reads it to pick mycelium textures; the fungus migration writes it in step with the block."
   fn shown(w : World) : NativeU8Arr do match w do World(_, _, _, _, sh, _, _) -> sh end end
+  doc "The model templates plus the texture layer table, as every World carries them: built once, constant after."
+  fn default_models() : CubeForge.Model.Templates do CubeForge.Model.with_layers(CubeForge.Model.build(), CubeForge.Texture.layer_table()) end
   doc "The model templates the mesher stamps for small mushrooms, fronds and bushes: built once with the world, constant after."
   fn models(w : World) : CubeForge.Model.Templates do match w do World(_, _, _, _, _, _, mo) -> mo end end
   fn shown_at(w : World, x : Int, z : Int) : Int do
@@ -222,19 +224,19 @@ mod CubeForge.World do
     -- the lake table once, read by every chunk (a read only: no copy -- GAPS G68)
     let lk = CubeForge.Lakes.levels(seed, n)
     let chunks = List.pmap_n(coords(n), fn i -> C.generate_lakes(16 * (i % n), 16 * (i / n), seed, lk, n), workers)
-    World(Array.from_list(chunks), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), shown_new(), n, CubeForge.Model.build())
+    World(Array.from_list(chunks), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), shown_new(), n, default_models())
   end
 
   doc "A world over chunks read from a save, with empty light and occupancy fields (rebuilt by the caller)."
   fn from_chunks(chunks : Array.PVec(CubeForge.Chunk.Chunk), n : Int) : World do
-    World(chunks, CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), shown_new(), n, CubeForge.Model.build())
+    World(chunks, CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), shown_new(), n, default_models())
   end
   doc "The chunk array, in grid order."
   fn chunks(w : World) : Array.PVec(CubeForge.Chunk.Chunk) do match w do World(cs, _, _, _, _, _, _) -> cs end end
 
   fn generate_scalar(n : Int, seed : Int, workers : Int) : World do
     let chunks = List.pmap_n(coords(n), fn i -> C.generate_scalar(16 * (i % n), 16 * (i / n), seed), workers)
-    World(Array.from_list(chunks), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), shown_new(), n, CubeForge.Model.build())
+    World(Array.from_list(chunks), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), shown_new(), n, default_models())
   end
 
   -- A rolling hash over every voxel of every chunk. Four million reads, so this

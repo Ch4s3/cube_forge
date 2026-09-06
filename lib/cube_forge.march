@@ -445,6 +445,13 @@ mod CubeForge do
   -- and one edit is one section's worth of work anyway.
   doc "Sections rebuilt per frame while the queue is not empty."
   fn remesh_budget() : Int do 4 end
+  doc "Sections the drain may rebuild on a frame of the period: 3 on the odd frames (no phase runs there), 2 on the retexture frames, 1 on the water and field frames, none on the vegetation frame. 21 a period, against the 20 the odd frames alone carried."
+  fn drain_budget(phase : Int) : Int do
+    if phase % 2 == 1 do 3
+    else if is_migrate_slot(phase) do 2
+    else if phase == veg_slot() do 0
+    else 1 end end end
+  end
 
   -- Owe [passes] on every section [marks] touched.
   pfn stage_go(pend : NativeIntArr, marks : NativeIntArr, i : Int, passes : Int) : NativeIntArr do
@@ -483,28 +490,31 @@ mod CubeForge do
   -- owed. The budget is checked before a chunk is started, so a frame can
   -- overshoot by at most the sections of one chunk.
   pfn drain_go(w : CubeForge.World.World, pend : NativeIntArr, ci : Int, n : Int, counts : NativeIntArr,
-               meshes, empty : CubeForge.Chunk.Chunk, budget : Int) : Drained do
+               meshes, empty : CubeForge.Chunk.Chunk, budget : Int, log : Bool) : Drained do
     if ci >= n * n do Drained(counts, meshes, pend)
     else if budget <= 0 do Drained(counts, meshes, pend)
     else
       let cx = ci % n
       let cz = ci / n
       let mask = owed_mask(pend, cx, cz, 0, 0)
-      if mask == 0 do drain_go(w, pend, ci + 1, n, counts, meshes, empty, budget)
+      if mask == 0 do drain_go(w, pend, ci + 1, n, counts, meshes, empty, budget, log)
       else
         let done = owed_count(pend, cx, cz, 0, 0)
+        let t0 = Win.time()
         let m1 = drain_sections(w, cx, cz, pend, 0, Array.get(meshes, ci), empty)
-        drain_go(w, clear_chunk(pend, cx, cz, 0), ci + 1, n, upload_chunk_passes(m1, ci, counts, mask),
-                 Array.set(meshes, ci, m1), empty, budget - done)
+        let t1 = Win.time()
+        let counts1 = upload_chunk_passes(m1, ci, counts, mask)
+        if log do println("  drain chunk " ++ int_to_string(cx) ++ "," ++ int_to_string(cz) ++ ": " ++ int_to_string(done) ++ " sections, passes " ++ int_to_string(mask) ++ ", mesh " ++ ms(t1 -. t0) ++ ", upload " ++ ms(Win.time() -. t1) ++ ", water verts " ++ int_to_string(CM.water_vertices(m1)) ++ ", opaque " ++ int_to_string(CM.opaque_vertices(m1)) ++ ", foliage " ++ int_to_string(CM.foliage_vertices(m1))) else () end
+        drain_go(w, clear_chunk(pend, cx, cz, 0), ci + 1, n, counts1, Array.set(meshes, ci, m1), empty, budget - done, log)
       end
     end end
   end
 
   doc "Pay off at most [budget] sections of the mesh the world owes."
-  pfn drain(sc, budget : Int) do
+  pfn drain(sc, budget : Int, log : Bool) do
     match sc do
       Scene(w, counts, outline, hit, ui, pids, flags, meshes, bio, pend, myc) ->
-        match drain_go(w, pend, 0, World.side(w), counts, meshes, Chunk.new(), budget) do
+        match drain_go(w, pend, 0, World.side(w), counts, meshes, Chunk.new(), budget, log) do
           Drained(c1, m1, pend1) -> Scene(w, c1, outline, hit, ui, pids, flags, m1, bio, pend1, myc)
         end
     end
@@ -745,20 +755,26 @@ mod CubeForge do
         -- the box above ground the edit can touch: a trunk and canopy, or one layer of leaves
         let sp = Veg.species_for(b)
         let trunk = if bush do 0 - 1 else CubeForge.Trees.grown_trunk(sp) end
+        let t0 = Win.time()
         let w1 = if bush do
           if Veg.is_decay(e) do Veg.unbush(w, x, z, base) else Veg.plant_bush(w, x, z, base) end
         else
           if Veg.is_decay(e) do Veg.fell(w, x, z, base) else Veg.plant(w, x, z, base, trunk, sp) end
         end
+        let t1 = Win.time()
         -- relight_marked, not relight_at: the relight can change baked light in
         -- sections the tree's box never touched, and a section whose light moved
         -- but whose mesh was not rebuilt renders stale. The relight reports
         -- exactly which sections it changed; those join the geometry marks.
         let relit = World.relight_marked(w1, x, base + (if bush do 1 else 4 end), z)
         let w2 = World.relit_world(relit)
+        let t2 = Win.time()
         sync_occupancy(w2, x, z, base, base + trunk + 2)
+        let t3 = Win.time()
         let marks1 = or_marks(mark_box(marks, x - 4, base, z - 4, x + 4, base + trunk + 2, z + 4, n, 0), World.relit_marks(relit), 0)
-        veg_go(w2, Biome.rescan_box(bio, w2, x, z, Veg.decay_radius() + 1, base + trunk + 2), marks1, seed, n, rest)
+        let bio1 = Biome.rescan_box(bio, w2, x, z, Veg.decay_radius() + 1, base + trunk + 2)
+        if Env.get_int("CF_VEG_LOG", 0) == 1 do println("  veg edit: blocks " ++ ms(t1 -. t0) ++ " relight " ++ ms(t2 -. t1) ++ " occupancy " ++ ms(t3 -. t2) ++ " marks+rescan " ++ ms(Win.time() -. t3)) else () end
+        veg_go(w2, bio1, marks1, seed, n, rest)
     end
   end
   pfn or_marks(a : NativeIntArr, b : NativeIntArr, i : Int) : NativeIntArr do
@@ -862,16 +878,11 @@ mod CubeForge do
   end
 
   -- The shadow occupancy texture is per-voxel on the GPU; push the tree's box.
-  pfn sync_occupancy(w : CubeForge.World.World, x : Int, z : Int, y0 : Int, y1 : Int) : Unit do sync_go(w, x, z, y0, y1, 0) end
-  pfn sync_go(w : CubeForge.World.World, x : Int, z : Int, y0 : Int, y1 : Int, i : Int) : Unit do
-    if i >= 81 * (y1 - y0 + 1) do ()
-    else
-      let bx = x - 4 + i % 9
-      let bz = z - 4 + (i / 9) % 9
-      let yy = y0 + i / 81   -- not `by`: reserved (GAPS G65)
-      Win.gfx_set_voxel(bx, yy, bz, CubeForge.Light.occludes(World.block_at(w, bx, yy, bz)))
-      sync_go(w, x, z, y0, y1, i + 1)
-    end
+  -- One box upload from the world's own occupancy array (set_occupied keeps it
+  -- current), not 729 single-texel calls: 0.6 ms of a tree edit, and the
+  -- coarse cells are recounted exactly rather than bumped per call.
+  pfn sync_occupancy(w : CubeForge.World.World, x : Int, z : Int, y0 : Int, y1 : Int) : Unit do
+    Win.gfx_sync_box(World.occupancy(w), x - 4, y0, z - 4, x + 4, y1, z + 4)
   end
 
   -- Retexture a batch of columns as ONE edit: every pick is a palette block
@@ -1685,6 +1696,10 @@ mod CubeForge do
           let elapsed = now -. last_t
           let worst1 = if frame > warmup_frames() && elapsed > worst do elapsed else worst end
           let worst_at1 = if frame > warmup_frames() && elapsed > worst do frame - 1 else worst_at end
+          -- Under CF_AUTOFLOW (the diagnostics gate), every frame over 4 ms names
+          -- itself and its phase of the period, so a worst frame can be tied to
+          -- the work that ran on it.
+          if autoflow >= 0 && frame > warmup_frames() && elapsed > 0.004 do println("slow frame " ++ int_to_string(frame - 1) ++ " phase " ++ int_to_string((frame - 1) % tick_period()) ++ ": " ++ ms(elapsed)) else () end
           -- Cursor in NDC. The shim hands back framebuffer pixels, so the only
           -- conversion here is pixels to NDC, with y flipped (screen y grows down).
           -- Read only while the window is open: each of these extern calls returns
@@ -1923,12 +1938,14 @@ mod CubeForge do
           -- frame. This is what holds the frame time down: the phases above
           -- change blocks in bursts, and the rebuild is spread behind them.
           --
-          -- On the frames BETWEEN the phases. Every phase sits on an even frame
-          -- of the period, so draining on the odd ones stops the rebuild from
-          -- stacking on top of the work that asked for it -- which was the whole
-          -- of the difference between a 14 ms frame and a 5 ms one. Five drain
-          -- frames a period is more throughput than the phases can generate.
-          let sc1 = if phase % 2 == 1 do drain(sc1pre2, remesh_budget()) else sc1pre2 end
+          -- Spread by phase (drain_budget): most on the odd frames, which carry no
+          -- phase; one or two on the light even frames; none on the vegetation
+          -- frame, whose tree or body is already the period's heaviest edit.
+          -- Four on each odd frame was the worst frame of the pinned run: an
+          -- opaque section is 0.6-1.0 ms to remesh and retexturing owes ten a
+          -- period, so those frames ran 5-9 ms while the even ones sat under 4.
+          let db = drain_budget(phase)
+          let sc1 = if db > 0 do drain(sc1pre2, db, autoflow >= 0 && frame % 100 < 10) else sc1pre2 end
           if frame % 100 == 0 && Env.get_int("CF_WATER_LOG", 0) == 1 do
             println("frame " ++ int_to_string(frame) ++ " flowing water cells: " ++ int_to_string(scene_flow_count(sc1)))
           else () end
@@ -2160,7 +2177,7 @@ mod CubeForge do
             -- Drained to empty first: with a bounded queue the invariant is not
             -- "the mesh always equals a full rebuild" but "what the queue
             -- finishes equals a full rebuild", so the oracle settles it first.
-            let scq = drain(sc1, 4096)
+            let scq = drain(sc1, 4096, false)
             println("  state: biome " ++ int_to_string(Biome.state_hash(scene_biome(scq), World.side(scene_world(scq)) * 16)) ++ " myc " ++ int_to_string(Myc.state_hash(scene_myc(scq), World.side(scene_world(scq)) * 16))
                     ++ " world " ++ int_to_string(World.state_hash(scene_world(scq)))
                     ++ " mesh " ++ int_to_string(mesh_hash(scene_meshes(scq), World.side(scene_world(scq)))))

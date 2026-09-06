@@ -1426,3 +1426,14 @@ reads in one-line helpers is in place. See RESULTS.md, the perf pass of
 2 for as long as it lives, so a per-iteration pair return makes every write
 in the next iteration a copy (G12/G68 restated for this shape).
 
+### G71. `Array.PVec.get` is a list walk: ~50 hops for a 64-element vector
+- `Array.get` on a 64-element `PVec` computes the tail's length by walking
+  the tail list (32 hops), then `lst_nth` walks up to 31 more in the tail or
+  in a leaf's values list. `Array.lst_nth$List_Chunk$Int` shows in every
+  profile of this project at ~2% of the frame; `World.chunk_at` is one such
+  call, and `World.block_at` pays it per voxel in the light sweep's
+  `give_level`, the water scan, vegetation and fruit.
+- **Would need:** array-backed leaves and a stored tail length in the stdlib
+  `PVec`, or a fixed-size object array. Worked around locally only where a
+  loop could hoist the chunk (the mesher takes its five chunks as arguments;
+  the seed walks a chunk at a time).
