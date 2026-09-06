@@ -33,7 +33,8 @@ mod CubeForge.Test.Poi do
     else
       let wx = (i % 64) * step
       let wz = (i / 64) * step
-      if N.height(wx, wz, seed()) > N.height_base(wx, wz, seed()) do wx * 100000 + wz
+      -- height also carries the arch fin now, so ask the butte term itself
+      if N.height(wx, wz, seed()) > N.height_base(wx, wz, seed()) && N.arch_of(wx, wz, seed()) == 0 do wx * 100000 + wz
       else find_butte_go(i + 1, n, step) end
     end
   end
@@ -54,39 +55,17 @@ mod CubeForge.Test.Poi do
     else
       let cx = i % 24 - 12
       let cz = i / 24 - 12
-      if Pi.arch_here(cx, cz, seed(), 1.0) do (cx + 500) * 100000 + (cz + 500)
+      if N.arch_here(cx, cz, seed(), 1.0) do (cx + 500) * 100000 + (cz + 500)
       else find_arch_go(i + 1, n) end
     end
   end
   pfn arch_cx(f : Int) : Int do f / 100000 - 500 end
   pfn arch_cz(f : Int) : Int do f % 100000 - 500 end
-  pfn arch_wx(f : Int) : Int do arch_cx(f) * Pi.arch_cell() + Pi.arch_offset_of(Pi.arch_at(arch_cx(f), arch_cz(f), seed(), 1.0)) % Pi.arch_cell() end
-  pfn arch_wz(f : Int) : Int do arch_cz(f) * Pi.arch_cell() + Pi.arch_offset_of(Pi.arch_at(arch_cx(f), arch_cz(f), seed(), 1.0)) / Pi.arch_cell() end
-  -- The bank the arch springs from, and so the y of its crown band.
-  pfn arch_bank(f : Int) : Int do
-    let ax = Pi.arch_axis(arch_wx(f), arch_wz(f), seed())
-    let s = Pi.arch_span_of(Pi.arch_at(arch_cx(f), arch_cz(f), seed(), 1.0))
-    Math.min_int(Pi.arch_col_h(arch_wx(f), arch_wz(f), seed(), ax, s),
-                 Pi.arch_col_h(arch_wx(f), arch_wz(f), seed(), ax, 0 - s))
-  end
-  pfn arch_crown(f : Int) : Int do arch_bank(f) + Pi.arch_rise(arch_cx(f), arch_cz(f), seed()) end
 
-  -- Non-air blocks in a chunk.
-  pfn solid_col(c : CubeForge.Chunk.Chunk, x : Int, z : Int, y : Int, acc : Int) : Int do
-    if y >= 256 do acc
-    else solid_col(c, x, z, y + 1, if C.get(c, x, y, z) != 0 do acc + 1 else acc end) end
-  end
-  pfn solid_go(c : CubeForge.Chunk.Chunk, i : Int, acc : Int) : Int do
-    if i >= 256 do acc else solid_go(c, i + 1, solid_col(c, i % 16, i / 16, 0, acc)) end
-  end
-
-  -- Blocks of [a] that differ from [b].
-  pfn diff_col(a : CubeForge.Chunk.Chunk, b : CubeForge.Chunk.Chunk, x : Int, z : Int, y : Int, acc : Int) : Int do
-    if y >= 256 do acc
-    else diff_col(a, b, x, z, y + 1, if C.get(a, x, y, z) != C.get(b, x, y, z) do acc + 1 else acc end) end
-  end
-  pfn diff_go(a : CubeForge.Chunk.Chunk, b : CubeForge.Chunk.Chunk, i : Int, acc : Int) : Int do
-    if i >= 256 do acc else diff_go(a, b, i + 1, diff_col(a, b, i % 16, i / 16, 0, acc)) end
+  -- Air blocks in a chunk column, and in the whole chunk.
+  pfn air_col(c : CubeForge.Chunk.Chunk, x : Int, z : Int, y : Int, y1 : Int, acc : Int) : Int do
+    if y > y1 do acc
+    else air_col(c, x, z, y + 1, y1, if C.get(c, x, y, z) == 0 do acc + 1 else acc end) end
   end
 
   pfn any_air_go(c : CubeForge.Chunk.Chunk, x : Int, z : Int, y : Int, top : Int) : Bool do
@@ -98,13 +77,22 @@ mod CubeForge.Test.Poi do
     else if C.get(c, x, y, z) != 0 do true else any_solid_go(c, x, z, y + 1, top) end end
   end
 
+  -- Blocks of [a] that differ from [b].
+  pfn diff_col(a : CubeForge.Chunk.Chunk, b : CubeForge.Chunk.Chunk, x : Int, z : Int, y : Int, acc : Int) : Int do
+    if y >= 256 do acc
+    else diff_col(a, b, x, z, y + 1, if C.get(a, x, y, z) != C.get(b, x, y, z) do acc + 1 else acc end) end
+  end
+  pfn diff_go(a : CubeForge.Chunk.Chunk, b : CubeForge.Chunk.Chunk, i : Int, acc : Int) : Int do
+    if i >= 256 do acc else diff_go(a, b, i + 1, diff_col(a, b, i % 16, i / 16, 0, acc)) end
+  end
+
   describe "the POI off switch" do
     test "a zero scale is no butte and no arch" do
       -- butte_of folds the scale into k, so k = 0 is exactly the CF_POI=0 shape
       Test.assert_eq_int(N.butte_go(100, 100, seed(), 0.0, 70.0, 0, 0), 0, "no scale, no mesa")
       Test.assert_eq_int(N.butte_at(4, 4, 100, 100, seed(), 0.0, 70.0), 0, "and none in any one cell")
-      Test.assert_true(!Pi.arch_here(0, 0, seed(), 0.0), "no scale, no arch")
-      Test.assert_true(!Pi.arch_here(3, 5, seed(), 0.0), "and not in another cell either")
+      Test.assert_true(!N.arch_here(0, 0, seed(), 0.0), "no scale, no arch")
+      Test.assert_true(!N.arch_here(3, 5, seed(), 0.0), "and not in another cell either")
     end
     test "the term is zero outside the desert mask, before the octave is even sampled" do
       Test.assert_eq_int(N.butte_of(1000, 1000, seed(), 0.0, 80.0), 0, "dune mask 0 short-circuits")
@@ -140,67 +128,70 @@ mod CubeForge.Test.Poi do
   end
 
   describe "an arch" do
-    test "its dimensions are a function of the cell alone" do
+    test "its fin and its hole are the same size, from the same hashed site" do
       let f = find_arch_go(0, 576)
       if f < 0 do Test.assert_true(true, "no arch in the scanned cells")
       else
         let cx = arch_cx(f)
         let cz = arch_cz(f)
-        Test.assert_eq_int(Pi.arch_offset_of(Pi.arch_at(cx, cz, seed(), 1.0)), Pi.arch_offset_of(Pi.arch_at(cx, cz, seed(), 1.0)), "the offset is stable")
-        Test.assert_true(Pi.arch_span_of(Pi.arch_at(cx, cz, seed(), 1.0)) >= Pi.arch_min_span(), "half-span at least the minimum")
-        Test.assert_true(Pi.arch_span_of(Pi.arch_at(cx, cz, seed(), 1.0)) <= Pi.arch_max_span(), "and no wider than the maximum")
-        Test.assert_true(Pi.arch_width(cx, cz, seed()) >= 2 && Pi.arch_width(cx, cz, seed()) <= 3, "half-width in range")
-        Test.assert_true(Pi.arch_rise(cx, cz, seed()) >= 5 && Pi.arch_rise(cx, cz, seed()) <= 10, "rise in range")
+        Test.assert_true(N.arch_len(cx, cz, seed()) >= 24 && N.arch_len(cx, cz, seed()) <= 36, "half-length in range")
+        Test.assert_true(N.arch_rise(cx, cz, seed()) >= 26 && N.arch_rise(cx, cz, seed()) <= 40, "rise in range")
+        -- the opening must sit under the fin's flat top and leave a band above
+        Test.assert_true(N.arch_hole_w(cx, cz, seed()) * 2 < N.arch_len(cx, cz, seed()), "the hole is narrower than the fin's flat top")
+        Test.assert_eq_int(N.arch_rise(cx, cz, seed()) - N.arch_hole_h(cx, cz, seed()), 10, "ten blocks of arch over the opening")
       end
     end
-    test "the band thickens from the crown to the haunches" do
-      Test.assert_eq_int(Pi.arch_thick(0, 10), 3, "three at the crown")
-      Test.assert_eq_int(Pi.arch_thick(10, 10), 5, "five at the foot")
-      Test.assert_eq_int(Pi.arch_thick(0 - 10, 10), 5, "and at the other foot")
-    end
-    test "it writes into air and never over a block that is already there" do
+    test "the fin's own site is its tallest column, and it tapers to nothing at its ends" do
       let f = find_arch_go(0, 576)
       if f < 0 do Test.assert_true(true, "no arch in the scanned cells")
       else
-        let wx0 = floor16(arch_wx(f))
-        let wz0 = floor16(arch_wz(f))
-        let x = arch_wx(f) - wx0
-        let z = arch_wz(f) - wz0
-        let y = arch_crown(f)
-        if y < 1 || y >= 255 do Test.assert_true(true, "the crown is out of the world")
+        let cx = arch_cx(f)
+        let cz = arch_cz(f)
+        let sx = N.arch_sx(cx, cz, seed())
+        let sz = N.arch_sz(cx, cz, seed())
+        let mid = N.height(sx, sz, seed()) - N.height_base(sx, sz, seed())
+        Test.assert_true(mid > 0, "the fin stands above the field terrain at its site")
+        Test.assert_true(mid >= N.arch_rise(cx, cz, seed()) / 2, "and it stands most of its rise")
+        -- well past the end of the fin, in any direction, there is no fin left
+        let far = N.arch_len(cx, cz, seed()) + 12
+        Test.assert_eq_int(N.arch_fin_at(cx, cz, sx + far, sz, seed(), 1.0), 0, "nothing that far along x")
+        Test.assert_eq_int(N.arch_fin_at(cx, cz, sx, sz + far, seed(), 1.0), 0, "nor that far along z")
+        Test.assert_true(N.arch_fin_at(cx, cz, sx, sz, seed(), 1.0) > 0, "but the site itself carries the fin")
+      end
+    end
+    test "the carve takes ground and leaves water and bedrock" do
+      Test.assert_true(!Pi.carvable(0), "air is not carvable")
+      Test.assert_true(!Pi.carvable(C.bedrock()), "nor bedrock")
+      Test.assert_true(!Pi.carvable(C.water()), "nor water: a river under an arch stays a river")
+      Test.assert_true(Pi.carvable(3), "stone is")
+      Test.assert_true(Pi.carvable(C.oak_log()), "and so is a tree standing where the opening goes")
+    end
+    test "an arch has a hole through it: air above the ground at its site, and fin above the air" do
+      let f = find_arch_go(0, 576)
+      if f < 0 do Test.assert_true(true, "no arch in the scanned cells")
+      else
+        let cx = arch_cx(f)
+        let cz = arch_cz(f)
+        let sx = N.arch_sx(cx, cz, seed())
+        let sz = N.arch_sz(cx, cz, seed())
+        let wx0 = floor16(sx)
+        let wz0 = floor16(sz)
+        let c = C.generate(wx0, wz0, seed())
+        let x = sx - wx0
+        let z = sz - wz0
+        let yf = N.height_base(sx, sz, seed()) + 1
+        let top = yf + N.arch_hole_h(cx, cz, seed())
+        if yf < 1 || top + 12 >= 255 do Test.assert_true(true, "out of the world")
         else
-          -- an empty chunk with one sentinel exactly where the crown band goes
-          let marked = C.set(C.new(), x, y, z, C.bedrock())
-          let out = Pi.stamp(marked, wx0, wz0, seed())
-          Test.assert_eq_int(C.get(out, x, y, z), C.bedrock(), "the sentinel under the crown survived the stamp")
-          Test.assert_true(solid_go(out, 0, 0) > 1, "and the arch was written around it")
+          Test.assert_true(air_col(c, x, z, yf, top - 1, 0) > 0, "the opening is open")
+          Test.assert_true(any_solid_go(c, x, z, top + 1, top + 12), "and the arch stands over it")
         end
       end
     end
     test "stamping a generated chunk again changes nothing" do
-      let wx0 = 0
-      let wz0 = 0
-      let c = C.generate(wx0, wz0, seed())
-      Test.assert_eq_int(diff_go(Pi.stamp(c, wx0, wz0, seed()), C.generate(wx0, wz0, seed()), 0, 0), 0,
-                         "everything the stamp would write is already there")
-    end
-    test "a span leaves air over the channel and rock over that air" do
-      let f = find_arch_go(0, 576)
-      if f < 0 do Test.assert_true(true, "no arch in the scanned cells")
-      else
-        let wx0 = floor16(arch_wx(f))
-        let wz0 = floor16(arch_wz(f))
-        let x = arch_wx(f) - wx0
-        let z = arch_wz(f) - wz0
-        let c = C.generate(wx0, wz0, seed())
-        let h = N.height(arch_wx(f), arch_wz(f), seed())
-        let top = arch_crown(f) + 8
-        if h < 1 || top >= 255 do Test.assert_true(true, "out of the world")
-        else
-          Test.assert_true(any_air_go(c, x, z, h + 1, top), "air over the channel")
-          Test.assert_true(any_solid_go(c, x, z, arch_crown(f), top), "and a span over that air")
-        end
-      end
+      let c = C.generate(0, 0, seed())
+      Test.assert_eq_int(diff_go(Pi.stamp(c, 0, 0, seed()), C.generate(0, 0, seed()), 0, 0), 0,
+                         "the carve is idempotent: what it would remove is already gone")
     end
   end
 

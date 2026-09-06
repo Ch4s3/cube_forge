@@ -1,219 +1,76 @@
--- Poi — structure points of interest: rare, particular things STAMPED into a
--- chunk after it is filled, as against the landform POIs, which are terms in
--- `Noise.height` (see the POI design, section 2, and `Noise.butte_of`).
+-- Poi — the half of a point of interest that a heightmap cannot express.
 --
--- A structure is placed the way a tree is placed (`Trees.tree_at_cell`): the
--- world is cut into fixed cells, a cell holds at most one site, and what it
--- holds is a pure function of the cell and the seed, so two chunks that share a
--- footprint derive byte-identical blocks for it without communicating.
+-- Landform POIs are terms in `Noise.height` (see `Noise.butte_of` and
+-- `Noise.arch_of`, and the POI design, section 2): a rarity mask times a shape,
+-- evaluated per column, probing nothing expensive. That is what gets a feature
+-- its surface materials, its strata, its talus, its trees -- everything the
+-- generator does to ground.
 --
--- Unlike a landform, a structure's suitability test is FREE to probe the
--- terrain -- `Noise.height`, `river_at`, `temperature` at any column it likes --
--- because it runs once per site per chunk rather than once per column, and
--- because `height` carries no structure term, so there is no recursion to fall
--- into.
+-- But a heightmap has exactly one surface per column, so it cannot have a HOLE
+-- in it. The natural arch is a fin of land (the landform) with an opening
+-- punched through it (here). Both halves read the same hashed site from
+-- `Noise`, so they cannot disagree about where the arch is or how big it is.
 --
--- A structure writes only into AIR, like a tree canopy, so it can never eat the
--- terrain it stands on.
---
--- This phase holds one structure: the natural stone arch.
+-- The carve runs after the chunk is filled, planted and its caves cut, and it
+-- removes only ground: never water, so a river under an arch stays a river, and
+-- never bedrock.
 mod CubeForge.Poi do
 
   alias CubeForge.Noise as N
   alias CubeForge.Chunk as C
 
-  doc "Side of an arch cell in blocks: one arch at most per cell."
-  fn arch_cell() : Int do 96 end
-  doc "Fraction of arch cells whose column is even considered; the river and bank tests then reject most of those."
-  fn arch_density() : Float do 0.25 end
-  doc "How far outside a chunk an arch cell may sit and still reach into it: half the widest span plus the width."
-  fn arch_reach() : Int do 24 end
-  doc "River mask at and above which a column counts as a channel an arch may span."
-  fn arch_channel() : Float do 0.55 end
-  doc "How far above the channel a bank must stand before an arch will spring from it."
-  fn arch_bank_rise() : Int do 5 end
-  doc "The least and greatest half-span an arch may have: the gorge must be at least this wide, and no wider."
-  fn arch_min_span() : Int do 5 end
-  fn arch_max_span() : Int do 11 end
+  doc "How far outside a chunk an arch cell may sit and still cut into it: the opening's half-width plus the fin's half-thickness, rounded up."
+  fn arch_reach() : Int do 26 end
 
   pfn floor_div(a : Int, b : Int) : Int do if a >= 0 do a / b else (a - b + 1) / b end end
-  pfn cell_hash(cx : Int, cz : Int, seed : Int, salt : Int) : Float do
-    N.hash2(cx * 7919 + salt * 104729, cz * 6271 + salt * 15485863, seed + 2400)
+
+  doc "May the carve take this block: anything but air, water and bedrock. Trees standing where the opening goes are removed along with the rock under them."
+  fn carvable(id : Int) : Bool do
+    if id == 0 do false else if id == C.bedrock() do false else !C.is_water(id) end end
   end
 
-  -- ── The arch's dimensions, hashed per cell ──────────────────────────────
-
-  doc "How high the crown stands above the bank the arch springs from: 5 .. 10."
-  fn arch_rise(cx : Int, cz : Int, seed : Int) : Int do 5 + float_to_int(cell_hash(cx, cz, seed, 5) *. 6.0) end
-  doc "Half the arch's width across the span, in blocks: 2 .. 3."
-  fn arch_width(cx : Int, cz : Int, seed : Int) : Int do 2 + float_to_int(cell_hash(cx, cz, seed, 6) *. 2.0) end
-
-  doc "Thickness of the band at offset [u] along a span of half-width [s]: three at the crown, five at the haunches, so the arch thickens where it carries."
-  fn arch_thick(u : Int, s : Int) : Int do
-    3 + float_to_int(2.0 *. int_to_float(if u < 0 do 0 - u else u end) /. int_to_float(s))
-  end
-
-  -- ── Where an arch stands ────────────────────────────────────────────────
-
-  doc "How many hashed columns inside a cell are tried before the cell is given up on."
-  fn arch_probes() : Int do 16 end
-
-  doc """
-  The [k]th candidate column of cell (cx, cz), as an offset within the cell,
-  ox + arch_cell() * oz. One hashed point per cell is not enough: a channel is
-  a couple of percent of columns, so a single draw in a 96-block cell finds one
-  about once in forty cells and the bank test then throws most of those away.
-  Measured: with one draw, no arch in 160 cells; with sixteen, roughly one in
-  six cells.
-
-  Note this is an offset WITHIN the cell, never `wx + 4096 * wz`: the world is
-  unbounded now and that packing cannot carry a negative column.
-  """
-  fn arch_offset_k(cx : Int, cz : Int, seed : Int, k : Int) : Int do
-    let side = int_to_float(arch_cell())
-    float_to_int(cell_hash(cx, cz, seed, 10 + 2 * k) *. side)
-      + arch_cell() * float_to_int(cell_hash(cx, cz, seed, 11 + 2 * k) *. side)
-  end
-
-  doc """
-  The axis an arch in cell (cx, cz) spans ACROSS: 0 for x, 1 for z. The river
-  runs along whichever axis keeps its mask high six blocks out, so the arch
-  crosses the other one.
-  """
-  fn arch_axis(wx : Int, wz : Int, seed : Int) : Int do
-    let along_x = N.river_at(wx + 6, wz, seed) +. N.river_at(wx - 6, wz, seed)
-    let along_z = N.river_at(wx, wz + 6, seed) +. N.river_at(wx, wz - 6, seed)
-    if along_x > along_z do 1 else 0 end
-  end
-
-  doc "Height of the column [d] blocks from (wx, wz) along the span axis."
-  fn arch_col_h(wx : Int, wz : Int, seed : Int, axis : Int, d : Int) : Int do
-    if axis == 0 do N.height(wx + d, wz, seed) else N.height(wx, wz + d, seed) end
-  end
-
-  -- How far out along [dir] the ground first stands arch_bank_rise() above the
-  -- channel, or -1 if it has not by arch_max_span(). The span is READ OFF the
-  -- terrain rather than hashed: an arch is the span of a gorge, and a hashed
-  -- width lands in the right place about once in a thousand cells. Measured:
-  -- with a hashed span, one arch per ~5 million blocks; with this, one per
-  -- 100-200 thousand.
-  pfn arch_foot(wx : Int, wz : Int, seed : Int, axis : Int, dir : Int, mid : Int, d : Int) : Int do
-    if d > arch_max_span() do 0 - 1
-    else if arch_col_h(wx, wz, seed, axis, dir * d) >= mid + arch_bank_rise() do d
-    else arch_foot(wx, wz, seed, axis, dir, mid, d + 1) end end
-  end
-
-  -- One candidate: is the offset a channel with a bank within reach both ways.
-  -- Returns the half-span, or -1.
-  pfn arch_try(cx : Int, cz : Int, seed : Int, off : Int) : Int do
-    let wx = cx * arch_cell() + off % arch_cell()
-    let wz = cz * arch_cell() + off / arch_cell()
-    if N.river_at(wx, wz, seed) < arch_channel() do 0 - 1
-    else
-      let axis = arch_axis(wx, wz, seed)
-      let mid = N.height(wx, wz, seed)
-      let a = arch_foot(wx, wz, seed, axis, 1, mid, arch_min_span())
-      let b = arch_foot(wx, wz, seed, axis, 0 - 1, mid, arch_min_span())
-      -- the wider of the two feet, so the span reaches solid ground on both
-      if a < 0 do 0 - 1 else if b < 0 do 0 - 1 else Math.max_int(a, b) end end
-    end
-  end
-
-  pfn arch_probe_go(cx : Int, cz : Int, seed : Int, k : Int) : Int do
-    if k >= arch_probes() do 0 - 1
-    else
-      let off = arch_offset_k(cx, cz, seed, k)
-      let s = arch_try(cx, cz, seed, off)
-      if s >= 0 do off * 100 + s else arch_probe_go(cx, cz, seed, k + 1) end
-    end
-  end
-
-  doc """
-  The arch cell (cx, cz) holds, packed as `offset * 100 + half-span`, or -1 for
-  no arch: the density draw passes and one of arch_probes() candidate columns
-  inside the cell sits on a channel with a bank within arch_max_span() both
-  ways. [scale] is N.poi_scale(), so CF_POI=0 gives no arch anywhere.
-  """
-  fn arch_at(cx : Int, cz : Int, seed : Int, scale : Float) : Int do
-    if cell_hash(cx, cz, seed, 1) > arch_density() *. scale do 0 - 1
-    else arch_probe_go(cx, cz, seed, 0) end
-  end
-
-  doc "The offset within the cell of a packed arch (see arch_at)."
-  fn arch_offset_of(p : Int) : Int do p / 100 end
-  doc "The half-span of a packed arch (see arch_at)."
-  fn arch_span_of(p : Int) : Int do p % 100 end
-
-  doc "Does cell (cx, cz) hold an arch."
-  fn arch_here(cx : Int, cz : Int, seed : Int, scale : Float) : Bool do arch_at(cx, cz, seed, scale) >= 0 end
-
-  -- ── Stamping ────────────────────────────────────────────────────────────
-
-  -- One column of the band, y0 .. y1, written into air only, in the rock the
-  -- strata put at that height -- so an arch matches the bank it grows out of.
-  pfn arch_y_go(c : CubeForge.Chunk.Chunk, wx : Int, wz : Int, seed : Int, lx : Int, lz : Int, y : Int, y1 : Int) : CubeForge.Chunk.Chunk do
+  -- One column of the opening: clear from the floor up to where the ellipse
+  -- closes. The opening stands ON the ground the fin grew from, so its floor is
+  -- `height_base` -- the terrain before any point of interest touched it.
+  pfn hole_y_go(c : CubeForge.Chunk.Chunk, x : Int, z : Int, y : Int, y1 : Int) : CubeForge.Chunk.Chunk do
     if y > y1 do c
     else
       let c1 = if y < 1 || y >= 256 do c
-               else if C.get(c, lx, y, lz) != 0 do c
-               else C.set(c, lx, y, lz, C.rock_id(wx, y, wz, seed)) end end
-      arch_y_go(c1, wx, wz, seed, lx, lz, y + 1, y1)
+               else if !carvable(C.get(c, x, y, z)) do c
+               else C.set(c, x, y, z, 0) end end
+      hole_y_go(c1, x, z, y + 1, y1)
     end
   end
 
-  -- Across the span: v runs -w .. w.
-  pfn arch_v_go(c : CubeForge.Chunk.Chunk, wx0 : Int, wz0 : Int, wx : Int, wz : Int, seed : Int,
-                axis : Int, u : Int, v : Int, w : Int, yb : Int, th : Int) : CubeForge.Chunk.Chunk do
-    if v > w do c
+  -- Every column of the chunk against one arch: 256 columns is cheaper to walk
+  -- than the arch's own footprint, and it needs no clipping.
+  pfn hole_col_go(c : CubeForge.Chunk.Chunk, wx0 : Int, wz0 : Int, seed : Int,
+                  cx : Int, cz : Int, i : Int, yf : Int) : CubeForge.Chunk.Chunk do
+    if i >= 256 do c
     else
-      let cxw = if axis == 0 do wx + u else wx + v end
-      let czw = if axis == 0 do wz + v else wz + u end
-      let lx = cxw - wx0
-      let lz = czw - wz0
-      let c1 = if lx < 0 || lx >= 16 || lz < 0 || lz >= 16 do c
-               else arch_y_go(c, cxw, czw, seed, lx, lz, yb, yb + th - 1) end
-      arch_v_go(c1, wx0, wz0, wx, wz, seed, axis, u, v + 1, w, yb, th)
+      let x = i % 16
+      let z = i / 16
+      let u = N.arch_u(cx, cz, seed, wx0 + x, wz0 + z)
+      let v = N.arch_v(cx, cz, seed, wx0 + x, wz0 + z)
+      let hw = int_to_float(N.arch_hole_w(cx, cz, seed))
+      let hh = int_to_float(N.arch_hole_h(cx, cz, seed))
+      -- through the whole fin and a little past it, so the opening is a hole
+      -- rather than a pair of alcoves
+      let t = int_to_float(N.arch_fin(cx, cz, seed)) +. 2.0
+      let q = 1.0 -. (u /. hw) *. (u /. hw)
+      if Math.abs(v) > t do hole_col_go(c, wx0, wz0, seed, cx, cz, i + 1, yf)
+      else if q <= 0.0 do hole_col_go(c, wx0, wz0, seed, cx, cz, i + 1, yf)
+      else
+        -- the ellipse's height at this offset along the fin
+        let top = yf + float_to_int(hh *. Math.sqrt(q))
+        hole_col_go(hole_y_go(c, x, z, yf, top), wx0, wz0, seed, cx, cz, i + 1, yf)
+      end end
     end
   end
 
-  doc "The underside of the band at offset [u]: an ellipse from the bank at both feet to bank + rise at the crown."
-  fn arch_yb(u : Int, s : Int, bank : Int, rise : Int) : Int do
-    let t = int_to_float(u) /. int_to_float(s)
-    bank + float_to_int(int_to_float(rise) *. Math.sqrt(if 1.0 -. t *. t < 0.0 do 0.0 else 1.0 -. t *. t end))
-  end
-
-  -- Along the span: u runs -s .. s. The band's TOP is taken against its two
-  -- neighbours as well as itself, so consecutive columns always overlap. An
-  -- ellipse's slope runs away near the feet -- several blocks per column, more
-  -- than the band is thick -- and a band of constant thickness therefore came
-  -- out with holes in it. Measured on a cross-section before this: a one-block
-  -- gap at the crown of the first arch generated.
-  pfn arch_u_go(c : CubeForge.Chunk.Chunk, wx0 : Int, wz0 : Int, wx : Int, wz : Int, seed : Int,
-                axis : Int, u : Int, s : Int, w : Int, bank : Int, rise : Int) : CubeForge.Chunk.Chunk do
-    if u > s do c
-    else
-      let yb = arch_yb(u, s, bank, rise)
-      let lo = Math.min_int(yb, Math.min_int(arch_yb(u - 1, s, bank, rise), arch_yb(u + 1, s, bank, rise)))
-      let hi = Math.max_int(yb, Math.max_int(arch_yb(u - 1, s, bank, rise), arch_yb(u + 1, s, bank, rise))) + arch_thick(u, s) - 1
-      let c1 = arch_v_go(c, wx0, wz0, wx, wz, seed, axis, u, 0 - w, w, lo, hi - lo + 1)
-      arch_u_go(c1, wx0, wz0, wx, wz, seed, axis, u + 1, s, w, bank, rise)
-    end
-  end
-
-  doc "Stamp cell (cx, cz)'s arch into the chunk at (wx0, wz0), if it holds one."
   pfn arch_cell_go(c : CubeForge.Chunk.Chunk, wx0 : Int, wz0 : Int, seed : Int, cx : Int, cz : Int, scale : Float) : CubeForge.Chunk.Chunk do
-    let p = arch_at(cx, cz, seed, scale)
-    if p < 0 do c
-    else
-      let off = arch_offset_of(p)
-      let wx = cx * arch_cell() + off % arch_cell()
-      let wz = cz * arch_cell() + off / arch_cell()
-      let s = arch_span_of(p)
-      let axis = arch_axis(wx, wz, seed)
-      -- The arch springs from the LOWER of the two banks, so both feet land.
-      let bank = Math.min_int(arch_col_h(wx, wz, seed, axis, s), arch_col_h(wx, wz, seed, axis, 0 - s))
-      arch_u_go(c, wx0, wz0, wx, wz, seed, axis, 0 - s, s, arch_width(cx, cz, seed), bank, arch_rise(cx, cz, seed))
-    end
+    if !N.arch_here(cx, cz, seed, scale) do c
+    else hole_col_go(c, wx0, wz0, seed, cx, cz, 0, N.height_base(N.arch_sx(cx, cz, seed), N.arch_sz(cx, cz, seed), seed) + 1) end
   end
 
   pfn stamp_go(c : CubeForge.Chunk.Chunk, wx0 : Int, wz0 : Int, seed : Int, i : Int, cx0 : Int, cz0 : Int, nx : Int, nz : Int, scale : Float) : CubeForge.Chunk.Chunk do
@@ -224,16 +81,16 @@ mod CubeForge.Poi do
     end
   end
 
-  doc "Stamp every structure point of interest that reaches into the chunk at (wx0, wz0). At arch_cell() 96 and arch_reach() 24 that is at most a 2x2 of cells."
+  doc "Cut every structure point of interest that reaches into the chunk at (wx0, wz0). At Noise.arch_cell() 160 and arch_reach() 26 that is at most a 2x2 of cells."
   fn stamp(c : CubeForge.Chunk.Chunk, wx0 : Int, wz0 : Int, seed : Int) : CubeForge.Chunk.Chunk do
     let scale = N.poi_scale()
     if scale <= 0.0 do c
     else
       let r = arch_reach()
-      let a = arch_cell()
+      let a = N.arch_cell()
       let cx0 = floor_div(wx0 - r, a)
       let cz0 = floor_div(wz0 - r, a)
-      -- the two spans are computed separately: at a 96-block cell and 16-block
+      -- the two spans are computed separately: at a 160-block cell and 16-block
       -- chunks they are not always the same number
       stamp_go(c, wx0, wz0, seed, 0, cx0, cz0,
                floor_div(wx0 + 15 + r, a) - cx0 + 1, floor_div(wz0 + 15 + r, a) - cz0 + 1, scale)

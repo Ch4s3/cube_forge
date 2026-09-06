@@ -395,6 +395,121 @@ mod CubeForge.Noise do
     end
   end
 
+  -- ── The arch: a fin of land with a hole through it ──────────────────────
+  -- The first attempt made an arch a STAMP: a band of rock laid over a river
+  -- channel, 12 to 22 across and 5 to 10 high. It was the wrong idea at the
+  -- wrong scale. A natural arch is not masonry over a stream, it is a RIDGE
+  -- with a hole in it -- terrain, with grass and trees on top of it, spanning a
+  -- whole valley. So the arch is two halves that must agree:
+  --
+  --   the fin   a landform term here, so it gets surface materials, strata,
+  --             talus, trees and everything else the generator does to ground;
+  --   the hole  a carve in CubeForge.Poi, because a heightmap cannot have one.
+  --
+  -- Both read the same hashed site, so they cannot disagree about where the
+  -- arch is or how big it is.
+
+  doc "Side of an arch cell in blocks: one arch at most per cell."
+  fn arch_cell() : Int do 160 end
+  doc "Fraction of cells in full arch country holding one."
+  fn arch_density() : Float do 0.5 end
+  doc "The least a column must stand above sea level before a fin rises on it."
+  fn arch_rise_above() : Int do 5 end
+
+  pfn arch_hash(cx : Int, cz : Int, seed : Int, salt : Int) : Float do
+    hash2(cx * 7919 + salt * 104729, cz * 6271 + salt * 15485863, seed + 2300)
+  end
+
+  doc "1 in arch country: one very broad octave over a high threshold. Arches are landmarks, so they are regional and rare."
+  fn arch_country(wx : Int, wz : Int, seed : Int) : Float do
+    smooth(clamp01((value2(int_to_float(wx) *. 0.0035, int_to_float(wz) *. 0.0035, seed + 2301) -. 0.56) /. 0.10))
+  end
+
+  doc "World column of the arch cell (cx, cz)'s site: x."
+  fn arch_sx(cx : Int, cz : Int, seed : Int) : Int do cx * arch_cell() + float_to_int(arch_hash(cx, cz, seed, 2) *. int_to_float(arch_cell())) end
+  doc "World column of the arch cell (cx, cz)'s site: z."
+  fn arch_sz(cx : Int, cz : Int, seed : Int) : Int do cz * arch_cell() + float_to_int(arch_hash(cx, cz, seed, 3) *. int_to_float(arch_cell())) end
+
+  doc """
+  Does cell (cx, cz) hold an arch. Every test is read at the SITE, never at the
+  column asking, so the fin and the hole cannot disagree about whether the arch
+  exists or where its ground is. A landform may not probe `height` -- there is
+  no bottom to that recursion -- but `height_base` carries no POI term, so it is
+  safe, and it runs only for a cell whose site is already within reach of the
+  column and past the density draw.
+  """
+  fn arch_here(cx : Int, cz : Int, seed : Int, scale : Float) : Bool do
+    if arch_hash(cx, cz, seed, 1) > arch_density() *. scale *. arch_country(arch_sx(cx, cz, seed), arch_sz(cx, cz, seed), seed) do false
+    else height_base(arch_sx(cx, cz, seed), arch_sz(cx, cz, seed), seed) >= sea_level() + arch_rise_above() end
+  end
+
+  doc "Which way the fin runs, in radians."
+  fn arch_angle(cx : Int, cz : Int, seed : Int) : Float do arch_hash(cx, cz, seed, 4) *. 6.2831853 end
+  doc "Half the fin's length in blocks: 24 .. 36, so the ridge is 48 .. 72 long."
+  fn arch_len(cx : Int, cz : Int, seed : Int) : Int do 24 + float_to_int(arch_hash(cx, cz, seed, 5) *. 13.0) end
+  doc "Half the fin's thickness in blocks: 5 .. 8."
+  fn arch_fin(cx : Int, cz : Int, seed : Int) : Int do 5 + float_to_int(arch_hash(cx, cz, seed, 6) *. 4.0) end
+  doc "How high the fin stands above the land it grows out of: 26 .. 40."
+  fn arch_rise(cx : Int, cz : Int, seed : Int) : Int do 26 + float_to_int(arch_hash(cx, cz, seed, 7) *. 15.0) end
+  doc "Half the opening's width along the fin: 45% of the half-length, so the hole sits under the fin's flat top and never breaks out of its ends."
+  fn arch_hole_w(cx : Int, cz : Int, seed : Int) : Int do arch_len(cx, cz, seed) * 45 / 100 end
+  doc "How high the opening reaches above the ground: the fin's rise less a ten-block band, which is the arch itself."
+  fn arch_hole_h(cx : Int, cz : Int, seed : Int) : Int do arch_rise(cx, cz, seed) - 10 end
+
+  doc "Along-fin and across-fin offsets of (wx, wz) from cell (cx, cz)'s site, packed as a pair through arch_u / arch_v."
+  fn arch_u(cx : Int, cz : Int, seed : Int, wx : Int, wz : Int) : Float do
+    let a = arch_angle(cx, cz, seed)
+    int_to_float(wx - arch_sx(cx, cz, seed)) *. Math.cos(a) +. int_to_float(wz - arch_sz(cx, cz, seed)) *. Math.sin(a)
+  end
+  fn arch_v(cx : Int, cz : Int, seed : Int, wx : Int, wz : Int) : Float do
+    let a = arch_angle(cx, cz, seed)
+    int_to_float(wz - arch_sz(cx, cz, seed)) *. Math.cos(a) -. int_to_float(wx - arch_sx(cx, cz, seed)) *. Math.sin(a)
+  end
+
+  -- Blocks cell (cx, cz)'s fin adds at (wx, wz). Flat-topped along its length
+  -- and rounded across, so the top is a ridge a player can stand on rather than
+  -- a knife edge, and it tapers to nothing at both ends.
+  doc "Blocks cell (cx, cz)'s fin adds at (wx, wz): flat-topped along its length and rounded across, tapering to nothing at both ends."
+  fn arch_fin_at(cx : Int, cz : Int, wx : Int, wz : Int, seed : Int, scale : Float) : Int do
+    let dx = wx - arch_sx(cx, cz, seed)
+    let dz = wz - arch_sz(cx, cz, seed)
+    let reach = arch_len(cx, cz, seed)
+    -- cheap rejection before the trig, which is most of the nine cells
+    if dx > reach || dx < 0 - reach || dz > reach || dz < 0 - reach do 0
+    else if !arch_here(cx, cz, seed, scale) do 0
+    else
+      let fu = smooth(clamp01((1.0 -. Math.abs(arch_u(cx, cz, seed, wx, wz)) /. int_to_float(arch_len(cx, cz, seed))) *. 2.0))
+      let fv = smooth(clamp01((1.0 -. Math.abs(arch_v(cx, cz, seed, wx, wz)) /. int_to_float(arch_fin(cx, cz, seed))) *. 1.6))
+      float_to_int(int_to_float(arch_rise(cx, cz, seed)) *. fu *. fv)
+    end end
+  end
+
+  pfn arch_go(wx : Int, wz : Int, seed : Int, scale : Float, i : Int, best : Int) : Int do
+    if i >= 9 do best
+    else
+      let cx = poi_floor_div(wx, arch_cell()) - 1 + i % 3
+      let cz = poi_floor_div(wz, arch_cell()) - 1 + i / 3
+      arch_go(wx, wz, seed, scale, i + 1, Math.max_int(best, arch_fin_at(cx, cz, wx, wz, seed, scale)))
+    end
+  end
+
+  doc """
+  Blocks the arch fin adds at (wx, wz). Outside arch country it is zero, and
+  that is where the nine cell hashes and the CF_POI read are skipped -- the one
+  broad octave is all a column outside a fin ever pays.
+
+  The land's own height is deliberately NOT a gate here: whether an arch stands
+  is settled once, at its site, by `arch_here`. Gating per column would clip the
+  fin wherever the ground under it dipped, and the ground under an arch dips by
+  definition -- it spans a valley.
+  """
+  fn arch_of(wx : Int, wz : Int, seed : Int) : Int do
+    let cty = arch_country(wx, wz, seed)
+    -- the country mask multiplies the fin as well as gating the scan, so
+    -- where the gate cuts, the fin has already faded to nothing
+    if cty <= 0.0 do 0 else float_to_int(int_to_float(arch_go(wx, wz, seed, poi_scale(), 0, 0)) *. cty) end
+  end
+
   doc "Terrain height for a world column, without any point-of-interest term: what the POI masks are read against, and the SIMD lanes test's reference."
   fn height_base(wx : Int, wz : Int, seed : Int) : Int do
     let x = int_to_float(wx)
@@ -457,7 +572,7 @@ mod CubeForge.Noise do
     -- buttes out of the grasslands. Computed once, read twice.
     let dmask = dune_mask_of(temp_from_base(value2(x *. 0.018, z *. 0.018, seed + 1700), hf), hf, river)
     let hd = hf +. dmask *. dune_of(xw, zw, seed) *. dune_amp()
-    let h = float_to_int(hd) + butte_of(wx, wz, seed, dmask, hd)
+    let h = float_to_int(hd) + Math.max_int(butte_of(wx, wz, seed, dmask, hd), arch_of(wx, wz, seed))
     if h < 1 do 1 else if h > 200 do 200 else h end end
   end
 

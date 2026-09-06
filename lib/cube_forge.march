@@ -2722,17 +2722,22 @@ mod CubeForge do
     end
   end
   pfn poi_arch_go(n : Int, i : Int, seed : Int, scale : Float, acc : Int, first : Int) : Int do
-    let cells = 16 * n / CubeForge.Poi.arch_cell() + 1
+    let cells = 16 * n / CubeForge.Noise.arch_cell() + 1
     if i >= cells * cells do acc * 1000000 + first
     else
       let cx = i % cells
       let cz = i / cells
-      let p = CubeForge.Poi.arch_at(cx, cz, seed, scale)
-      if p < 0 do poi_arch_go(n, i + 1, seed, scale, acc, first)
+      if !CubeForge.Noise.arch_here(cx, cz, seed, scale) do poi_arch_go(n, i + 1, seed, scale, acc, first)
       else
-        let off = CubeForge.Poi.arch_offset_of(p)
-        let wx = cx * CubeForge.Poi.arch_cell() + off % CubeForge.Poi.arch_cell()
-        let wz = cz * CubeForge.Poi.arch_cell() + off / CubeForge.Poi.arch_cell()
+        let wx = CubeForge.Noise.arch_sx(cx, cz, seed)
+        let wz = CubeForge.Noise.arch_sz(cx, cz, seed)
+        let deg = float_to_int(CubeForge.Noise.arch_angle(cx, cz, seed) *. 57.2957795)
+        println("  arch: site " ++ int_to_string(wx) ++ "," ++ int_to_string(wz)
+                ++ "  ground " ++ int_to_string(CubeForge.Noise.height_base(wx, wz, seed))
+                ++ "  half-length " ++ int_to_string(CubeForge.Noise.arch_len(cx, cz, seed))
+                ++ "  rise " ++ int_to_string(CubeForge.Noise.arch_rise(cx, cz, seed))
+                ++ "  opening " ++ int_to_string(2 * CubeForge.Noise.arch_hole_w(cx, cz, seed)) ++ "x" ++ int_to_string(CubeForge.Noise.arch_hole_h(cx, cz, seed))
+                ++ "  bearing " ++ int_to_string(deg) ++ " deg")
         -- first is 1-based so 0 means none; the world span is 0..127 in both axes
         poi_arch_go(n, i + 1, seed, scale, acc + 1, if first == 0 do wx * 1000 + wz + 1 else first end)
       end
@@ -3071,9 +3076,16 @@ mod CubeForge do
     else
       let counts = upload_meshes(meshes, 0, NativeArray.make_int(4 * water_slot_base(), 0))
       let water_col = World.find_water(world)
+      -- CF_SPAWN_X / CF_SPAWN_Z put the player on a named column instead of the
+      -- generator's choice. Rare features -- a point of interest, a lake outlet
+      -- -- are otherwise unlookable-at: the spawn is wherever the highest flat
+      -- column near the centre happens to be, and four rounds of yaw sweeps at
+      -- seeds carrying an arch landed on a peak, in a lake and under water.
+      let spawn_env_x = Env.get_int("CF_SPAWN_X", -1)
+      let spawn_env_z = Env.get_int("CF_SPAWN_Z", -1)
       let spawn_col = find_spawn_go(world, n, 0, 0, 0)
-      let spawn_x = spawn_col % 4096
-      let spawn_z = spawn_col / 4096
+      let spawn_x = if spawn_env_x >= 0 do spawn_env_x else spawn_col % 4096 end
+      let spawn_z = if spawn_env_z >= 0 do spawn_env_z else spawn_col / 4096 end
       let ground_y = int_to_float(World.surface_y(world, spawn_x, spawn_z) + 1)
       -- CF_AUTODIVE spawns over the same column CF_AUTOSWIM does; the
       -- difference is which key the scripted input holds once it lands.
