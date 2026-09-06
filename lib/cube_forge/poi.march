@@ -128,7 +128,7 @@ mod CubeForge.Poi do
   fn cty_band(k : Int) : Float do 0.10 end
   doc "How far outside a chunk an instance may sit and still write into it."
   fn reach(k : Int) : Int do
-    if k == k_butte() do 12 else if k == k_arch() do 26 else if k == k_cavern() do 44 else 58 end end end
+    if k == k_butte() do 12 else if k == k_arch() do 26 else if k == k_cavern() do 50 else 58 end end end
   end
   doc "The least a landmark's ground must stand above sea level."
   fn min_ground(k : Int) : Int do
@@ -162,14 +162,14 @@ mod CubeForge.Poi do
     if k == k_butte() do (if i == p_len() do 5 else if i == p_wide() do 5 else if i == p_top() do 74 else 0 end end end)
     else if k == k_arch() do (if i == p_len() do 24 else if i == p_wide() do 5 else if i == p_rise() do 26 else 0 end end end)
     -- cavern: len is how far its chambers spread, wide is a chamber's radius
-    else if k == k_cavern() do (if i == p_len() do 16 else if i == p_wide() do 8 else if i == p_depth() do 22 else 0 end end end)
+    else if k == k_cavern() do (if i == p_len() do 18 else if i == p_wide() do 12 else if i == p_depth() do 28 else 0 end end end)
     -- tree: len is the crown's radius, wide the trunk's, rise the trunk's height
     else (if i == p_len() do 26 else if i == p_wide() do 4 else if i == p_rise() do 14 else 0 end end end) end end end
   end
   fn phi(k : Int, i : Int) : Int do
     if k == k_butte() do (if i == p_len() do 11 else if i == p_wide() do 11 else if i == p_top() do 100 else 0 end end end)
     else if k == k_arch() do (if i == p_len() do 36 else if i == p_wide() do 8 else if i == p_rise() do 40 else 0 end end end)
-    else if k == k_cavern() do (if i == p_len() do 26 else if i == p_wide() do 13 else if i == p_depth() do 34 else 0 end end end)
+    else if k == k_cavern() do (if i == p_len() do 28 else if i == p_wide() do 18 else if i == p_depth() do 42 else 0 end end end)
     else (if i == p_len() do 38 else if i == p_wide() do 6 else if i == p_rise() do 22 else 0 end end end) end end end
   end
 
@@ -363,6 +363,16 @@ mod CubeForge.Poi do
 
   pfn sq(a : Float) : Float do a *. a end
 
+  -- Position along the segment (ax, ay, az)-(ex, ey, ez) nearest (px, py, pz),
+  -- clamped to 0..1. What a taper is written against.
+  pfn seg_t(px : Float, py : Float, pz : Float, ax : Float, ay : Float, az : Float, ex : Float, ey : Float, ez : Float) : Float do
+    let dx = ex -. ax
+    let dy = ey -. ay
+    let dz = ez -. az
+    let len2 = dx *. dx +. dy *. dy +. dz *. dz
+    if len2 <= 0.0001 do 0.0 else N.clamp01(((px -. ax) *. dx +. (py -. ay) *. dy +. (pz -. az) *. dz) /. len2) end
+  end
+
   -- Squared distance from (px, py, pz) to the segment (ax, ay, az)-(ex, ey, ez).
   -- The end point is `e`, not `b`: `by` is a keyword, and a parameter named
   -- that is a parse error on the signature line with no hint as to why.
@@ -431,26 +441,50 @@ mod CubeForge.Poi do
   -- greedy-meshes into a prism. Naica's are metres across and span the cave.
 
   doc "Beams crossing each chamber."
-  fn beams() : Int do 2 end
+  fn beams() : Int do 5 end
 
   -- Beam [b] of chamber [j]: a segment through the chamber at a hashed
   -- attitude, longer than the chamber is wide so it drives into both walls.
   pfn beam_dx(k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int) : Float do
-    Math.cos(hash(k, cx, cz, seed, 110 + 4 * (3 * j + b)) *. 6.2831853) *. Math.cos(hash(k, cx, cz, seed, 111 + 4 * (3 * j + b)) *. 1.4 -. 0.7)
+    Math.cos(hash(k, cx, cz, seed, 110 + 4 * (4 * j + b)) *. 6.2831853) *. Math.cos(hash(k, cx, cz, seed, 111 + 4 * (4 * j + b)) *. 0.9 -. 0.45)
   end
   pfn beam_dy(k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int) : Float do
-    Math.sin(hash(k, cx, cz, seed, 111 + 4 * (3 * j + b)) *. 1.4 -. 0.7)
+    Math.sin(hash(k, cx, cz, seed, 111 + 4 * (4 * j + b)) *. 0.9 -. 0.45)
   end
   pfn beam_dz(k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int) : Float do
-    Math.sin(hash(k, cx, cz, seed, 110 + 4 * (3 * j + b)) *. 6.2831853) *. Math.cos(hash(k, cx, cz, seed, 111 + 4 * (3 * j + b)) *. 1.4 -. 0.7)
+    Math.sin(hash(k, cx, cz, seed, 110 + 4 * (4 * j + b)) *. 6.2831853) *. Math.cos(hash(k, cx, cz, seed, 111 + 4 * (4 * j + b)) *. 0.9 -. 0.45)
   end
-  doc "Half the beam's length, in blocks: longer than the chamber's radius, so it is embedded in the rock at both ends."
+  doc """
+  Is beam [b] one of the long ones. Two thirds are: a chamber of beams all the
+  same length reads as a lattice, and what makes a crystal cave look grown is a
+  few long shafts with shorter ones broken across them.
+  """
+  fn beam_long(k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int) : Bool do
+    hash(k, cx, cz, seed, 180 + 5 * j + b) < 0.66
+  end
+
+  doc "Half the beam's length, in blocks. A long one overshoots the chamber's radius, so it is embedded in the rock at both ends; a short one is a stub a third of the way across."
   fn beam_half(k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int) : Float do
-    cham_r(k, cx, cz, seed, j) *. (0.95 +. 0.45 *. hash(k, cx, cz, seed, 112 + 4 * (3 * j + b)))
+    let h = hash(k, cx, cz, seed, 112 + 4 * (4 * j + b))
+    if beam_long(k, cx, cz, seed, j, b) do cham_r(k, cx, cz, seed, j) *. (1.10 +. 0.55 *. h)
+    else cham_r(k, cx, cz, seed, j) *. (0.30 +. 0.28 *. h) end
   end
-  doc "The beam's radius in blocks: 1.3 .. 2.5, so a shaft is three to five blocks across. Wider than this and two beams fill the chamber they are supposed to cross."
+  doc """
+  The beam's radius at its thickest, in blocks. That thickness against its
+  LENGTH is what makes it read as a crystal: at radius 2.5 the same beam looked
+  like a pale boulder, because the eye reads thickness against length, not
+  against the room it is in.
+  """
   fn beam_rad(k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int) : Float do
-    1.3 +. 1.2 *. hash(k, cx, cz, seed, 113 + 4 * (3 * j + b))
+    let h = hash(k, cx, cz, seed, 113 + 4 * (4 * j + b))
+    -- the long ones carry the look, so they are the medium-thick ones; the
+    -- short ones stay slender or they read as boulders rather than crystals
+    if beam_long(k, cx, cz, seed, j, b) do 1.1 +. 0.7 *. h else 0.7 +. 0.5 *. h end
+  end
+  doc "How thick the beam is at position [t] along it, as a fraction of beam_rad: full over the middle and drawn to a point at both ends, the way a crystal terminates."
+  fn beam_taper(t : Float) : Float do
+    let e = Math.abs(2.0 *. t -. 1.0)
+    1.0 -. 0.92 *. e *. e *. e *. e
   end
 
   -- Nearest beam of chamber [j], as a fraction of its own radius.
@@ -460,13 +494,15 @@ mod CubeForge.Poi do
       let l = beam_half(k, cx, cz, seed, j, b)
       -- the beam is offset from the chamber's centre, so the three of them
       -- cross rather than all passing through one point
-      let ou = cham_u(k, cx, cz, seed, j) +. (hash(k, cx, cz, seed, 140 + 3 * j + b) -. 0.5) *. cham_r(k, cx, cz, seed, j)
-      let ov = cham_v(k, cx, cz, seed, j) +. (hash(k, cx, cz, seed, 150 + 3 * j + b) -. 0.5) *. cham_r(k, cx, cz, seed, j)
-      let oy = cham_y(k, cx, cz, seed, j, g) +. (hash(k, cx, cz, seed, 160 + 3 * j + b) -. 0.5) *. cham_r(k, cx, cz, seed, j) *. 0.8
+      let ou = cham_u(k, cx, cz, seed, j) +. (hash(k, cx, cz, seed, 140 + 4 * j + b) -. 0.5) *. cham_r(k, cx, cz, seed, j)
+      let ov = cham_v(k, cx, cz, seed, j) +. (hash(k, cx, cz, seed, 152 + 4 * j + b) -. 0.5) *. cham_r(k, cx, cz, seed, j)
+      let oy = cham_y(k, cx, cz, seed, j, g) +. (hash(k, cx, cz, seed, 164 + 4 * j + b) -. 0.5) *. cham_r(k, cx, cz, seed, j) *. 0.8
       let dx = beam_dx(k, cx, cz, seed, j, b) *. l
       let dy = beam_dy(k, cx, cz, seed, j, b) *. l
       let dz = beam_dz(k, cx, cz, seed, j, b) *. l
-      let d = Math.sqrt(seg_d2(u, y, v, ou -. dx, oy -. dy, ov -. dz, ou +. dx, oy +. dy, ov +. dz)) /. beam_rad(k, cx, cz, seed, j, b)
+      let t = seg_t(u, y, v, ou -. dx, oy -. dy, ov -. dz, ou +. dx, oy +. dy, ov +. dz)
+      let d = Math.sqrt(seg_d2(u, y, v, ou -. dx, oy -. dy, ov -. dz, ou +. dx, oy +. dy, ov +. dz))
+              /. (beam_rad(k, cx, cz, seed, j, b) *. beam_taper(t))
       beam_d(k, cx, cz, seed, u, v, y, g, j, b + 1, Math.min_float(best, d))
     end
   end

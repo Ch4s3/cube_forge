@@ -2447,10 +2447,28 @@ the rock at both ends rather than stopping neatly at the wall. Their offsets
 from the chamber centre are hashed independently, so they cross rather than all
 passing through one point.
 
-First attempt: three beams per chamber at radius up to 3.2. Two of them filled
-the chamber they were supposed to cross, and the preview showed it before the
-world did. The fine blade growth dropped from 0.26 to 0.18 of shell voxels at
-the same time, because the beams now carry the look.
+Three rounds of tuning, each against the preview rather than a screenshot:
+
+| | beams | radius | half-length | result |
+|---|---|---|---|---|
+| first | 3 x 3 | 1.6 - 3.2 | 0.95-1.4 r | two of them filled the chamber they were meant to cross |
+| second | 3 x 2 | 1.3 - 2.5 | 0.95-1.4 r | still read as pale boulders, not shafts |
+| third | 3 x 5 | 0.7 - 1.8 | mixed | shafts |
+
+What fixed it was not the beams but the **chamber**: radius went 8-13 to 12-18
+and depth 22-34 to 28-42, because the eye reads a crystal's thickness against
+its own length and against the room, and at radius 2.5 in a ten-block chamber
+nothing can look like a ten-metre crystal. The beams then went **slender**
+(0.7-1.8, so two to four blocks across against a length of twenty to fifty) and
+gained a **taper** -- `beam_taper`, full over the middle and drawn to a point at
+both ends, the way a crystal terminates -- which needed `seg_t` beside `seg_d2`
+so a shape can know where along a segment it is.
+
+Finally a **size distribution**: two thirds of the beams are long and
+medium-thick, one third are short and slender stubs broken across them. A
+chamber of beams all one length read as a lattice; the mix is what reads as
+grown. The fine blade growth dropped from 0.26 to 0.18 of shell voxels along the
+way, because the beams now carry the look.
 
 So the crystals are both things, and each is the mechanism that fits it: the
 fine growth is micro-voxel blades, because a cube read as a box; the shafts are
