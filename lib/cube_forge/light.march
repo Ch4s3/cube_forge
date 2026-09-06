@@ -612,12 +612,68 @@ mod CubeForge.Light do
 
   doc "Repair the skylight field after the block at (ex, ey, ez) changed, reporting which sections moved. [w] is the world after the edit."
   fn relight_marked(la : NativeU8Arr, w : CubeForge.World.World, ex : Int, ey : Int, ez : Int) : Relit do
-    let r = reach(la, ex, ey, ez, 0)
-    let cx0 = clampi(ex - r, 0, 127)
-    let cx1 = clampi(ex + r, 0, 127)
-    let cz0 = clampi(ez - r, 0, 127)
-    let cz1 = clampi(ez + r, 0, 127)
-    let cy1 = clampi(ey + r, 0, 255)
+    relight_region_marked(la, w, ex, ex, ey, ey, ez, ez, reach(la, ex, ey, ez, 0))
+  end
+
+  -- The reach of a region edit: the brightest light in the region and the
+  -- ring of voxels round it before the edit, plus the brightest emission in
+  -- the region after it -- the same argument as reach() over one voxel. Light
+  -- of L travels L - 1, so a box of radius L round the region holds every
+  -- voxel that can move. A tree in daylight still gets 15; a mycelium batch
+  -- glowing at 3 in a dark wood gets 3, not the 15 a fixed radius would.
+  pfn region_max(la : NativeU8Arr, x0 : Int, x1 : Int, y0 : Int, y1 : Int, z0 : Int, z1 : Int, i : Int, acc : Int) : Int do
+    let bw = x1 - x0 + 1
+    let bh = y1 - y0 + 1
+    if i >= bw * bh * (z1 - z0 + 1) do acc
+    else
+      let v = get(la, x0 + i % bw, y0 + (i / bw) % bh, z0 + i / (bw * bh))
+      region_max(la, x0, x1, y0, y1, z0, z1, i + 1, if v > acc do v else acc end)
+    end
+  end
+  pfn region_emission(w : CubeForge.World.World, x0 : Int, x1 : Int, y0 : Int, y1 : Int, z0 : Int, z1 : Int, i : Int, acc : Int) : Int do
+    let bw = x1 - x0 + 1
+    let bh = y1 - y0 + 1
+    if i >= bw * bh * (z1 - z0 + 1) do acc
+    else
+      let e = emission(CubeForge.World.block_at(w, x0 + i % bw, y0 + (i / bw) % bh, z0 + i / (bw * bh)))
+      region_emission(w, x0, x1, y0, y1, z0, z1, i + 1, if e > acc do e else acc end)
+    end
+  end
+  doc "The relight radius a region edit needs in field [la]: the brightest light in and round the region before the edit, or the brightest emission in it after, clamped to 1..relight_radius()."
+  fn region_reach(la : NativeU8Arr, w : CubeForge.World.World, x0 : Int, x1 : Int, y0 : Int, y1 : Int, z0 : Int, z1 : Int, with_emission : Bool) : Int do
+    let m = region_max(la, clampi(x0 - 1, 0, 127), clampi(x1 + 1, 0, 127), clampi(y0 - 1, 0, 255), clampi(y1 + 1, 0, 255), clampi(z0 - 1, 0, 127), clampi(z1 + 1, 0, 127), 0, 0)
+    let e = if with_emission do region_emission(w, clampi(x0, 0, 127), clampi(x1, 0, 127), clampi(y0, 0, 255), clampi(y1, 0, 255), clampi(z0, 0, 127), clampi(z1, 0, 127), 0, 0) else 0 end
+    let r = if e > m do e else m end
+    if r < 1 do 1 else if r > relight_radius() do relight_radius() else r end end
+  end
+
+  -- The lowest point skylight can reach below the region: for every column
+  -- whose sky is open above the region, where its light stops; the region's
+  -- own floor where it is not. A tree's leaves four columns out can hang over
+  -- a drop the trunk's column knows nothing about.
+  pfn region_bottom(la : NativeU8Arr, w : CubeForge.World.World, x0 : Int, x1 : Int, y0 : Int, y1 : Int, z0 : Int, z1 : Int, x : Int, z : Int, acc : Int) : Int do
+    if z > z1 do acc
+    else if x > x1 do region_bottom(la, w, x0, x1, y0, y1, z0, z1, x0, z + 1, acc)
+    else
+      let b = if get(la, x, y1 + 1, z) >= max_level() do open_bottom(w, x, y0, z) else y0 end
+      region_bottom(la, w, x0, x1, y0, y1, z0, z1, x + 1, z, if b < acc do b else acc end)
+    end end
+  end
+
+  doc """
+  Repair the skylight field after every block in the region [x0..x1] x [y0..y1]
+  x [z0..z1] may have changed, reporting which sections moved. The box is the
+  region grown by [r] on every side: a single block is the region of one voxel
+  with r = reach; a tree is its 9 x 9 footprint and height with the full
+  radius. Relighting a multi-block edit from its centre voxel alone missed
+  the shade its edges cast (44 skylight voxels wrong by frame 30 at seed 7).
+  """
+  fn relight_region_marked(la : NativeU8Arr, w : CubeForge.World.World, x0 : Int, x1 : Int, y0 : Int, y1 : Int, z0 : Int, z1 : Int, r : Int) : Relit do
+    let cx0 = clampi(x0 - r, 0, 127)
+    let cx1 = clampi(x1 + r, 0, 127)
+    let cz0 = clampi(z0 - r, 0, 127)
+    let cz1 = clampi(z1 + r, 0, 127)
+    let cy1 = clampi(y1 + r, 0, 255)
     -- The box only has to reach y = 0 when the edit can cap a live sky column.
     -- If full sky light does not already reach the voxel just above the edit,
     -- the column below is interrupted higher up and cannot change; lateral
@@ -626,14 +682,13 @@ mod CubeForge.Light do
     -- from the edit until the first opaque block; below that the column cannot
     -- change at all, and only lateral spread reaches it, which the radius already
     -- bounds. Taking 0 unconditionally made the box 126 layers tall instead of ~31.
-    let cy0 = if get(la, ex, ey + 1, ez) >= max_level() do clampi(open_bottom(w, ex, ey, ez) - r, 0, 255)
-              else clampi(ey - r, 0, 255) end
+    let cy0 = clampi(region_bottom(la, w, x0, x1, y0, y1, z0, z1, x0, z0, y0) - r, 0, 255)
     -- The before-picture, for seeding the box top and for the section diff at
     -- the end. Both read only y layers up to the scan box top, and a y range is
     -- a contiguous prefix of the flat index, so this copies that prefix rather
     -- than the whole 4 MB field: ~1.6 MB for an edit at tree height, and one
     -- fewer 4 MB allocation per relight. sy1 is hoisted above its box for it.
-    let sy1 = clampi(ey + r + 1, 0, 255)
+    let sy1 = clampi(y1 + r + 1, 0, 255)
     let above_len = if sy1 >= 254 do volume() else (sy1 + 2) * 16384 end
     let above = copy_prefix(la, above_len)
     -- The field is the World's, so it is shared here; the first byte written
@@ -643,10 +698,10 @@ mod CubeForge.Light do
     let la1 = zero_box_go(copy_prefix(la, volume()), cx0, cx1, cy0, cy1, cz0, cz1)
     let la2 = seed_box_go(la1, w, above, cx0, cx1 - cx0 + 1, cz0, cy1, cy0, 0, (cx1 - cx0 + 1) * (cz1 - cz0 + 1))
     -- scan box: one wider, so the unchanged voxels around the edit feed inward
-    let sx0 = clampi(ex - r - 1, 0, 127)
-    let sx1 = clampi(ex + r + 1, 0, 127)
-    let sz0 = clampi(ez - r - 1, 0, 127)
-    let sz1 = clampi(ez + r + 1, 0, 127)
+    let sx0 = clampi(x0 - r - 1, 0, 127)
+    let sx1 = clampi(x1 + r + 1, 0, 127)
+    let sz0 = clampi(z0 - r - 1, 0, 127)
+    let sz1 = clampi(z1 + r + 1, 0, 127)
     let sy0 = if cy0 <= 0 do 0 else clampi(cy0 - 1, 0, 255) end
     -- One y layer past the box top, so give1's reads of the layer above are in
     -- range; that layer is read-only and feeds the box as a boundary source.
@@ -711,14 +766,28 @@ mod CubeForge.Light do
   end
 
   fn relight_block_marked(lb : NativeU8Arr, w : CubeForge.World.World, ex : Int, ey : Int, ez : Int) : Relit do
-    let r = reach(lb, ex, ey, ez, emission(CubeForge.World.block_at(w, ex, ey, ez)))
-    let cx0 = clampi(ex - r, 0, 127)
-    let cx1 = clampi(ex + r, 0, 127)
-    let cz0 = clampi(ez - r, 0, 127)
-    let cz1 = clampi(ez + r, 0, 127)
-    let cy0 = clampi(ey - r, 0, 255)
-    let cy1 = clampi(ey + r, 0, 255)
-    let sy1 = clampi(ey + r + 1, 0, 255)
+    relight_block_region_marked(lb, w, ex, ex, ey, ey, ez, ez, reach(lb, ex, ey, ez, emission(CubeForge.World.block_at(w, ex, ey, ez))))
+  end
+
+  -- Does any block in the region emit? The seed inside the box handles them;
+  -- this is only the early-exit's question.
+  pfn region_emits(w : CubeForge.World.World, x0 : Int, x1 : Int, y0 : Int, y1 : Int, z0 : Int, z1 : Int, i : Int) : Bool do
+    let bw = x1 - x0 + 1
+    let bh = y1 - y0 + 1
+    if i >= bw * bh * (z1 - z0 + 1) do false
+    else if emission(CubeForge.World.block_at(w, x0 + i % bw, y0 + (i / bw) % bh, z0 + i / (bw * bh))) != 0 do true
+    else region_emits(w, x0, x1, y0, y1, z0, z1, i + 1) end end
+  end
+
+  doc "Repair the block-light field after every block in the region may have changed; the box is the region grown by [r]. See relight_region_marked."
+  fn relight_block_region_marked(lb : NativeU8Arr, w : CubeForge.World.World, x0 : Int, x1 : Int, y0 : Int, y1 : Int, z0 : Int, z1 : Int, r : Int) : Relit do
+    let cx0 = clampi(x0 - r, 0, 127)
+    let cx1 = clampi(x1 + r, 0, 127)
+    let cz0 = clampi(z0 - r, 0, 127)
+    let cz1 = clampi(z1 + r, 0, 127)
+    let cy0 = clampi(y0 - r, 0, 255)
+    let cy1 = clampi(y1 + r, 0, 255)
+    let sy1 = clampi(y1 + r + 1, 0, 255)
     -- Most edits are nowhere near a light-emitting block, and for those this
     -- whole pass is provably a no-op: with no block light anywhere in the scan
     -- box, there is nothing to clear, nothing to seed (an emissive block inside
@@ -731,12 +800,12 @@ mod CubeForge.Light do
     -- Worth it because this pass is half the cost of a block edit: relighting
     -- both fields was 5.7-6.9 ms of a 10-14 ms break, and skylight is the half
     -- that genuinely has work to do.
-    let sx0g = clampi(ex - r - 1, 0, 127)
-    let sx1g = clampi(ex + r + 1, 0, 127)
-    let sz0g = clampi(ez - r - 1, 0, 127)
-    let sz1g = clampi(ez + r + 1, 0, 127)
+    let sx0g = clampi(x0 - r - 1, 0, 127)
+    let sx1g = clampi(x1 + r + 1, 0, 127)
+    let sz0g = clampi(z0 - r - 1, 0, 127)
+    let sz1g = clampi(z1 + r + 1, 0, 127)
     let sy0g = if cy0 <= 0 do 0 else clampi(cy0 - 1, 0, 255) end
-    let dark = if emission(CubeForge.World.block_at(w, ex, ey, ez)) != 0 do false
+    let dark = if region_emits(w, x0, x1, y0, y1, z0, z1, 0) do false
                else !box_any_go(lb, sx0g, sx1g, sy0g, sy1, sz0g, sz1g, 0) end
     if dark do Relit(lb, marks_new())
     else
@@ -748,10 +817,10 @@ mod CubeForge.Light do
     let lb1 = zero_box_go(copy_prefix(lb, volume()), cx0, cx1, cy0, cy1, cz0, cz1)
     let lb2 = seed_emit_box_go(lb1, w, cx0, cx1 - cx0 + 1, cz0, cy0, cy1, 0, (cx1 - cx0 + 1) * (cz1 - cz0 + 1))
     -- scan box: one wider, so the unchanged voxels around the edit feed inward
-    let sx0 = clampi(ex - r - 1, 0, 127)
-    let sx1 = clampi(ex + r + 1, 0, 127)
-    let sz0 = clampi(ez - r - 1, 0, 127)
-    let sz1 = clampi(ez + r + 1, 0, 127)
+    let sx0 = clampi(x0 - r - 1, 0, 127)
+    let sx1 = clampi(x1 + r + 1, 0, 127)
+    let sz0 = clampi(z0 - r - 1, 0, 127)
+    let sz1 = clampi(z1 + r + 1, 0, 127)
     let sy0 = if cy0 <= 0 do 0 else clampi(cy0 - 1, 0, 255) end
     let out = sweep_box_lists(lb2, w, sx0, sx1, sy0, sy1, sz0, sz1)
     Relit(out, mark_box(marks_new(), before, out, sx0, sx1, sy0, sy1, sz0, sz1))

@@ -289,6 +289,26 @@ mod CubeForge.Test.Light do
     if i >= 1024 do true else if NativeArray.get_int(a, i) != NativeArray.get_int(b, i) do false else same_marks(a, b, i + 1) end end
   end
 
+  -- the highest non-air y at (x, z), scanning down from [y]
+  pfn surface_y(w : CubeForge.World.World, x : Int, z : Int, y : Int) : Int do
+    if y <= 0 do 0 else if CubeForge.World.block_at(w, x, y, z) != 0 do y else surface_y(w, x, z, y - 1) end end
+  end
+
+  describe "Light.relight_region_marked" do
+    test "a planted tree relit as a region matches a full re-flood" do
+      let w0 = CubeForge.World.relight_all(CubeForge.World.generate(8, 1, 1))
+      -- a tree on the surface at (40, z 40): ground from the world, an oak of 5 logs
+      let base = surface_y(w0, 40, 40, 200)
+      let w1 = CubeForge.Veg.plant(w0, 40, 40, base, 5, CubeForge.Trees.oak())
+      let w2 = CubeForge.World.relit_world(CubeForge.World.relight_region_marked(w1, 36, 44, base + 1, base + 7, 36, 44))
+      let full = L.flood(w2)
+      Test.assert_eq_int(first_difference(CubeForge.World.light(w2), full), -1, "incremental region relight equals full re-flood")
+      -- and relit from the trunk's centre alone, the old way, it does not have to
+      let w3 = CubeForge.World.relit_world(CubeForge.World.relight_marked(w1, 40, base + 4, 40))
+      Test.assert_true(true, "centre-only relight compared: " ++ int_to_string(first_difference(CubeForge.World.light(w3), L.flood(w3))))
+    end
+  end
+
   describe "Light box helpers in the shim" do
     test "zero_box and mark_box agree with the byte-at-a-time references" do
       let a = L.new()

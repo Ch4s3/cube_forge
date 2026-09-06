@@ -766,7 +766,9 @@ mod CubeForge do
         -- sections the tree's box never touched, and a section whose light moved
         -- but whose mesh was not rebuilt renders stale. The relight reports
         -- exactly which sections it changed; those join the geometry marks.
-        let relit = World.relight_marked(w1, x, base + (if bush do 1 else 4 end), z)
+        -- the whole edit's region, not its centre voxel: a canopy's shade falls four columns out
+        let relit = if bush do World.relight_region_marked(w1, x - 1, x + 1, base + 1, base + 1, z - 1, z + 1)
+                    else World.relight_region_marked(w1, x - 4, x + 4, base + 1, base + trunk + 2, z - 4, z + 4) end
         let w2 = World.relit_world(relit)
         let t2 = Win.time()
         sync_occupancy(w2, x, z, base, base + trunk + 2)
@@ -831,7 +833,7 @@ mod CubeForge do
         else
           let top = base + Fruit.height_of(sp, x, z, seed)
           let w1 = Fruit.stamp(w, sp, x, base, z, seed)
-          let relit = World.relight_marked(w1, x, base + 2, z)
+          let relit = World.relight_region_marked(w1, x - 4, x + 4, base + 1, top, z - 4, z + 4)
           let w2 = World.relit_world(relit)
           sync_occupancy(w2, x, z, base, top)
           let marks1 = or_marks(mark_box(marks, x - 4, base, z - 4, x + 4, top, z + 4, n, 0), World.relit_marks(relit), 0)
@@ -850,7 +852,7 @@ mod CubeForge do
         let r = Fruit.fell(world, sp, x, base, z, seed)
         let w1 = Fruit.felled_world(r)
         let top = base + Fruit.height_of(sp, x, z, seed)
-        let relit = World.relight_marked(w1, x, base + 2, z)
+        let relit = World.relight_region_marked(w1, x - 4, x + 4, base + 1, top, z - 4, z + 4)
         let w2 = World.relit_world(relit)
         sync_occupancy(w2, x, z, base, top)
         let marks = or_marks(mark_box(CubeForge.Light.marks_new(), x - 4, base, z - 4, x + 4, top, z + 4, n, 0), World.relit_marks(relit), 0)
@@ -996,7 +998,9 @@ mod CubeForge do
                 -- pass_solid, not pass_opaque: a felled small mushroom was in the cutout pass
                 if ax < 0 do Scene(w1, counts, outline, hit, ui, pids, flags, meshes, bio, stage_go(pend, marks, 0, pass_solid()), myc)
                 else
-                  let relit = CubeForge.Light.relight_block_marked(World.block_light(w1), w1, ax, ah, az)
+                  -- the batch's window (every taken column within 4 of the anchor, bodies up to 12 tall), with the full radius
+                  let relit = CubeForge.Light.relight_block_region_marked(World.block_light(w1), w1, ax - 4, ax + 4, ah, ah + 12, az - 4, az + 4,
+                                                                          CubeForge.Light.region_reach(World.block_light(w1), w1, ax - 4, ax + 4, ah, ah + 12, az - 4, az + 4, true))
                   let w2 = World.set_block_light(w1, CubeForge.Light.relit_field(relit))
                   Scene(w2, counts, outline, hit, ui, pids, flags, meshes, bio, stage_go(pend, CubeForge.Light.or_marks(marks, CubeForge.Light.relit_marks(relit)), 0, pass_solid()), myc)
                 end
@@ -2186,6 +2190,13 @@ mod CubeForge do
             println("  mycelium: " ++ myc_summary(scene_myc(sc1), World.side(scene_world(sc1)) * 16, 1, ""))
             println("  effects: " ++ Effects.summary(ui_effects(scene_ui(sc1)), now))
             println("  giant cells near the player: " ++ giant_cells(scene_world(sc1), scene_myc(sc1), seed, pcx, pcz, 0, ""))
+            -- The light oracle: the incrementally maintained fields against a
+            -- flood from scratch, as voxel counts that differ. Both must be 0;
+            -- a non-zero count is a relight that missed something.
+            println("  light oracle: sky " ++ int_to_string(count_diff_u8(World.light(scene_world(sc1)), CubeForge.Light.flood(scene_world(sc1)), 0, 4194304, 0))
+                    ++ " block " ++ int_to_string(count_diff_u8(World.block_light(scene_world(sc1)), CubeForge.Light.flood_block(scene_world(sc1)), 0, 4194304, 0)) ++ " voxels differ;"
+                    ++ " first sky:" ++ first_diffs(World.light(scene_world(sc1)), CubeForge.Light.flood(scene_world(sc1)), 0, 4194304, 6, "")
+                    ++ " first block:" ++ first_diffs(World.block_light(scene_world(sc1)), CubeForge.Light.flood_block(scene_world(sc1)), 0, 4194304, 4, ""))
             println("  fruit: small " ++ int_to_string(Fruit.count_bodies(scene_world(sc1), scene_biome(sc1), 0)) ++ " medium " ++ int_to_string(Fruit.count_bodies(scene_world(sc1), scene_biome(sc1), 1)) ++ " giant " ++ int_to_string(Fruit.count_bodies(scene_world(sc1), scene_biome(sc1), 2)) ++ " orphans " ++ int_to_string(Fruit.count_orphans(scene_world(sc1), scene_biome(sc1), World.shown(scene_world(sc1)))))
             -- the column three east of the player: where CF_AUTOPLANT plants
             let mx = pcx + 3
@@ -2361,6 +2372,16 @@ mod CubeForge do
     end
   end
 
+  -- The first [left] differing voxels, as "x,y,z kept/flood" pairs.
+  pfn first_diffs(a : NativeU8Arr, b : NativeU8Arr, i : Int, n : Int, left : Int, acc : String) : String do
+    if i >= n || left <= 0 do acc
+    else if NativeArray.get_u8(a, i) != NativeArray.get_u8(b, i) do
+      first_diffs(a, b, i + 1, n, left - 1, acc ++ " " ++ int_to_string(i % 128) ++ "," ++ int_to_string(i / 16384) ++ "," ++ int_to_string((i / 128) % 128) ++ " " ++ int_to_string(NativeArray.get_u8(a, i)) ++ "/" ++ int_to_string(NativeArray.get_u8(b, i)))
+    else first_diffs(a, b, i + 1, n, left, acc) end end
+  end
+  pfn count_diff_u8(a : NativeU8Arr, b : NativeU8Arr, i : Int, n : Int, acc : Int) : Int do
+    if i >= n do acc else count_diff_u8(a, b, i + 1, n, if NativeArray.get_u8(a, i) != NativeArray.get_u8(b, i) do acc + 1 else acc end) end
+  end
   pfn count_verts(meshes : List(CubeForge.ChunkMesh.ChunkMesh), acc : Int) : Int do
     match meshes do
       Nil -> acc

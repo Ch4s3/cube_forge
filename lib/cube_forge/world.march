@@ -97,6 +97,14 @@ mod CubeForge.World do
           CubeForge.Light.or_marks(CubeForge.Light.relit_marks(rs), CubeForge.Light.relit_marks(rb)))
   end
 
+  doc "Repair both light fields after every block in a region may have changed -- a tree, a body, a batch of mycelium -- with the full relight radius round it. See Light.relight_region_marked."
+  fn relight_region_marked(w : World, x0 : Int, x1 : Int, y0 : Int, y1 : Int, z0 : Int, z1 : Int) : Repaired do
+    let rs = CubeForge.Light.relight_region_marked(light(w), w, x0, x1, y0, y1, z0, z1, CubeForge.Light.region_reach(light(w), w, x0, x1, y0, y1, z0, z1, false))
+    let rb = CubeForge.Light.relight_block_region_marked(block_light(w), w, x0, x1, y0, y1, z0, z1, CubeForge.Light.region_reach(block_light(w), w, x0, x1, y0, y1, z0, z1, true))
+    Repaired(set_block_light(set_light(w, CubeForge.Light.relit_field(rs)), CubeForge.Light.relit_field(rb)),
+          CubeForge.Light.or_marks(CubeForge.Light.relit_marks(rs), CubeForge.Light.relit_marks(rb)))
+  end
+
   doc "Repair both light fields after an edit, discarding the dirty-section marks."
   fn relight_at(w : World, x : Int, y : Int, z : Int) : World do relit_world(relight_marked(w, x, y, z)) end
 

@@ -2178,3 +2178,55 @@ the diagnostic in place.
 
 Hash at frame 30 unchanged through all of it (103332325 since main's
 relight-box merge). 440 tests.
+
+## The light oracle: what the mesh hash was saying (2026-09-05)
+
+The frame-30 mesh hash moved on main's relight-box commit (380281180 ->
+103332325). Every change of this pass had held it, so the question was
+whether main's relight was wrong. The dump frame now prints a **light oracle**:
+both light fields against a flood from scratch, as counts of differing voxels
+and the first few with their kept/flooded values. Bisected with the same
+oracle patch on three builds, seed 7, frames 30 and 300:
+
+| build | sky | block |
+|---|---|---|
+| before both changes (14fdab3) | 18 / 43 | 0 / 0 |
+| this pass's occupancy-byte sweep alone (33a555c) | 18 / 43 | 0 / 0 |
+| main's reach-sized box alone (e7029a6) | 44 / 88 | 0 / 19 |
+
+So the occupancy-byte sweep is exact, and main's commit did introduce wrong
+light -- but the 18 and 43 were already there. Two causes, both found:
+
+1. **Water moves without a relight.** Every voxel in the base count is kept at
+   15 where a fresh flood says 13, at y 63-83 -- water (opacity 2) that the
+   actors moved through `set_cells` after the flood. Nine voxels by frame 3,
+   before any other edit. Deliberate: a region relight per changed section
+   would be tens of milliseconds a tick for a one- or two-level shade under
+   moving water. Recorded as an accepted approximation in `todos.md`.
+2. **Multi-block edits were relit from one voxel.** A tree, a fruit body and
+   a batch of mycelium each called the relight at their centre, so a box of
+   radius 15 round the trunk missed the shade a canopy casts four columns out
+   (visible as kept 14 against 15 from frame 6, the first tree), and with
+   main's reach-sized box the mycelium batch's window -- taken within 4 of an
+   anchor on the promise of a radius-15 box -- got a box of the anchor's own
+   dim light and left emitters outside it: the 19 block-light voxels.
+
+`Light.relight_region_marked` / `relight_block_region_marked` take the edited
+region and grow it by a radius; `World.relight_region_marked` uses
+`Light.region_reach` -- the brightest light in and round the region before
+the edit, or the brightest emission in it after -- so a tree in daylight gets
+15 and a glowing patch in a dark wood gets its glow. Trees, bushes, bodies
+and the mycelium anchor use it; a single block still uses `reach` at the
+voxel. A fixed radius 15 for regions was tried first and put the worst frame
+at 11.3 ms through the mycelium batch's 39-wide box; the reach brought it
+back.
+
+| | before | after |
+|---|---|---|
+| light oracle, frame 30 / 300 | sky 44 / 88, block 0 / 19 | **sky 18 / 42 (all water), block 0 / 0** |
+| tree edit, relight | 1.3-2.2 ms (wrong box) | 1.7-2.9 ms |
+| frame budget, worst frame | 5.7-6.7 | 6.46 ms |
+
+A new test plants a tree and checks the region relight against a full flood.
+441 tests. The oracle stays in the dump: a non-zero block count, or a sky
+count whose first voxels are not the 15/13 water pattern, is a relight bug.
