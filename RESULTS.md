@@ -2776,3 +2776,98 @@ the oracle now compares solidity, which is what has to agree.
 Commit drops out of the over-budget set. What is left is `chunks` at 27.1 ms
 (one chunk generation's latency) and `light` at 23.4 (one band sweep, the two
 already running as a pair). 468 tests.
+
+
+## Measuring per-fragment smooth lighting (2026-09-06)
+
+A prototype (`CF_GPULIGHT=1`) that samples light per fragment from a 3D texture
+instead of reading it from the vertex, to decide whether moving lighting off the
+mesh is affordable. Not a finished path -- see the caveats.
+
+### What the prototype does
+
+`Mesher.corner_pack`, in the fragment shader. For each of the four corners of the
+voxel face the fragment sits on: average the light of the face-adjacent air voxel
+and the three neighbours round that corner, **skipping the occluded ones**, and
+derive AO from how many were occluded (`0.55 + 0.15 * ao`, exactly the mesher's
+`ao_factor`); then bilinearly blend the four. 25 texture fetches a fragment: one
+shared light tap, then three occupancy and three light taps per corner.
+
+The two light fields go up as one RG8 3D texture (sky in R, block in G, level *
+17 so it samples as level/15) on unit 3, toroidal with the occupancy textures.
+
+### It looks right
+
+Same camera, same frame, sun 45, 2560x1440 framebuffer:
+
+| | |
+|---|---|
+| mean channel delta | **0.50** |
+| channels differing by > 4 | 0.6% |
+| by > 16 | 0.2% |
+| by > 48 | 0.1% |
+
+The residue is where it should be: the quad-flip diagonals (`Mesher.flip`, which
+exists only because per-vertex light interpolates wrong across a merged quad) and
+the chunk seams.
+
+### It costs almost nothing
+
+Wall-clock fps cannot see it -- the game is CPU-bound -- so this is a
+`GL_TIME_ELAPSED` query round the frame, two queries ping-ponged so reading one
+never stalls (`CF_GPU_LOG=1`).
+
+| framebuffer | vertex | per-fragment | cost |
+|---|---|---|---|
+| 1600x1200 | 2.581 ms | 2.591 ms | noise |
+| 3456x2234 | 4.489 ms | 4.475 ms | noise |
+| 5120x2880 | 4.196 ms | 4.535 ms | **+0.34 ms** |
+
+At 14.7 M fragments the 25 dependent fetches cost a third of a millisecond, and
+the CPU frame is ~5 ms, so fps does not move at any resolution. The estimate that
+this would make the game GPU-bound was wrong: the shadow DDA already has these
+textures hot, and the extra taps ride along.
+
+### The false start
+
+The first A/B said the vertex path was FASTER (229 vs 196 fps), which was
+nonsense: with `CF_GPULIGHT=0` nothing was being drawn at all. `u_light` was left
+at its default sampler unit 0, where it collided with `u_tex`, a sampler2DArray
+-- two sampler types on one unit make every draw incomplete, silently. The unit
+is now claimed at init with a 1x1x1 texture on it whether the path is used or
+not. Worth remembering: a blank frame with no error is what a sampler collision
+looks like.
+
+### What this does NOT yet measure
+
+The prototype pays the cost of per-fragment light **without taking the benefit**.
+It still bakes light into the vertex and into the greedy key, so the meshes are
+still fragmented by it. Removing light from `Mesher.key_of` is where the win is,
+and it is measured: **517 098 vertices against 334 878** with corner light forced
+constant, so light costs **35% of the mesh**. Taking that would cut vertex work,
+very likely paying for the 0.34 ms and more.
+
+Also missing: the light texture is uploaded whole on every shift rather than
+band-synced like the occupancy (easy, the machinery exists), the path is gated to
+ordinary geometry (`fx >> 8 == 0`, so not foliage or water), and nothing yet
+stops a light change from remeshing.
+
+### What other engines do
+
+Per-vertex at mesh time is the near-universal answer, and 0fps -- the canonical
+write-up for the method this codebase uses -- gives the reason: AO values have to
+be constant along a greedy edge for the merge to be valid, so AO and greedy
+meshing are designed together. It dismisses SSAO for voxel worlds and does not
+consider a 3D-texture alternative at all.
+
+The volume-sampled alternative is well trodden outside voxel games -- Unreal's
+Volumetric Lightmaps interpolate per pixel from a brick structure -- and its
+documented failure is exactly the one that matters here: light leaking, whose
+only fixes are "decrease the cell size" or "increase the thickness of the wall".
+A voxel game whose walls are routinely one block thick cannot take either. That
+is why naive trilinear sampling is not an option, and why the prototype
+reproduces the occlusion-aware average instead of filtering.
+
+The engines that genuinely move voxel lighting to the GPU do it by abandoning
+meshed geometry: voxel cone tracing and voxel ray tracing march the volume
+directly. That is a different renderer, not a change to this one.

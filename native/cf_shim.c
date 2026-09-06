@@ -145,7 +145,8 @@ int64_t cf_win_open(int64_t w, int64_t h, march_value title) {
     return 1;
 }
 int64_t cf_win_should_close(void) { return g_win && glfwWindowShouldClose(g_win); }
-void    cf_win_swap(void)         { if (g_win) glfwSwapBuffers(g_win); }
+void cf_gfx_end_query(void);   /* defined with the timer query below */
+void    cf_win_swap(void)         { cf_gfx_end_query(); if (g_win) glfwSwapBuffers(g_win); }
 double  cf_win_time(void)         { return glfwGetTime(); }
 int64_t cf_win_fb_w(void)         { return g_fb_w; }
 int64_t cf_win_fb_h(void)         { return g_fb_h; }
@@ -279,6 +280,8 @@ static const char *FS =
      * it costs an add. Both DDAs bounds-check before every sample, so a ray
      * leaving the window never reaches the wrap. */
     "uniform vec2 u_occ_off;\n"
+    "uniform sampler3D u_light;\n"
+    "uniform int u_gpulight;\n"
     "uniform float u_fog_density;\n"
     "uniform vec3  u_fog_color;\n"
     "uniform float u_overcast;\n"
@@ -374,6 +377,42 @@ static const char *FS =
      * ray order, so the first fine hit is the nearest: the result is identical to
      * the single-level trace, in far fewer steps. That matters most with soft
      * shadows, which fire four of these per fragment. */
+    /* PROTOTYPE: the mesher's corner_pack, per fragment. For each of the four
+     * corners of the voxel face the fragment sits on, average the light of the
+     * face-adjacent air voxel and the three neighbours round that corner,
+     * skipping the occluded ones, and derive AO from how many were occluded --
+     * then bilinearly blend the four. This is exactly what the mesher bakes into
+     * a_shade; doing it here is what would let light stop fragmenting the greedy
+     * merge. 25 texture fetches a fragment: one shared light tap, then three
+     * occupancy and three light taps per corner. */
+    "float occAt(vec3 v){ return texture(u_occ, (v + vec3(u_occ_off.x, 0.0, u_occ_off.y) + 0.5) / WORLD).r > 0.5 ? 1.0 : 0.0; }\n"
+    "vec2 litAt(vec3 v){ return texture(u_light, (v + vec3(u_occ_off.x, 0.0, u_occ_off.y) + 0.5) / WORLD).rg; }\n"
+    "vec2 cornerLight(vec3 av, vec3 du, vec3 dv, vec2 nl){\n"
+    "  float o1 = occAt(av + du), o2 = occAt(av + dv), oc = occAt(av + du + dv);\n"
+    "  vec2 l1 = o1 > 0.5 ? vec2(0.0) : litAt(av + du);\n"
+    "  vec2 l2 = o2 > 0.5 ? vec2(0.0) : litAt(av + dv);\n"
+    "  vec2 lc = oc > 0.5 ? vec2(0.0) : litAt(av + du + dv);\n"
+    "  float cnt = 1.0 + (1.0 - o1) + (1.0 - o2) + (1.0 - oc);\n"
+    /* the mesher's corner_ao: both sides occluded is the darkest corner */
+    "  float side = o1 + o2;\n"
+    "  float ao = (o1 > 0.5 && o2 > 0.5) ? 0.0 : (3.0 - side - oc) / 3.0;\n"
+    "  return ((nl + l1 + l2 + lc) / cnt) * mix(0.55, 1.0, ao);\n"
+    "}\n"
+    "vec2 smoothLight(vec3 p, vec3 n){\n"
+    "  vec3 av = floor(p + n * 0.5);\n"
+    /* the two in-face axes */
+    "  vec3 du = abs(n.x) > 0.5 ? vec3(0,1,0) : vec3(1,0,0);\n"
+    "  vec3 dv = abs(n.y) > 0.5 ? vec3(0,0,1) : (abs(n.x) > 0.5 ? vec3(0,0,1) : vec3(0,1,0));\n"
+    "  vec3 rel = p + n * 0.5 - av;\n"
+    "  float fu = clamp(dot(rel, du), 0.0, 1.0);\n"
+    "  float fv = clamp(dot(rel, dv), 0.0, 1.0);\n"
+    "  vec2 nl = litAt(av);\n"
+    "  vec2 c00 = cornerLight(av, -du, -dv, nl);\n"
+    "  vec2 c10 = cornerLight(av,  du, -dv, nl);\n"
+    "  vec2 c01 = cornerLight(av, -du,  dv, nl);\n"
+    "  vec2 c11 = cornerLight(av,  du,  dv, nl);\n"
+    "  return mix(mix(c00, c10, fu), mix(c01, c11, fu), fv);\n"
+    "}\n"
     "float traceDist(vec3 p, vec3 dir, float maxDist){\n"
     /* Skipping empty space only pays when there IS empty space. A ray near the
      * horizon travels a long way through terrain, so almost every coarse cell it
@@ -468,6 +507,10 @@ static const char *FS =
      * plain shade in [0, 1], which decodes as sky-only and leaves them alone. */
     "  float sk = v_shade;\n"
     "  float bl = v_blk;\n"
+    /* PROTOTYPE: take the same two channels from the light texture instead of
+     * the vertex, computed per fragment. Uniform branch, so it is coherent
+     * across the draw and the off case pays nothing. */
+    "  if (u_gpulight == 1 && (fxw >> 8) == 0) { vec2 g = smoothLight(v_world, v_normal); sk = g.r; bl = g.g; }\n"
     "  float spd = float(fxw & 255) / 255.0 * 7.0;\n"
     /* Flowing water scrolls its ripple along the flow; still water drifts;
      * fast or falling water blends toward the foam layer. */
@@ -616,6 +659,8 @@ static GLint  g_u_time = -1;
  * whole number of cells too. */
 static int64_t g_occ_ox = 0, g_occ_oz = 0;
 static GLint  g_u_occ_off = -1;
+static GLint  g_u_light = -1, g_u_gpulight = -1;
+static GLuint g_lt = 0;
 static void occ_push_off(void);
 static GLint  g_u_fog_density = -1, g_u_fog_color = -1, g_u_overcast = -1, g_u_bolt = -1;
 static GLint  g_u_off = -1;
@@ -669,6 +714,8 @@ int64_t cf_gfx_init(void) {
     g_u_soft = glGetUniformLocation(g_prog, "u_soft");
     g_u_occ_c = glGetUniformLocation(g_prog, "u_occ_c");
     g_u_occ_off = glGetUniformLocation(g_prog, "u_occ_off");
+    g_u_light = glGetUniformLocation(g_prog, "u_light");
+    g_u_gpulight = glGetUniformLocation(g_prog, "u_gpulight");
     g_u_fog_density = glGetUniformLocation(g_prog, "u_fog_density");
     g_u_fog_color = glGetUniformLocation(g_prog, "u_fog_color");
     g_u_overcast = glGetUniformLocation(g_prog, "u_overcast");
@@ -684,6 +731,23 @@ int64_t cf_gfx_init(void) {
     glGenBuffers(CF_MAX_MESHES, g_vbo_b);
     glUseProgram(g_prog);
     glUniform1i(g_u_tex, 0);
+    /* u_light must name a unit of its own even when the per-fragment light path
+     * is off: left at the default 0 it collides with u_tex, a sampler2DArray, and
+     * two sampler types on one unit make every draw incomplete -- the whole world
+     * silently stops rendering. So the unit is claimed here and a 1x1x1 texture
+     * put on it, which cf_gfx_upload_light replaces when the path is enabled. */
+    glUniform1i(g_u_light, 3);
+    {
+        unsigned char dummy[2] = {0, 0};
+        glGenTextures(1, &g_lt);
+        glActiveTexture(GL_TEXTURE3);
+        glBindTexture(GL_TEXTURE_3D, g_lt);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexImage3D(GL_TEXTURE_3D, 0, GL_RG8, 1, 1, 1, 0, GL_RG, GL_UNSIGNED_BYTE, dummy);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glActiveTexture(GL_TEXTURE0);
+    }
     glUniform1i(g_u_use_tex, 0);
     glUniform1i(g_u_cutout, 0);
     return 1;
@@ -748,7 +812,28 @@ void cf_gfx_upload_part(int64_t slot, int64_t offset, void *arr, int64_t nfloats
     if (g_stage_filled >= g_stage_total) cf_stage_flush();
 }
 
+/* GPU time for the frame, by timer query. Two queries ping-ponged so reading
+ * one never stalls on the frame still in flight; cf_gfx_gpu_us returns the last
+ * result that was ready. Diagnostic: the game is CPU-bound, so wall-clock fps
+ * cannot see what the fragment shader costs. */
+static GLuint g_tq[2] = {0, 0};
+static int    g_tq_i = 0, g_tq_armed[2] = {0, 0};
+static int64_t g_gpu_us = 0;
+void cf_gfx_end_query(void) {
+    if (g_tq[g_tq_i] && g_tq_armed[g_tq_i] == 2) { glEndQuery(GL_TIME_ELAPSED); g_tq_armed[g_tq_i] = 1; g_tq_i = 1 - g_tq_i; }
+}
+int64_t cf_gfx_gpu_us(void) { return g_gpu_us; }
+
 void cf_gfx_begin_frame(double r, double g, double b) {
+    if (!g_tq[0]) { glGenQueries(2, g_tq); }
+    int other = 1 - g_tq_i;
+    if (g_tq_armed[other]) {
+        GLint ready = 0;
+        glGetQueryObjectiv(g_tq[other], GL_QUERY_RESULT_AVAILABLE, &ready);
+        if (ready) { GLuint64 ns = 0; glGetQueryObjectui64v(g_tq[other], GL_QUERY_RESULT, &ns); g_gpu_us = (int64_t)(ns / 1000); g_tq_armed[other] = 0; }
+    }
+    if (!g_tq_armed[g_tq_i]) { glBeginQuery(GL_TIME_ELAPSED, g_tq[g_tq_i]); g_tq_armed[g_tq_i] = 2; }
+
     g_fog_rgb[0] = (float)r; g_fog_rgb[1] = (float)g; g_fog_rgb[2] = (float)b;
     glClearColor((float)r, (float)g, (float)b, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -963,6 +1048,44 @@ static void occ_sub_wrapped(GLuint tex, const unsigned char *stage,
 /* The window slid by (dx, dz) chunks: advance the texture origin. The caller
  * then syncs the band that came in, which lands on the texels the band that
  * left was using. Nothing else moves, and nothing else is uploaded. */
+/* ── PROTOTYPE: the light fields as a 3D texture ──────────────────────────────
+ * Measurement only, for deciding whether per-fragment smooth lighting is
+ * affordable. Sky in R, block in G, toroidal with the occupancy textures (the
+ * light fields slide with them), on unit 3. A whole upload per shift; if this
+ * path were kept it would sync the band like the occupancy does. */
+void cf_gfx_upload_light(void *la, void *lb, int64_t w, int64_t h, int64_t d) {
+    if (narr_len(la) < w * h * d || narr_len(lb) < w * h * d) return;
+    const unsigned char *a = (const unsigned char *)narr_data(la);
+    const unsigned char *b = (const unsigned char *)narr_data(lb);
+    size_t n = (size_t)w * h * d;
+    unsigned char *rg = (unsigned char *)malloc(n * 2);
+    if (!rg) return;
+    /* light is x + w * (z + d * y); the texture wants x fastest, then y, then z,
+     * matching the occupancy layout the shader already addresses */
+    for (int64_t z = 0; z < d; z++)
+        for (int64_t y = 0; y < h; y++)
+            for (int64_t x = 0; x < w; x++) {
+                size_t src = (size_t)x + w * ((size_t)z + d * (size_t)y);
+                size_t dst = ((size_t)x + w * ((size_t)y + h * (size_t)z)) * 2;
+                rg[dst] = (unsigned char)(a[src] * 17);   /* 0..15 -> 0..255 */
+                rg[dst + 1] = (unsigned char)(b[src] * 17);
+            }
+    if (!g_lt) glGenTextures(1, &g_lt);
+    glActiveTexture(GL_TEXTURE3);
+    glBindTexture(GL_TEXTURE_3D, g_lt);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage3D(GL_TEXTURE_3D, 0, GL_RG8, (GLsizei)w, (GLsizei)h, (GLsizei)d, 0, GL_RG, GL_UNSIGNED_BYTE, rg);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_REPEAT);
+    free(rg);
+    if (g_u_light >= 0) glUniform1i(g_u_light, 3);
+    glActiveTexture(GL_TEXTURE0);
+}
+void cf_gfx_set_gpulight(int64_t on) { if (g_u_gpulight >= 0) glUniform1i(g_u_gpulight, (int)on); }
+
 static void occ_push_off(void) {
     if (g_u_occ_off >= 0) glUniform2f(g_u_occ_off, (float)g_occ_ox, (float)g_occ_oz);
 }

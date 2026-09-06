@@ -1439,6 +1439,7 @@ mod CubeForge do
         let obz0 = 16 * World.band_z0(n, dz)
         let obz1 = 16 * World.band_z1(n, dz) + 15
         Win.gfx_sync_box(World.occupancy(w1), obx0, 0, obz0, obx1, 255, obz1)
+        if Env.get_int("CF_GPULIGHT", 0) == 1 do Win.gfx_upload_light(World.light(w1), World.block_light(w1), 192, 256, 192) else () end
         let c3 = Win.time()
         let counts0 = remap_bases_go(counts, NativeArray.make_int(4 * water_slot_base(), 0), n, dx, dz, water_slot_base(), 3, 0, 0)
         -- every chunk that moved is flagged, and owes every section, so the
@@ -2805,6 +2806,7 @@ mod CubeForge do
           if frame % 60 == 0 && autowalk do
             println("frame " ++ int_to_string(frame) ++ " player at " ++ V.to_string(Player.position(player1)) ++ " on_ground=" ++ (if Player.on_ground(player1) do "true" else "false" end))
           else () end
+          if Env.get_int("CF_GPU_LOG", 0) == 1 && frame > 200 do println("G " ++ int_to_string(Win.gfx_gpu_us())) else () end
           Win.swap()
           -- allocation gauge: sample the live-object delta over frames 100..200
           let sample1 = if frame == 100 do Win.live_allocs() else sample end
@@ -3345,6 +3347,11 @@ mod CubeForge do
     let to0 = System.monotonic_time()
     let world = World.rebuild_occupancy(world_lit)
     if !headless do Win.gfx_upload_occupancy(World.occupancy(world), 192, 256, 192) else () end
+    -- PROTOTYPE (CF_GPULIGHT=1): light sampled per fragment from a 3D texture
+    -- instead of baked into the vertex. Measurement only; the texture is
+    -- uploaded whole here and after each shift.
+    if !headless do Win.gfx_set_gpulight(Env.get_int("CF_GPULIGHT", 0) == 1) else () end
+    if !headless && Env.get_int("CF_GPULIGHT", 0) == 1 do Win.gfx_upload_light(World.light(world), World.block_light(world), 192, 256, 192) else () end
     println("  occupancy: " ++ int_to_string(System.monotonic_time() - to0) ++ " ms")
     -- stage 2: meshing (needs neighbours; runs only after stage 1 completed)
     -- CF_MESH_REPS>0 re-meshes the whole world that many extra times, purely
