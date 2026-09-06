@@ -36,7 +36,7 @@ mod CubeForge.World do
   -- The occupancy byte of one voxel, kept by set_block and set_cells: every
   -- block write in the world goes through one of those two, so the field is
   -- always the blocks' opacity (Light.occ_value) and the light sweep can read
-  -- a neighbour's opacity from it instead of fetching the block (GAPS G71).
+  -- a neighbour's opacity from it instead of fetching the block (GAPS G82).
   pfn occ_write(o : NativeU8Arr, x : Int, y : Int, z : Int, id : Int) : NativeU8Arr do
     if x < 0 || x >= 128 || y < 0 || y >= 256 || z < 0 || z >= 128 do o
     else NativeArray.set_u8(o, CubeForge.Light.occ_index(x, y, z), CubeForge.Light.occ_value(id)) end
@@ -85,15 +85,15 @@ mod CubeForge.World do
   end
 
   -- A repaired world together with the sections whose light (either field) changed.
-  type Relit = Relit(World, NativeIntArr)
-  fn relit_world(r : Relit) : World do match r do Relit(w, _) -> w end end
-  fn relit_marks(r : Relit) : NativeIntArr do match r do Relit(_, m) -> m end end
+  type Repaired = Repaired(World, NativeIntArr)
+  fn relit_world(r : Repaired) : World do match r do Repaired(w, _) -> w end end
+  fn relit_marks(r : Repaired) : NativeIntArr do match r do Repaired(_, m) -> m end end
 
   doc "Repair both light fields after an edit at a world coordinate, reporting the union of the sections either moved."
-  fn relight_marked(w : World, x : Int, y : Int, z : Int) : Relit do
+  fn relight_marked(w : World, x : Int, y : Int, z : Int) : Repaired do
     let rs = CubeForge.Light.relight_marked(light(w), w, x, y, z)
     let rb = CubeForge.Light.relight_block_marked(block_light(w), w, x, y, z)
-    Relit(set_block_light(set_light(w, CubeForge.Light.relit_field(rs)), CubeForge.Light.relit_field(rb)),
+    Repaired(set_block_light(set_light(w, CubeForge.Light.relit_field(rs)), CubeForge.Light.relit_field(rb)),
           CubeForge.Light.or_marks(CubeForge.Light.relit_marks(rs), CubeForge.Light.relit_marks(rb)))
   end
 
@@ -245,7 +245,7 @@ mod CubeForge.World do
   fn from_chunks(chunks : Array.PVec(CubeForge.Chunk.Chunk), n : Int) : World do
     rebuild_occupancy(World(CubeForge.Tree.from_list(Array.to_list(chunks)), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), shown_new(), n, default_models()))
   end
-  doc "The chunk array, in grid order, as a PVec for the save format and tests. The World itself keeps a Tree (GAPS G71); this converts."
+  doc "The chunk array, in grid order, as a PVec for the save format and tests. The World itself keeps a Tree (GAPS G82); this converts."
   fn chunks(w : World) : Array.PVec(CubeForge.Chunk.Chunk) do match w do World(cs, _, _, _, _, _, _) -> Array.from_list(CubeForge.Tree.to_list(cs)) end end
   doc "The world over a list of chunks in grid order: the constructor tests use."
   fn of_chunk_list(chunks : List(CubeForge.Chunk.Chunk), n : Int) : World do

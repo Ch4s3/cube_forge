@@ -1,0 +1,50 @@
+-- G79 repro: a variant with native-array fields defined in a library module and
+-- churned there by its bare name. With a deep drop the run stays near 2 MB
+-- resident; a shallow free of the dying cell leaks 2 MB a step (run with
+-- /usr/bin/time -l and read the maximum resident set size).
+mod DropXmod do
+  needs IO
+  alias DropXmod.Cell as Cell
+
+  -- the same churn from outside the module, naming the type qualified
+  fn churn_here(c : DropXmod.Cell.Cell, i : Int) : Int do
+    if i == 0 do Cell.tag(c)
+    else churn_here(DropXmod.Cell.Cell(NativeArray.make_u8(1048576, 0), NativeArray.make_u8(1048576, 0), i), i - 1) end
+  end
+
+  -- WHICH=4: replace one 64 KB array of a 64-element persistent vector per
+  -- step, the shape World.set_block has (a chunk copy, then Array.set).
+  pfn churn_pvec(v : Array.PVec(NativeU8Arr), i : Int) : Int do
+    if i == 0 do NativeArray.length_u8(Array.get(v, 0))
+    else churn_pvec(Array.set(v, i % 64, NativeArray.make_u8(65536, 0)), i - 1) end
+  end
+  pfn pvec_of(i : Int, acc : List(NativeU8Arr)) : List(NativeU8Arr) do
+    if i == 0 do acc else pvec_of(i - 1, Cons(NativeArray.make_u8(65536, 0), acc)) end
+  end
+
+  -- WHICH=5: a closure that captures a 1 MB array, called once and dropped,
+  -- a thousand times. A closure environment released shallowly leaks the
+  -- capture: ~1 GB resident instead of ~2 MB.
+  pfn churn_clo(i : Int, acc : Int) : Int do
+    if i == 0 do acc
+    else
+      let a = NativeArray.make_u8(1048576, 0)
+      let f = fn x -> x + NativeArray.length_u8(a)
+      churn_clo(i - 1, acc + f(1))
+    end
+  end
+
+  -- WHICH=1 churns inside the type's module, WHICH=2 from the main module.
+  fn main(cap : Cap(IO)) : Int do
+    let which = Env.get_int("WHICH", 3)
+    let inside = if which % 2 == 1 do Cell.churn(Cell.fresh(), 500) else 0 end
+    println("inside its module: " ++ int_to_string(inside))
+    let outside = if which == 2 || which == 3 do churn_here(Cell.fresh(), 500) else 0 end
+    println("from the main module: " ++ int_to_string(outside))
+    let pv = if which == 4 do churn_pvec(Array.from_list(pvec_of(64, Nil)), 4000) else 0 end
+    println("pvec churn: " ++ int_to_string(pv))
+    let cl = if which == 5 do churn_clo(1000, 0) else 0 end
+    println("closure churn: " ++ int_to_string(cl))
+    0
+  end
+end

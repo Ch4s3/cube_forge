@@ -31,7 +31,7 @@ mod CubeForge.Test.Fruit do
 
 
   -- shown follows the field: every held column shows its species
-  pfn shown_of(f : CubeForge.Myc.Field, n : Int, i : Int, sh : NativeU8Arr) : NativeU8Arr do
+  pfn shown_of(f : CubeForge.Myc.Net, n : Int, i : Int, sh : NativeU8Arr) : NativeU8Arr do
     if i >= n * n do sh
     else shown_of(f, n, i + 1, NativeArray.set_u8(sh, i, CubeForge.Myc.species_of(f, n, i % n, i / n))) end
   end

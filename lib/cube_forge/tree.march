@@ -1,7 +1,7 @@
 -- Tree — a complete binary tree over a power-of-two count of values, indexed
 -- by position. The stdlib's Array.PVec keeps 32 values per leaf in a LIST and
 -- walks its tail to find its length, so a get on a 64-element vector is ~50
--- pointer hops and a set rebuilds a 32-long list (GAPS G71). Here a get is
+-- pointer hops and a set rebuilds a 32-long list (GAPS G82). Here a get is
 -- log2(n) matches and a set allocates log2(n) nodes: for the world's 64
 -- chunks, six of each. Measured in probes/pvec_get: get 72 ns against 112,
 -- set 200 ns against 860.

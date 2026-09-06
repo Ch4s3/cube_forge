@@ -101,13 +101,13 @@ mod CubeForge.Fruit do
     stamp_go(w, sp, bx, base, bz, seed, 0, height_of(sp, bx, bz, seed))
   end
 
-  type Felled = Felled(CubeForge.World.World, Int, Int)
-  fn felled_world(f : Felled) : CubeForge.World.World do match f do Felled(w, _, _) -> w end end
-  fn felled_stems(f : Felled) : Int do match f do Felled(_, s, _) -> s end end
-  fn felled_caps(f : Felled) : Int do match f do Felled(_, _, c) -> c end end
+  type Harvest = Harvest(CubeForge.World.World, Int, Int)
+  fn felled_world(f : Harvest) : CubeForge.World.World do match f do Harvest(w, _, _) -> w end end
+  fn felled_stems(f : Harvest) : Int do match f do Harvest(_, s, _) -> s end end
+  fn felled_caps(f : Harvest) : Int do match f do Harvest(_, _, c) -> c end end
 
-  pfn fell_go(w : CubeForge.World.World, sp : Int, bx : Int, base : Int, bz : Int, seed : Int, i : Int, rows : Int, stems : Int, caps : Int) : Felled do
-    if i >= 81 * rows do Felled(w, stems, caps)
+  pfn fell_go(w : CubeForge.World.World, sp : Int, bx : Int, base : Int, bz : Int, seed : Int, i : Int, rows : Int, stems : Int, caps : Int) : Harvest do
+    if i >= 81 * rows do Harvest(w, stems, caps)
     else
       let x = bx - 4 + i % 9
       let z = bz - 4 + (i / 9) % 9
@@ -122,7 +122,7 @@ mod CubeForge.Fruit do
     end
   end
   doc "Remove exactly the blocks the body's shape owns, counting the stems and caps that were actually there."
-  fn fell(w : CubeForge.World.World, sp : Int, bx : Int, base : Int, bz : Int, seed : Int) : Felled do
+  fn fell(w : CubeForge.World.World, sp : Int, bx : Int, base : Int, bz : Int, seed : Int) : Harvest do
     fell_go(w, sp, bx, base, bz, seed, 0, height_of(sp, bx, bz, seed), 0, 0)
   end
 
@@ -187,7 +187,7 @@ mod CubeForge.Fruit do
   end
 
   doc "Columns to grow a body on this tick. At most [budget], scanning [scan] columns from where tick [tick] leaves off. Bodies the network has left are not this scan's business: the migration that clears their ground fells them."
-  fn candidates(f : CubeForge.Myc.Field, shown : NativeU8Arr, w : CubeForge.World.World, bio : CubeForge.Biome.Field, seed : Int, tick : Int, scan : Int, budget : Int, scale : Float) : List(Int) do
+  fn candidates(f : CubeForge.Myc.Net, shown : NativeU8Arr, w : CubeForge.World.World, bio : CubeForge.Biome.Field, seed : Int, tick : Int, scan : Int, budget : Int, scale : Float) : List(Int) do
     let n = CubeForge.Biome.cols(w)
     let sps = CubeForge.Myc.field_species(f)
     scan_go(sps, CubeForge.Myc.field_vigour(f), shown, w, bio, seed, tick, n, rows_go(sps, n, 0, NativeArray.make_u8(n, 0)), (tick * scan) % (n * n), scan, budget, scale, Nil)
