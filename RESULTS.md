@@ -2149,3 +2149,32 @@ Not kept from this stretch: a VAO per mesh slot (six alternating runs were
 noise, so 192 attribute-pointer sets a frame are not where a quiet frame's
 time is on this driver). Kept: the shim's `getenv("CF_DEBUG")` on every draw
 call is now read once.
+
+## Tree placement in one write; the copy-on-write that remains (2026-09-05)
+
+`World.set_blocks` takes a list of packed cells, splits them by chunk and
+applies each chunk's cells through `set_cells`: one chunk copy per chunk
+touched, one pass over the occupancy bytes. `Veg.plant`, `Veg.fell`,
+`Fruit.stamp` and `Fruit.fell` gather their cells against the world as it
+stands and write once, where each used to call `set_block` per block and copy
+the 64 KB chunk every time.
+
+| | before | after |
+|---|---|---|
+| tree edit, blocks | 0.8-0.9 ms | **0.3-0.45 ms** |
+| a fruit body | 4.2 ms | **~2.0 ms** |
+| bush edit, blocks | 0.3 ms | 0.3 ms |
+
+The bush number is the finding. A bush is nine cells, and with the occupancy
+write skipped as an experiment its blocks cost 0.02 ms: the 0.3 ms is the
+first byte written into the World's 4 MB occupancy field copying it, because
+the field is shared at that moment. `Win.arr_rc` (a new diagnostic, the
+array's refcount word as the shim sees it) reads 2 for the occupancy field and
+5-8 for the light field at the start of a tree edit. Moving the vegetation
+branch into a helper so the old scene is not named in an else arm changed
+nothing. The extra reference is somewhere else in the frame; the same copy is
+what `relight_marked` pays explicitly for the light field. Left open, with
+the diagnostic in place.
+
+Hash at frame 30 unchanged through all of it (103332325 since main's
+relight-box merge). 440 tests.

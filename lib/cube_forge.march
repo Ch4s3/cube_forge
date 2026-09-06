@@ -860,6 +860,22 @@ mod CubeForge do
     end
   end
 
+  -- Vegetation: grow where the biome wants a tree and the cell says so, fell
+  -- where it no longer does. Each one is a chop-sized edit. The cursor is the
+  -- PERIOD count, not the tick: this phase runs every other tick, and a
+  -- tick-keyed cursor over eight windows only ever visited the even four --
+  -- half the world never grew a tree.
+  pfn veg_phase(sc, run : Bool, seed : Int, frame : Int, veg_budget : Int, autoflow : Int) do
+    if !run do sc
+    else
+      let tv0 = Win.time()
+      let vpicks = Veg.candidates(scene_biome(sc), scene_world(sc), seed, frame / tick_period() / 2, 2048, veg_budget)
+      let scv = vegetate(sc, seed, vpicks)
+      if autoflow >= 0 && frame % 100 == veg_slot() do println("biome veg: " ++ int_to_string(List.length(vpicks) - count_bush(vpicks, 0)) ++ " trees, " ++ int_to_string(count_bush(vpicks, 0)) ++ " bushes in " ++ ms(Win.time() -. tv0)) else () end
+      scv
+    end
+  end
+
   pfn vegetate(sc, seed : Int, entries : List(Int)) do
     match entries do
       Nil -> sc
@@ -1927,18 +1943,11 @@ mod CubeForge do
           -- remesh are for one trunk -- so it cannot be halved by splitting the
           -- batch the way the retexture is. Halving how often it runs is the
           -- only lever it has, and trees grow half as fast for it.
-          let sc1pre = if if phase == veg_slot() do (frame / tick_period()) % 2 == 0 else false end do
-            -- Vegetation: grow where the biome wants a tree and the cell says so,
-            -- fell where it no longer does. Each one is a chop-sized edit.
-            let tv0 = Win.time()
-            -- The cursor is the PERIOD count, not the tick: this phase runs every
-            -- other tick, and a tick-keyed cursor over eight windows only ever
-            -- visited the even four -- half the world never grew a tree.
-            let vpicks = Veg.candidates(scene_biome(scm2), scene_world(scm2), seed, frame / tick_period() / 2, 2048, veg_budget)
-            let scv = vegetate(scm2, seed, vpicks)
-            if autoflow >= 0 && frame % 100 == veg_slot() do println("biome veg: " ++ int_to_string(List.length(vpicks) - count_bush(vpicks, 0)) ++ " trees, " ++ int_to_string(count_bush(vpicks, 0)) ++ " bushes in " ++ ms(Win.time() -. tv0)) else () end
-            scv
-          else scm2 end
+          -- In a helper rather than an `if` with the scene named in both arms. Tried
+          -- for the 0.3 ms copy-on-write of the occupancy field that every edit pays
+          -- (the field is shared when the edit writes it); it made no difference, so
+          -- the extra reference is not this `if`. Kept because it reads better.
+          let sc1pre = veg_phase(scm2, if phase == veg_slot() do (frame / tick_period()) % 2 == 0 else false end, seed, frame, veg_budget, autoflow)
           -- Fruit: on the vegetation slot, on the periods vegetation skips, so
           -- no frame carries a tree and a mushroom at once.
           let sc1pre2 = if if phase == veg_slot() do (frame / tick_period()) % 2 == 1 else false end do

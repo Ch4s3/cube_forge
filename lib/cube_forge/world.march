@@ -153,6 +153,44 @@ mod CubeForge.World do
         occ_cells(occ_write(o, 16 * cx + i % 16, i / 256, 16 * cz + (i / 16) % 16, v % 256), cx, cz, rest)
     end
   end
+  doc "Pack a world cell for set_blocks: x and z in 0..127, y and id in 0..255."
+  fn pack_cell(x : Int, y : Int, z : Int, id : Int) : Int do ((x * 128 + z) * 256 + y) * 256 + id end
+  pfn cell_id(v : Int) : Int do v % 256 end
+  pfn cell_y(v : Int) : Int do (v / 256) % 256 end
+  pfn cell_z(v : Int) : Int do (v / 65536) % 128 end
+  pfn cell_x(v : Int) : Int do v / 8388608 end
+  -- Split [cells] into those in chunk (cx, cz), repacked as chunk-local
+  -- idx * 256 + id, and the rest.
+  pfn split_chunk(cells : List(Int), cx : Int, cz : Int, mine : List(Int), rest : List(Int)) : Split do
+    match cells do
+      Nil -> Split(mine, rest)
+      Cons(v, t) ->
+        let x = cell_x(v)
+        let z = cell_z(v)
+        if floor_div16(x) == cx && floor_div16(z) == cz do
+          split_chunk(t, cx, cz, Cons((mod16(x) + 16 * (mod16(z) + 16 * cell_y(v))) * 256 + cell_id(v), mine), rest)
+        else split_chunk(t, cx, cz, mine, Cons(v, rest)) end
+    end
+  end
+  type Split = Split(List(Int), List(Int))
+  doc """
+  Write many blocks at once (cells from pack_cell): grouped by chunk, each
+  chunk copied once and its occupancy bytes written in one pass, where
+  set_block per block copies the 64 KB chunk every time. A tree is ~40 blocks
+  over at most four chunks. Positions must be distinct.
+  """
+  fn set_blocks(w : World, cells : List(Int)) : World do
+    match cells do
+      Nil -> w
+      Cons(v, _) ->
+        let cx = floor_div16(cell_x(v))
+        let cz = floor_div16(cell_z(v))
+        match split_chunk(cells, cx, cz, Nil, Nil) do
+          Split(mine, rest) -> set_blocks(set_cells(w, cx, cz, mine), rest)
+        end
+    end
+  end
+
   fn set_cells(w : World, cx : Int, cz : Int, cells : List(Int)) : World do
     if !in_bounds(w, cx, cz) do w
     else match w do World(cs, la, lb, o, sh, n, mo) ->
