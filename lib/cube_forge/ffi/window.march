@@ -27,6 +27,7 @@ mod CubeForge.Ffi.Window do
     fn x_gfx_upload_part(slot: Int, offset: Int, arr: NativeF32Arr, nfloats: Int): Unit = "cf_gfx_upload_part"
     fn x_gfx_begin_frame(r: Float, g: Float, b: Float): Unit = "cf_gfx_begin_frame"
     fn x_gfx_set_weather(fog: Float, overcast: Float, bolt: Float): Unit = "cf_gfx_set_weather"
+    fn x_gfx_set_myc(first: Int, count: Int, rgb: NativeF32Arr, branch: Float, scale: Float, sharp: Float): Unit = "cf_gfx_set_myc"
     fn x_gfx_set_time(t: Float): Unit = "cf_gfx_set_time"
     fn x_spring_set(x: Int, y: Int, z: Int, flag: Int): Unit = "cf_spring_set"   -- not `on`: reserved (GAPS G65)
     fn x_spring_count(): Int = "cf_spring_count"
@@ -109,6 +110,8 @@ mod CubeForge.Ffi.Window do
 
   doc "Fog density, overcast 0..1 and the lightning spike. The fog colour is whatever gfx_begin_frame last cleared to, so fog and sky always agree."
   fn gfx_set_weather(fog : Float, overcast : Float, bolt : Float) : Unit do x_gfx_set_weather(fog, overcast, bolt) end
+  doc "Tell the shader which layers are mycelium, the species colours to draw filaments in (3 floats each, 0..1), and how strongly. Startup only."
+  fn gfx_set_myc(first : Int, count : Int, rgb : NativeF32Arr, branch : Float, scale : Float, sharp : Float) : Unit do x_gfx_set_myc(first, count, rgb, branch, scale, sharp) end
 
   doc "Draw a precipitation slot: blended, depth-write off, unlit and untextured."
   fn gfx_draw_precip(slot : Int, nverts : Int) : Unit do x_gfx_draw_precip(slot, nverts) end

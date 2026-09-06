@@ -2281,3 +2281,125 @@ oracle and frame budget unmoved (380281180, sky 18 block 0, 6.42 ms).
 The one thing not covered headless is the mouse itself: the scripted knob
 supplies the slot, so the click-to-slot rule is tested through `eat_slot`
 rather than through a real right-click over a real cursor position.
+
+## The mycelium skin, dialled back (2026-09-06)
+
+Mycelium showed too strongly: on grassland the ground read as a change of
+biome rather than a skin over one. `Texture.myc_tint()` is one dial over both
+halves of the texel formula -- how many texels are threads, and how far a
+texel is pulled toward the species colour -- as twelfths, so 100 is exactly
+the old fractions (a third of texels, two-thirds species colour on a thread,
+a sixth elsewhere) and 0 is the bare surface, byte for byte. **The default is
+now 60.** `CF_MYC_TINT` overrides it, which is how the comparison below was
+rendered from one build.
+
+Judged on a mature patch on open grassland (seed 11, `CF_PITCH=-115`), at 100,
+60, 35 and 18, against a control with no fungus: `docs/fungus-tint.png`. At 60
+the ground keeps its own green with a warm cast; at 35 it is nearly plain
+grass; 18 is indistinguishable at a glance.
+
+Two things the comparison settled that guessing would not have:
+
+- **A glowing species' loudness is mostly its light, not its texture.** The
+  first ladder used Lanterncap, whose surface mycelium emits 6, and the
+  panels differed as much in banding as in colour. Repeating it with
+  Meadowbell, which does not glow, isolated the dial. The glow is deliberately
+  untouched: lit ground at night is what glowing fungus is for.
+- **The first scene was worthless and looked fine.** Planting at the seed-7
+  spawn now lands in a grove, where the surface is bush leaves: leaves carry
+  no mycelium, so `wanted 4 shown 0` and four tint settings rendered four
+  identical frames. The readout line at the dumped column is what caught it.
+
+Verification note: a raw `cmp` of two frame dumps always differs, because the
+FPS counter is drawn into the frame. `scratch/cmpframe.py` masks it, and by
+that measure two identical runs match exactly (0 differing pixels) and the
+shipped default matches an explicit `CF_MYC_TINT=60` (0), against 1.79M
+pixels differing from 100. Chunk streaming did not cost reproducibility.
+
+458 tests (three new ones pin the dial: 0 is the bare base, the default shows
+but less than 100, and the thread count thins as it comes down), lint clean,
+budget 6.44 ms.
+
+
+## The black bands under glowing fungus were a vertex-interpolation bug (2026-09-06)
+
+Reported as "those fungal stripes shouldn't be black". They were not the
+texture: a mycelium layer's darkest texel is its base's darkest texel, and
+fungus only ever lightens it (grass 70,140,60; Lanterncap over grass at 60,
+85,145,61). The bands were the sky term of the lighting, destroyed in transit.
+
+Sky and block light shared one vertex float: `2 * round(blk * 255) + sky`,
+unpacked in the fragment shader with `floor` and a subtraction. A varying is
+interpolated across the triangle, and that unpack is not linear, so between
+two corners that are **both fully sunlit** but differ in block light the
+decoded sky ran
+
+    1.0  1.4  1.8  0.2  0.6  1.0  1.4  1.8  0.2  0.6  1.0
+
+a sawtooth. The troughs are the black bands, and the peaks above 1 are the
+blown-out bright bands beside them. It appeared only where a block glowed,
+which is why fungus wore the blame: with a non-glowing species the same
+ground rendered flat and clean, and with a glowing one it looked terraced.
+
+**Fix: the two channels are separate attributes.** The vertex goes 9 floats to
+10 (pos.xyz, uv, layer, sky, face, fx, block light) and the packed word is
+split on the CPU -- in `F32Buf.push_vertex` and the shim's `cf_vert` and
+`cf_f32_stamp` -- so it never reaches a varying. Two channels cannot share one
+interpolated scalar; no encoding fixes that, because interpolation is linear
+and any unpack is not.
+
+`docs/fungus-blockband.png` is the same patch before and after. At midnight the
+glow still does its job: ground luminance median 33 under a glowing species
+against 9 under a non-glowing one, and even, with no banding.
+
+Two things the vertex growing from 9 to 10 turned up, both silent until they
+were not:
+
+- **`cf_f32_stamp` had `n % 9` and `i += 9` of its own**, so every model
+  template (mushrooms, fronds, bushes) aborted the moment the vertex grew.
+- **Floats-per-quad was the literal `54` in four places**, twice in
+  `F32Buf.push_quad`/`push_slice` and twice in the shim's `cf_mesh_slice`,
+  which reserve and write the same buffer. They drifted apart and quads went
+  missing (a six-quad slab meshed as five). Both sides now say it once:
+  `F32Buf.quad_floats()` and `CF_QUAD_FLOATS`.
+
+460 tests, lint clean, budget 6.61 ms with the 11% wider vertex. Two new tests:
+one asserts the old packing is *not* interpolation-safe (both corners decode to
+sky 1.0, three tenths of the way across it decodes to 0.2), the other that
+`push_vertex` lands sky in slot 6 and block light in slot 9. A point test of
+the encode/decode passed throughout and could never have caught this -- the bug
+lives between the vertices, not at them.
+
+
+## Branching filaments, drawn in the shader (2026-09-06)
+
+The tile gives mycelium a warm cast; this gives it threads. They are drawn in
+the fragment shader, not baked into the texture, for one reason: **a tile
+cannot branch across a block boundary.** Sixteen edge-connection variants per
+(base, species) would be 672 layers against the atlas's 92, and the threads
+would still repeat every block. Fed world-space coordinates instead, a
+filament crosses from block to block unbroken and the pattern never tiles.
+
+`hyphae(p)` is ridged, domain-warped value noise: the ridge is where the noise
+crosses its midpoint, and that line wanders and forks, which is what reads as
+branching. Two octaves, one warp, sixteen `hash12` calls per mycelium
+fragment.
+
+The shader needs no new vertex data. The layer index already carries the
+species -- mycelium layers run `myc_first + 6 * base + (species - 1)` -- so
+`(layer - first) % 6` is the species, and the six colours arrive once at
+startup in a uniform, from `Species.colour_*`, the same source the map overlay
+and the tiles use. Guarded on `u_unlit == 0 && u_use_tex == 1`, so overlays and
+the map are untouched.
+
+Defaults `Species.branch_strength` 60, `branch_scale` 500, `branch_sharp` 93,
+each overridable (`CF_MYC_BRANCH`, `CF_MYC_BRANCH_SCALE`, `CF_MYC_BRANCH_SHARP`)
+-- the settings were chosen by sweeping them from one build. Scale is the
+knob that matters: at 100 the threads were blurred smudges several blocks
+wide; from about 450 up they read as filaments.
+`docs/fungus-filaments.png` is the tile alone against the tile with threads.
+
+Cost is under the noise floor. Wild world, 600 frames: 284 fps with, 267
+without. Standing in a patch that fills the screen: 269 with, 259 without --
+the "with" runs measured faster both times, which is how much of a difference
+there is to find. Budget 6.32 ms, 460 tests, lint clean.

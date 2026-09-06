@@ -2599,6 +2599,20 @@ mod CubeForge do
   end
 
   -- Full-screen quad in NDC for the underwater tint: layer 1 (water), shade 0.6. Built once.
+  -- The six species colours as 18 floats, 0..1, for the shader's filament
+  -- overlay. One source of truth: Species.colour_* is what the map overlay and
+  -- the texture tiles use too.
+  pfn species_rgb_go(a : NativeF32Arr, sp : Int) : NativeF32Arr do
+    if sp > 6 do a
+    else
+      let i = 3 * (sp - 1)
+      let a1 = NativeArray.set_f32(a, i, int_to_float(Species.colour_r(sp)) /. 255.0)
+      let a2 = NativeArray.set_f32(a1, i + 1, int_to_float(Species.colour_g(sp)) /. 255.0)
+      species_rgb_go(NativeArray.set_f32(a2, i + 2, int_to_float(Species.colour_b(sp)) /. 255.0), sp + 1)
+    end
+  end
+  pfn species_rgb() : NativeF32Arr do species_rgb_go(NativeArray.make_f32(18, 0.0), 1) end
+
   pfn underwater_quad() : CubeForge.F32Buf.F32Buf do
     let v = fn (b, x, y, u, t) -> b |> F32Buf.push3(x, y, 0.0) |> F32Buf.push(u) |> F32Buf.push(t) |> F32Buf.push(Texture.water_layer()) |> F32Buf.push(0.6) |> F32Buf.push(0.0) |> F32Buf.push(Vx.plain())
     F32Buf.new(64) |> v(-1.0, -1.0, 0.0, 0.0) |> v(1.0, -1.0, 4.0, 0.0) |> v(1.0, 1.0, 4.0, 3.0)
@@ -2863,7 +2877,13 @@ mod CubeForge do
       -- Session-invariant GL state: uploaded once and reused by every session.
       if !headless do
         Win.spray_init(Env.get_int("CF_SPRAY", 512))
-        Win.gfx_upload_texture(Texture.checkerboard(), Texture.size(), Texture.size(), Texture.layers())
+        Win.gfx_upload_texture(Texture.checkerboard_tinted(Env.get_int("CF_MYC_TINT", Texture.myc_tint())), Texture.size(), Texture.size(), Texture.layers())
+        -- The filament overlay: which layers are mycelium, the six species
+        -- colours, and how strongly the shader draws threads in them.
+        Win.gfx_set_myc(float_to_int(Texture.myc_layer(0, 1)), Texture.myc_layer_count(), species_rgb(),
+                        int_to_float(Env.get_int("CF_MYC_BRANCH", Species.branch_strength())) /. 100.0,
+                        int_to_float(Env.get_int("CF_MYC_BRANCH_SCALE", Species.branch_scale())) /. 100.0,
+                        int_to_float(Env.get_int("CF_MYC_BRANCH_SHARP", Species.branch_sharp())) /. 100.0)
         let uq = underwater_quad()
         Win.gfx_upload(253, F32Buf.storage(uq), F32Buf.len(uq))
       else () end
