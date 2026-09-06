@@ -536,11 +536,11 @@ mod CubeForge.World do
       else shift_shown_go(src, CubeForge.Ffi.Window.u8_blit(dst, z * c + xd0, src, sz * c + xs0, len), c, s, dzc, z + 1) end
     end
   end
-  -- The band that comes in, in local chunk coordinates, for a shift of (dx, dz).
-  pfn band_x0(n : Int, dx : Int) : Int do if dx > 0 do n - 1 else 0 end end
-  pfn band_x1(n : Int, dx : Int) : Int do if dx < 0 do 0 else n - 1 end end
-  pfn band_z0(n : Int, dz : Int) : Int do if dz > 0 do n - 1 else 0 end end
-  pfn band_z1(n : Int, dz : Int) : Int do if dz < 0 do 0 else n - 1 end end
+  doc "The band that comes in, in local chunk coordinates, for a shift of (dx, dz). The commit needs them too, to sync just that band of the occupancy texture."
+  fn band_x0(n : Int, dx : Int) : Int do if dx > 0 do n - 1 else 0 end end
+  fn band_x1(n : Int, dx : Int) : Int do if dx < 0 do 0 else n - 1 end end
+  fn band_z0(n : Int, dz : Int) : Int do if dz > 0 do n - 1 else 0 end end
+  fn band_z1(n : Int, dz : Int) : Int do if dz < 0 do 0 else n - 1 end end
 
   -- A shift with its chunks in place but none of its fields: what shift_chunks
   -- hands shift_fields. The world inside has the new chunks and the new origin

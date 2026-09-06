@@ -273,6 +273,12 @@ static const char *FS =
     "uniform sampler3D u_occ_c;\n"
     "uniform float u_shadow;\n"
     "uniform float u_soft;\n"
+    /* The occupancy textures are TOROIDAL: the window slides but their content
+     * does not move, so a shift only rewrites the incoming band. This is the
+     * window origin inside them, in texels (x, z); GL_REPEAT does the wrap, so
+     * it costs an add. Both DDAs bounds-check before every sample, so a ray
+     * leaving the window never reaches the wrap. */
+    "uniform vec2 u_occ_off;\n"
     "uniform float u_fog_density;\n"
     "uniform vec3  u_fog_color;\n"
     "uniform float u_overcast;\n"
@@ -348,7 +354,7 @@ static const char *FS =
     "  vec3  tDelta = mix(vec3(1e30), 1.0 / abs(den), moving);\n"
     "  if (testEntry && v.x >= 0 && v.y >= 0 && v.z >= 0 &&\n"
     "      v.x < int(WORLD.x) && v.y < int(WORLD.y) && v.z < int(WORLD.z))\n"
-    "    if (texture(u_occ, (vec3(v) + 0.5) / WORLD).r > 0.5) return t0;\n"
+    "    if (texture(u_occ, (vec3(v) + vec3(u_occ_off.x, 0.0, u_occ_off.y) + 0.5) / WORLD).r > 0.5) return t0;\n"
     "  float span = t1 - t0;\n"
     "  for (int i = 0; i < MAX_STEPS; i++){\n"
     "    float tNow = min(tMax.x, min(tMax.y, tMax.z));\n"
@@ -357,7 +363,7 @@ static const char *FS =
     "    else if (tMax.y <= tMax.z)                { v.y += stp.y; tMax.y += tDelta.y; }\n"
     "    else                                      { v.z += stp.z; tMax.z += tDelta.z; }\n"
     "    if (v.x < 0 || v.y < 0 || v.z < 0 || v.x >= int(WORLD.x) || v.y >= int(WORLD.y) || v.z >= int(WORLD.z)) return 1e30;\n"
-    "    if (texture(u_occ, (vec3(v) + 0.5) / WORLD).r > 0.5) return t0 + tNow;\n"
+    "    if (texture(u_occ, (vec3(v) + vec3(u_occ_off.x, 0.0, u_occ_off.y) + 0.5) / WORLD).r > 0.5) return t0 + tNow;\n"
     "  }\n"
     "  return 1e30;\n"
     "}\n"
@@ -388,7 +394,7 @@ static const char *FS =
     "    if (tEnter > maxDist) return 1e30;\n"
     "    if (c.x < 0 || c.y < 0 || c.z < 0 || c.x >= int(CW.x) || c.y >= int(CW.y) || c.z >= int(CW.z)) return 1e30;\n"
     "    float tExit = min(ctMax.x, min(ctMax.y, ctMax.z));\n"
-    "    if (texture(u_occ_c, (vec3(c) + 0.5) / CW).r > 0.5) {\n"
+    "    if (texture(u_occ_c, (vec3(c) + vec3(u_occ_off.x, 0.0, u_occ_off.y) / CS + 0.5) / CW).r > 0.5) {\n"
     "      float hit = traceSpan(p, dir, tEnter, min(tExit, maxDist), i > 0);\n"
     "      if (hit < 1e29) return hit;\n"
     "    }\n"
@@ -602,6 +608,15 @@ static GLint  g_u_cutout = -1;
 static GLint  g_u_sun = -1, g_u_eye = -1, g_u_dir = -1, g_u_flash = -1;
 static GLint  g_u_sundir = -1, g_u_moondir = -1, g_u_unlit = -1;
 static GLint  g_u_time = -1;
+/* The occupancy textures are toroidal: window-local (x, y, z) lives at texel
+ * ((x + g_occ_ox) mod w, y, (z + g_occ_oz) mod d). A shift advances the origin
+ * by the band it brought in, which lands on exactly the texels the band that
+ * left was using, so only that band is rewritten -- 0.8 MB instead of 9.4.
+ * Always a multiple of 16, hence of CF_OCC_CS, so the coarse level shifts by a
+ * whole number of cells too. */
+static int64_t g_occ_ox = 0, g_occ_oz = 0;
+static GLint  g_u_occ_off = -1;
+static void occ_push_off(void);
 static GLint  g_u_fog_density = -1, g_u_fog_color = -1, g_u_overcast = -1, g_u_bolt = -1;
 static GLint  g_u_off = -1;
 /* Per-slot window offset (blocks, x and z): zero for a slot uploaded since the
@@ -653,6 +668,7 @@ int64_t cf_gfx_init(void) {
     g_u_shadow = glGetUniformLocation(g_prog, "u_shadow");
     g_u_soft = glGetUniformLocation(g_prog, "u_soft");
     g_u_occ_c = glGetUniformLocation(g_prog, "u_occ_c");
+    g_u_occ_off = glGetUniformLocation(g_prog, "u_occ_off");
     g_u_fog_density = glGetUniformLocation(g_prog, "u_fog_density");
     g_u_fog_color = glGetUniformLocation(g_prog, "u_fog_color");
     g_u_overcast = glGetUniformLocation(g_prog, "u_overcast");
@@ -858,7 +874,9 @@ void cf_gfx_upload_occupancy(void *arr, int64_t w, int64_t h, int64_t d) {
         return;
     }
     if (!g_occ) glGenTextures(1, &g_occ);
+    /* a whole upload is the window as it stands, so the toroidal origin resets */
     g_occ_w = w; g_occ_h = h; g_occ_d = d;
+    g_occ_ox = 0; g_occ_oz = 0;
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_3D, g_occ);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
@@ -866,9 +884,9 @@ void cf_gfx_upload_occupancy(void *arr, int64_t w, int64_t h, int64_t d) {
                  GL_RED, GL_UNSIGNED_BYTE, narr_data(arr));
     glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_REPEAT);
     /* Coarse level. Occupancy is indexed x + CF_WORLD_SIDE * (y + 256 * z), matching
      * CubeForge.Light.occ_index. */
     g_occ_cw = (int)((w + CF_OCC_CS - 1) / CF_OCC_CS);
@@ -896,14 +914,63 @@ void cf_gfx_upload_occupancy(void *arr, int64_t w, int64_t h, int64_t d) {
                  GL_RED, GL_UNSIGNED_BYTE, coarse);
     glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_REPEAT);
     free(coarse);
     glActiveTexture(GL_TEXTURE0);
     glUseProgram(g_prog);
     glUniform1i(g_u_occ, 1);
     glUniform1i(g_u_occ_c, 2);
+    occ_push_off();
+}
+
+/* Window-local (x, z) to texel, through the toroidal origin. */
+static inline int64_t occ_tx(int64_t x) { int64_t v = (x + g_occ_ox) % g_occ_w; return v < 0 ? v + g_occ_w : v; }
+static inline int64_t occ_tz(int64_t z) { int64_t v = (z + g_occ_oz) % g_occ_d; return v < 0 ? v + g_occ_d : v; }
+
+/* Upload a staged box, splitting it where it wraps. [stage] is bw x bh x bd in
+ * the texture's own order; (tx, ty, tz) is its wrapped origin. Unpack strides
+ * let each piece be sourced straight out of the one staging buffer. */
+static void occ_sub_wrapped(GLuint tex, const unsigned char *stage,
+                            int64_t tx, int64_t ty, int64_t tz,
+                            int64_t bw, int64_t bh, int64_t bd, int64_t texw, int64_t texd) {
+    glBindTexture(GL_TEXTURE_3D, tex);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, (GLint)bw);
+    glPixelStorei(GL_UNPACK_IMAGE_HEIGHT, (GLint)bh);
+    int64_t xs[2], xw[2], zs[2], zd[2];
+    int nx = 0, nz = 0;
+    if (tx + bw <= texw) { xs[0] = 0; xw[0] = bw; nx = 1; }
+    else { xs[0] = 0; xw[0] = texw - tx; xs[1] = xw[0]; xw[1] = bw - xw[0]; nx = 2; }
+    if (tz + bd <= texd) { zs[0] = 0; zd[0] = bd; nz = 1; }
+    else { zs[0] = 0; zd[0] = texd - tz; zs[1] = zd[0]; zd[1] = bd - zd[0]; nz = 2; }
+    for (int i = 0; i < nx; i++)
+        for (int j = 0; j < nz; j++) {
+            glPixelStorei(GL_UNPACK_SKIP_PIXELS, (GLint)xs[i]);
+            glPixelStorei(GL_UNPACK_SKIP_IMAGES, (GLint)zs[j]);
+            glTexSubImage3D(GL_TEXTURE_3D, 0,
+                            (GLint)(i == 0 ? tx : 0), (GLint)ty, (GLint)(j == 0 ? tz : 0),
+                            (GLsizei)xw[i], (GLsizei)bh, (GLsizei)zd[j],
+                            GL_RED, GL_UNSIGNED_BYTE, stage);
+        }
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    glPixelStorei(GL_UNPACK_IMAGE_HEIGHT, 0);
+    glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
+    glPixelStorei(GL_UNPACK_SKIP_IMAGES, 0);
+}
+
+/* The window slid by (dx, dz) chunks: advance the texture origin. The caller
+ * then syncs the band that came in, which lands on the texels the band that
+ * left was using. Nothing else moves, and nothing else is uploaded. */
+static void occ_push_off(void) {
+    if (g_u_occ_off >= 0) glUniform2f(g_u_occ_off, (float)g_occ_ox, (float)g_occ_oz);
+}
+void cf_gfx_shift_occupancy(int64_t dx, int64_t dz) {
+    if (!g_occ_w || !g_occ_d) return;
+    g_occ_ox = ((g_occ_ox + 16 * dx) % g_occ_w + g_occ_w) % g_occ_w;
+    g_occ_oz = ((g_occ_oz + 16 * dz) % g_occ_d + g_occ_d) % g_occ_d;
+    occ_push_off();
 }
 
 /* One voxel changed: a single texel beats rebuilding 4 MB. */
@@ -914,15 +981,15 @@ void cf_gfx_set_voxel(int64_t x, int64_t y, int64_t z, int64_t solid) {
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_3D, g_occ);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    glTexSubImage3D(GL_TEXTURE_3D, 0, (GLint)x, (GLint)y, (GLint)z, 1, 1, 1,
+    glTexSubImage3D(GL_TEXTURE_3D, 0, (GLint)occ_tx(x), (GLint)y, (GLint)occ_tz(z), 1, 1, 1,
                     GL_RED, GL_UNSIGNED_BYTE, &v);
     /* Keep the coarse level exact. The count is what makes a break able to clear
      * a coarse texel: without it a broken block could only be handled
      * conservatively and the cell would stay marked solid forever. */
     if (g_occ_count && g_occ_c) {
-        size_t ci = (size_t)(x / CF_OCC_CS)
+        size_t ci = (size_t)(occ_tx(x) / CF_OCC_CS)
                   + (size_t)g_occ_cw * ((size_t)(y / CF_OCC_CS)
-                  + (size_t)g_occ_ch * (size_t)(z / CF_OCC_CS));
+                  + (size_t)g_occ_ch * (size_t)(occ_tz(z) / CF_OCC_CS));
         uint16_t before = g_occ_count[ci];
         if (solid) g_occ_count[ci]++;
         else if (g_occ_count[ci]) g_occ_count[ci]--;
@@ -930,8 +997,8 @@ void cf_gfx_set_voxel(int64_t x, int64_t y, int64_t z, int64_t solid) {
             unsigned char cv = g_occ_count[ci] ? 255 : 0;
             glActiveTexture(GL_TEXTURE2);
             glBindTexture(GL_TEXTURE_3D, g_occ_c);
-            glTexSubImage3D(GL_TEXTURE_3D, 0, (GLint)(x / CF_OCC_CS), (GLint)(y / CF_OCC_CS),
-                            (GLint)(z / CF_OCC_CS), 1, 1, 1, GL_RED, GL_UNSIGNED_BYTE, &cv);
+            glTexSubImage3D(GL_TEXTURE_3D, 0, (GLint)(occ_tx(x) / CF_OCC_CS), (GLint)(y / CF_OCC_CS),
+                            (GLint)(occ_tz(z) / CF_OCC_CS), 1, 1, 1, GL_RED, GL_UNSIGNED_BYTE, &cv);
         }
     }
     glActiveTexture(GL_TEXTURE0);
@@ -960,9 +1027,7 @@ void cf_gfx_sync_box(void *arr, int64_t x0, int64_t y0, int64_t z0, int64_t x1, 
             for (int64_t x = x0; x <= x1; x++)
                 stage[(x - x0) + bw * ((y - y0) + bh * (z - z0))] = a[x + g_occ_w * (y + g_occ_h * z)] == 255 ? 255 : 0;
     glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_3D, g_occ);
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    glTexSubImage3D(GL_TEXTURE_3D, 0, (GLint)x0, (GLint)y0, (GLint)z0, (GLsizei)bw, (GLsizei)bh, (GLsizei)bd, GL_RED, GL_UNSIGNED_BYTE, stage);
+    occ_sub_wrapped(g_occ, stage, occ_tx(x0), y0, occ_tz(z0), bw, bh, bd, g_occ_w, g_occ_d);
     free(stage);
     if (g_occ_count && g_occ_c) {
         glActiveTexture(GL_TEXTURE2);
@@ -975,16 +1040,73 @@ void cf_gfx_sync_box(void *arr, int64_t x0, int64_t y0, int64_t z0, int64_t x1, 
                         for (int64_t y = cy * CF_OCC_CS; y < (cy + 1) * CF_OCC_CS && y < g_occ_h; y++)
                             for (int64_t x = cx * CF_OCC_CS; x < (cx + 1) * CF_OCC_CS && x < g_occ_w; x++)
                                 if (a[x + g_occ_w * (y + g_occ_h * z)] == 255) n++;
-                    size_t ci = (size_t)cx + (size_t)g_occ_cw * ((size_t)cy + (size_t)g_occ_ch * (size_t)cz);
+                    /* the coarse level is toroidal with the fine one; the origin is
+                     * a multiple of 16 so it lands on a whole number of cells */
+                    int64_t tcx = occ_tx(cx * CF_OCC_CS) / CF_OCC_CS;
+                    int64_t tcz = occ_tz(cz * CF_OCC_CS) / CF_OCC_CS;
+                    size_t ci = (size_t)tcx + (size_t)g_occ_cw * ((size_t)cy + (size_t)g_occ_ch * (size_t)tcz);
                     uint16_t before = g_occ_count[ci];
                     g_occ_count[ci] = n;
                     if ((before > 0) != (n > 0)) {
                         unsigned char cv = n ? 255 : 0;
-                        glTexSubImage3D(GL_TEXTURE_3D, 0, (GLint)cx, (GLint)cy, (GLint)cz, 1, 1, 1, GL_RED, GL_UNSIGNED_BYTE, &cv);
+                        glTexSubImage3D(GL_TEXTURE_3D, 0, (GLint)tcx, (GLint)cy, (GLint)tcz, 1, 1, 1, GL_RED, GL_UNSIGNED_BYTE, &cv);
                     }
                 }
     }
     glActiveTexture(GL_TEXTURE0);
+}
+
+/* Oracle for the toroidal occupancy textures: read both levels back and check
+ * every texel against the world's occupancy array, through the same wrap the
+ * shader uses. Returns fine_mismatches * 1000000 + coarse_mismatches, so one
+ * call answers both. Diagnostic only -- glGetTexImage stalls the pipeline. */
+int64_t cf_occ_check(void *arr) {
+    if (!g_occ || !g_occ_count || !g_occ_c) return -1;
+    if (narr_len(arr) < g_occ_w * g_occ_h * g_occ_d) return -2;
+    const unsigned char *a = (const unsigned char *)narr_data(arr);
+    size_t nf = (size_t)g_occ_w * g_occ_h * g_occ_d;
+    unsigned char *tex = (unsigned char *)malloc(nf);
+    if (!tex) return -3;
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_3D, g_occ);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glGetTexImage(GL_TEXTURE_3D, 0, GL_RED, GL_UNSIGNED_BYTE, tex);
+    int64_t bad = 0;
+    for (int64_t z = 0; z < g_occ_d; z++)
+        for (int64_t y = 0; y < g_occ_h; y++)
+            for (int64_t x = 0; x < g_occ_w; x++) {
+                /* Solidity, not the raw byte: the array holds the light opacity
+                 * (2 water, 6 leaves) and cf_gfx_upload_occupancy uploads it
+                 * verbatim while cf_gfx_sync_box normalises to 0/255. The shader
+                 * only ever asks `> 0.5`, so that is what has to agree. */
+                int want = a[x + g_occ_w * (y + g_occ_h * z)] > 127;
+                int got  = tex[occ_tx(x) + g_occ_w * (y + g_occ_h * occ_tz(z))] > 127;
+                if (want != got) bad++;
+            }
+    free(tex);
+    size_t nc = (size_t)g_occ_cw * g_occ_ch * g_occ_cd;
+    unsigned char *ctex = (unsigned char *)malloc(nc);
+    int64_t cbad = 0;
+    if (ctex) {
+        glActiveTexture(GL_TEXTURE2);
+        glBindTexture(GL_TEXTURE_3D, g_occ_c);
+        glGetTexImage(GL_TEXTURE_3D, 0, GL_RED, GL_UNSIGNED_BYTE, ctex);
+        for (int64_t cz = 0; cz < g_occ_cd; cz++)
+            for (int64_t cy = 0; cy < g_occ_ch; cy++)
+                for (int64_t cx = 0; cx < g_occ_cw; cx++) {
+                    int64_t n = 0;
+                    for (int64_t z = cz * CF_OCC_CS; z < (cz + 1) * CF_OCC_CS && z < g_occ_d; z++)
+                        for (int64_t y = cy * CF_OCC_CS; y < (cy + 1) * CF_OCC_CS && y < g_occ_h; y++)
+                            for (int64_t x = cx * CF_OCC_CS; x < (cx + 1) * CF_OCC_CS && x < g_occ_w; x++)
+                                if (a[x + g_occ_w * (y + g_occ_h * z)] == 255) n++;
+                    int64_t tcx = occ_tx(cx * CF_OCC_CS) / CF_OCC_CS, tcz = occ_tz(cz * CF_OCC_CS) / CF_OCC_CS;
+                    unsigned char got = ctex[tcx + g_occ_cw * (cy + g_occ_ch * tcz)];
+                    if ((n > 0) != (got > 0)) cbad++;
+                }
+        free(ctex);
+    }
+    glActiveTexture(GL_TEXTURE0);
+    return bad * 1000000 + cbad;
 }
 
 /* Translucent pass: blend, keep depth test, no depth writes, no culling (water

@@ -1427,7 +1427,18 @@ mod CubeForge do
         let c1 = Win.time()
         Win.gfx_shift(dx, dz)
         let c2 = Win.time()
-        Win.gfx_upload_occupancy(World.occupancy(w1), 192, 256, 192)
+        -- The occupancy textures are toroidal (see gfx_shift_occupancy): the
+        -- window's origin inside them moves and their content does not, so all
+        -- that has to reach the GPU is the band that came in -- 0.8 MB against
+        -- the 9.4 MB whole-texture upload this replaces, which was 13 of this
+        -- stage's 21 ms. The band's texels are exactly the ones the band that
+        -- left was using, so nothing else is stale.
+        Win.gfx_shift_occupancy(dx, dz)
+        let obx0 = 16 * World.band_x0(n, dx)
+        let obx1 = 16 * World.band_x1(n, dx) + 15
+        let obz0 = 16 * World.band_z0(n, dz)
+        let obz1 = 16 * World.band_z1(n, dz) + 15
+        Win.gfx_sync_box(World.occupancy(w1), obx0, 0, obz0, obx1, 255, obz1)
         let c3 = Win.time()
         let counts0 = remap_bases_go(counts, NativeArray.make_int(4 * water_slot_base(), 0), n, dx, dz, water_slot_base(), 3, 0, 0)
         -- every chunk that moved is flagged, and owes every section, so the
@@ -2758,6 +2769,8 @@ mod CubeForge do
             -- The light oracle: the incrementally maintained fields against a
             -- flood from scratch, as voxel counts that differ. Both must be 0;
             -- a non-zero count is a relight that missed something.
+            let occbad = Win.occ_check(World.occupancy(scene_world(sc1)))
+            println("  occupancy oracle: fine " ++ int_to_string(occbad / 1000000) ++ " coarse " ++ int_to_string(occbad % 1000000) ++ " texels differ from the world (both must be 0)")
             println("  light oracle: sky " ++ int_to_string(count_diff_u8(World.light(scene_world(sc1)), CubeForge.Light.flood(scene_world(sc1)), 0, CubeForge.Light.volume(), 0))
                     ++ " block " ++ int_to_string(count_diff_u8(World.block_light(scene_world(sc1)), CubeForge.Light.flood_block(scene_world(sc1)), 0, CubeForge.Light.volume(), 0)) ++ " voxels differ;"
                     ++ " first sky:" ++ first_diffs(World.light(scene_world(sc1)), CubeForge.Light.flood(scene_world(sc1)), 0, CubeForge.Light.volume(), 6, "")

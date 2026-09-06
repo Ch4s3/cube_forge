@@ -2713,3 +2713,66 @@ None of the three remaining stages will yield to more splitting:
 
 468 tests. Light oracle at the accepted water baseline (sky 47/142/99 at frames
 30/400/1200, block 2/2/1).
+
+
+## The occupancy texture goes toroidal (2026-09-06)
+
+The commit stage was 20-22 ms and `CF_STREAM_LOG` said where: **13 of it was one
+call**, re-uploading the whole 9.4 MB occupancy texture. Everything else in the
+stage is small (biome+myc slide 3.2, actors+springs 3.3, the band's twelve mesh
+uploads 0.8, `gfx_shift` 5 microseconds, the counts/pending remaps 35).
+
+A shift does not change the world the texture describes -- it changes which part
+of it the window covers. So the texture stops moving and the window's origin
+inside it moves instead: window-local (x, y, z) lives at texel
+((x + g_occ_ox) mod w, y, (z + g_occ_oz) mod d), and the origin advances 16 per
+chunk shifted. The band that comes in lands on exactly the texels the band that
+left was using, so a shift uploads 0.8 MB instead of 9.4.
+
+The shader pays an add. It samples with normalised coordinates, so switching the
+two 3D textures from `GL_CLAMP_TO_EDGE` to `GL_REPEAT` and adding a `u_occ_off`
+uniform gets the wrap **in hardware, for free** -- no modulo in the DDA's hot
+loop, and no need for a power-of-two window (192 is not one). Both DDAs already
+bounds-check before every sample, so a ray leaving the window never reaches the
+wrap. The coarse level rides along: the origin is always a multiple of 16 and
+the cell is 8, so it shifts by a whole number of cells.
+
+`cf_gfx_sync_box` and `cf_gfx_set_voxel` write through the same wrap, splitting a
+box that straddles the seam into at most four `glTexSubImage3D` calls sourced out
+of one staging buffer with unpack strides.
+
+### The oracle
+
+`cf_occ_check` reads both levels back and checks every texel against the world's
+occupancy array through the shader's own wrap; the dump frame prints it beside
+the light oracle. It must read 0 and 0.
+
+It did not at first: 37,310 fine texels differed at frame 30, before any shift.
+That turned out to be a pre-existing disagreement, not the wrap --
+`cf_gfx_upload_occupancy` uploads the array verbatim, so water sits in the
+texture as 2 and leaves as 6, while `cf_gfx_sync_box` normalises to 0/255. The
+shader only ever asks `> 0.5`, so both read as empty and nothing was ever wrong;
+the oracle now compares solidity, which is what has to agree.
+
+| frame (shifts by then) | fine | coarse |
+|---|---|---|
+| 30 (0) | 0 | 0 |
+| 800 (1) | 0 | 0 |
+| 1500 (2) | 0 | 0 |
+| 2500 (3) | 0 | 0 |
+| 4000 (6) | 0 | 0 |
+
+### Result
+
+| | before | after |
+|---|---|---|
+| occupancy upload, per shift | 12.6-14.8 ms | **0.7-2.8 ms** |
+| commit stage | 20.3 | **9.7** |
+| worst frame, 19 899 frames | 49.5 | **36.1** |
+| frames over 16.67 | 43 | 39 |
+| worst frame, the 1500-frame line | 33.7 | **29.6** |
+| mean / p99 | 4.13 / 9.53 | 4.11 / 9.49 |
+
+Commit drops out of the over-budget set. What is left is `chunks` at 27.1 ms
+(one chunk generation's latency) and `light` at 23.4 (one band sweep, the two
+already running as a pair). 468 tests.
