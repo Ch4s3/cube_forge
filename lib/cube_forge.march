@@ -1421,10 +1421,14 @@ mod CubeForge do
     match sc do
       Scene(w, counts, outline, hit, ui, pids, flags, meshes, bio, pend, myc) ->
         let n = World.side(w)
+        let c0 = Win.time()
         let bio1 = Biome.shift(bio, w1, dx, dz, seed)
         let myc1 = restore_myc(Myc.shift(myc, 16 * n, dx, dz), w1, n, World.restored(w1))
+        let c1 = Win.time()
         Win.gfx_shift(dx, dz)
+        let c2 = Win.time()
         Win.gfx_upload_occupancy(World.occupancy(w1), 192, 256, 192)
+        let c3 = Win.time()
         let counts0 = remap_bases_go(counts, NativeArray.make_int(4 * water_slot_base(), 0), n, dx, dz, water_slot_base(), 3, 0, 0)
         -- every chunk that moved is flagged, and owes every section, so the
         -- drain rebakes it at the new origin over the coming frames
@@ -1441,15 +1445,19 @@ mod CubeForge do
         -- cache is flagged, because it may have been carrying a flow when the
         -- window dropped it and nothing else would wake it.
         let flags1 = flag_restored(remap_ints_go(flags, NativeArray.make_int(n * n, 0), n, dx, dz, 0, 0, 0), w1, n, World.restored(w1))
+        let c4 = Win.time()
         let band = band_indices(n, dx, dz, n * n - 1, Nil)
         let rm = remap_meshes_go(meshes, w1, n, dx, dz, n * n - 1, counts1, Chunk.new(), band, fresh, Nil)
+        let c5 = Win.time()
         let pids1 = Array.from_list(remap_pids_go(pids, w1, n, dx, dz, n * n - 1, freed_pids_go(pids, n, dx, dz, n * n - 1, Nil), seed, Nil))
         let flags2 = spring_band(w1, bio1, n, band, flags1)
         match rm do
           ShiftMeshes(mlist, counts2) ->
             -- CF_STREAM_LOG=1: one line per shift, on the frame it lands
             if Env.get_int("CF_STREAM_LOG", 0) == 1 do
-              println("window shift (" ++ int_to_string(dx) ++ "," ++ int_to_string(dz) ++ ") -> origin (" ++ int_to_string(World.origin_x(w1)) ++ "," ++ int_to_string(World.origin_z(w1)) ++ "); commit " ++ ms(Win.time() -. t0))
+              println("window shift (" ++ int_to_string(dx) ++ "," ++ int_to_string(dz) ++ ") -> origin (" ++ int_to_string(World.origin_x(w1)) ++ "," ++ int_to_string(World.origin_z(w1)) ++ "); commit " ++ ms(Win.time() -. t0)
+                      ++ " [bio+myc " ++ ms(c1 -. c0) ++ " gfx_shift " ++ ms(c2 -. c1) ++ " OCCUPANCY_UPLOAD " ++ ms(c3 -. c2)
+                      ++ " remaps " ++ ms(c4 -. c3) ++ " meshupload " ++ ms(c5 -. c4) ++ " actors+springs " ++ ms(Win.time() -. c5) ++ "]")
             else () end
             Scene(w1, counts2, outline, hit, ui, pids1, flags2, Array.from_list(mlist), bio1, pend1, myc1)
         end
