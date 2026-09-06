@@ -99,6 +99,8 @@ mod CubeForge.Chunk do
   doc "Sandstone and shale: two of the rock strata's bands (see rock_id). Both harvest as stone."
   fn sandstone() : Int do 67 end
   fn shale() : Int do 68 end
+  doc "Crystal: the cavern's glow. Solid and opaque like any rock, but Light.emission gives it a level, so a crystal cavern is lit by what is in it rather than by a lamp the player has to carry down."
+  fn crystal() : Int do 69 end
   doc "Palm trunk and frond: the oasis tree. Fronds are foliage in every sense leaves are."
   fn palm_log() : Int do 65 end
   fn palm_frond() : Int do 66 end
@@ -148,7 +150,7 @@ mod CubeForge.Chunk do
   doc "The species of a fruit block, or 0."
   fn fruit_species(id : Int) : Int do if is_fruit(id) do (id - 47) % 6 + 1 else 0 end end
   doc "Alpha-cutout blocks: leaves and small mushrooms. Meshed in the cutout pass and see-through for face culling and light."
-  fn is_cutout(id : Int) : Bool do is_foliage(id) || is_fruit_small(id) end
+  fn is_cutout(id : Int) : Bool do is_foliage(id) || is_fruit_small(id) || id == crystal() end
   fn is_log(id : Int) : Bool do id == oak_log() || id == pine_log() || id == palm_log() end
   fn is_foliage(id : Int) : Bool do id == oak_leaves() || id == pine_leaves() || id == palm_frond() end
 

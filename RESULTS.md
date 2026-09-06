@@ -2377,3 +2377,67 @@ cross-section above, the `poi:` diagnostic line under `CF_TERRAIN_STATS`, the
 world and mesh hashes moving at a seed with an arch (seed 1: world 79424082 ->
 590784810) and not moving at one without, and the tests. A spawn-position knob
 would pay for itself the next time a rare feature needs looking at.
+
+## Points of interest, phase 2: the crystal cavern and the giant tree (2026-09-06)
+
+Two kinds added to the template. Both are **landmarks with no height term**: a
+cavern is a hole in the rock and a tree is not terrain, so neither belongs in
+`Noise.height`, and `raises(k)` keeps them out of the per-column scan entirely --
+the hot path stays exactly two kinds wide however many kinds exist.
+
+**The template gained a volume op**, orthogonal to scatter/landmark: `vol_carve`
+(an opening, a chamber), `vol_stamp` (a trunk, a canopy) or `vol_none`. One
+function, `vol_block`, decides what a kind does to a voxel, and **the generator
+and the preview both call it** -- a preview that modelled the shape separately
+would drift from what gets built, which is the class of bug this module exists
+to end. Two new rules: a stamp must not also raise the ground, and an
+underground kind must keep a roof's worth of rock over its widest chamber
+whatever depth it draws (`plo(depth) >= phi(wide) + roof()`).
+
+**Three bugs, each caught by a different one of those two.**
+
+*The preview drew an empty sky.* It asked whether an instance happened to be
+placed at the sample cell, and mostly one was not. Shape and placement are now
+separated -- `shape_at` is the shape, `rise_at` is the shape once placement
+agrees -- which is a better split anyway.
+
+*Every cavern was unlit.* The crystals lining a chamber's shell were being
+written under the stamp rule, "only into air", and the voxels they line are rock
+that was just carved. The preview showed them; the world had none. The rule is
+now split by op: **a carve owns the volume it opens**, so what it puts back
+replaces the ground it took; a stamp owns nothing and writes only into air, so a
+tree can never eat the hill it stands on.
+
+*The giant tree was a pole.* 34-50 tall with blobs around it -- a conifer, not a
+live oak. The references are **wider than they are tall**: a short thick trunk
+that boughs leave low down, and boughs that sweep out and *down* before lifting
+to their tips. So the trunk is 14-22 with a flaring foot, the boughs are two
+segments with a dip at the elbow (that dip is what makes a bough read as
+carrying its own weight rather than as a spoke), and the canopy is a flattened
+dome of radius `0.92 * reach` sitting on them. Final proportions: about 40 tall
+and 70 across.
+
+**The crystals are micro-voxel models, not cubes.** One block per crystal read as
+a stack of boxes; Naica's selenite is a shaft. `Model` gained four crystal
+templates -- a blade walked from a floor point to a tip, tapering, plus a shorter
+one across it -- and `crystal` joined `is_cutout`, so it meshes in the foliage
+pass, lets light through and costs no new machinery. The template variant is
+hashed on a **coarse** grid so neighbouring blades lean the same way and a patch
+reads as one growth rather than a bristle. `Model.count()` 20 -> 24, texture
+layers 92 -> 93 (layer 92 is the crystal cube face, still used for the item).
+
+**Numbers.** 478 tests. `CF_POI=0` and `CF_POI=1` agree at seed 7 (mesh
+484802240, world 1012862119). Worst frame 6.04 ms best of 5 against a 16 ms
+budget, unmoved. Landmarks are rare enough to be landmarks: over 40 seeds, 4
+worlds had an arch in the spawn window, 8 a cavern, 3 a giant tree.
+
+`CF_TERRAIN_STATS` now prints a line per landmark with its site, size and
+bearing -- and, for a cavern, the world position of chamber 0, because the site
+column of a cavern is usually solid rock and standing there shows you nothing.
+`docs/poi-arch.png`, `docs/poi-giant-tree.png`, `docs/poi-crystal-cavern.png`.
+
+**Not done.** Naica's beams span a whole chamber; these are one cell each, so a
+patch reads as crystal growth rather than as crossing beams. Making a run of
+cells form a continuous shaft needs the blade's tip to be the next cell's base,
+which the variant hash cannot express -- it wants a direction field along the
+shell. Left as a follow-up.

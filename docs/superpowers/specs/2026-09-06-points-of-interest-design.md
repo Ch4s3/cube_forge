@@ -318,3 +318,29 @@ poi preview: arch  (landmark)
 Adding a kind is now: a row in the placement table, a row in the parameter
 table, a case in `shape_at` built from the shared profiles, and -- if it needs
 one -- a case in the carve. The invariants and the preview come with it.
+
+## 11. As built, phase 2 (2026-09-06)
+
+The crystal cavern and the giant tree. Both are landmarks with **no height
+term**; the template gained a volume op (`vol_carve` / `vol_stamp` / `vol_none`)
+orthogonal to scatter/landmark, and `raises(k)` keeps volume-only kinds out of
+the per-column scan.
+
+- One function, `vol_block`, says what a kind does to a voxel, and the generator
+  and the preview both call it. This is the rule that keeps the preview
+  believable.
+- **A carve owns the volume it opens**; a stamp owns nothing. The crystals
+  lining a chamber replace the rock the carve just took; a tree writes only into
+  air. Treating both the same left every cavern unlit.
+- The giant tree is a live oak, not a conifer: wider than it is tall, short
+  thick trunk, boughs that dip at the elbow before lifting. The first version
+  was a 50-block pole with blobs around it.
+- Crystals are **micro-voxel models** (`Model.t_crystal`), four blade variants
+  hashed on a coarse grid so a patch leans together. A cube per crystal read as
+  a stack of boxes.
+- The cavern's `p_depth` is 22..34 against a `min_ground` of sea + 24, so the
+  roof rule holds by construction rather than by luck.
+
+Naica's beams span a whole chamber; these are one cell each. A continuous shaft
+needs a direction field along the shell so one blade's tip is the next one's
+base — a follow-up, noted in RESULTS.

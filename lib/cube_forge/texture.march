@@ -54,6 +54,20 @@ mod CubeForge.Texture do
 
   -- Bedded rock: horizontal laminae [every] pixels apart, a shade darker, over
   -- a speckle -- sandstone's thick pale beds, shale's thin grey-blue ones.
+  -- Layer 92: crystal. Angular facets in a cold blue-green, bright enough that
+  -- it reads as lit even before the block-light channel gets to it.
+  pfn crystal_go(a : NativeU8Arr, i : Int) : NativeU8Arr do
+    if i >= 256 do a
+    else
+      let x = i % 16
+      let y = i / 16
+      -- two crossing diagonal families make facets rather than a speckle
+      let f = ((x + y) / 3 + (x - y + 32) / 4) % 4
+      let d = f * 26 - 32
+      crystal_go(put_rgba(a, 92 * 1024 + i * 4, 70 + d, 190 + d, 200 + d, 255), i + 1)
+    end
+  end
+
   pfn bedded_go(a : NativeU8Arr, layer : Int, i : Int, r : Int, g : Int, b : Int, every : Int) : NativeU8Arr do
     if i >= 256 do a
     else
@@ -139,11 +153,11 @@ mod CubeForge.Texture do
   11 pine leaves, 12 pine bark, 13 gravel, 14 clay, 15 spring (icon only), 16 foam,
   17 basalt, 18 ice, 19 mud, 20 glow cap, 21..62 mycelium over (grass, dirt, sand, snow,
   gravel, clay, stone) x six species, 63..68 spore icons per species, 69..86 fruit
-  (small, stem, cap) x six species, 87 palm bark, 88 palm frond, 89 sandstone, 90 shale, 91 the model palette
+  (small, stem, cap) x six species, 87 palm bark, 88 palm frond, 89 sandstone, 90 shale, 91 the model palette, 92 crystal
   (texel k is Model.colour k).
   """
   fn checkerboard() : NativeU8Arr do
-    let a0 = checker_go(NativeArray.make_u8(92 * 16 * 16 * 4, 0), 0)
+    let a0 = checker_go(NativeArray.make_u8(93 * 16 * 16 * 4, 0), 0)
     let a1 = water_go(a0, 0)
     let a2 = speckle_go(a1, 2, 0, 134, 96, 67)
     let a3 = speckle_go(a2, 3, 0, 128, 128, 132)
@@ -168,7 +182,7 @@ mod CubeForge.Texture do
     let a22 = fronds_go(a21, 88, 0)
     let a23 = bedded_go(a22, 89, 0, 206, 178, 128, 3)
     let a24 = bedded_go(a23, 90, 0, 96, 104, 118, 2)
-    let a25 = palette_go(a24, 0)
+    let a25 = crystal_go(palette_go(a24, 0), 0)
     fruit_all_go(spore_all_go(myc_all_go(a25, 0), 1), 0)
   end
 
@@ -188,7 +202,7 @@ mod CubeForge.Texture do
   doc "Texture layer for an item's HUD icon: as layer_for, except the spring item (id 4) shows its ring. The sea is also id 4 and must keep rendering as water, which is why this is not layer_for."
   fn icon_layer(id : Int) : Float do if id == 4 do 15.0 else if CubeForge.Species.is_spore(id) do spore_layer(CubeForge.Species.species_of_item(id)) else layer_for(id) end end end
 
-  fn layers() : Int do 92 end
+  fn layers() : Int do 93 end
 
   -- ── The layer table for the shim's quad emitter ─────────────────────────
   pfn layer_tab_go(t : NativeF32Arr, i : Int) : NativeF32Arr do
@@ -230,13 +244,14 @@ mod CubeForge.Texture do
     else if id == 23 do 18.0
     else if id == 24 do 19.0
     else if id == 25 do 20.0
+    else if id == CubeForge.Chunk.crystal() do 92.0
     else if id == CubeForge.Chunk.sandstone() do 89.0
     else if id == CubeForge.Chunk.shale() do 90.0
     else if id == CubeForge.Chunk.palm_log() do 87.0
     else if id == CubeForge.Chunk.palm_frond() do 88.0
     else if CubeForge.Chunk.is_myc(id) do layer_for(CubeForge.Chunk.myc_base(id))
     else if CubeForge.Chunk.is_fruit(id) do fruit_layer(fruit_kind(id), CubeForge.Chunk.fruit_species(id))
-    else 0.0 end end end end end end end end end end end end end end end end end end end end end end end
+    else 0.0 end end end end end end end end end end end end end end end end end end end end end end end end
   end
 
 

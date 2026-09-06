@@ -2725,24 +2725,37 @@ mod CubeForge do
     else
       let cx = i % cells
       let cz = i / cells
-      if !CubeForge.Poi.here(k, cx, cz, seed, scale) do poi_cells_go(n, k, i + 1, seed, scale, acc)
+      if CubeForge.Poi.class_of(k) != CubeForge.Poi.cls_landmark() do acc
+      else if !CubeForge.Poi.here(k, cx, cz, seed, scale) do poi_cells_go(n, k, i + 1, seed, scale, acc)
       else
         println("  " ++ CubeForge.Poi.kind_name(k) ++ ": site " ++ int_to_string(CubeForge.Poi.sx(k, cx, cz, seed)) ++ "," ++ int_to_string(CubeForge.Poi.sz(k, cx, cz, seed))
                 ++ "  ground " ++ int_to_string(CubeForge.Poi.ground(k, cx, cz, seed))
                 ++ "  len " ++ int_to_string(CubeForge.Poi.param(k, cx, cz, seed, CubeForge.Poi.p_len()))
                 ++ "  rise " ++ int_to_string(CubeForge.Poi.param(k, cx, cz, seed, CubeForge.Poi.p_rise()))
+                ++ "  depth " ++ int_to_string(CubeForge.Poi.param(k, cx, cz, seed, CubeForge.Poi.p_depth()))
                 ++ "  opening " ++ int_to_string(2 * CubeForge.Poi.param(k, cx, cz, seed, CubeForge.Poi.p_hole_w())) ++ "x" ++ int_to_string(CubeForge.Poi.param(k, cx, cz, seed, CubeForge.Poi.p_hole_h()))
-                ++ "  bearing " ++ int_to_string(float_to_int(CubeForge.Poi.bearing(k, cx, cz, seed) *. 57.2957795)) ++ " deg")
+                ++ "  bearing " ++ int_to_string(float_to_int(CubeForge.Poi.bearing(k, cx, cz, seed) *. 57.2957795)) ++ " deg"
+                ++ (if k != CubeForge.Poi.k_cavern() do "" else
+                      let a = CubeForge.Poi.bearing(k, cx, cz, seed)
+                      let cu = CubeForge.Poi.cham_u(k, cx, cz, seed, 0)
+                      let cv = CubeForge.Poi.cham_v(k, cx, cz, seed, 0)
+                      "  chamber 0 at " ++ int_to_string(CubeForge.Poi.sx(k, cx, cz, seed) + float_to_int(cu *. Math.cos(a) -. cv *. Math.sin(a)))
+                      ++ "," ++ int_to_string(CubeForge.Poi.sz(k, cx, cz, seed) + float_to_int(cu *. Math.sin(a) +. cv *. Math.cos(a)))
+                      ++ " y " ++ int_to_string(float_to_int(CubeForge.Poi.cham_y(k, cx, cz, seed, 0, CubeForge.Poi.ground(k, cx, cz, seed)))) end))
         poi_cells_go(n, k, i + 1, seed, scale, acc + 1)
-      end
+      end end
     end
+  end
+  pfn poi_kinds_go(n : Int, k : Int, seed : Int, scale : Float, acc : Int) : Int do
+    if k >= CubeForge.Poi.kinds() do acc
+    else poi_kinds_go(n, k + 1, seed, scale, acc + poi_cells_go(n, k, 0, seed, scale, 0)) end
   end
   pfn poi_report(n : Int, seed : Int) : Unit do
     let r = poi_rise_go(n, 0, seed, 0, 0)
-    let a = poi_cells_go(n, CubeForge.Poi.k_arch(), 0, seed, CubeForge.Poi.poi_scale(), 0)
+    let a = poi_kinds_go(n, 1, seed, CubeForge.Poi.poi_scale(), 0)
     println("  poi: " ++ int_to_string(r / 1000000) ++ " columns raised by a landform"
             ++ (if r % 1000000 == 0 do "" else " (first at " ++ int_to_string((r % 1000000 - 1) / 1000) ++ ", " ++ int_to_string((r % 1000000 - 1) % 1000) ++ ")" end)
-            ++ ", " ++ int_to_string(a) ++ " arches")
+            ++ ", " ++ int_to_string(a) ++ " landmarks")
   end
 
   -- CF_TERRAIN_MAP=1 (alongside CF_TERRAIN_STATS): the world as a character map, one

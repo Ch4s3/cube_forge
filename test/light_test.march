@@ -478,7 +478,7 @@ mod CubeForge.Test.Light do
       Test.assert_true(L.is_opaque(C.glow_cap()), "a glow cap is a solid block")
     end
     test "the glow cap has its own texture layer" do
-      Test.assert_eq_int(CubeForge.Texture.layers(), 92, "layer count")
+      Test.assert_eq_int(CubeForge.Texture.layers(), 93, "layer count")
       Test.assert_true(near(CubeForge.Texture.layer_for(C.glow_cap()), 20.0), "layer 20")
     end
   end

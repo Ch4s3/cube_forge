@@ -66,9 +66,37 @@ mod CubeForge.Poi do
 
   fn k_butte() : Int do 0 end
   fn k_arch() : Int do 1 end
+  fn k_cavern() : Int do 2 end
+  fn k_tree() : Int do 3 end
   doc "How many kinds there are: the rules test walks 0 .. kinds() - 1."
-  fn kinds() : Int do 2 end
-  fn kind_name(k : Int) : String do if k == k_butte() do "butte" else "arch" end end
+  fn kinds() : Int do 4 end
+  fn kind_name(k : Int) : String do
+    if k == k_butte() do "butte" else if k == k_arch() do "arch" else if k == k_cavern() do "cavern" else "giant tree" end end end
+  end
+
+  -- ── What a kind does to the world ────────────────────────────────────────
+  -- Orthogonal to scatter/landmark: a kind may raise the ground, may write
+  -- into the volume, or both. The arch does both; the cavern and the giant
+  -- tree only write volume, and a butte only raises.
+
+  fn vol_none() : Int do 0 end
+  doc "Removes ground: an opening, a chamber."
+  fn vol_carve() : Int do 1 end
+  doc "Writes blocks into air: a trunk, a canopy."
+  fn vol_stamp() : Int do 2 end
+  doc "What kind [k] does to the volume."
+  fn vol_of(k : Int) : Int do
+    if k == k_butte() do vol_none()
+    else if k == k_tree() do vol_stamp()
+    else vol_carve() end end
+  end
+  doc """
+  Does the kind contribute to `height`. A feature that should read as TERRAIN
+  must -- that is what gets it surface materials, strata, talus and trees. A
+  feature that is not terrain (a cavern in the rock, a tree standing on it)
+  must not, and is kept out of the per-column scan entirely.
+  """
+  fn raises(k : Int) : Bool do k == k_butte() || k == k_arch() end
 
   fn cls_scatter() : Int do 0 end
   fn cls_landmark() : Int do 1 end
@@ -81,19 +109,35 @@ mod CubeForge.Poi do
   -- ── The placement table ──────────────────────────────────────────────────
 
   doc "Side of the kind's cell in blocks: one instance at most per cell."
-  fn cell(k : Int) : Int do if k == k_butte() do 24 else 160 end end
+  fn cell(k : Int) : Int do
+    if k == k_butte() do 24 else if k == k_cavern() do 128 else 160 end end
+  end
   doc "Fraction of cells in full country holding one."
-  fn density(k : Int) : Float do if k == k_butte() do 0.35 else 0.5 end end
+  fn density(k : Int) : Float do
+    if k == k_butte() do 0.35 else if k == k_arch() do 0.5 else if k == k_cavern() do 0.45 else 0.4 end end end
+  end
   doc "Frequency of the kind's country octave: how wide a region of them is."
-  fn cty_freq(k : Int) : Float do if k == k_butte() do 0.0075 else 0.0035 end end
+  fn cty_freq(k : Int) : Float do
+    if k == k_butte() do 0.0075 else if k == k_arch() do 0.0035 else if k == k_cavern() do 0.0040 else 0.0060 end end end
+  end
   doc "Where the country octave has to reach before the kind appears at all: its rarity."
-  fn cty_lo(k : Int) : Float do if k == k_butte() do 0.62 else 0.56 end end
+  fn cty_lo(k : Int) : Float do
+    if k == k_butte() do 0.62 else if k == k_arch() do 0.56 else if k == k_cavern() do 0.52 else 0.60 end end end
+  end
   doc "How wide the country's edge band is."
   fn cty_band(k : Int) : Float do 0.10 end
   doc "How far outside a chunk an instance may sit and still write into it."
-  fn reach(k : Int) : Int do if k == k_butte() do 12 else 26 end end
+  fn reach(k : Int) : Int do
+    if k == k_butte() do 12 else if k == k_arch() do 26 else if k == k_cavern() do 44 else 58 end end end
+  end
   doc "The least a landmark's ground must stand above sea level."
-  fn min_ground(k : Int) : Int do if k == k_butte() do 0 else N.sea_level() + 5 end end
+  fn min_ground(k : Int) : Int do
+    if k == k_butte() do 0
+    else if k == k_arch() do N.sea_level() + 5
+    -- a cavern needs rock over it, or it is a hole in a hillside
+    else if k == k_cavern() do N.sea_level() + 24
+    else N.sea_level() + 3 end end end
+  end
 
   -- ── The parameter table ──────────────────────────────────────────────────
   -- Six numbers per kind. A kind that does not use one leaves it zero.
@@ -110,15 +154,23 @@ mod CubeForge.Poi do
   fn p_hole_w() : Int do 4 end
   doc "Parameter 5: height of the opening above its floor."
   fn p_hole_h() : Int do 5 end
-  fn params() : Int do 6 end
+  doc "Parameter 6: how far below the surface the shape sits. Underground kinds only."
+  fn p_depth() : Int do 6 end
+  fn params() : Int do 7 end
 
   fn plo(k : Int, i : Int) : Int do
     if k == k_butte() do (if i == p_len() do 5 else if i == p_wide() do 5 else if i == p_top() do 74 else 0 end end end)
-    else (if i == p_len() do 24 else if i == p_wide() do 5 else if i == p_rise() do 26 else 0 end end end) end
+    else if k == k_arch() do (if i == p_len() do 24 else if i == p_wide() do 5 else if i == p_rise() do 26 else 0 end end end)
+    -- cavern: len is how far its chambers spread, wide is a chamber's radius
+    else if k == k_cavern() do (if i == p_len() do 16 else if i == p_wide() do 8 else if i == p_depth() do 22 else 0 end end end)
+    -- tree: len is the crown's radius, wide the trunk's, rise the trunk's height
+    else (if i == p_len() do 26 else if i == p_wide() do 4 else if i == p_rise() do 14 else 0 end end end) end end end
   end
   fn phi(k : Int, i : Int) : Int do
     if k == k_butte() do (if i == p_len() do 11 else if i == p_wide() do 11 else if i == p_top() do 100 else 0 end end end)
-    else (if i == p_len() do 36 else if i == p_wide() do 8 else if i == p_rise() do 40 else 0 end end end) end
+    else if k == k_arch() do (if i == p_len() do 36 else if i == p_wide() do 8 else if i == p_rise() do 40 else 0 end end end)
+    else if k == k_cavern() do (if i == p_len() do 26 else if i == p_wide() do 13 else if i == p_depth() do 34 else 0 end end end)
+    else (if i == p_len() do 38 else if i == p_wide() do 6 else if i == p_rise() do 22 else 0 end end end) end end end
   end
 
   pfn hash(k : Int, cx : Int, cz : Int, seed : Int, salt : Int) : Float do
@@ -218,7 +270,8 @@ mod CubeForge.Poi do
   first run of it did.
   """
   fn shape_at(k : Int, cx : Int, cz : Int, wx : Int, wz : Int, seed : Int, hd : Float) : Int do
-    if k == k_butte() do
+    if !raises(k) do 0
+    else if k == k_butte() do
       -- a mesa: a hard rim (rule 4) and an ABSOLUTE top (rule 3), so its top is
       -- level whatever the ground under it does, and a cell whose ground is
       -- already near its top holds nothing
@@ -235,7 +288,7 @@ mod CubeForge.Poi do
       let fu = prof_flat(Math.abs(u_of(k, cx, cz, seed, wx, wz)), int_to_float(param(k, cx, cz, seed, p_len())), 0.5)
       let fv = prof_round(Math.abs(v_of(k, cx, cz, seed, wx, wz)), int_to_float(param(k, cx, cz, seed, p_wide())))
       float_to_int(int_to_float(param(k, cx, cz, seed, p_rise())) *. fu *. fv)
-    end
+    end end
   end
 
   -- The shape, once placement has agreed there is one here.
@@ -286,72 +339,298 @@ mod CubeForge.Poi do
     -- where the gate cuts, the fin has already faded to nothing
     let cty = country(k_arch(), wx, wz, seed)
     let a = if cty <= 0.0 do 0 else float_to_int(int_to_float(kind_go(k_arch(), wx, wz, seed, poi_scale(), hd, 0, 0)) *. cty) end
+    -- the cavern and the giant tree do not raise anything (`raises`), so the
+    -- per-column scan stays exactly two kinds wide however many kinds exist
     Math.max_int(b, a)
   end
 
-  -- ── The volume pass ──────────────────────────────────────────────────────
+  -- ── The volume pass ────────────────────────────────────────────────────
+  --
+  -- ONE function decides what a kind does to a voxel, and both the generator
+  -- and the preview call it. That is deliberate: the preview exists to be
+  -- believed, and a preview that modelled the shape separately would drift from
+  -- what the world actually builds -- which is the whole class of bug this
+  -- module was written to end.
+  --
+  --   -1  leave the voxel alone
+  --    0  clear it (only ever ground: never water, never bedrock)
+  --   id  write this block into it, if it is air
 
   doc "May the carve take this block: anything but air, water and bedrock. A river under an arch stays a river."
   fn carvable(id : Int) : Bool do
     if id == 0 do false else if id == C.bedrock() do false else !C.is_water(id) end end
   end
 
-  pfn hole_y_go(c : CubeForge.Chunk.Chunk, x : Int, z : Int, y : Int, y1 : Int) : CubeForge.Chunk.Chunk do
+  pfn sq(a : Float) : Float do a *. a end
+
+  -- Squared distance from (px, py, pz) to the segment (ax, ay, az)-(ex, ey, ez).
+  -- The end point is `e`, not `b`: `by` is a keyword, and a parameter named
+  -- that is a parse error on the signature line with no hint as to why.
+  pfn seg_d2(px : Float, py : Float, pz : Float, ax : Float, ay : Float, az : Float, ex : Float, ey : Float, ez : Float) : Float do
+    let dx = ex -. ax
+    let dy = ey -. ay
+    let dz = ez -. az
+    let len2 = dx *. dx +. dy *. dy +. dz *. dz
+    let t0 = if len2 <= 0.0001 do 0.0 else ((px -. ax) *. dx +. (py -. ay) *. dy +. (pz -. az) *. dz) /. len2 end
+    let t = N.clamp01(t0)
+    sq(px -. (ax +. dx *. t)) +. sq(py -. (ay +. dy *. t)) +. sq(pz -. (az +. dz *. t))
+  end
+
+  -- ── The arch's opening ───────────────────────────────────────────────────
+  pfn vol_arch(k : Int, cx : Int, cz : Int, seed : Int, wx : Int, wz : Int, y : Int, g : Int) : Int do
+    let u = u_of(k, cx, cz, seed, wx, wz)
+    let hw = int_to_float(param(k, cx, cz, seed, p_hole_w()))
+    let q = 1.0 -. sq(u /. hw)
+    -- through the whole fin and a little past it, so the opening is a hole
+    -- rather than a pair of alcoves
+    if Math.abs(v_of(k, cx, cz, seed, wx, wz)) > int_to_float(param(k, cx, cz, seed, p_wide())) +. 2.0 do 0 - 1
+    else if q <= 0.0 do 0 - 1
+    else if y < g + 1 do 0 - 1
+    else if y > g + 1 + float_to_int(int_to_float(param(k, cx, cz, seed, p_hole_h())) *. Math.sqrt(q)) do 0 - 1
+    else 0 end end end end
+  end
+
+  -- ── The cavern's chambers ────────────────────────────────────────────────
+  doc "How many chambers a cavern has."
+  fn chambers() : Int do 3 end
+
+  doc "Chamber [j]'s centre, in the frame, and its radius. Public so the CF_TERRAIN_STATS line can say where to stand to see one."
+  fn cham_u(k : Int, cx : Int, cz : Int, seed : Int, j : Int) : Float do
+    (hash(k, cx, cz, seed, 40 + 3 * j) -. 0.5) *. 2.0 *. int_to_float(param(k, cx, cz, seed, p_len()))
+  end
+  fn cham_v(k : Int, cx : Int, cz : Int, seed : Int, j : Int) : Float do
+    (hash(k, cx, cz, seed, 41 + 3 * j) -. 0.5) *. 2.0 *. int_to_float(param(k, cx, cz, seed, p_len()))
+  end
+  fn cham_y(k : Int, cx : Int, cz : Int, seed : Int, j : Int, g : Int) : Float do
+    int_to_float(g - param(k, cx, cz, seed, p_depth())) +. (hash(k, cx, cz, seed, 42 + 3 * j) -. 0.5) *. 10.0
+  end
+  fn cham_r(k : Int, cx : Int, cz : Int, seed : Int, j : Int) : Float do
+    int_to_float(param(k, cx, cz, seed, p_wide())) *. (0.70 +. 0.55 *. hash(k, cx, cz, seed, 60 + j))
+  end
+
+  -- The nearest chamber's surface, as a fraction of its radius: under 1 is
+  -- inside it. Chambers are joined by a tube along the line between them, so a
+  -- cavern is one place rather than three unconnected bubbles.
+  pfn cav_d(k : Int, cx : Int, cz : Int, seed : Int, u : Float, v : Float, y : Float, g : Int, j : Int, best : Float) : Float do
+    if j >= chambers() do best
+    else
+      let r = cham_r(k, cx, cz, seed, j)
+      let d = Math.sqrt(sq(u -. cham_u(k, cx, cz, seed, j)) +. sq(v -. cham_v(k, cx, cz, seed, j)) +. sq(y -. cham_y(k, cx, cz, seed, j, g))) /. r
+      -- the tube to the next chamber, at a third of the radius
+      let n = (j + 1) % chambers()
+      let td = Math.sqrt(seg_d2(u, y, v, cham_u(k, cx, cz, seed, j), cham_y(k, cx, cz, seed, j, g), cham_v(k, cx, cz, seed, j),
+                                cham_u(k, cx, cz, seed, n), cham_y(k, cx, cz, seed, n, g), cham_v(k, cx, cz, seed, n))) /. (r *. 0.34)
+      cav_d(k, cx, cz, seed, u, v, y, g, j + 1, Math.min_float(best, Math.min_float(d, td)))
+    end
+  end
+
+  pfn vol_cavern(k : Int, cx : Int, cz : Int, seed : Int, wx : Int, wz : Int, y : Int, g : Int) : Int do
+    let d = cav_d(k, cx, cz, seed, u_of(k, cx, cz, seed, wx, wz), v_of(k, cx, cz, seed, wx, wz), int_to_float(y), g, 0, 9.0)
+    if d >= 1.0 do 0 - 1
+    -- the crystals line the chamber's lower shell rather than standing as
+    -- separate spikes: a shell is a field, so the preview and the generator can
+    -- share it, and it clusters the way a geode does
+    -- floor AND ceiling: a lining only on the floor lit the chamber from below
+    -- and left its roof black, which read as a hole rather than a geode
+    else if d > 0.88 && N.hash2(wx * 31 + y, wz * 17 - y, seed + 909) < 0.26 do C.crystal()
+    else 0 end end
+  end
+
+  -- ── The giant tree ───────────────────────────────────────────────────────
+  -- A live oak, not a conifer: WIDER THAN IT IS TALL, on a short thick trunk
+  -- that the branches leave low down. The first version was a 50-block pole
+  -- with blobs round it, which is a different tree entirely -- the proportions
+  -- are the whole character of this one, so they are the numbers to look at
+  -- first in the preview.
+  --
+  -- A branch is two segments, not one: it sweeps out and slightly DOWN from the
+  -- trunk, then lifts to its tip. That dip is what makes it read as a bough
+  -- carrying its own weight rather than a spoke.
+
+  doc "How many boughs a giant tree throws."
+  fn branches() : Int do 7 end
+
+  -- Where branch [j] leaves the trunk, how far it reaches, and how far it lifts.
+  pfn br_h(k : Int, cx : Int, cz : Int, seed : Int, j : Int) : Float do
+    int_to_float(param(k, cx, cz, seed, p_rise())) *. (0.55 +. 0.40 *. hash(k, cx, cz, seed, 70 + j))
+  end
+  pfn br_a(k : Int, cx : Int, cz : Int, seed : Int, j : Int) : Float do
+    bearing(k, cx, cz, seed) +. int_to_float(j) *. 6.2831853 /. int_to_float(branches()) +. (hash(k, cx, cz, seed, 80 + j) -. 0.5) *. 0.7
+  end
+  pfn br_len(k : Int, cx : Int, cz : Int, seed : Int, j : Int) : Float do
+    int_to_float(param(k, cx, cz, seed, p_len())) *. (0.70 +. 0.40 *. hash(k, cx, cz, seed, 90 + j))
+  end
+  pfn br_lift(k : Int, cx : Int, cz : Int, seed : Int, j : Int) : Float do
+    br_len(k, cx, cz, seed, j) *. (0.15 +. 0.45 *. hash(k, cx, cz, seed, 100 + j))
+  end
+  pfn br_base_y(k : Int, cx : Int, cz : Int, seed : Int, j : Int, g : Int) : Float do int_to_float(g) +. br_h(k, cx, cz, seed, j) end
+  pfn br_tip_u(k : Int, cx : Int, cz : Int, seed : Int, j : Int) : Float do Math.cos(br_a(k, cx, cz, seed, j)) *. br_len(k, cx, cz, seed, j) end
+  pfn br_tip_v(k : Int, cx : Int, cz : Int, seed : Int, j : Int) : Float do Math.sin(br_a(k, cx, cz, seed, j)) *. br_len(k, cx, cz, seed, j) end
+  pfn br_tip_y(k : Int, cx : Int, cz : Int, seed : Int, j : Int, g : Int) : Float do br_base_y(k, cx, cz, seed, j, g) +. br_lift(k, cx, cz, seed, j) end
+  -- the elbow: half way out, dipped below the straight line
+  pfn br_mid_u(k : Int, cx : Int, cz : Int, seed : Int, j : Int) : Float do br_tip_u(k, cx, cz, seed, j) *. 0.5 end
+  pfn br_mid_v(k : Int, cx : Int, cz : Int, seed : Int, j : Int) : Float do br_tip_v(k, cx, cz, seed, j) *. 0.5 end
+  pfn br_mid_y(k : Int, cx : Int, cz : Int, seed : Int, j : Int, g : Int) : Float do
+    br_base_y(k, cx, cz, seed, j, g) +. br_lift(k, cx, cz, seed, j) *. 0.5 -. br_len(k, cx, cz, seed, j) *. 0.16
+  end
+
+  -- Nearest bough, as a fraction of its own thickness. The inner half is
+  -- thicker than the outer, so a bough tapers from the trunk to its tip.
+  pfn br_d(k : Int, cx : Int, cz : Int, seed : Int, u : Float, v : Float, y : Float, g : Int, j : Int, best : Float) : Float do
+    if j >= branches() do best
+    else
+      let inner = Math.sqrt(seg_d2(u, y, v, 0.0, br_base_y(k, cx, cz, seed, j, g), 0.0,
+                                   br_mid_u(k, cx, cz, seed, j), br_mid_y(k, cx, cz, seed, j, g), br_mid_v(k, cx, cz, seed, j))) /. 2.6
+      let outer = Math.sqrt(seg_d2(u, y, v, br_mid_u(k, cx, cz, seed, j), br_mid_y(k, cx, cz, seed, j, g), br_mid_v(k, cx, cz, seed, j),
+                                   br_tip_u(k, cx, cz, seed, j), br_tip_y(k, cx, cz, seed, j, g), br_tip_v(k, cx, cz, seed, j))) /. 1.8
+      br_d(k, cx, cz, seed, u, v, y, g, j + 1, Math.min_float(best, Math.min_float(inner, outer)))
+    end
+  end
+
+  -- A leaf mass at every bough's tip, so the canopy's edge follows the boughs
+  -- rather than being a circle drawn over them.
+  pfn leaf_d(k : Int, cx : Int, cz : Int, seed : Int, u : Float, v : Float, y : Float, g : Int, j : Int, best : Float) : Float do
+    if j >= branches() do best
+    else
+      let r = br_len(k, cx, cz, seed, j) *. 0.42
+      let d = Math.sqrt(sq(u -. br_tip_u(k, cx, cz, seed, j)) +. sq(v -. br_tip_v(k, cx, cz, seed, j))
+                        +. sq((y -. (br_tip_y(k, cx, cz, seed, j, g) +. r *. 0.35)) *. 1.6)) /. r
+      leaf_d(k, cx, cz, seed, u, v, y, g, j + 1, Math.min_float(best, d))
+    end
+  end
+
+  pfn vol_tree(k : Int, cx : Int, cz : Int, seed : Int, wx : Int, wz : Int, y : Int, g : Int) : Int do
+    let u = u_of(k, cx, cz, seed, wx, wz)
+    let v = v_of(k, cx, cz, seed, wx, wz)
+    let fy = int_to_float(y)
+    let l = int_to_float(param(k, cx, cz, seed, p_len()))
+    let tr = int_to_float(param(k, cx, cz, seed, p_wide()))
+    let top = int_to_float(g) +. int_to_float(param(k, cx, cz, seed, p_rise()))
+    -- a short trunk that flares at the foot, like a live oak's buttress
+    let trunk = if fy < int_to_float(g) || fy > top do false
+                else Math.sqrt(u *. u +. v *. v) <= tr *. (1.35 -. 0.45 *. (fy -. int_to_float(g)) /. (top -. int_to_float(g))) end
+    -- the crown: a broad flattened dome sitting ON the boughs, wider than the
+    -- whole tree is tall
+    let ch = int_to_float(g) +. int_to_float(param(k, cx, cz, seed, p_rise())) +. l *. 0.42
+    let cr = l *. 0.92
+    let cd = Math.sqrt(u *. u +. v *. v +. sq((fy -. ch) *. 2.6)) /. cr
+    if trunk do C.oak_log()
+    else if br_d(k, cx, cz, seed, u, v, fy, g, 0, 9.0) < 1.0 do C.oak_log()
+    else if leaf_d(k, cx, cz, seed, u, v, fy, g, 0, 9.0) < 1.0 do C.oak_leaves()
+    else if cd < 1.0 do C.oak_leaves()
+    else 0 - 1 end end end end
+  end
+
+  doc """
+  What kind [k]'s instance in cell (cx, cz) does to the voxel (wx, y, wz), given
+  the ground [g] its site stands on: -1 leave alone, 0 clear, or a block id to
+  write into air. The generator and the preview both go through here.
+  """
+  fn vol_block(k : Int, cx : Int, cz : Int, seed : Int, wx : Int, wz : Int, y : Int, g : Int) : Int do
+    if k == k_arch() do vol_arch(k, cx, cz, seed, wx, wz, y, g)
+    else if k == k_cavern() do vol_cavern(k, cx, cz, seed, wx, wz, y, g)
+    else if k == k_tree() do vol_tree(k, cx, cz, seed, wx, wz, y, g)
+    else 0 - 1 end end end
+  end
+
+  doc "The lowest voxel kind [k] can touch, above the ground [g] its site stands on."
+  fn vol_y0(k : Int, cx : Int, cz : Int, seed : Int, g : Int) : Int do
+    if k == k_cavern() do g - param(k, cx, cz, seed, p_depth()) - param(k, cx, cz, seed, p_wide()) - 8
+    else g + 1 end
+  end
+  doc "The highest voxel kind [k] can touch."
+  fn vol_y1(k : Int, cx : Int, cz : Int, seed : Int, g : Int) : Int do
+    if k == k_cavern() do g - param(k, cx, cz, seed, p_depth()) + param(k, cx, cz, seed, p_wide()) + 8
+    else if k == k_tree() do g + param(k, cx, cz, seed, p_rise()) + param(k, cx, cz, seed, p_len())
+    else g + 1 + param(k, cx, cz, seed, p_hole_h()) end end
+  end
+
+  -- ── Applying it to a chunk ───────────────────────────────────────────────
+
+  pfn apply_y_go(c : CubeForge.Chunk.Chunk, k : Int, cx : Int, cz : Int, seed : Int,
+                 wx : Int, wz : Int, x : Int, z : Int, y : Int, y1 : Int, g : Int) : CubeForge.Chunk.Chunk do
     if y > y1 do c
     else
       let c1 = if y < 1 || y >= 256 do c
-               else if !carvable(C.get(c, x, y, z)) do c
-               else C.set(c, x, y, z, 0) end end
-      hole_y_go(c1, x, z, y + 1, y1)
+               else
+                 let b = vol_block(k, cx, cz, seed, wx, wz, y, g)
+                 let had = C.get(c, x, y, z)
+                 if b < 0 do c
+                 else if b == 0 do (if carvable(had) do C.set(c, x, y, z, 0) else c end)
+                 -- A CARVE owns the volume it opens, so what it puts back --
+                 -- the crystal lining a chamber's shell -- replaces the ground
+                 -- it just took. A STAMP does not own anything: it writes only
+                 -- into air, so a tree can never eat the hill it stands on.
+                 -- Getting this the same for both left every cavern unlit: the
+                 -- crystals were being asked to replace rock and declining.
+                 else if vol_of(k) == vol_stamp() do (if had == 0 do C.set(c, x, y, z, b) else c end)
+                 else (if carvable(had) || had == 0 do C.set(c, x, y, z, b) else c end) end end end
+               end
+      apply_y_go(c1, k, cx, cz, seed, wx, wz, x, z, y + 1, y1, g)
     end
   end
 
   -- Every column of the chunk against one instance: 256 columns is cheaper to
   -- walk than the instance's own footprint, and it needs no clipping.
-  pfn hole_col_go(c : CubeForge.Chunk.Chunk, wx0 : Int, wz0 : Int, seed : Int,
-                  cx : Int, cz : Int, i : Int, yf : Int) : CubeForge.Chunk.Chunk do
+  pfn apply_col_go(c : CubeForge.Chunk.Chunk, k : Int, wx0 : Int, wz0 : Int, seed : Int,
+                   cx : Int, cz : Int, i : Int, g : Int) : CubeForge.Chunk.Chunk do
     if i >= 256 do c
     else
       let x = i % 16
       let z = i / 16
-      let k = k_arch()
-      let u = u_of(k, cx, cz, seed, wx0 + x, wz0 + z)
-      let v = v_of(k, cx, cz, seed, wx0 + x, wz0 + z)
-      let hw = int_to_float(param(k, cx, cz, seed, p_hole_w()))
-      let hh = int_to_float(param(k, cx, cz, seed, p_hole_h()))
-      -- through the whole fin and a little past it, so the opening is a hole
-      -- rather than a pair of alcoves
-      let t = int_to_float(param(k, cx, cz, seed, p_wide())) +. 2.0
-      let q = 1.0 -. (u /. hw) *. (u /. hw)
-      if Math.abs(v) > t do hole_col_go(c, wx0, wz0, seed, cx, cz, i + 1, yf)
-      else if q <= 0.0 do hole_col_go(c, wx0, wz0, seed, cx, cz, i + 1, yf)
-      else hole_col_go(hole_y_go(c, x, z, yf, yf + float_to_int(hh *. Math.sqrt(q))), wx0, wz0, seed, cx, cz, i + 1, yf) end end
+      -- a column outside the instance's horizontal reach cannot be touched by
+      -- it at any height, and the y walk is 60 voxels deep for a giant tree
+      let dx = wx0 + x - sx(k, cx, cz, seed)
+      let dz = wz0 + z - sz(k, cx, cz, seed)
+      let r = reach(k)
+      if dx * dx + dz * dz > r * r do apply_col_go(c, k, wx0, wz0, seed, cx, cz, i + 1, g)
+      else
+        apply_col_go(apply_y_go(c, k, cx, cz, seed, wx0 + x, wz0 + z, x, z,
+                                vol_y0(k, cx, cz, seed, g), vol_y1(k, cx, cz, seed, g), g),
+                     k, wx0, wz0, seed, cx, cz, i + 1, g)
+      end
     end
   end
 
-  pfn carve_cell(c : CubeForge.Chunk.Chunk, wx0 : Int, wz0 : Int, seed : Int, cx : Int, cz : Int, scale : Float) : CubeForge.Chunk.Chunk do
-    if !here(k_arch(), cx, cz, seed, scale) do c
-    else hole_col_go(c, wx0, wz0, seed, cx, cz, 0, ground(k_arch(), cx, cz, seed) + 1) end
-  end
-
-  pfn carve_go(c : CubeForge.Chunk.Chunk, wx0 : Int, wz0 : Int, seed : Int, i : Int, cx0 : Int, cz0 : Int, nx : Int, nz : Int, scale : Float) : CubeForge.Chunk.Chunk do
-    if i >= nx * nz do c
-    else carve_go(carve_cell(c, wx0, wz0, seed, cx0 + i % nx, cz0 + i / nx, scale), wx0, wz0, seed, i + 1, cx0, cz0, nx, nz, scale) end
-  end
-
-  doc "Cut every opening that reaches into the chunk at (wx0, wz0). Only landmark kinds carve."
-  fn carve(c : CubeForge.Chunk.Chunk, wx0 : Int, wz0 : Int, seed : Int) : CubeForge.Chunk.Chunk do
-    let scale = poi_scale()
-    if scale <= 0.0 do c
+  pfn apply_cell(c : CubeForge.Chunk.Chunk, k : Int, wx0 : Int, wz0 : Int, seed : Int, cx : Int, cz : Int, scale : Float) : CubeForge.Chunk.Chunk do
+    if !here(k, cx, cz, seed, scale) do c
     else
-      let r = reach(k_arch())
-      let a = cell(k_arch())
+      -- a column of the chunk more than the instance's reach away cannot be
+      -- touched by it, so a distant instance costs one distance test
+      let dx = wx0 + 8 - sx(k, cx, cz, seed)
+      let dz = wz0 + 8 - sz(k, cx, cz, seed)
+      let r = reach(k) + 12
+      if dx > r || dx < 0 - r || dz > r || dz < 0 - r do c
+      else apply_col_go(c, k, wx0, wz0, seed, cx, cz, 0, ground(k, cx, cz, seed)) end
+    end
+  end
+
+  pfn apply_cells_go(c : CubeForge.Chunk.Chunk, k : Int, wx0 : Int, wz0 : Int, seed : Int, i : Int, cx0 : Int, cz0 : Int, nx : Int, nz : Int, scale : Float) : CubeForge.Chunk.Chunk do
+    if i >= nx * nz do c
+    else apply_cells_go(apply_cell(c, k, wx0, wz0, seed, cx0 + i % nx, cz0 + i / nx, scale), k, wx0, wz0, seed, i + 1, cx0, cz0, nx, nz, scale) end
+  end
+
+  pfn apply_kind(c : CubeForge.Chunk.Chunk, k : Int, wx0 : Int, wz0 : Int, seed : Int, scale : Float) : CubeForge.Chunk.Chunk do
+    if vol_of(k) == vol_none() do c
+    else
+      let r = reach(k)
+      let a = cell(k)
       let cx0 = floor_div(wx0 - r, a)
       let cz0 = floor_div(wz0 - r, a)
-      -- the two spans are computed separately: at a 160-block cell and 16-block
+      -- the two spans are computed separately: at these cell sizes and 16-block
       -- chunks they are not always the same number
-      carve_go(c, wx0, wz0, seed, 0, cx0, cz0, floor_div(wx0 + 15 + r, a) - cx0 + 1, floor_div(wz0 + 15 + r, a) - cz0 + 1, scale)
+      apply_cells_go(c, k, wx0, wz0, seed, 0, cx0, cz0, floor_div(wx0 + 15 + r, a) - cx0 + 1, floor_div(wz0 + 15 + r, a) - cz0 + 1, scale)
     end
+  end
+
+  pfn apply_go(c : CubeForge.Chunk.Chunk, k : Int, wx0 : Int, wz0 : Int, seed : Int, scale : Float) : CubeForge.Chunk.Chunk do
+    if k >= kinds() do c else apply_go(apply_kind(c, k, wx0, wz0, seed, scale), k + 1, wx0, wz0, seed, scale) end
+  end
+
+  doc "Write every point of interest's volume into the chunk at (wx0, wz0): the arch's opening, the cavern's chambers, the giant tree."
+  fn carve(c : CubeForge.Chunk.Chunk, wx0 : Int, wz0 : Int, seed : Int) : CubeForge.Chunk.Chunk do
+    let scale = poi_scale()
+    if scale <= 0.0 do c else apply_go(c, 0, wx0, wz0, seed, scale) end
   end
 
   -- ── The rules ────────────────────────────────────────────────────────────
@@ -373,45 +652,53 @@ mod CubeForge.Poi do
     -- 2: an opening sits strictly inside the mass over it
     else if hw * 2 >= len do false
     else if hh > 0 && hh + roof() > rise do false
+    -- 2, underground: a chamber keeps a roof's worth of rock over it, whatever
+    -- its radius and however shallow it is allowed to sit
+    else if k == k_cavern() && plo(k, p_depth()) < phi(k, p_wide()) + roof() do false
+    else if k == k_cavern() && min_ground(k) < plo(k, p_depth()) + phi(k, p_wide()) do false
     -- 3: a kind with a level top declares an absolute one
     else if k == k_butte() && phi(k, p_top()) <= 0 do false
     -- 5: a landmark resolves at its site, a scatter does not probe at all
     else if class_of(k) == cls_landmark() && min_ground(k) <= 0 do false
-    else true end end end end end end
+    -- a stamp is not terrain: it must not also raise the ground, or a tree
+    -- would grow its own hill and get grass on the branches
+    else if vol_of(k) == vol_stamp() && raises(k) do false
+    else if vol_of(k) == vol_stamp() && phi(k, p_rise()) <= 0 do false
+    -- a kind that neither raises nor writes volume does nothing at all
+    else if !raises(k) && vol_of(k) == vol_none() do false
+    else true end end end end end end end end end end end
   end
 
   -- ── The preview ──────────────────────────────────────────────────────────
-  -- Every iteration on a shape belongs here, not in a world with a blind camera.
+  -- Every iteration on a shape belongs here, not in a world with a blind
+  -- camera. It draws through `shape_at` and `vol_block` -- the same two
+  -- functions the generator uses -- so what it shows is what gets built.
 
-  doc "Flat ground the preview stands a kind on."
-  fn preview_ground() : Int do 70 end
+  doc "Flat ground the preview stands kind [k] on: deep enough that an underground kind has rock over it."
+  fn preview_ground(k : Int) : Int do if k == k_cavern() do min_ground(k) + 6 else 70 end end
 
-  -- Height of the instance at frame offset (u, v), standing on flat ground.
-  pfn pv_h(k : Int, cx : Int, cz : Int, seed : Int, u : Int, v : Int) : Int do
-    let a = bearing(k, cx, cz, seed)
-    let wx = sx(k, cx, cz, seed) + float_to_int(int_to_float(u) *. Math.cos(a) -. int_to_float(v) *. Math.sin(a))
-    let wz = sz(k, cx, cz, seed) + float_to_int(int_to_float(u) *. Math.sin(a) +. int_to_float(v) *. Math.cos(a))
-    shape_at(k, cx, cz, wx, wz, seed, int_to_float(preview_ground()))
+  -- World column of frame offset (u, v).
+  pfn pv_wx(k : Int, cx : Int, cz : Int, seed : Int, u : Int, v : Int) : Int do
+    sx(k, cx, cz, seed) + float_to_int(int_to_float(u) *. Math.cos(bearing(k, cx, cz, seed)) -. int_to_float(v) *. Math.sin(bearing(k, cx, cz, seed)))
+  end
+  pfn pv_wz(k : Int, cx : Int, cz : Int, seed : Int, u : Int, v : Int) : Int do
+    sz(k, cx, cz, seed) + float_to_int(int_to_float(u) *. Math.sin(bearing(k, cx, cz, seed)) +. int_to_float(v) *. Math.cos(bearing(k, cx, cz, seed)))
   end
 
-  -- Is (u, v, y) inside the opening, y measured above the ground.
-  pfn pv_hole(k : Int, cx : Int, cz : Int, seed : Int, u : Int, v : Int, y : Int) : Bool do
-    if class_of(k) != cls_landmark() do false
-    else
-      let hw = int_to_float(param(k, cx, cz, seed, p_hole_w()))
-      let hh = int_to_float(param(k, cx, cz, seed, p_hole_h()))
-      let q = 1.0 -. (int_to_float(u) /. hw) *. (int_to_float(u) /. hw)
-      if q <= 0.0 do false
-      else if Math.abs(int_to_float(v)) > int_to_float(param(k, cx, cz, seed, p_wide())) +. 2.0 do false
-      else y <= float_to_int(hh *. Math.sqrt(q)) end end
-    end
-  end
-
-  -- One character of an elevation: '#' rock, '.' the opening, ' ' sky.
+  -- One character: what the generator would leave at (u, v, y) on flat ground.
+  --   '#' ground   ':' the kind's own raised mass   '.' carved void
+  --   '*' crystal  'T' trunk or branch   'o' leaves   ' ' air
   pfn pv_cell(k : Int, cx : Int, cz : Int, seed : Int, u : Int, v : Int, y : Int) : String do
-    if pv_hole(k, cx, cz, seed, u, v, y) do "."
-    else if y <= pv_h(k, cx, cz, seed, u, v) do "#"
-    else " " end end
+    let g = preview_ground(k)
+    let wx = pv_wx(k, cx, cz, seed, u, v)
+    let wz = pv_wz(k, cx, cz, seed, u, v)
+    let raised = shape_at(k, cx, cz, wx, wz, seed, int_to_float(g))
+    let b = vol_block(k, cx, cz, seed, wx, wz, y, g)
+    if b > 0 do (if b == C.crystal() do "*" else if b == C.oak_log() do "T" else "o" end end)
+    else if b == 0 do (if y <= g + raised do "." else " " end)
+    else if y <= g do "#"
+    else if y <= g + raised do ":"
+    else " " end end end end
   end
 
   pfn pv_row(k : Int, cx : Int, cz : Int, seed : Int, y : Int, i : Int, n : Int, step : Int, across : Bool, acc : String) : String do
@@ -423,30 +710,36 @@ mod CubeForge.Poi do
     end
   end
 
-  pfn pv_go(k : Int, cx : Int, cz : Int, seed : Int, y : Int, n : Int, step : Int, across : Bool) : Unit do
-    if y < 0 do ()
+  pfn pv_go(k : Int, cx : Int, cz : Int, seed : Int, y : Int, lo : Int, n : Int, step : Int, across : Bool) : Unit do
+    if y < lo do ()
     else
-      println("   " ++ (if y < 10 do " " else "" end) ++ int_to_string(y) ++ " " ++ pv_row(k, cx, cz, seed, y, 0, n, step, across, ""))
-      pv_go(k, cx, cz, seed, y - 1, n, step, across)
+      println("   " ++ (if y < 10 do "  " else if y < 100 do " " else "" end end) ++ int_to_string(y) ++ " " ++ pv_row(k, cx, cz, seed, y, 0, n, step, across, ""))
+      pv_go(k, cx, cz, seed, y - 1, lo, n, step, across)
     end
   end
 
-  doc "Print kind [k]'s table and three orthographic sections of it on flat ground: along its frame, across it, and the numbers that decide its shape."
+  doc "Print kind [k]'s table and two orthographic sections of it standing on flat ground: along its frame and across it."
   fn preview(k : Int, seed : Int) : Unit do
     let cx = 3
     let cz = 5
-    println("poi preview: " ++ kind_name(k) ++ "  (" ++ (if class_of(k) == cls_scatter() do "scatter" else "landmark" end) ++ ")")
+    let g = preview_ground(k)
+    let lo = Math.min_int(g - 2, vol_y0(k, cx, cz, seed, g) - 2)
+    let hi = Math.max_int(g + shape_at(k, cx, cz, sx(k, cx, cz, seed), sz(k, cx, cz, seed), seed, int_to_float(g)) + 2, vol_y1(k, cx, cz, seed, g) + 2)
+    println("poi preview: " ++ kind_name(k) ++ "  (" ++ (if class_of(k) == cls_scatter() do "scatter" else "landmark" end)
+            ++ ", " ++ (if raises(k) do "raises" else "no height" end)
+            ++ ", " ++ (if vol_of(k) == vol_none() do "no volume" else if vol_of(k) == vol_carve() do "carves" else "stamps" end end) ++ ")")
     println("  cell " ++ int_to_string(cell(k)) ++ "  density " ++ int_to_string(float_to_int(density(k) *. 100.0)) ++ "%"
             ++ "  country over " ++ int_to_string(float_to_int(cty_lo(k) *. 100.0)) ++ "% at 1/" ++ int_to_string(float_to_int(1.0 /. cty_freq(k))) ++ " blocks"
-            ++ "  reach " ++ int_to_string(reach(k)))
+            ++ "  reach " ++ int_to_string(reach(k)) ++ "  ground >= " ++ int_to_string(min_ground(k)))
     println("  len " ++ int_to_string(param(k, cx, cz, seed, p_len())) ++ "  wide " ++ int_to_string(param(k, cx, cz, seed, p_wide()))
             ++ "  rise " ++ int_to_string(param(k, cx, cz, seed, p_rise())) ++ "  top " ++ int_to_string(param(k, cx, cz, seed, p_top()))
+            ++ "  depth " ++ int_to_string(param(k, cx, cz, seed, p_depth()))
             ++ "  opening " ++ int_to_string(2 * param(k, cx, cz, seed, p_hole_w())) ++ "x" ++ int_to_string(param(k, cx, cz, seed, p_hole_h()))
             ++ "  rules " ++ (if rule_ok(k, cx, cz, seed) do "ok" else "BROKEN" end))
     println("  along the frame (u), one column per 2 blocks:")
-    pv_go(k, cx, cz, seed, 44, 40, 2, false)
-    println("  across it (v), one column per block:")
-    pv_go(k, cx, cz, seed, 44, 30, 1, true)
+    pv_go(k, cx, cz, seed, hi, lo, 40, 2, false)
+    println("  across it (v), one column per 2 blocks:")
+    pv_go(k, cx, cz, seed, hi, lo, 30, 2, true)
   end
 
 end
