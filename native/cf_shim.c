@@ -659,6 +659,9 @@ int64_t cf_gfx_init(void) {
     g_u_bolt = glGetUniformLocation(g_prog, "u_bolt");
     g_u_time = glGetUniformLocation(g_prog, "u_time");
     g_u_off = glGetUniformLocation(g_prog, "u_off");
+    /* GL 4.1 is the ceiling on macOS (Apple GL over Metal): no compute shaders,
+     * no SSBOs, no image load/store -- all of those want 4.3. */
+    if (cf_debug()) fprintf(stderr, "cf: GL %s | GLSL %s | %s\n", glGetString(GL_VERSION), glGetString(GL_SHADING_LANGUAGE_VERSION), glGetString(GL_RENDERER));
     if (cf_debug()) fprintf(stderr, "cf: uniforms occ=%d shadow=%d sundir=%d unlit=%d\n", g_u_occ, g_u_shadow, g_u_sundir, g_u_unlit);
     glGenVertexArrays(1, &g_vao);
     glGenBuffers(CF_MAX_MESHES, g_vbo);
