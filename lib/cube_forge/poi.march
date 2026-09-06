@@ -440,34 +440,41 @@ mod CubeForge.Poi do
   -- the same primitive the giant tree's boughs use, and the block it is made of
   -- greedy-meshes into a prism. Naica's are metres across and span the cave.
 
+  -- Salt ranges, kept apart on purpose: the direction, length and radius draws
+  -- take 110..193 (four per beam, twenty-one beams), the three centre offsets
+  -- 200..220, 230..250 and 260..280, and the size class 290..310. They collided
+  -- once when the beam count changed, and a collision here is invisible -- two
+  -- draws that should be independent quietly agree.
   doc "Beams crossing each chamber."
-  fn beams() : Int do 5 end
+  fn beams() : Int do 7 end
 
   -- Beam [b] of chamber [j]: a segment through the chamber at a hashed
   -- attitude, longer than the chamber is wide so it drives into both walls.
   pfn beam_dx(k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int) : Float do
-    Math.cos(hash(k, cx, cz, seed, 110 + 4 * (4 * j + b)) *. 6.2831853) *. Math.cos(hash(k, cx, cz, seed, 111 + 4 * (4 * j + b)) *. 0.9 -. 0.45)
+    Math.cos(hash(k, cx, cz, seed, 110 + 4 * (7 * j + b)) *. 6.2831853) *. Math.cos(hash(k, cx, cz, seed, 111 + 4 * (7 * j + b)) *. 2.4 -. 1.2)
   end
   pfn beam_dy(k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int) : Float do
-    Math.sin(hash(k, cx, cz, seed, 111 + 4 * (4 * j + b)) *. 0.9 -. 0.45)
+    Math.sin(hash(k, cx, cz, seed, 111 + 4 * (7 * j + b)) *. 2.4 -. 1.2)
   end
   pfn beam_dz(k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int) : Float do
-    Math.sin(hash(k, cx, cz, seed, 110 + 4 * (4 * j + b)) *. 6.2831853) *. Math.cos(hash(k, cx, cz, seed, 111 + 4 * (4 * j + b)) *. 0.9 -. 0.45)
+    Math.sin(hash(k, cx, cz, seed, 110 + 4 * (7 * j + b)) *. 6.2831853) *. Math.cos(hash(k, cx, cz, seed, 111 + 4 * (7 * j + b)) *. 2.4 -. 1.2)
   end
   doc """
-  Is beam [b] one of the long ones. Two thirds are: a chamber of beams all the
-  same length reads as a lattice, and what makes a crystal cave look grown is a
-  few long shafts with shorter ones broken across them.
+  Is beam [b] one of the large ones. FOUR IN FIVE are: Naica is packed with big
+  ones, and a chamber where the big shafts are the minority reads as a cave that
+  happens to have some crystal in it rather than as a crystal cave. The rest are
+  short stubs broken across them, which is what keeps it from reading as a
+  lattice.
   """
   fn beam_long(k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int) : Bool do
-    hash(k, cx, cz, seed, 180 + 5 * j + b) < 0.66
+    hash(k, cx, cz, seed, 290 + 7 * j + b) < 0.80
   end
 
   doc "Half the beam's length, in blocks. A long one overshoots the chamber's radius, so it is embedded in the rock at both ends; a short one is a stub a third of the way across."
   fn beam_half(k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int) : Float do
-    let h = hash(k, cx, cz, seed, 112 + 4 * (4 * j + b))
-    if beam_long(k, cx, cz, seed, j, b) do cham_r(k, cx, cz, seed, j) *. (1.10 +. 0.55 *. h)
-    else cham_r(k, cx, cz, seed, j) *. (0.30 +. 0.28 *. h) end
+    let h = hash(k, cx, cz, seed, 112 + 4 * (7 * j + b))
+    if beam_long(k, cx, cz, seed, j, b) do cham_r(k, cx, cz, seed, j) *. (1.10 +. 0.60 *. h)
+    else cham_r(k, cx, cz, seed, j) *. (0.35 +. 0.30 *. h) end
   end
   doc """
   The beam's radius at its thickest, in blocks. That thickness against its
@@ -476,10 +483,10 @@ mod CubeForge.Poi do
   against the room it is in.
   """
   fn beam_rad(k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int) : Float do
-    let h = hash(k, cx, cz, seed, 113 + 4 * (4 * j + b))
+    let h = hash(k, cx, cz, seed, 113 + 4 * (7 * j + b))
     -- the long ones carry the look, so they are the medium-thick ones; the
     -- short ones stay slender or they read as boulders rather than crystals
-    if beam_long(k, cx, cz, seed, j, b) do 1.1 +. 0.7 *. h else 0.7 +. 0.5 *. h end
+    if beam_long(k, cx, cz, seed, j, b) do 1.4 +. 1.0 *. h else 0.8 +. 0.5 *. h end
   end
   doc "How thick the beam is at position [t] along it, as a fraction of beam_rad: full over the middle and drawn to a point at both ends, the way a crystal terminates."
   fn beam_taper(t : Float) : Float do
@@ -494,9 +501,9 @@ mod CubeForge.Poi do
       let l = beam_half(k, cx, cz, seed, j, b)
       -- the beam is offset from the chamber's centre, so the three of them
       -- cross rather than all passing through one point
-      let ou = cham_u(k, cx, cz, seed, j) +. (hash(k, cx, cz, seed, 140 + 4 * j + b) -. 0.5) *. cham_r(k, cx, cz, seed, j)
-      let ov = cham_v(k, cx, cz, seed, j) +. (hash(k, cx, cz, seed, 152 + 4 * j + b) -. 0.5) *. cham_r(k, cx, cz, seed, j)
-      let oy = cham_y(k, cx, cz, seed, j, g) +. (hash(k, cx, cz, seed, 164 + 4 * j + b) -. 0.5) *. cham_r(k, cx, cz, seed, j) *. 0.8
+      let ou = cham_u(k, cx, cz, seed, j) +. (hash(k, cx, cz, seed, 200 + 7 * j + b) -. 0.5) *. cham_r(k, cx, cz, seed, j)
+      let ov = cham_v(k, cx, cz, seed, j) +. (hash(k, cx, cz, seed, 230 + 7 * j + b) -. 0.5) *. cham_r(k, cx, cz, seed, j)
+      let oy = cham_y(k, cx, cz, seed, j, g) +. (hash(k, cx, cz, seed, 260 + 7 * j + b) -. 0.5) *. cham_r(k, cx, cz, seed, j) *. 0.8
       let dx = beam_dx(k, cx, cz, seed, j, b) *. l
       let dy = beam_dy(k, cx, cz, seed, j, b) *. l
       let dz = beam_dz(k, cx, cz, seed, j, b) *. l

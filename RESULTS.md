@@ -2464,11 +2464,31 @@ gained a **taper** -- `beam_taper`, full over the middle and drawn to a point at
 both ends, the way a crystal terminates -- which needed `seg_t` beside `seg_d2`
 so a shape can know where along a segment it is.
 
-Finally a **size distribution**: two thirds of the beams are long and
-medium-thick, one third are short and slender stubs broken across them. A
-chamber of beams all one length read as a lattice; the mix is what reads as
-grown. The fine blade growth dropped from 0.26 to 0.18 of shell voxels along the
-way, because the beams now carry the look.
+Then a **size distribution**, and then the numbers Naica actually has: **seven
+beams per chamber, four in five of them large** (radius 1.4-2.4 against a length
+of twenty-five to sixty), the rest short slender stubs broken across them. A
+chamber where the big shafts are the minority reads as a cave that happens to
+have crystal in it; the stubs are what keep the rest from reading as a lattice.
+
+**The angles were the last thing wrong, and the most obvious in hindsight.** The
+elevation band was `hash * 0.9 - 0.45` -- plus or minus twenty-six degrees --
+so every beam in every chamber lay at much the same attitude and the whole thing
+read as a stack of shelves. It is now `hash * 2.4 - 1.2`, plus or minus seventy,
+and they cross at genuinely odd angles.
+
+Raising the beam count to seven collided the hash salts: the direction draws
+take `110 + 4 * (7j + b)`, which now runs to 193 and ran straight over the
+centre offsets at 140 and 161. A salt collision is invisible -- two draws that
+should be independent quietly agree -- so the ranges are now laid out with gaps
+and the layout is written down where they are declared.
+
+The fine blade growth dropped from 0.26 to 0.18 of shell voxels along the way,
+because the beams now carry the look.
+
+Cost: startup meshing 190 ms at a seed with a cavern against 179 with none
+(+6%), and the frame budget unmoved at 6.04 ms best of five. Twenty-one segment
+tests per voxel sounds like a lot and is not, because the whole beam pass is
+behind the `d < 1.45` chamber test.
 
 So the crystals are both things, and each is the mechanism that fits it: the
 fine growth is micro-voxel blades, because a cube read as a box; the shafts are
