@@ -1,12 +1,13 @@
 -- The menu: a start screen and an escape menu over one state machine.
 --
--- Two modes and four pages. Start mode (opened at launch) offers NEW GAME,
+-- Two modes and six pages. Start mode (opened at launch) offers NEW GAME,
 -- LOAD GAME, SETTINGS and QUIT; escape mode offers NEW GAME, SAVE GAME,
--- SETTINGS and QUIT. NEW GAME opens the new-world page: a SIZE row and an
--- AGE row with an arrow button at either end (age can be RANDOM), the seed
--- field, START and BACK. Both modes open the same slots page (five rows and
--- BACK, where a click saves in escape mode or loads in start mode), and the
--- same settings page: one row per graphics option with arrows, and BACK.
+-- SETTINGS and QUIT. NEW GAME opens the new-world page: a WORLD AGE row with
+-- an arrow button at either end (the age can be RANDOM), the seed field,
+-- START and BACK. Both modes open the same slots page (five rows and BACK,
+-- where a click saves in escape mode or loads in start mode), and the same
+-- settings hub: GRAPHICS, SOUND and BACK, each of the first two a row page
+-- with one row per option, an arrow button at either end of it, and BACK.
 --
 -- State and geometry only — no I/O and no world access, so the whole thing is
 -- unit-testable. The frame loop reads the state, `Hud` draws it, and both take
@@ -37,8 +38,27 @@ mod CubeForge.Menu do
   fn mode_escape() : Int do 1 end
   fn page_main() : Int do 0 end
   fn page_slots() : Int do 1 end
+  doc "The settings hub: GRAPHICS, SOUND, BACK."
   fn page_settings() : Int do 2 end
-  fn page_world() : Int do 3 end
+  fn page_graphics() : Int do 3 end
+  fn page_sound() : Int do 4 end
+  doc "The new-world page: the age row, the seed field, START and BACK."
+  fn page_world() : Int do 5 end
+  doc "A row page is laid out as arrow rows: the two settings pages edit a run of fields, one per row; the new-world page has the age row and then START."
+  fn is_row_page(p : Int) : Bool do p == page_graphics() || p == page_sound() || p == page_world() end
+  doc "A settings page: a row page whose rows are settings fields."
+  fn is_settings_page(p : Int) : Bool do p == page_graphics() || p == page_sound() end
+  fn page_field0(p : Int) : Int do if p == page_sound() do Settings.graphics_fields() else 0 end end
+  fn page_rows(p : Int) : Int do
+    if p == page_sound() do Settings.sound_fields() else if p == page_world() do world_rows() else Settings.graphics_fields() end end
+  end
+  doc "Where BACK (and Esc) from this page lands: a settings page returns to the hub, everything else to main."
+  fn back_page(m : Menu) : Int do if is_settings_page(page(m)) do page_settings() else page_main() end end
+  doc "The new-world page's rows: the age. (A size row came and went: the world is unbounded now, streamed as a window around the player.)"
+  fn world_row_age() : Int do 0 end
+  fn world_rows() : Int do 1 end
+  doc "START on the new-world page: after its rows."
+  fn item_start() : Int do world_rows() * 3 end
 
   -- Main page items.
   fn item_new_game() : Int do 0 end
@@ -49,35 +69,31 @@ mod CubeForge.Menu do
   fn main_items() : Int do 4 end
   -- Slots page items: 0..4 are slots 1..5, then BACK.
   fn slot_of_item(i : Int) : Int do i + 1 end
-  -- Arrow-row pages (settings, new world): three items per row (left arrow,
-  -- body, right arrow), then the page's own buttons, then BACK.
+  -- Hub items.
+  fn hub_graphics() : Int do 0 end
+  fn hub_sound() : Int do 1 end
+  fn hub_items() : Int do 3 end
+  -- Row page items: three per row (left arrow, body, right arrow), then BACK.
   fn part_left() : Int do 0 end
   fn part_body() : Int do 1 end
   fn part_right() : Int do 2 end
   fn settings_row(i : Int) : Int do i / 3 end
   fn settings_part(i : Int) : Int do i % 3 end
   fn settings_item(row : Int, part : Int) : Int do row * 3 + part end
-  doc "The new-world page's rows: the age. (A size row came and went: the world is unbounded now, streamed as a window around the player.)"
-  fn world_row_age() : Int do 0 end
-  fn world_rows() : Int do 1 end
-  doc "START on the new-world page: after its two rows."
-  fn item_start() : Int do world_rows() * 3 end
-  doc "Pages laid out as arrow rows."
-  fn is_arrow_page(m : Menu) : Bool do page(m) == page_settings() || page(m) == page_world() end
-  doc "Arrow rows on the current page: the settings fields, the world's two, none elsewhere."
-  fn arrow_rows(m : Menu) : Int do
-    if page(m) == page_settings() do Settings.fields() else if page(m) == page_world() do world_rows() else 0 end end
-  end
-  doc "BACK is the last item of the slots, settings and new-world pages."
+  doc "The settings field item [i] of a row page edits."
+  fn field_of(m : Menu, i : Int) : Int do page_field0(page(m)) + settings_row(i) end
+  doc "BACK is the last item of every sub-page (on the new-world page, after START)."
   fn item_back(m : Menu) : Int do
-    if page(m) == page_settings() do Settings.fields() * 3
-    else if page(m) == page_world() do item_start() + 1
-    else Save.slots() end end
+    if page(m) == page_world() do item_start() + 1
+    else if is_row_page(page(m)) do page_rows(page(m)) * 3
+    else if page(m) == page_settings() do hub_items() - 1
+    else Save.slots() end end end
   end
   fn items(m : Menu) : Int do
     if page(m) == page_slots() do Save.slots() + 1
-    else if is_arrow_page(m) do item_back(m) + 1
-    else main_items() end end
+    else if is_row_page(page(m)) do item_back(m) + 1
+    else if page(m) == page_settings() do hub_items()
+    else main_items() end end end
   end
 
   fn status_none() : Int do 0 end
@@ -121,7 +137,7 @@ mod CubeForge.Menu do
   fn set_page(m : Menu, p : Int) : Menu do match m do Menu(o, s, f, md, _, _, _, _, l, st, r) -> Menu(o, s, f, md, p, 0, status_none(), 0, l, st, r) end end
   fn set_slots(m : Menu, l : List(CubeForge.Save.SlotInfo)) : Menu do match m do Menu(o, s, f, md, p, ss, sk, sf, _, st, r) -> Menu(o, s, f, md, p, ss, sk, sf, l, st, r) end end
   fn set_settings(m : Menu, st : CubeForge.Settings.Settings) : Menu do match m do Menu(o, s, f, md, p, ss, sk, sf, l, _, r) -> Menu(o, s, f, md, p, ss, sk, sf, l, st, r) end end
-  doc "Light a row: a slot number on the slots page, a field index on the settings page."
+  doc "Light a row: a slot number on the slots page, a settings field on a row page."
   fn set_status(m : Menu, slot : Int, kind : Int, frame : Int) : Menu do
     match m do Menu(o, s, f, md, p, _, _, _, l, st, r) -> Menu(o, s, f, md, p, slot, kind, frame, l, st, r) end
   end
@@ -131,27 +147,27 @@ mod CubeForge.Menu do
     if status_kind(m) != status_none() && frame - status_frame(m) >= status_frames() do clear_status(m) else m end
   end
 
-  doc "Esc: a sub-page goes back to main; the escape menu closes; the start screen stays."
+  doc "Esc: a sub-page goes back a level; the escape menu closes; the start screen stays."
   fn escape(m : Menu) : Menu do
-    if page(m) != page_main() do set_page(m, page_main())
+    if page(m) != page_main() do set_page(m, back_page(m))
     else if mode(m) == mode_escape() do set_open(m, false)
     else m end end
   end
 
   doc """
-  The menu after a click on [item]. On the settings page an arrow steps its
-  row's field; on the new-world page an arrow steps SIZE or AGE; everything
-  else is the caller's business (start, save, load, page changes have side
+  The menu after a click on [item]. On a settings page an arrow steps its
+  row's field; on the new-world page an arrow steps the AGE; everything else
+  is the caller's business (start, save, load, page changes have side
   effects) and leaves the menu unchanged.
   """
   fn click(m : Menu, item : Int) : Menu do
-    if !is_arrow_page(m) || item < 0 || item >= arrow_rows(m) * 3 do m
+    if !is_row_page(page(m)) || item < 0 || item >= page_rows(page(m)) * 3 do m
     else
       let part = settings_part(item)
       let dir = if part == part_right() do 1 else -1 end
       if part == part_body() do m
-      else if page(m) == page_settings() do set_settings(m, Settings.step(settings(m), settings_row(item), dir))
-      else step_age(m, dir) end end
+      else if page(m) == page_world() do step_age(m, dir)
+      else set_settings(m, Settings.step(settings(m), field_of(m, item), dir)) end end
     end
   end
 
@@ -203,34 +219,43 @@ mod CubeForge.Menu do
   fn age_down(m : Menu) : Menu do nudge_age(m, 0 - age_step()) end
 
   -- ── Geometry (NDC) ────────────────────────────────────────────────────────
-  -- One source for both drawing and hit-testing. The slots and settings pages
+  -- One source for both drawing and hit-testing. The slots and row pages
   -- are taller and tighter than the main page; everything below is a function
-  -- of the page, and on the settings page also of the item.
+  -- of the page, and on a row page also of the item.
 
-  doc "The sub-pages are wider: a slot row holds SLOT 5 SEED, a ten-digit seed, AGE 100 and SIZE 128; a settings or world row two arrows and a long name."
+  doc "The sub-pages are wider: a slot row holds SLOT 5 SEED, a ten-digit seed and AGE 100; a settings row two arrows and a long name."
   fn panel_x0(m : Menu) : Float do
     if page(m) == page_slots() do -0.56
-    else if is_arrow_page(m) do -0.45
+    else if is_row_page(page(m)) do -0.45
     else -0.36 end end
   end
   fn panel_x1(m : Menu) : Float do 0.0 -. panel_x0(m) end
-  fn panel_y0(m : Menu) : Float do if page(m) == page_main() do -0.56 else -0.50 end end
-  fn panel_y1(m : Menu) : Float do if page(m) == page_main() do 0.36 else 0.50 end end
+  doc "The panel ends a little under its last row: the seed field on main, BACK elsewhere."
+  fn panel_y0(m : Menu) : Float do
+    if page(m) == page_main() do -0.74
+    else if page(m) == page_settings() do -0.38
+    else if page(m) == page_world() do -0.50
+    else if is_row_page(page(m)) do 0.22 -. int_to_float(page_rows(page(m))) *. 0.14
+    else -0.50 end end end end
+  end
+  fn panel_y1(m : Menu) : Float do if is_main_style(m) do 0.36 else 0.50 end end
+  doc "The main page and the hub share one layout: wide buttons, one per line."
+  pfn is_main_style(m : Menu) : Bool do page(m) == page_main() || page(m) == page_settings() end
 
-  doc "Full width of a row: the whole row on the main and slots pages, arrows included on the arrow pages."
+  doc "Full width of a row: the whole row on the main, hub and slots pages, arrows included on a row page."
   pfn row_w(m : Menu) : Float do
     if page(m) == page_slots() do 0.98
-    else if is_arrow_page(m) do 0.80
+    else if is_row_page(page(m)) do 0.80
     else 0.44 end end
   end
   pfn row_x0(m : Menu) : Float do 0.0 -. row_w(m) /. 2.0 end
-  fn item_h(m : Menu) : Float do if page(m) == page_main() do 0.13 else 0.115 end end
+  fn item_h(m : Menu) : Float do if is_main_style(m) do 0.13 else 0.115 end end
   doc "An arrow button is a square of the row's height, with this gap to the body."
   fn arrow_gap() : Float do 0.01 end
 
-  doc "Left edge of item [i]. Only the arrow pages' arrows and bodies differ from the row."
+  doc "Left edge of item [i]. Only a row page's arrows and bodies differ from the row."
   fn item_x0(m : Menu, i : Int) : Float do
-    if !is_arrow_page(m) || i >= arrow_rows(m) * 3 do row_x0(m)
+    if !is_row_page(page(m)) || i >= page_rows(page(m)) * 3 do row_x0(m)
     else
       let part = settings_part(i)
       if part == part_left() do row_x0(m)
@@ -240,18 +265,19 @@ mod CubeForge.Menu do
   end
   doc "Width of item [i]."
   fn item_w(m : Menu, i : Int) : Float do
-    if !is_arrow_page(m) || i >= arrow_rows(m) * 3 do row_w(m)
+    if !is_row_page(page(m)) || i >= page_rows(page(m)) * 3 do row_w(m)
     else if settings_part(i) == part_body() do row_w(m) -. 2.0 *. (item_h(m) +. arrow_gap())
     else item_h(m) end end
   end
-  doc "The row an item sits on, on the arrow pages: its arrow row, or the buttons after them in order."
+  doc "The row an item sits on, on a row page: its arrow row, or the buttons after them (START, BACK) in order."
   pfn row_of(m : Menu, i : Int) : Int do
-    if i < arrow_rows(m) * 3 do settings_row(i) else arrow_rows(m) + (i - arrow_rows(m) * 3) end
+    let rows = page_rows(page(m))
+    if i < rows * 3 do settings_row(i) else rows + (i - rows * 3) end
   end
   doc "Bottom edge of item [i]; rows run downward from the top of the panel."
   fn item_y0(m : Menu, i : Int) : Float do
     if page(m) == page_slots() do 0.32 -. int_to_float(i) *. 0.14
-    else if is_arrow_page(m) do 0.32 -. int_to_float(row_of(m, i)) *. 0.14
+    else if is_row_page(page(m)) do 0.32 -. int_to_float(row_of(m, i)) *. 0.14
     else 0.08 -. int_to_float(i) *. 0.18 end end
   end
 
@@ -278,7 +304,7 @@ mod CubeForge.Menu do
 
   pfn two(n : Int) : String do (if n < 10 do "0" else "" end) ++ int_to_string(n) end
 
-  doc "The label drawn on item [i] of the current page. An arrow body's label is the row's name; its value is [value_label]."
+  doc "The label drawn on item [i] of the current page. A settings body's label is the field's name; its value is [value_label]."
   fn label(m : Menu, i : Int) : String do
     if page(m) == page_main() do
       if i == item_new_game() do "NEW GAME"
@@ -287,12 +313,13 @@ mod CubeForge.Menu do
       else "QUIT" end end end
     else if i == item_back(m) do "BACK"
     else if page(m) == page_world() && i == item_start() do "START"
-    else if is_arrow_page(m) do
+    else if page(m) == page_settings() do (if i == hub_graphics() do "GRAPHICS" else "SOUND" end)
+    else if is_row_page(page(m)) do
       let part = settings_part(i)
       if part == part_left() do "<"
       else if part == part_right() do ">"
-      else if page(m) == page_settings() do Settings.name(settings_row(i))
-      else "WORLD AGE" end end end
+      else if page(m) == page_world() do "WORLD AGE"
+      else Settings.name(field_of(m, i)) end end end
     else
       let slot = slot_of_item(i)
       if status_kind(m) != status_none() && status_slot(m) == slot do
@@ -303,18 +330,18 @@ mod CubeForge.Menu do
           ++ (if Save.info_is_empty(info) do " EMPTY"
               else " SEED " ++ int_to_string(N.base_seed(Save.info_seed(info))) ++ " AGE " ++ int_to_string(N.age_of(Save.info_seed(info))) end)
       end
-    end end end end
+    end end end end end
   end
 
-  doc "The right-aligned text of an arrow body: the current choice, or FAILED while a write failure shows. Empty elsewhere."
+  doc "The right-aligned text of a row page body: the current choice, or FAILED while a write failure shows. Empty elsewhere."
   fn value_label(m : Menu, i : Int) : String do
-    if !is_arrow_page(m) || i >= arrow_rows(m) * 3 || settings_part(i) != part_body() do ""
+    if !is_row_page(page(m)) || i >= page_rows(page(m)) * 3 || settings_part(i) != part_body() do ""
+    else if page(m) == page_world() do age_label(m)
     else
-      let row = settings_row(i)
-      if page(m) == page_world() do age_label(m)
-      else if status_kind(m) == status_failed() && status_slot(m) == row do "FAILED"
-      else Settings.label(settings(m), row) end end
-    end
+      let f = field_of(m, i)
+      if status_kind(m) == status_failed() && status_slot(m) == f do "FAILED"
+      else Settings.label(settings(m), f) end
+    end end
   end
 
   doc "The second line of a used slot row: the save time as YYYY MM DD HH MM. Empty otherwise."

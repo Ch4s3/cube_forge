@@ -15,7 +15,7 @@ mod CubeForge.Test.Biome do
     if i < 0 do acc else flat_chunks(i - 1, h, Cons(flat_cells(C.new(), 0, h), acc)) end
   end
   pfn flat_world(h : Int) : CubeForge.World.World do
-    CubeForge.World.World(Array.from_list(flat_chunks(63, h, Nil)), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.World.shown_new(8), 8, CubeForge.Model.build(), 0, 0, NativeArray.make_u8(64, 0), Nil, Nil, Nil, NativeArray.make_int(64, 0))
+    CubeForge.World.of_chunk_list(flat_chunks(63, h, Nil), 8)
   end
 
   -- Inland (far from water) at sea level, so only the axes decide.
@@ -288,7 +288,7 @@ mod CubeForge.Test.Biome do
   end
 
   -- ── The grove ─────────────────────────────────────────────────────────────
-  pfn tick_net_k(f : CubeForge.Biome.Field, w : CubeForge.World.World, m : CubeForge.Myc.Field, drow : NativeU8Arr, k : Int) : CubeForge.Biome.Field do
+  pfn tick_net_k(f : CubeForge.Biome.Field, w : CubeForge.World.World, m : CubeForge.Myc.Net, drow : NativeU8Arr, k : Int) : CubeForge.Biome.Field do
     let n = Biome.cols(w)
     if k <= 0 do f
     else tick_net_k(Biome.tick_net(f, w, 7, 0.05, Biome.no_pulls(n), Biome.no_rows(n), 1.0, CubeForge.Myc.field_species(m), CubeForge.Myc.field_vigour(m), drow), w, m, drow, k - 1) end

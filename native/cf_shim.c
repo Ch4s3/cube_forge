@@ -23,6 +23,7 @@
 #include <stdint.h>
 #include <math.h>
 #include <pthread.h>
+#include <mach/mach.h>
 
 /* ── NativeArray payload access ──────────────────────────────────────────────
  * March's NativeArray heap layout (runtime/march_runtime.c, NATIVE_ARR_HDR):
@@ -508,7 +509,17 @@ static GLuint compile(GLenum kind, const char *src) {
 }
 
 #define CF_MAX_MESHES 256
+/* Two VBOs per mesh slot. An upload goes to the one the last frame did NOT
+ * draw, so glBufferSubData never waits on a buffer the GPU still reads; the
+ * drain trace had 1-4 ms stalls in it on a single buffer, orphaning or not. */
 static GLuint g_vbo[CF_MAX_MESHES];
+static GLuint g_vbo_b[CF_MAX_MESHES];
+static unsigned char g_vbo_cur[CF_MAX_MESHES];
+static int64_t g_vbo_cap[2][CF_MAX_MESHES];   /* floats allocated per buffer; grown, never shrunk */
+static inline GLuint vbo_of(int64_t slot) { return g_vbo_cur[slot] ? g_vbo_b[slot] : g_vbo[slot]; }
+/* A VAO per mesh slot was tried (2026-09-05 perf pass): 192 chunk draws a frame as one bind and one draw each. A/B over six alternating runs was noise, so the shared VAO stays. */
+static int g_debug = -1;
+static inline int cf_debug(void) { if (g_debug < 0) g_debug = getenv("CF_DEBUG") != NULL; return g_debug; }
 static GLint  g_u_use_tex = -1;
 static GLint  g_u_cutout = -1;
 static GLint  g_u_sun = -1, g_u_eye = -1, g_u_dir = -1, g_u_flash = -1;
@@ -565,9 +576,10 @@ int64_t cf_gfx_init(void) {
     g_u_bolt = glGetUniformLocation(g_prog, "u_bolt");
     g_u_time = glGetUniformLocation(g_prog, "u_time");
     g_u_off = glGetUniformLocation(g_prog, "u_off");
-    if (getenv("CF_DEBUG")) fprintf(stderr, "cf: uniforms occ=%d shadow=%d sundir=%d unlit=%d\n", g_u_occ, g_u_shadow, g_u_sundir, g_u_unlit);
+    if (cf_debug()) fprintf(stderr, "cf: uniforms occ=%d shadow=%d sundir=%d unlit=%d\n", g_u_occ, g_u_shadow, g_u_sundir, g_u_unlit);
     glGenVertexArrays(1, &g_vao);
     glGenBuffers(CF_MAX_MESHES, g_vbo);
+    glGenBuffers(CF_MAX_MESHES, g_vbo_b);
     glUseProgram(g_prog);
     glUniform1i(g_u_tex, 0);
     glUniform1i(g_u_use_tex, 0);
@@ -580,25 +592,58 @@ void cf_gfx_upload(int64_t slot, void *arr, int64_t nfloats) {
     if (slot < 0 || slot >= CF_MAX_MESHES) return;
     g_off[slot][0] = g_off[slot][1] = 0.0f;   /* baked at the current local origin */
     if (nfloats > narr_len(arr)) nfloats = narr_len(arr);
-    glBindBuffer(GL_ARRAY_BUFFER, g_vbo[slot]);
+    g_vbo_cur[slot] ^= 1;
+    glBindBuffer(GL_ARRAY_BUFFER, vbo_of(slot));
     glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(nfloats * 4), narr_data(arr), GL_STATIC_DRAW);
-    if (getenv("CF_DEBUG")) { const float *f = narr_data(arr); fprintf(stderr, "cf: upload slot=%lld nfloats=%lld arrlen=%lld first=%g %g %g %g %g %g %g glerr=%d\n", (long long)slot, (long long)nfloats, (long long)narr_len(arr), f[0],f[1],f[2],f[3],f[4],f[5],f[6], (int)glGetError()); }
+    if (cf_debug()) { const float *f = narr_data(arr); fprintf(stderr, "cf: upload slot=%lld nfloats=%lld arrlen=%lld first=%g %g %g %g %g %g %g glerr=%d\n", (long long)slot, (long long)nfloats, (long long)narr_len(arr), f[0],f[1],f[2],f[3],f[4],f[5],f[6], (int)glGetError()); }
 }
 
+/* The parts of one upload are staged in a scratch buffer and sent with ONE
+ * glBufferSubData when the last of them lands (offset + n reaches the total
+ * upload_begin announced). Sixteen sections were sixteen calls, and the drain
+ * trace showed the driver charging 1-4 ms for some of them; one call is one
+ * charge. A part sequence that never completes is flushed by the next begin. */
+static float  *g_stage = NULL;
+static int64_t g_stage_cap = 0, g_stage_total = 0, g_stage_filled = 0, g_stage_slot = -1;
+static void cf_stage_flush(void) {
+    if (g_stage_slot < 0 || g_stage_filled <= 0) { g_stage_slot = -1; return; }
+    glBindBuffer(GL_ARRAY_BUFFER, vbo_of(g_stage_slot));
+    glBufferSubData(GL_ARRAY_BUFFER, 0, (GLsizeiptr)(g_stage_filled * 4), g_stage);
+    g_stage_slot = -1; g_stage_filled = 0;
+}
 /* Assemble a VBO from several March buffers: reserve `nfloats` floats, then
  * copy parts at float offsets. GL 3.3 core / GLES 3.0: glBufferData(NULL) +
  * glBufferSubData. */
 void cf_gfx_upload_begin(int64_t slot, int64_t nfloats) {
     if (slot < 0 || slot >= CF_MAX_MESHES) return;
     g_off[slot][0] = g_off[slot][1] = 0.0f;
-    glBindBuffer(GL_ARRAY_BUFFER, g_vbo[slot]);
-    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(nfloats * 4), NULL, GL_STATIC_DRAW);
+    cf_stage_flush();
+    if (nfloats > g_stage_cap) { free(g_stage); g_stage_cap = nfloats + nfloats / 2 + 1024; g_stage = (float *)malloc((size_t)g_stage_cap * 4); }
+    g_stage_slot = nfloats > 0 ? slot : -1; g_stage_total = nfloats; g_stage_filled = 0;
+    g_vbo_cur[slot] ^= 1;
+    glBindBuffer(GL_ARRAY_BUFFER, vbo_of(slot));
+    /* Reallocate only when the mesh outgrows the buffer, with headroom; a
+     * smaller mesh reuses the store and the parts land by glBufferSubData
+     * alone. The other buffer of the pair is the one the last frame drew, so
+     * nothing here waits on the GPU. */
+    int64_t *cap = &g_vbo_cap[g_vbo_cur[slot]][slot];
+    if (nfloats > *cap) {
+        *cap = nfloats + nfloats / 2 + 1024;
+        glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(*cap * 4), NULL, GL_DYNAMIC_DRAW);
+    }
 }
 void cf_gfx_upload_part(int64_t slot, int64_t offset, void *arr, int64_t nfloats) {
     if (slot < 0 || slot >= CF_MAX_MESHES || nfloats <= 0) return;
     if (nfloats > narr_len(arr)) nfloats = narr_len(arr);
-    glBindBuffer(GL_ARRAY_BUFFER, g_vbo[slot]);
-    glBufferSubData(GL_ARRAY_BUFFER, (GLintptr)(offset * 4), (GLsizeiptr)(nfloats * 4), narr_data(arr));
+    if (slot != g_stage_slot || offset + nfloats > g_stage_total) {
+        /* not the upload in progress: send it straight */
+        glBindBuffer(GL_ARRAY_BUFFER, vbo_of(slot));
+        glBufferSubData(GL_ARRAY_BUFFER, (GLintptr)(offset * 4), (GLsizeiptr)(nfloats * 4), narr_data(arr));
+        return;
+    }
+    memcpy(g_stage + offset, narr_data(arr), (size_t)nfloats * 4);
+    if (offset + nfloats > g_stage_filled) g_stage_filled = offset + nfloats;
+    if (g_stage_filled >= g_stage_total) cf_stage_flush();
 }
 
 void cf_gfx_begin_frame(double r, double g, double b) {
@@ -613,13 +658,13 @@ void cf_gfx_begin_frame(double r, double g, double b) {
 void cf_gfx_set_view_proj(void *arr) {
     if (narr_len(arr) < 16) return;
     glUniformMatrix4fv(g_u_vp, 1, GL_FALSE, (const float *)narr_data(arr));
-    if (getenv("CF_DEBUG")) { const float *f = narr_data(arr); fprintf(stderr, "cf: vp loc=%d diag=%g %g %g %g glerr=%d\n", g_u_vp, f[0], f[5], f[10], f[15], (int)glGetError()); }
+    if (cf_debug()) { const float *f = narr_data(arr); fprintf(stderr, "cf: vp loc=%d diag=%g %g %g %g glerr=%d\n", g_u_vp, f[0], f[5], f[10], f[15], (int)glGetError()); }
 }
 
 void cf_gfx_draw(int64_t slot, int64_t nverts) {
     if (slot < 0 || slot >= CF_MAX_MESHES || nverts <= 0) return;
     glUniform2f(g_u_off, g_off[slot][0], g_off[slot][1]);
-    glBindBuffer(GL_ARRAY_BUFFER, g_vbo[slot]);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo_of(slot));
     GLsizei stride = CF_VERT_FLOATS * sizeof(float);
     glEnableVertexAttribArray(0); glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void *)0);
     glEnableVertexAttribArray(1); glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, stride, (void *)(3 * 4));
@@ -628,7 +673,7 @@ void cf_gfx_draw(int64_t slot, int64_t nverts) {
     glEnableVertexAttribArray(4); glVertexAttribPointer(4, 1, GL_FLOAT, GL_FALSE, stride, (void *)(7 * 4));
     glEnableVertexAttribArray(5); glVertexAttribPointer(5, 1, GL_FLOAT, GL_FALSE, stride, (void *)(8 * 4));
     glDrawArrays(GL_TRIANGLES, 0, (GLsizei)nverts);
-    if (getenv("CF_DEBUG")) { fprintf(stderr, "cf: draw slot=%lld nverts=%lld glerr=%d prog=%u vao=%u\n", (long long)slot, (long long)nverts, (int)glGetError(), g_prog, g_vao); }
+    if (cf_debug()) { fprintf(stderr, "cf: draw slot=%lld nverts=%lld glerr=%d prog=%u vao=%u\n", (long long)slot, (long long)nverts, (int)glGetError(), g_prog, g_vao); }
 }
 
 /* ── The window slid ──────────────────────────────────────────────────────
@@ -644,16 +689,24 @@ void cf_gfx_draw(int64_t slot, int64_t nverts) {
  * the window is dropped. */
 static void cf_shift_particles(int64_t dx, int64_t dz);   /* defined with the particle state, below */
 void cf_gfx_shift(int64_t dx, int64_t dz) {
+    /* A slot's state is its VBO pair, which of the two the last upload went
+     * to, both capacities and its offset: all of it moves with the chunk. */
     for (int base = 0; base < 192; base += 64) {
-        GLuint old[64]; float oldoff[64][2]; int used[64];
-        for (int i = 0; i < 64; i++) { old[i] = g_vbo[base + i]; oldoff[i][0] = g_off[base + i][0]; oldoff[i][1] = g_off[base + i][1]; used[i] = 0; }
+        GLuint olda[64], oldb[64]; unsigned char oldcur[64]; int64_t oldcap[2][64]; float oldoff[64][2]; int used[64];
+        for (int i = 0; i < 64; i++) {
+            olda[i] = g_vbo[base + i]; oldb[i] = g_vbo_b[base + i]; oldcur[i] = g_vbo_cur[base + i];
+            oldcap[0][i] = g_vbo_cap[0][base + i]; oldcap[1][i] = g_vbo_cap[1][base + i];
+            oldoff[i][0] = g_off[base + i][0]; oldoff[i][1] = g_off[base + i][1]; used[i] = 0;
+        }
         int has[64];
         for (int d = 0; d < 64; d++) {
             int64_t sx = d % 8 + dx, sz = d / 8 + dz;
             has[d] = 0;
             if (sx >= 0 && sx < 8 && sz >= 0 && sz < 8) {
                 int s = (int)(sx + 8 * sz);
-                g_vbo[base + d] = old[s]; used[s] = 1; has[d] = 1;
+                g_vbo[base + d] = olda[s]; g_vbo_b[base + d] = oldb[s]; g_vbo_cur[base + d] = oldcur[s];
+                g_vbo_cap[0][base + d] = oldcap[0][s]; g_vbo_cap[1][base + d] = oldcap[1][s];
+                used[s] = 1; has[d] = 1;
                 g_off[base + d][0] = oldoff[s][0] - 16.0f * (float)dx;
                 g_off[base + d][1] = oldoff[s][1] - 16.0f * (float)dz;
             }
@@ -663,7 +716,9 @@ void cf_gfx_shift(int64_t dx, int64_t dz) {
             if (has[d]) continue;
             while (u < 64 && used[u]) u++;
             if (u >= 64) break;
-            g_vbo[base + d] = old[u]; used[u] = 1;
+            g_vbo[base + d] = olda[u]; g_vbo_b[base + d] = oldb[u]; g_vbo_cur[base + d] = oldcur[u];
+            g_vbo_cap[0][base + d] = oldcap[0][u]; g_vbo_cap[1][base + d] = oldcap[1][u];
+            used[u] = 1;
             g_off[base + d][0] = g_off[base + d][1] = 0.0f;
         }
     }
@@ -730,7 +785,7 @@ void cf_gfx_upload_occupancy(void *arr, int64_t w, int64_t h, int64_t d) {
     for (int64_t z = 0; z < d; z++)
         for (int64_t y = 0; y < h; y++)
             for (int64_t x = 0; x < w; x++)
-                if (fine[x + w * (y + h * z)]) {
+                if (fine[x + w * (y + h * z)] == 255) {   /* the byte is the light opacity; 255 alone is solid */
                     size_t ci = (size_t)(x / CF_OCC_CS)
                               + (size_t)g_occ_cw * ((size_t)(y / CF_OCC_CS)
                               + (size_t)g_occ_ch * (size_t)(z / CF_OCC_CS));
@@ -782,6 +837,56 @@ void cf_gfx_set_voxel(int64_t x, int64_t y, int64_t z, int64_t solid) {
             glTexSubImage3D(GL_TEXTURE_3D, 0, (GLint)(x / CF_OCC_CS), (GLint)(y / CF_OCC_CS),
                             (GLint)(z / CF_OCC_CS), 1, 1, 1, GL_RED, GL_UNSIGNED_BYTE, &cv);
         }
+    }
+    glActiveTexture(GL_TEXTURE0);
+}
+
+/* Sync the box [x0..x1] x [y0..y1] x [z0..z1] of the occupancy texture from
+ * the world's occupancy array (x + 128 * (y + 256 * z), the texture's own
+ * layout, so one glTexSubImage3D with unpack strides does the box), then
+ * recount every coarse cell the box touches from the array. A tree edit used
+ * to make 729 one-texel calls here (0.6 ms), and each call bumped the coarse
+ * count whether or not the voxel had changed. The recount is exact. */
+void cf_gfx_sync_box(void *arr, int64_t x0, int64_t y0, int64_t z0, int64_t x1, int64_t y1, int64_t z1) {
+    if (!g_occ) return;
+    if (narr_len(arr) < g_occ_w * g_occ_h * g_occ_d) return;
+    if (x0 < 0) x0 = 0; if (y0 < 0) y0 = 0; if (z0 < 0) z0 = 0;
+    if (x1 >= g_occ_w) x1 = g_occ_w - 1; if (y1 >= g_occ_h) y1 = g_occ_h - 1; if (z1 >= g_occ_d) z1 = g_occ_d - 1;
+    if (x0 > x1 || y0 > y1 || z0 > z1) return;
+    const unsigned char *a = (const unsigned char *)narr_data(arr);
+    /* the fine texture: the box straight out of the array. The array holds
+     * 0 / occ_solid; the texture wants 0 / 255, so stage the box. */
+    int64_t bw = x1 - x0 + 1, bh = y1 - y0 + 1, bd = z1 - z0 + 1;
+    unsigned char *stage = (unsigned char *)malloc((size_t)(bw * bh * bd));
+    if (!stage) return;
+    for (int64_t z = z0; z <= z1; z++)
+        for (int64_t y = y0; y <= y1; y++)
+            for (int64_t x = x0; x <= x1; x++)
+                stage[(x - x0) + bw * ((y - y0) + bh * (z - z0))] = a[x + g_occ_w * (y + g_occ_h * z)] == 255 ? 255 : 0;
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_3D, g_occ);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexSubImage3D(GL_TEXTURE_3D, 0, (GLint)x0, (GLint)y0, (GLint)z0, (GLsizei)bw, (GLsizei)bh, (GLsizei)bd, GL_RED, GL_UNSIGNED_BYTE, stage);
+    free(stage);
+    if (g_occ_count && g_occ_c) {
+        glActiveTexture(GL_TEXTURE2);
+        glBindTexture(GL_TEXTURE_3D, g_occ_c);
+        for (int64_t cz = z0 / CF_OCC_CS; cz <= z1 / CF_OCC_CS; cz++)
+            for (int64_t cy = y0 / CF_OCC_CS; cy <= y1 / CF_OCC_CS; cy++)
+                for (int64_t cx = x0 / CF_OCC_CS; cx <= x1 / CF_OCC_CS; cx++) {
+                    uint16_t n = 0;
+                    for (int64_t z = cz * CF_OCC_CS; z < (cz + 1) * CF_OCC_CS && z < g_occ_d; z++)
+                        for (int64_t y = cy * CF_OCC_CS; y < (cy + 1) * CF_OCC_CS && y < g_occ_h; y++)
+                            for (int64_t x = cx * CF_OCC_CS; x < (cx + 1) * CF_OCC_CS && x < g_occ_w; x++)
+                                if (a[x + g_occ_w * (y + g_occ_h * z)] == 255) n++;
+                    size_t ci = (size_t)cx + (size_t)g_occ_cw * ((size_t)cy + (size_t)g_occ_ch * (size_t)cz);
+                    uint16_t before = g_occ_count[ci];
+                    g_occ_count[ci] = n;
+                    if ((before > 0) != (n > 0)) {
+                        unsigned char cv = n ? 255 : 0;
+                        glTexSubImage3D(GL_TEXTURE_3D, 0, (GLint)cx, (GLint)cy, (GLint)cz, 1, 1, 1, GL_RED, GL_UNSIGNED_BYTE, &cv);
+                    }
+                }
     }
     glActiveTexture(GL_TEXTURE0);
 }
@@ -1172,7 +1277,7 @@ void cf_gfx_draw_lines(int64_t slot, int64_t nverts) {
     glDisable(GL_DEPTH_TEST);
     cf_unlit_begin();
     glUniform1i(g_u_use_tex, 0);
-    glBindBuffer(GL_ARRAY_BUFFER, g_vbo[slot]);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo_of(slot));
     GLsizei stride = CF_VERT_FLOATS * sizeof(float);
     glEnableVertexAttribArray(0); glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void *)0);
     glEnableVertexAttribArray(1); glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, stride, (void *)(3 * 4));
@@ -1234,6 +1339,235 @@ void *cf_f64_blit(void *dst, int64_t di, void *src, int64_t si, int64_t n) {
     }
     memcpy((double *)narr_data(dst) + di, (const double *)narr_data(src) + si, (size_t)n * 8);
     return dst;
+}
+
+/* Stamp a model template: copy n floats (whole 9-float vertices) from src[si..]
+ * into dst[di..], adding (dx, dy, dz) to each vertex's position and writing
+ * [shade] into its shade slot. The March version did this with nine boxed-Float
+ * reads and three boxed-Float adds per vertex; the profile put a bush stamp at
+ * thousands of allocations. Same rc == 1 contract as cf_f32_blit. */
+void *cf_f32_stamp(void *dst, int64_t di, void *src, int64_t si, int64_t n, double dx, double dy, double dz, double shade) {
+    int64_t rc = *(int64_t *)dst;
+    if (rc != 1) { fprintf(stderr, "cf_f32_stamp: destination is shared (rc=%lld); refusing to write in place\n", (long long)rc); abort(); }
+    if (n <= 0) return dst;
+    if (di < 0 || si < 0 || di + n > narr_len(dst) || si + n > narr_len(src) || n % 9 != 0) {
+        fprintf(stderr, "cf_f32_stamp: out of range (di=%lld si=%lld n=%lld dst=%lld src=%lld)\n",
+                (long long)di, (long long)si, (long long)n, (long long)narr_len(dst), (long long)narr_len(src));
+        abort();
+    }
+    float *d = (float *)narr_data(dst) + di;
+    const float *s = (const float *)narr_data(src) + si;
+    for (int64_t i = 0; i < n; i += 9) {
+        d[i + 0] = (float)((double)s[i + 0] + dx);
+        d[i + 1] = (float)((double)s[i + 1] + dy);
+        d[i + 2] = (float)((double)s[i + 2] + dz);
+        d[i + 3] = s[i + 3]; d[i + 4] = s[i + 4]; d[i + 5] = s[i + 5];
+        d[i + 6] = (float)shade;
+        d[i + 7] = s[i + 7]; d[i + 8] = s[i + 8];
+    }
+    return dst;
+}
+
+/* ── The greedy mesher's quad, written here ──────────────────────────────────
+ * One merged rectangle of the section mesher: 6 vertices x 9 floats at
+ * dst[at..], from the integer description the greedy pass has (direction d,
+ * section sy, slice a, mask cell (u, v), size wd x h, the packed key) plus the
+ * chunk origin and the texture-layer table. This is Mesher.emit_rect and
+ * quad_sized, Vertex.pack_shade, Mesher.corner_sky/corner_blk and should_flip
+ * in C, arithmetic in the same order in double so the floats come out
+ * bit-identical (the mesh hash is the oracle). Why here: every Float in March
+ * is a heap object, and a quad in March was some sixty of them; the profile
+ * put 60% of a section's mesh time in the allocator.
+ *
+ * Key layout (Mesher.key_of): id in the low 8 bits, four 10-bit corners c0..c3
+ * at 2^8, 2^18, 2^28, 2^38 in mask (u, v) order, the shown species at 2^48.
+ * Corner (Mesher.pack_corner): skylight in the low nibble, AO 0..3 above it,
+ * block light 0..15 above that.
+ * Layers: tab[id * 6 + d] for a block face; tab[1536 + k * 6 + (sp - 1)] for
+ * mycelium base index k shown with species sp (Texture.layer_table). */
+static double cf_corner_ao(int64_t p) { return 0.55 + 0.15 * (double)((p / 16) % 4); }
+static double cf_corner_sky(int64_t p) { return ((double)(p % 16) / 15.0) * cf_corner_ao(p); }
+static double cf_corner_blk(int64_t p) { return ((double)(p / 64) / 15.0) * cf_corner_ao(p); }
+static double cf_clamp01(double v) { return v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v); }
+static double cf_pack_shade(double sky, double blk) { return 2.0 * (double)(int64_t)(cf_clamp01(blk) * 255.0 + 0.5) + cf_clamp01(sky); }
+static double cf_brightness(double p) { double h = floor(p / 2.0); return (p - 2.0 * h) + h / 255.0; }
+static void cf_vert(float *o, double x, double y, double z, double u, double v, double layer, double shade, double face) {
+    o[0] = (float)x; o[1] = (float)y; o[2] = (float)z; o[3] = (float)u; o[4] = (float)v;
+    o[5] = (float)layer; o[6] = (float)shade; o[7] = (float)face; o[8] = 255.0f;
+}
+static void cf_quad_into(float *o, int64_t d, int64_t sy, int64_t a, int64_t u, int64_t v, int64_t wd, int64_t h,
+                         int64_t key, double ox, double oz, const float *tab, int64_t ntab);
+void *cf_mesh_quad(void *dst, int64_t at, int64_t d, int64_t sy, int64_t a, int64_t u, int64_t v, int64_t wd, int64_t h,
+                   int64_t key, double ox, double oz, void *layers) {
+    int64_t rc = *(int64_t *)dst;
+    if (rc != 1) { fprintf(stderr, "cf_mesh_quad: destination is shared (rc=%lld); refusing to write in place\n", (long long)rc); abort(); }
+    if (at < 0 || at + 54 > narr_len(dst)) { fprintf(stderr, "cf_mesh_quad: out of range (at=%lld dst=%lld)\n", (long long)at, (long long)narr_len(dst)); abort(); }
+    cf_quad_into((float *)narr_data(dst) + at, d, sy, a, u, v, wd, h, key, ox, oz, (const float *)narr_data(layers), narr_len(layers));
+    return dst;
+}
+
+/* One slice of the greedy pass: the 256 keys of mask[base..base+256) (mask
+ * index u + 16 * v), merged into rectangles in the mesher's scan order --
+ * first unclaimed cell in index order, widest run along u of the same key,
+ * tallest stack of such rows along v -- each written as a quad at dst[at..].
+ * Works on a local copy of the slice, so the March mask is read only. dst is
+ * consumed and returned like cf_f32_blit's; the caller reserves 256 * 54 + 1
+ * floats past [at], and the number of floats written comes back in the slot
+ * at dst[at + 256 * 54], past anything this call wrote, for the caller to
+ * read and adopt as the new length (an extern returns one value, and the
+ * buffer is the one that must come back). Replaces Mesher.greedy_go: its
+ * per-cell variant rebuild and run scans were a third of a section's mesh
+ * time (RESULTS, the perf pass of 2026-09-05). */
+void *cf_mesh_slice(void *dst, int64_t at, void *mask, int64_t base, int64_t d, int64_t sy, int64_t a,
+                    double ox, double oz, void *layers) {
+    int64_t rc = *(int64_t *)dst;
+    if (rc != 1) { fprintf(stderr, "cf_mesh_slice: destination is shared (rc=%lld); refusing to write in place\n", (long long)rc); abort(); }
+    if (at < 0 || at + 256 * 54 + 1 > narr_len(dst) || base < 0 || base + 256 > narr_len(mask)) {
+        fprintf(stderr, "cf_mesh_slice: out of range (at=%lld dst=%lld base=%lld mask=%lld)\n", (long long)at, (long long)narr_len(dst), (long long)base, (long long)narr_len(mask));
+        abort();
+    }
+    int64_t m[256];
+    memcpy(m, (const int64_t *)narr_data(mask) + base, 256 * sizeof(int64_t));
+    const float *tab = (const float *)narr_data(layers);
+    int64_t ntab = narr_len(layers);
+    float *o = (float *)narr_data(dst) + at;
+    int64_t written = 0;
+    for (int64_t i = 0; i < 256; i++) {
+        int64_t key = m[i];
+        if (key == 0) continue;
+        int64_t u = i % 16, v = i / 16;
+        int64_t wd = 1;
+        while (u + wd < 16 && m[u + wd + 16 * v] == key) wd++;
+        int64_t h = 1;
+        for (;;) {
+            if (v + h >= 16) break;
+            int ok = 1;
+            for (int64_t k = 0; k < wd; k++) if (m[u + k + 16 * (v + h)] != key) { ok = 0; break; }
+            if (!ok) break;
+            h++;
+        }
+        for (int64_t k = 0; k < wd * h; k++) m[u + k % wd + 16 * (v + k / wd)] = 0;
+        cf_quad_into(o + written, d, sy, a, u, v, wd, h, key, ox, oz, tab, ntab);
+        written += 54;
+    }
+    o[256 * 54] = (float)written;
+    return dst;
+}
+
+static void cf_quad_into(float *o, int64_t d, int64_t sy, int64_t a, int64_t u, int64_t v, int64_t wd, int64_t h,
+                         int64_t key, double ox, double oz, const float *tab, int64_t ntab) {
+    int64_t id = key % 256;
+    int64_t c0 = (key / 256) % 1024, c1 = (key / 262144) % 1024, c2 = (key / 268435456) % 1024, c3 = (key / 274877906944LL) % 1024;
+    int64_t sp = (key / 281474976710656LL) % 256;
+    double layer;
+    if (id >= 26 && id <= 46 && sp > 0) {
+        int64_t k = (id - 26) / 3;
+        int64_t idx = 1536 + k * 6 + (sp - 1);
+        if (idx >= ntab) { fprintf(stderr, "cf_mesh_quad: layer table too short (%lld)\n", (long long)ntab); abort(); }
+        layer = tab[idx];
+    } else {
+        int64_t idx = id * 6 + d;
+        if (idx >= ntab) { fprintf(stderr, "cf_mesh_quad: layer table too short (%lld)\n", (long long)ntab); abort(); }
+        layer = tab[idx];
+    }
+    double s0 = cf_pack_shade(cf_corner_sky(c0), cf_corner_blk(c0));
+    double s1 = cf_pack_shade(cf_corner_sky(c1), cf_corner_blk(c1));
+    double s2 = cf_pack_shade(cf_corner_sky(c2), cf_corner_blk(c2));
+    double s3 = cf_pack_shade(cf_corner_sky(c3), cf_corner_blk(c3));
+    double fw = (double)wd, fh = (double)h;
+    /* the four corners in quad_sized's order, its uv extents, and its shades */
+    double X[4], Y[4], Z[4], S[4], uw, vh;
+    if (d <= 1) {
+        double x = ox + (double)u, z = oz + (double)v, y = (double)(sy * 16 + a);
+        double x1 = x + fw, z1 = z + fh;
+        if (d == 0) {
+            X[0]=x;  Y[0]=y+1.0; Z[0]=z;   X[1]=x;  Y[1]=y+1.0; Z[1]=z1;  X[2]=x1; Y[2]=y+1.0; Z[2]=z1;  X[3]=x1; Y[3]=y+1.0; Z[3]=z;
+            uw = fh; vh = fw; S[0]=s0; S[1]=s3; S[2]=s2; S[3]=s1;
+        } else {
+            X[0]=x;  Y[0]=y; Z[0]=z;   X[1]=x1; Y[1]=y; Z[1]=z;  X[2]=x1; Y[2]=y; Z[2]=z1;  X[3]=x; Y[3]=y; Z[3]=z1;
+            uw = fw; vh = fh; S[0]=s0; S[1]=s1; S[2]=s2; S[3]=s3;
+        }
+    } else if (d <= 3) {
+        double x = ox + (double)a, z = oz + (double)u, y = (double)(sy * 16 + v);
+        double z1 = z + fw, y1 = y + fh;
+        if (d == 2) {
+            X[0]=x+1.0; Y[0]=y;  Z[0]=z;   X[1]=x+1.0; Y[1]=y1; Z[1]=z;  X[2]=x+1.0; Y[2]=y1; Z[2]=z1;  X[3]=x+1.0; Y[3]=y; Z[3]=z1;
+            uw = fh; vh = fw; S[0]=s0; S[1]=s3; S[2]=s2; S[3]=s1;
+        } else {
+            X[0]=x; Y[0]=y;  Z[0]=z1;  X[1]=x; Y[1]=y1; Z[1]=z1;  X[2]=x; Y[2]=y1; Z[2]=z;  X[3]=x; Y[3]=y; Z[3]=z;
+            uw = fh; vh = fw; S[0]=s1; S[1]=s2; S[2]=s3; S[3]=s0;
+        }
+    } else {
+        double x = ox + (double)u, z = oz + (double)a, y = (double)(sy * 16 + v);
+        double x1 = x + fw, y1 = y + fh;
+        if (d == 4) {
+            X[0]=x1; Y[0]=y;  Z[0]=z+1.0;  X[1]=x1; Y[1]=y1; Z[1]=z+1.0;  X[2]=x; Y[2]=y1; Z[2]=z+1.0;  X[3]=x; Y[3]=y; Z[3]=z+1.0;
+            uw = fh; vh = fw; S[0]=s1; S[1]=s2; S[2]=s3; S[3]=s0;
+        } else {
+            X[0]=x; Y[0]=y;  Z[0]=z;  X[1]=x; Y[1]=y1; Z[1]=z;  X[2]=x1; Y[2]=y1; Z[2]=z;  X[3]=x1; Y[3]=y; Z[3]=z;
+            uw = fh; vh = fw; S[0]=s0; S[1]=s3; S[2]=s2; S[3]=s1;
+        }
+    }
+    double face = (double)d;
+    int flip = cf_brightness(S[0]) + cf_brightness(S[2]) < cf_brightness(S[1]) + cf_brightness(S[3]);
+    if (flip) {
+        cf_vert(o + 0,  X[1], Y[1], Z[1], uw,  0.0, layer, S[1], face);
+        cf_vert(o + 9,  X[2], Y[2], Z[2], uw,  vh,  layer, S[2], face);
+        cf_vert(o + 18, X[3], Y[3], Z[3], 0.0, vh,  layer, S[3], face);
+        cf_vert(o + 27, X[1], Y[1], Z[1], uw,  0.0, layer, S[1], face);
+        cf_vert(o + 36, X[3], Y[3], Z[3], 0.0, vh,  layer, S[3], face);
+        cf_vert(o + 45, X[0], Y[0], Z[0], 0.0, 0.0, layer, S[0], face);
+    } else {
+        cf_vert(o + 0,  X[0], Y[0], Z[0], 0.0, 0.0, layer, S[0], face);
+        cf_vert(o + 9,  X[1], Y[1], Z[1], uw,  0.0, layer, S[1], face);
+        cf_vert(o + 18, X[2], Y[2], Z[2], uw,  vh,  layer, S[2], face);
+        cf_vert(o + 27, X[0], Y[0], Z[0], 0.0, 0.0, layer, S[0], face);
+        cf_vert(o + 36, X[2], Y[2], Z[2], uw,  vh,  layer, S[2], face);
+        cf_vert(o + 45, X[3], Y[3], Z[3], 0.0, vh,  layer, S[3], face);
+    }
+}
+
+/* ── Relight box helpers: the light field is x + 128 * (z + 128 * y) ─────────
+ * Zero the box [x0..x1] x [y0..y1] x [z0..z1] of a light field: one memset per
+ * row. Same rc == 1 contract as cf_u8_blit. Light.zero_box_go did this a byte
+ * at a time; a tree's relight clears ~35k voxels twice (sky and block light). */
+void *cf_u8_zero_box(void *a, int64_t x0, int64_t x1, int64_t y0, int64_t y1, int64_t z0, int64_t z1) {
+    int64_t rc = *(int64_t *)a;
+    if (rc != 1) { fprintf(stderr, "cf_u8_zero_box: field is shared (rc=%lld); refusing to write in place\n", (long long)rc); abort(); }
+    if (x0 < 0 || y0 < 0 || z0 < 0 || x1 >= 128 || y1 >= 256 || z1 >= 128 || narr_len(a) < 4194304) {
+        fprintf(stderr, "cf_u8_zero_box: out of range\n"); abort();
+    }
+    unsigned char *d = (unsigned char *)narr_data(a);
+    for (int64_t y = y0; y <= y1; y++)
+        for (int64_t z = z0; z <= z1; z++)
+            memset(d + x0 + 128 * (z + 128 * y), 0, (size_t)(x1 - x0 + 1));
+    return a;
+}
+
+/* Mark, in a 1024-int marks array (slot cx + 8 * cz + 64 * sy), every chunk
+ * section in which the two light fields differ inside the box. Light.mark_box
+ * compared a voxel at a time in March; here a row is one memcmp and only a
+ * differing row is walked. [marks] is consumed and returned; [a] and [b] are
+ * read only. */
+void *cf_mark_box(void *marks, void *a, void *b, int64_t x0, int64_t x1, int64_t y0, int64_t y1, int64_t z0, int64_t z1) {
+    int64_t rc = *(int64_t *)marks;
+    if (rc != 1) { fprintf(stderr, "cf_mark_box: marks are shared (rc=%lld); refusing to write in place\n", (long long)rc); abort(); }
+    if (x0 < 0 || y0 < 0 || z0 < 0 || x1 >= 128 || y1 >= 256 || z1 >= 128 || narr_len(marks) < 1024) {
+        fprintf(stderr, "cf_mark_box: out of range\n"); abort();
+    }
+    int64_t need = x1 + 128 * (z1 + 128 * y1) + 1;
+    if (narr_len(a) < need || narr_len(b) < need) { fprintf(stderr, "cf_mark_box: fields too short\n"); abort(); }
+    const unsigned char *pa = (const unsigned char *)narr_data(a);
+    const unsigned char *pb = (const unsigned char *)narr_data(b);
+    int64_t *m = (int64_t *)narr_data(marks);
+    for (int64_t y = y0; y <= y1; y++)
+        for (int64_t z = z0; z <= z1; z++) {
+            int64_t row = x0 + 128 * (z + 128 * y);
+            if (memcmp(pa + row, pb + row, (size_t)(x1 - x0 + 1)) == 0) continue;
+            for (int64_t x = x0; x <= x1; x++)
+                if (pa[row + x - x0] != pb[row + x - x0]) m[(x / 16) + 8 * (z / 16) + 64 * (y / 16)] = 1;
+        }
+    return marks;
 }
 
 /* The u8 twin of cf_f32_blit, for the skylight field: copy n bytes from
@@ -1389,4 +1723,12 @@ static void cf_shift_particles(int64_t dx, int64_t dz) {
             g_nsprings--;
         } else i++;
     }
+}
+
+/* Current resident set size in bytes (the allocation gauge's byte view). */
+int64_t cf_rss_bytes(void) {
+    struct mach_task_basic_info info;
+    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO, (task_info_t)&info, &count) != KERN_SUCCESS) return -1;
+    return (int64_t)info.resident_size;
 }

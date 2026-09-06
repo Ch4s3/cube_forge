@@ -865,6 +865,17 @@ mod CubeForge.Biome do
     end
   end
 
+  doc """
+  Release a field the caller is done with, array by array. A field cell that
+  dies by a bare decrement is freed shallowly by this toolchain -- no deep drop
+  is synthesized for it (GAPS G79) -- and its nine arrays leak, 350 KB every
+  frame the biome slice ran. Destructuring extracts the arrays as bindings,
+  and a binding that dies is released properly.
+  """
+  fn release(f : Field) : Int do
+    match f do Field(hs, ws, ta, ma, bs, hold, tb, ds, act) -> NativeArray.length_u8(hs) + NativeArray.length_u8(ws) + NativeArray.length_float(ta) + NativeArray.length_float(ma) + NativeArray.length_u8(bs) + NativeArray.length_u8(hold) + NativeArray.length_float(tb) + NativeArray.length_u8(ds) + NativeArray.length_u8(act) end
+  end
+
   doc "Eased temperature / moisture / water flag / distance-cap for one column, for diagnostics."
   fn debug_axes(f : Field, wx : Int, wz : Int) : String do
     match f do

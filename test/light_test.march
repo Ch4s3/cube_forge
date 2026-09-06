@@ -15,7 +15,7 @@ mod CubeForge.Test.Light do
   -- An 8x8 world of entirely empty chunks (no terrain), so seeding tests see
   -- only the blocks they place themselves.
   pfn air_world() : CubeForge.World.World do
-    CubeForge.World.rebuild_occupancy(CubeForge.World.World(Array.from_list(air_chunks(63, Nil)), L.new(), L.new(), L.new(), CubeForge.World.shown_new(8), 8, CubeForge.Model.build(), 0, 0, NativeArray.make_u8(64, 0), Nil, Nil, Nil, NativeArray.make_int(64, 0)))
+    CubeForge.World.rebuild_occupancy(CubeForge.World.of_chunk_list(air_chunks(63, Nil), 8))
   end
 
 
@@ -30,7 +30,7 @@ mod CubeForge.Test.Light do
     if i < 0 do acc else slab_chunks(i - 1, y, Cons(slab_cells(C.new(), 0, y), acc)) end
   end
   pfn slab_world(y : Int) : CubeForge.World.World do
-    CubeForge.World.rebuild_occupancy(CubeForge.World.World(Array.from_list(slab_chunks(63, y, Nil)), L.new(), L.new(), L.new(), CubeForge.World.shown_new(8), 8, CubeForge.Model.build(), 0, 0, NativeArray.make_u8(64, 0), Nil, Nil, Nil, NativeArray.make_int(64, 0)))
+    CubeForge.World.rebuild_occupancy(CubeForge.World.of_chunk_list(slab_chunks(63, y, Nil), 8))
   end
 
 
@@ -58,7 +58,7 @@ mod CubeForge.Test.Light do
       let lx = i % 16
       let ly = i / 256
       let lz = (i / 16) % 16
-      let want = if L.is_opaque(C.get_idx(c, i)) do L.occ_solid() else 0 end
+      let want = L.occ_value(C.get_idx(c, i))
       if NativeArray.get_u8(o, L.occ_index(16 * cx + lx, ly, 16 * cz + lz)) != want do i
       else occ_mismatch(o, c, cx, cz, i + 1) end
     end
@@ -271,6 +271,42 @@ mod CubeForge.Test.Light do
     end
   end
 
+  pfn fill_go(a : NativeU8Arr, x0 : Int, x1 : Int, y0 : Int, y1 : Int, z0 : Int, z1 : Int, v : Int) : NativeU8Arr do
+    fill_cells(a, x0, x1, y0, y1, z0, z1, v, 0, (x1 - x0 + 1) * (y1 - y0 + 1) * (z1 - z0 + 1))
+  end
+  pfn fill_cells(a : NativeU8Arr, x0 : Int, x1 : Int, y0 : Int, y1 : Int, z0 : Int, z1 : Int, v : Int, i : Int, n : Int) : NativeU8Arr do
+    if i >= n do a
+    else
+      let w = x1 - x0 + 1
+      let d = z1 - z0 + 1
+      fill_cells(NativeArray.set_u8(a, L.index(x0 + i % w, y0 + i / (w * d), z0 + (i / w) % d), v), x0, x1, y0, y1, z0, z1, v, i + 1, n)
+    end
+  end
+  pfn same_field(a : NativeU8Arr, b : NativeU8Arr, i : Int) : Bool do
+    if i >= 4194304 do true else if NativeArray.get_u8(a, i) != NativeArray.get_u8(b, i) do false else same_field(a, b, i + 1) end end
+  end
+  pfn same_marks(a : NativeIntArr, b : NativeIntArr, i : Int) : Bool do
+    if i >= 1024 do true else if NativeArray.get_int(a, i) != NativeArray.get_int(b, i) do false else same_marks(a, b, i + 1) end end
+  end
+
+  describe "Light box helpers in the shim" do
+    test "zero_box and mark_box agree with the byte-at-a-time references" do
+      let a = L.new()
+      -- a lit block of the field, then a box cleared out of its middle
+      let lit = fill_go(a, 40, 60, 70, 90, 40, 60, 12)
+      let fast = L.zero_box(fill_go(L.new(), 40, 60, 70, 90, 40, 60, 12), 45, 55, 75, 85, 45, 55)
+      let slow = L.zero_box_slow(fill_go(L.new(), 40, 60, 70, 90, 40, 60, 12), 45, 55, 75, 85, 45, 55)
+      Test.assert_true(same_field(fast, slow, 0), "the cleared fields agree")
+      Test.assert_eq_int(L.get(fast, 50, 80, 50), 0, "inside the box: cleared")
+      Test.assert_eq_int(L.get(fast, 42, 80, 50), 12, "outside it: kept")
+      let mf = L.mark_box_fast(L.marks_new(), lit, fast, 30, 70, 60, 100, 30, 70)
+      let ms = L.mark_box_slow(L.marks_new(), lit, fast, 30, 70, 60, 100, 30, 70)
+      Test.assert_true(same_marks(mf, ms, 0), "the marks agree")
+      Test.assert_eq_int(NativeArray.get_int(mf, L.mark_slot(3, 3, 5)), 1, "the section holding the box is marked")
+      Test.assert_eq_int(NativeArray.get_int(mf, L.mark_slot(0, 0, 0)), 0, "a far section is not")
+    end
+  end
+
   describe "Mesher.should_flip" do
     test "flips only when the default diagonal is the darker pair" do
       Test.assert_false(CubeForge.Mesher.should_flip(1.0, 1.0, 1.0, 1.0), "uniform does not flip")
@@ -292,7 +328,7 @@ mod CubeForge.Test.Light do
       -- sideways: above the slab is open sky, below it is sealed.
       let w = CubeForge.World.relight_all(slab_world(8))
       let c = CubeForge.World.chunk_at(w, 2, 2)
-      let b = CubeForge.Mesher.mesh_section_opaque(c, c, c, c, c, CubeForge.World.light(w), CubeForge.World.block_light(w), CubeForge.World.shown(w), CubeForge.World.occupancy(w), 0, 32.0, 32.0, CubeForge.Model.build())
+      let b = CubeForge.Mesher.mesh_section_opaque(c, c, c, c, c, CubeForge.World.light(w), CubeForge.World.block_light(w), CubeForge.World.shown(w), CubeForge.World.occupancy(w), 0, 32.0, 32.0, CubeForge.World.default_models())
       let n = CubeForge.Mesher.vertex_count(b)
       Test.assert_true(n > 0, "the slab meshed to something")
       -- face 0 is +y (the sunlit top), face 1 is -y (the sealed underside)
@@ -303,7 +339,7 @@ mod CubeForge.Test.Light do
     test "opening a shaft lights the ceiling around it" do
       let w0 = CubeForge.World.relight_all(CubeForge.World.set_block(slab_world(8), 34, 8, 34, 0))
       let c = CubeForge.World.chunk_at(w0, 2, 2)
-      let b = CubeForge.Mesher.mesh_section_opaque(c, c, c, c, c, CubeForge.World.light(w0), CubeForge.World.block_light(w0), CubeForge.World.shown(w0), CubeForge.World.occupancy(w0), 0, 32.0, 32.0, CubeForge.Model.build())
+      let b = CubeForge.Mesher.mesh_section_opaque(c, c, c, c, c, CubeForge.World.light(w0), CubeForge.World.block_light(w0), CubeForge.World.shown(w0), CubeForge.World.occupancy(w0), 0, 32.0, 32.0, CubeForge.World.default_models())
       let n = CubeForge.Mesher.vertex_count(b)
       -- the underside is no longer uniformly black: light now reaches it
       Test.assert_true(shade_of_face(b, 1.0, 0, n) >= 0.0, "underside still meshes")
@@ -325,7 +361,7 @@ mod CubeForge.Test.Light do
       -- water is transparent to light, so it must not cast a shadow
       let ww = CubeForge.World.set_block(slab_world(8), 40, 20, 40, C.water())
       let wo = L.occupancy(ww)
-      Test.assert_eq_int(NativeArray.get_u8(wo, L.occ_index(40, 20, 40)), 0, "water does not occlude")
+      Test.assert_true(NativeArray.get_u8(wo, L.occ_index(40, 20, 40)) != L.occ_solid(), "water does not occlude: its byte is its opacity, not solid")
       Test.assert_true(NativeArray.get_u8(o, L.occ_index(64, 0, 64)) == L.occ_solid(), "bedrock depth of real terrain occludes")
     end
 
@@ -513,6 +549,34 @@ mod CubeForge.Test.Light do
       Test.assert_eq_int(first_difference(CubeForge.World.block_light(w2), L.flood_block(w1)), -1, "block light equals full re-flood")
       Test.assert_eq_int(unmarked_go(CubeForge.World.block_light(w0), CubeForge.World.block_light(w2), CubeForge.World.relit_marks(r), 0), -1, "block-light changes are marked")
       Test.assert_eq_int(unmarked_go(CubeForge.World.light(w0), CubeForge.World.light(w2), CubeForge.World.relit_marks(r), 0), -1, "skylight changes are marked")
+    end
+  end
+
+
+  describe "Light relight reach" do
+    test "an edit deep in a dim gallery matches a full re-flood with a box sized to its light" do
+      -- the gallery under the slab is lit 14, 13, ... from the shaft at x = 40
+      let w0 = CubeForge.World.relight_all(CubeForge.World.set_block(slab_world(100), 40, 100, 40, 0))
+      Test.assert_eq_int(CubeForge.World.light_at(w0, 50, 99, 40), 5, "ten steps along the gallery")
+      Test.assert_eq_int(L.reach(CubeForge.World.light(w0), 50, 99, 40, 0), 6, "reach is the brightest neighbour")
+      let w1 = CubeForge.World.set_block(w0, 50, 99, 40, 3)
+      let inc = L.relight_at(CubeForge.World.light(w1), w1, 50, 99, 40)
+      Test.assert_eq_int(first_difference(inc, L.flood(w1)), -1, "placing in the dim: incremental equals full re-flood")
+      let w2 = CubeForge.World.set_block(w1, 50, 99, 40, 0)
+      let inc2 = L.relight_at(inc, w2, 50, 99, 40)
+      Test.assert_eq_int(first_difference(inc2, L.flood(w2)), -1, "breaking it again: incremental equals full re-flood")
+    end
+    test "a block-light edit beside dim mycelium uses a small box and still matches" do
+      let w0 = CubeForge.World.relight_all(CubeForge.World.set_block(air_world(), 40, 100, 40, C.myc_id(1, 1)))
+      Test.assert_eq_int(CubeForge.World.block_light_at(w0, 40, 100, 40), 3, "dim mycelium glows 3")
+      let w1 = CubeForge.World.set_block(w0, 42, 100, 40, 3)
+      Test.assert_eq_int(L.reach(CubeForge.World.block_light(w0), 42, 100, 40, 0), 2, "two steps from a 3")
+      let inc = L.relit_field(L.relight_block_marked(CubeForge.World.block_light(w1), w1, 42, 100, 40))
+      Test.assert_eq_int(first_difference(inc, L.flood_block(w1)), -1, "incremental equals full re-flood")
+      let w2 = CubeForge.World.set_block(w1, 45, 100, 40, C.glow_cap())
+      Test.assert_eq_int(L.reach(inc, 45, 100, 40, L.emission(C.glow_cap())), 10, "a new emitter sets the reach")
+      let inc2 = L.relit_field(L.relight_block_marked(inc, w2, 45, 100, 40))
+      Test.assert_eq_int(first_difference(inc2, L.flood_block(w2)), -1, "placing a cap in the dark: incremental equals full re-flood")
     end
   end
 

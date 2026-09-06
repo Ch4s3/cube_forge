@@ -51,8 +51,8 @@ mod CubeForge.Test.Stream do
       let x = 112 + i % 16
       let z = i * 5 % 128
       let y = W.surface_y(w, x, z) - 1
-      -- the field says what the block says: solid ground occupies, water under a sea surface does not
-      let want = if L.occludes(W.block_at(w, x, y, z)) do L.occ_solid() else 0 end
+      -- the field says what the block says: solid ground occupies, water under a sea surface has its opacity
+      let want = L.occ_value(W.block_at(w, x, y, z))
       if y < 1 || NativeArray.get_u8(o, L.occ_index(x, y, z)) == want do band_occ(w, o, i + 1) else false end
     end
   end

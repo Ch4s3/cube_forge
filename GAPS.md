@@ -1426,3 +1426,57 @@ reads in one-line helpers is in place. See RESULTS.md, the perf pass of
 2 for as long as it lives, so a per-iteration pair return makes every write
 in the next iteration a copy (G12/G68 restated for this shape).
 
+### G79 — a library-defined type is freed shallowly: no deep drop is synthesized
+
+The drop pass looks a type up by the name a use site carries (the short
+name, inside the defining module or through an alias) against definitions
+registered under qualified names, exactly. It finds nothing for essentially
+every library-defined variant, so a dying cell of such a type releases only
+the box and leaks every field: in this project the biome and mycelium
+fields, the world, a persistent vector's trie nodes. Repro
+`probes/drop_xmod` (WHICH=1 and 2, 2.1 GB resident for 2 MB live). Fixed on
+the March branch `fix/drop-short-type-names` (`lib/tir/drop.ml`: resolve a
+short name to the one qualified definition that ends in it, Boxed only; a
+collision stays unresolved). Verified: the repro drops to 8 MB. See
+RESULTS.md, "where the frame's memory goes".
+
+### G80 — a closure environment is freed shallowly: every capture leaks
+
+`dec_rc` on a closure value frees the environment cell and never releases
+what it captured. Repro `probes/drop_xmod` WHICH=5: a thousand closures
+capturing a 1 MB array, each called once and dropped, leave 1.07 GB
+resident. Consequence in the stdlib: `Array.set` captures the new element in
+the closures of both its update paths, so every persistent-vector update in
+every program leaks the element (WHICH=4: 339 MB for 4 MB live), which in
+this project is 29 leaked 64 KB chunks a frame. Not fixed: the release site
+sees only `Ptr(Unit)` / a function type, so it needs either a synthesized
+drop per closure type reachable from the environment (a layout change, or a
+table keyed by the code pointer) or a runtime release that knows the capture
+kinds. The ownership convention is otherwise fine: the wrapper for a
+borrowed extern parameter releases it after the call.
+
+### G81 — a named binding unused in one arm of a lifted closure is never released
+
+`lst_set`'s loop bound the element being replaced as `h` and left it unused
+in the arm that replaces it; the compiled arm has no release for `h`, where
+the same arm with `_` for the head gets `dec_rc` on the extracted field.
+Worked around in the stdlib on the same branch (`stdlib/array.march`). The
+general rule for this project until it is fixed: in an arm that discards a
+pattern-bound value, bind it `_`.
+
+### G82. `Array.PVec.get` is a list walk: ~50 hops for a 64-element vector
+- `Array.get` on a 64-element `PVec` computes the tail's length by walking
+  the tail list (32 hops), then `lst_nth` walks up to 31 more in the tail or
+  in a leaf's values list. `Array.lst_nth$List_Chunk$Int` shows in every
+  profile of this project at ~2% of the frame; `World.chunk_at` is one such
+  call, and `World.block_at` pays it per voxel in the light sweep's
+  `give_level`, the water scan, vegetation and fruit.
+- Measured (`probes/pvec_get`, release): get 112 ns average (61 at index 0,
+  154 at index 63), set 860 ns, against 72 / 200 ns for a complete binary
+  tree of 64 leaves in plain March variants.
+- **Done instead:** `lib/cube_forge/tree.march`, a complete binary tree the
+  World keeps its chunks in; `World.chunks` converts to a PVec for the save
+  format. Worst frame 8.2 -> 5.7-6.6 ms, biome field build 228 -> 123 ms
+  (RESULTS). The mesher already took its five chunks as arguments.
+- **Would need:** array-backed leaves and a stored tail length in the stdlib
+  `PVec`, or a fixed-size object array.

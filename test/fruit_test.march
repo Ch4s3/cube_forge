@@ -15,7 +15,7 @@ mod CubeForge.Test.Fruit do
     if i < 0 do acc else flat_chunks(i - 1, Cons(flat_cells(Cf.new(), 0), acc)) end
   end
   pfn flat_world() : CubeForge.World.World do
-    CubeForge.World.World(Array.from_list(flat_chunks(63, Nil)), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), Wf.shown_new(8), 8, CubeForge.Model.build(), 0, 0, NativeArray.make_u8(64, 0), Nil, Nil, Nil, NativeArray.make_int(64, 0))
+    CubeForge.World.of_chunk_list(flat_chunks(63, Nil), 8)
   end
 
   -- Count fruit blocks in the 9x9x12 box above (bx, base, bz).
@@ -31,7 +31,7 @@ mod CubeForge.Test.Fruit do
 
 
   -- shown follows the field: every held column shows its species
-  pfn shown_of(f : CubeForge.Myc.Field, n : Int, i : Int, sh : NativeU8Arr) : NativeU8Arr do
+  pfn shown_of(f : CubeForge.Myc.Net, n : Int, i : Int, sh : NativeU8Arr) : NativeU8Arr do
     if i >= n * n do sh
     else shown_of(f, n, i + 1, NativeArray.set_u8(sh, i, CubeForge.Myc.species_of(f, n, i % n, i / n))) end
   end

@@ -47,7 +47,7 @@ mod CubeForge.World do
     if has_tile(tl, t) do tl else take_go(Cons(t, tl), 4, Nil) end
   end
 
-  type World = World(Array.PVec(CubeForge.Chunk.Chunk), NativeU8Arr, NativeU8Arr, NativeU8Arr, NativeU8Arr, Int, CubeForge.Model.Templates, Int, Int, NativeU8Arr, List(Evicted), List(Evicted), List(CubeForge.Lakes.Tile), NativeIntArr)   -- chunks, skylight field, block-light field, occupancy field, shown species per column, side length in chunks, the model templates the mesher stamps, the window origin in chunks (x, z), the dirty flag per local chunk, the evicted cache, the chunks the last shift restored from it, the lake tiles poured so far (a window touches at most four), the hash each local chunk generated to (0 unknown)
+  type World = World(CubeForge.Tree.Tree(CubeForge.Chunk.Chunk), NativeU8Arr, NativeU8Arr, NativeU8Arr, NativeU8Arr, Int, CubeForge.Model.Templates, Int, Int, NativeU8Arr, List(Evicted), List(Evicted), List(CubeForge.Lakes.Tile), NativeIntArr)   -- chunks, skylight field, block-light field, occupancy field, shown species per column, side length in chunks, the model templates the mesher stamps, the window origin in chunks (x, z), the dirty flag per local chunk, the evicted cache, the chunks the last shift restored from it, the lake tiles poured so far (a window touches at most four), the hash each local chunk generated to (0 unknown)
 
   doc "The LARGEST world side in chunks: what the fixed-width fields (light, occupancy, the shader) are written for. A world's own side is World.side(w), from Noise.size_of its seed, 4..8."
   fn size() : Int do 8 end
@@ -115,12 +115,13 @@ mod CubeForge.World do
   doc "Build the occupancy field from the current blocks."
   fn rebuild_occupancy(w : World) : World do set_occupancy(w, CubeForge.Light.occupancy(w)) end
 
-  doc "Update one voxel of the occupancy field after a block edit."
-  fn set_occupied(w : World, x : Int, y : Int, z : Int, solid : Bool) : World do
-    if x < 0 || x >= 128 || y < 0 || y >= 256 || z < 0 || z >= 128 do w
-    else match w do World(cs, la, lb, o, sh, n, mo, ox, oz, dt, ca, rs, tl, gh) ->
-      World(cs, la, lb, NativeArray.set_u8(o, CubeForge.Light.occ_index(x, y, z), if solid do CubeForge.Light.occ_solid() else 0 end), sh, n, mo, ox, oz, dt, ca, rs, tl, gh) end
-    end
+  -- The occupancy byte of one voxel, kept by set_block and set_cells: every
+  -- block write in the world goes through one of those two, so the field is
+  -- always the blocks' opacity (Light.occ_value) and the light sweep can read
+  -- a neighbour's opacity from it instead of fetching the block (GAPS G82).
+  pfn occ_write(o : NativeU8Arr, x : Int, y : Int, z : Int, id : Int) : NativeU8Arr do
+    if x < 0 || x >= 128 || y < 0 || y >= 256 || z < 0 || z >= 128 do o
+    else NativeArray.set_u8(o, CubeForge.Light.occ_index(x, y, z), CubeForge.Light.occ_value(id)) end
   end
 
   doc "Replace the world's skylight field."
@@ -145,6 +146,8 @@ mod CubeForge.World do
   fn shown_new(n : Int) : NativeU8Arr do NativeArray.make_u8(16 * n * 16 * n, 0) end
   doc "The species each column's surface currently displays (0 = none). The mesher reads it to pick mycelium textures; the fungus migration writes it in step with the block."
   fn shown(w : World) : NativeU8Arr do match w do World(_, _, _, _, sh, _, _, _, _, _, _, _, _, _) -> sh end end
+  doc "The model templates plus the texture layer table, as every World carries them: built once, constant after."
+  fn default_models() : CubeForge.Model.Templates do CubeForge.Model.with_layers(CubeForge.Model.build(), CubeForge.Texture.layer_table()) end
   doc "The model templates the mesher stamps for small mushrooms, fronds and bushes: built once with the world, constant after."
   fn models(w : World) : CubeForge.Model.Templates do match w do World(_, _, _, _, _, _, mo, _, _, _, _, _, _, _) -> mo end end
   fn shown_at(w : World, x : Int, z : Int) : Int do
@@ -166,15 +169,15 @@ mod CubeForge.World do
   end
 
   -- A repaired world together with the sections whose light (either field) changed.
-  type Relit = Relit(World, NativeIntArr)
-  fn relit_world(r : Relit) : World do match r do Relit(w, _) -> w end end
-  fn relit_marks(r : Relit) : NativeIntArr do match r do Relit(_, m) -> m end end
+  type Repaired = Repaired(World, NativeIntArr)
+  fn relit_world(r : Repaired) : World do match r do Repaired(w, _) -> w end end
+  fn relit_marks(r : Repaired) : NativeIntArr do match r do Repaired(_, m) -> m end end
 
   doc "Repair both light fields after an edit at a world coordinate, reporting the union of the sections either moved."
-  fn relight_marked(w : World, x : Int, y : Int, z : Int) : Relit do
+  fn relight_marked(w : World, x : Int, y : Int, z : Int) : Repaired do
     let rs = CubeForge.Light.relight_marked(light(w), w, x, y, z)
     let rb = CubeForge.Light.relight_block_marked(block_light(w), w, x, y, z)
-    Relit(set_block_light(set_light(w, CubeForge.Light.relit_field(rs)), CubeForge.Light.relit_field(rb)),
+    Repaired(set_block_light(set_light(w, CubeForge.Light.relit_field(rs)), CubeForge.Light.relit_field(rb)),
           CubeForge.Light.or_marks(CubeForge.Light.relit_marks(rs), CubeForge.Light.relit_marks(rb)))
   end
 
@@ -188,12 +191,12 @@ mod CubeForge.World do
 
   doc "The chunk at grid (cx, cz); panics if out of bounds."
   fn chunk_at(w : World, cx : Int, cz : Int) : CubeForge.Chunk.Chunk do
-    match w do World(cs, _, _, _, _, n, _, _, _, _, _, _, _, _) -> Array.get(cs, cx + n * cz) end
+    match w do World(cs, _, _, _, _, n, _, _, _, _, _, _, _, _) -> CubeForge.Tree.get(cs, cx + n * cz) end
   end
 
   doc "Replace the chunk at grid (cx, cz)."
   fn set_chunk(w : World, cx : Int, cz : Int, c : CubeForge.Chunk.Chunk) : World do
-    match w do World(cs, la, lb, o, sh, n, mo, ox, oz, dt, ca, rs, tl, gh) -> World(Array.set(cs, cx + n * cz, c), la, lb, o, sh, n, mo, ox, oz, NativeArray.set_u8(dt, cx + n * cz, 1), ca, rs, tl, gh) end
+    match w do World(cs, la, lb, o, sh, n, mo, ox, oz, dt, ca, rs, tl, gh) -> World(CubeForge.Tree.set(cs, cx + n * cz, c), la, lb, o, sh, n, mo, ox, oz, NativeArray.set_u8(dt, cx + n * cz, 1), ca, rs, tl, gh) end
   end
 
   fn floor_div16(v : Int) : Int do if v >= 0 do v / 16 else (v - 15) / 16 end end
@@ -225,8 +228,21 @@ mod CubeForge.World do
       Cons(v, rest) -> apply_cells(C.set_idx(c, v / 256, v % 256), rest)
     end
   end
+  -- The same cells into the occupancy field: a chunk index is lx + 16 * (lz + 16 * ly).
+  pfn occ_cells(o : NativeU8Arr, cx : Int, cz : Int, cells : List(Int)) : NativeU8Arr do
+    match cells do
+      Nil -> o
+      Cons(v, rest) ->
+        let i = v / 256
+        occ_cells(occ_write(o, 16 * cx + i % 16, i / 256, 16 * cz + (i / 16) % 16, v % 256), cx, cz, rest)
+    end
+  end
   fn set_cells(w : World, cx : Int, cz : Int, cells : List(Int)) : World do
-    if in_bounds(w, cx, cz) do set_chunk(w, cx, cz, apply_cells(chunk_at(w, cx, cz), cells)) else w end
+    if !in_bounds(w, cx, cz) do w
+    else match w do World(cs, la, lb, o, sh, n, mo, ox, oz, dt, ca, rs, tl, gh) ->
+      World(CubeForge.Tree.set(cs, cx + n * cz, apply_cells(CubeForge.Tree.get(cs, cx + n * cz), cells)), la, lb, occ_cells(o, cx, cz, cells), sh, n, mo,
+            ox, oz, NativeArray.set_u8(dt, cx + n * cz, 1), ca, rs, tl, gh) end
+    end
   end
 
   -- First column (x + 4096 * z) holding water at sea level, or -1. Used by the scripted swim test.
@@ -292,7 +308,9 @@ mod CubeForge.World do
     let cx = floor_div16(x)
     let cz = floor_div16(z)
     if y < 0 || y >= 256 || !in_bounds(w, cx, cz) do w
-    else set_chunk(w, cx, cz, C.set(chunk_at(w, cx, cz), mod16(x), y, mod16(z), id)) end
+    else match w do World(cs, la, lb, o, sh, n, mo, ox, oz, dt, ca, rs, tl, gh) ->
+      World(CubeForge.Tree.set(cs, cx + n * cz, C.set(CubeForge.Tree.get(cs, cx + n * cz), mod16(x), y, mod16(z), id)), la, lb, occ_write(o, x, y, z, id), sh, n, mo,
+            ox, oz, NativeArray.set_u8(dt, cx + n * cz, 1), ca, rs, tl, gh) end end
   end
 
   -- Grid coordinates in row-major order, as (cx, cz) packed into one Int: cx + n * cz.
@@ -306,10 +324,10 @@ mod CubeForge.World do
     -- the lake table once, read by every chunk (a read only: no copy -- GAPS G68)
     let lk = CubeForge.Lakes.levels(seed, n)
     let chunks = List.pmap_n(coords(n), fn i -> C.generate_lakes(16 * (i % n), 16 * (i / n), seed, lk), workers)
-    let cs = Array.from_list(chunks)
+    let cs = CubeForge.Tree.from_list(chunks, C.new())
     -- what each chunk generated to: the cache's test for "back to pristine"
-    let gh = hashes_in_go(List.pmap_n(coords(n), fn i -> hash_voxels(Array.get(cs, i), 0, 7), workers), NativeArray.make_int(n * n, 0), 0, n * n)
-    World(cs, CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), shown_new(n), n, CubeForge.Model.build(), 0, 0, NativeArray.make_u8(n * n, 0), Nil, Nil, Nil, gh)
+    let gh = hashes_in_go(List.pmap_n(coords(n), fn i -> hash_voxels(CubeForge.Tree.get(cs, i), 0, 7), workers), NativeArray.make_int(n * n, 0), 0, n * n)
+    rebuild_occupancy(World(cs, CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), shown_new(n), n, default_models(), 0, 0, NativeArray.make_u8(n * n, 0), Nil, Nil, Nil, gh))
   end
 
   -- ── The shift ─────────────────────────────────────────────────────────────
@@ -333,13 +351,13 @@ mod CubeForge.World do
       Cons(e, rest) -> uncache_go(rest, cx, cz, if ev_cx(e) == cx && ev_cz(e) == cz do acc else Cons(e, acc) end)
     end
   end
-  pfn shifted_chunk(cs : Array.PVec(CubeForge.Chunk.Chunk), n : Int, i : Int, dx : Int, dz : Int, ox1 : Int, oz1 : Int, seed : Int,
+  pfn shifted_chunk(cs : CubeForge.Tree.Tree(CubeForge.Chunk.Chunk), n : Int, i : Int, dx : Int, dz : Int, ox1 : Int, oz1 : Int, seed : Int,
                     ta : CubeForge.Lakes.Tile, tb : CubeForge.Lakes.Tile, ca : List(Evicted)) : CubeForge.Chunk.Chunk do
     let lx = i % n
     let lz = i / n
     let sx = lx + dx
     let sz = lz + dz
-    if sx >= 0 && sx < n && sz >= 0 && sz < n do Array.get(cs, sx + n * sz)
+    if sx >= 0 && sx < n && sz >= 0 && sz < n do CubeForge.Tree.get(cs, sx + n * sz)
     else
       let cx = ox1 + lx
       let cz = oz1 + lz
@@ -353,7 +371,7 @@ mod CubeForge.World do
   end
   -- The generation hashes after the shift: a moved chunk keeps its hash, a
   -- restored one brings its own, a generated one is hashed now (0.15 ms).
-  pfn shift_hash_go(gh : NativeIntArr, cs1 : Array.PVec(CubeForge.Chunk.Chunk), out : NativeIntArr, n : Int, dx : Int, dz : Int, ox1 : Int, oz1 : Int, ca : List(Evicted), i : Int) : NativeIntArr do
+  pfn shift_hash_go(gh : NativeIntArr, cs1 : CubeForge.Tree.Tree(CubeForge.Chunk.Chunk), out : NativeIntArr, n : Int, dx : Int, dz : Int, ox1 : Int, oz1 : Int, ca : List(Evicted), i : Int) : NativeIntArr do
     if i >= n * n do out
     else
       let sx = i % n + dx
@@ -361,7 +379,7 @@ mod CubeForge.World do
       let v = if sx >= 0 && sx < n && sz >= 0 && sz < n do NativeArray.get_int(gh, sx + n * sz)
               else match cached_go(ca, ox1 + i % n, oz1 + i / n) do
                 Cons(e, _) -> ev_hash(e)
-                Nil -> hash_voxels(Array.get(cs1, i), 0, 7)
+                Nil -> hash_voxels(CubeForge.Tree.get(cs1, i), 0, 7)
               end end
       shift_hash_go(gh, cs1, NativeArray.set_int(out, i, v), n, dx, dz, ox1, oz1, ca, i + 1)
     end
@@ -389,7 +407,7 @@ mod CubeForge.World do
   end
   -- The chunks leaving the window this shift that are dirty, as cache entries
   -- with the column blob the caller supplied for their local index.
-  pfn evict_go(cs : Array.PVec(CubeForge.Chunk.Chunk), dt : NativeU8Arr, n : Int, dx : Int, dz : Int, ox : Int, oz : Int, blobs : List(Blob), i : Int, acc : List(Evicted), gh : NativeIntArr) : List(Evicted) do
+  pfn evict_go(cs : CubeForge.Tree.Tree(CubeForge.Chunk.Chunk), dt : NativeU8Arr, n : Int, dx : Int, dz : Int, ox : Int, oz : Int, blobs : List(Blob), i : Int, acc : List(Evicted), gh : NativeIntArr) : List(Evicted) do
     if i >= n * n do acc
     else
       -- source i leaves when no destination maps to it
@@ -400,8 +418,8 @@ mod CubeForge.World do
       else
         -- dirty, but back at its generation? then it regenerates and is dropped
         let g = NativeArray.get_int(gh, i)
-        if g != 0 && hash_voxels(Array.get(cs, i), 0, 7) == g do evict_go(cs, dt, n, dx, dz, ox, oz, blobs, i + 1, acc, gh)
-        else evict_go(cs, dt, n, dx, dz, ox, oz, blobs, i + 1, Cons(Evicted(ox + i % n, oz + i / n, Array.get(cs, i), blob_for(blobs, i), g), acc), gh) end
+        if g != 0 && hash_voxels(CubeForge.Tree.get(cs, i), 0, 7) == g do evict_go(cs, dt, n, dx, dz, ox, oz, blobs, i + 1, acc, gh)
+        else evict_go(cs, dt, n, dx, dz, ox, oz, blobs, i + 1, Cons(Evicted(ox + i % n, oz + i / n, CubeForge.Tree.get(cs, i), blob_for(blobs, i), g), acc), gh) end
       end
     end
   end
@@ -472,7 +490,7 @@ mod CubeForge.World do
         let tl2 = remember_tile(tl1, tb)
         let ca1 = evict_go(cs, dt, n, dx, dz, ox, oz, blobs, 0, ca, gh)
         let rs = restored_go(ca1, n, dx, dz, ox1, oz1, 0, Nil)
-        let cs1 = Array.from_list(List.pmap_n(coords(n), fn i -> shifted_chunk(cs, n, i, dx, dz, ox1, oz1, seed, ta, tb, ca1), workers))
+        let cs1 = CubeForge.Tree.from_list(List.pmap_n(coords(n), fn i -> shifted_chunk(cs, n, i, dx, dz, ox1, oz1, seed, ta, tb, ca1), workers), C.new())
         let c = 16 * n
         let sh1 = restore_shown_go(shift_shown_go(sh, NativeArray.make_u8(c * c, 0), c, 16 * dx, 16 * dz, 0), rs, n, ox1, oz1)
         let dt1 = shift_dirty_go(dt, NativeArray.make_u8(n * n, 0), n, dx, dz, ox1, oz1, ca1, 0)
@@ -486,16 +504,20 @@ mod CubeForge.World do
     end
   end
 
-  doc "A world over chunks read from a save, with empty light and occupancy fields (rebuilt by the caller)."
+  doc "A world over chunks read from a save, with empty light fields (rebuilt by the caller); the occupancy field is built here, as every constructor does."
   fn from_chunks(chunks : Array.PVec(CubeForge.Chunk.Chunk), n : Int) : World do
-    World(chunks, CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), shown_new(n), n, CubeForge.Model.build(), 0, 0, NativeArray.make_u8(n * n, 0), Nil, Nil, Nil, NativeArray.make_int(n * n, 0))
+    rebuild_occupancy(World(CubeForge.Tree.from_list(Array.to_list(chunks), C.new()), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), shown_new(n), n, default_models(), 0, 0, NativeArray.make_u8(n * n, 0), Nil, Nil, Nil, NativeArray.make_int(n * n, 0)))
   end
-  doc "The chunk array, in grid order."
-  fn chunks(w : World) : Array.PVec(CubeForge.Chunk.Chunk) do match w do World(cs, _, _, _, _, _, _, _, _, _, _, _, _, _) -> cs end end
+  doc "The chunk array, in grid order, as a PVec for the save format and tests. The World itself keeps a Tree (GAPS G82); this converts."
+  fn chunks(w : World) : Array.PVec(CubeForge.Chunk.Chunk) do match w do World(cs, _, _, _, _, _, _, _, _, _, _, _, _, _) -> Array.from_list(CubeForge.Tree.to_list(cs)) end end
+  doc "The world over a list of chunks in grid order: the constructor tests use."
+  fn of_chunk_list(chunks : List(CubeForge.Chunk.Chunk), n : Int) : World do
+    rebuild_occupancy(World(CubeForge.Tree.from_list(chunks, C.new()), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), shown_new(n), n, default_models(), 0, 0, NativeArray.make_u8(n * n, 0), Nil, Nil, Nil, NativeArray.make_int(n * n, 0)))
+  end
 
   fn generate_scalar(n : Int, seed : Int, workers : Int) : World do
     let chunks = List.pmap_n(coords(n), fn i -> C.generate_scalar(16 * (i % n), 16 * (i / n), seed), workers)
-    World(Array.from_list(chunks), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), shown_new(n), n, CubeForge.Model.build(), 0, 0, NativeArray.make_u8(n * n, 0), Nil, Nil, Nil, NativeArray.make_int(n * n, 0))
+    rebuild_occupancy(World(CubeForge.Tree.from_list(chunks, C.new()), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), shown_new(n), n, default_models(), 0, 0, NativeArray.make_u8(n * n, 0), Nil, Nil, Nil, NativeArray.make_int(n * n, 0)))
   end
 
   -- A rolling hash over every voxel of every chunk. Four million reads, so this

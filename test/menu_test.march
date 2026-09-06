@@ -14,7 +14,9 @@ mod CubeForge.Test.Menu do
     else false end end
   end
   pfn slots_page() : CubeForge.Menu.Menu do Menu.set_page(Menu.new(7, Sx.defaults()), Menu.page_slots()) end
-  pfn settings_page() : CubeForge.Menu.Menu do Menu.set_page(Menu.new(7, Sx.defaults()), Menu.page_settings()) end
+  pfn settings_page() : CubeForge.Menu.Menu do Menu.set_page(Menu.new(7, Sx.defaults()), Menu.page_graphics()) end
+  pfn hub() : CubeForge.Menu.Menu do Menu.set_page(Menu.new(7, Sx.defaults()), Menu.page_settings()) end
+  pfn sound_page() : CubeForge.Menu.Menu do Menu.set_page(Menu.new(7, Sx.defaults()), Menu.page_sound()) end
   pfn right_edge(m : CubeForge.Menu.Menu, i : Int) : Float do Menu.item_x0(m, i) +. Menu.item_w(m, i) end
   pfn with_slot(m : CubeForge.Menu.Menu, slot : Int, seed : Int, at : Int) : CubeForge.Menu.Menu do
     Menu.set_slots(m, Cons(CubeForge.Save.SlotInfo(slot, seed, at), Nil))
@@ -213,6 +215,34 @@ mod CubeForge.Test.Menu do
     end
   end
 
+  describe "settings hub and sound page" do
+    test "the hub has GRAPHICS, SOUND and BACK, laid out like the main page" do
+      let h = hub()
+      Test.assert_eq_int(Menu.items(h), 3, "three")
+      Test.assert_true(centres_ok(h, 0), "centres hit")
+      Test.assert_eq_str(Menu.label(h, Menu.hub_graphics()), "GRAPHICS", "graphics")
+      Test.assert_eq_str(Menu.label(h, Menu.hub_sound()), "SOUND", "sound")
+      Test.assert_eq_str(Menu.label(h, Menu.item_back(h)), "BACK", "back")
+      Test.assert_true(!Menu.has_seed_field(h), "no seed field")
+      Test.assert_true(Menu.item_y0(h, Menu.item_back(h)) > Menu.panel_y0(h), "BACK inside the panel")
+      Test.assert_eq_int(Menu.page(Menu.escape(h)), Menu.page_main(), "escape from the hub goes to main")
+      Test.assert_eq_int(Menu.back_page(h), Menu.page_main(), "BACK from the hub goes to main")
+    end
+    test "the sound page edits the three volume fields" do
+      let sp = sound_page()
+      Test.assert_eq_int(Menu.items(sp), Sx.sound_fields() * 3 + 1, "three rows and BACK")
+      Test.assert_true(centres_ok(sp, 0), "centres hit")
+      Test.assert_eq_int(Menu.field_of(sp, Menu.settings_item(0, Menu.part_body())), Sx.field_master(), "first row is master")
+      Test.assert_eq_str(Menu.label(sp, Menu.settings_item(2, Menu.part_body())), "MUSIC", "third row is music")
+      Test.assert_eq_str(Menu.value_label(sp, Menu.settings_item(0, Menu.part_body())), "100", "value")
+      let stepped = Menu.click(sp, Menu.settings_item(0, Menu.part_right()))
+      Test.assert_eq_int(Sx.value(Menu.settings(stepped), Sx.field_master()), 0, "100 wraps to OFF")
+      Test.assert_eq_int(Sx.value(Menu.settings(stepped), Sx.field_fullscreen()), 0, "graphics untouched")
+      Test.assert_true(Menu.item_y0(sp, Menu.item_back(sp)) > Menu.panel_y0(sp), "BACK inside the shorter panel")
+      Test.assert_eq_int(Menu.back_page(sp), Menu.page_settings(), "BACK goes to the hub")
+    end
+  end
+
   describe "settings page" do
     test "the main page has four items" do
       let m = Menu.new(7, Sx.defaults())
@@ -223,7 +253,7 @@ mod CubeForge.Test.Menu do
     test "every box's own centre resolves back to it, and BACK is last" do
       let sp = settings_page()
       Test.assert_true(centres_ok(sp, 0), "settings page")
-      Test.assert_eq_int(Menu.items(sp), Sx.fields() * 3 + 1, "three per row and BACK")
+      Test.assert_eq_int(Menu.items(sp), Sx.graphics_fields() * 3 + 1, "three per row and BACK")
       Test.assert_eq_str(Menu.label(sp, Menu.item_back(sp)), "BACK", "back")
     end
     test "the three boxes of a row are disjoint and inside the panel" do
@@ -260,7 +290,7 @@ mod CubeForge.Test.Menu do
       Test.assert_eq_str(Menu.value_label(sp, Menu.settings_item(4, Menu.part_body())), "FAILED", "failed")
       Test.assert_eq_str(Menu.value_label(sp, Menu.settings_item(3, Menu.part_body())), "ON", "other rows unchanged")
       Test.assert_eq_str(Menu.value_label(Menu.expire_status(sp, 160), Menu.settings_item(4, Menu.part_body())), "HIGH", "gone at 60")
-      Test.assert_eq_int(Menu.page(Menu.escape(sp)), Menu.page_main(), "escape goes back")
+      Test.assert_eq_int(Menu.page(Menu.escape(sp)), Menu.page_settings(), "escape goes back to the hub")
       Test.assert_eq_int(Menu.status_kind(Menu.escape(sp)), Menu.status_none(), "a page change drops the status")
     end
   end

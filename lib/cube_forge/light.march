@@ -222,7 +222,7 @@ mod CubeForge.Light do
     else level_go(src, give6(src, dst, w, i % size_x(), i / layer(), (i / size_x()) % size_z(), lv), w, lv, i + 1, stop) end end
   end
 
-  -- Sweep levels [lv] down to 2. Each level writes into a FRESH buffer rather
+  -- Lists levels [lv] down to 2. Each level writes into a FRESH buffer rather
   -- than swapping the previous pair: `src` is read during the level, which
   -- leaves its refcount at 2, and a shared array cannot be a blit destination
   -- (GAPS.md G21). Fifteen 4 MB allocations per flood buys a memcpy per level.
@@ -293,6 +293,28 @@ mod CubeForge.Light do
 
   fn relight_radius() : Int do 15 end
 
+  -- How far an edit at (ex, ey, ez) can change a field: no further than the
+  -- brightest light that was at the edit or beside it before the edit, plus
+  -- whatever the new block emits. Light lost by placing a block was at most
+  -- the edit voxel's own level; light gained by breaking one is at most a
+  -- neighbour's level less one, and a sky shaft opening shows as the voxel
+  -- above at max_level(). A value of L propagates L - 1 steps, so a box of
+  -- radius L around the edit holds every voxel that can move. Surface edits
+  -- in daylight still get the full 15; an edit in a dim gallery, or a
+  -- block-light edit near mycelium glowing at 3, gets a box a few voxels
+  -- wide instead of 33 -- and the clear, the seed, the copy and the diff are
+  -- all passes over that box.
+  fn reach(la : NativeU8Arr, ex : Int, ey : Int, ez : Int, extra : Int) : Int do
+    let m0 = if extra > get(la, ex, ey, ez) do extra else get(la, ex, ey, ez) end
+    let m1 = if get(la, ex + 1, ey, ez) > m0 do get(la, ex + 1, ey, ez) else m0 end
+    let m2 = if get(la, ex - 1, ey, ez) > m1 do get(la, ex - 1, ey, ez) else m1 end
+    let m3 = if get(la, ex, ey + 1, ez) > m2 do get(la, ex, ey + 1, ez) else m2 end
+    let m4 = if get(la, ex, ey - 1, ez) > m3 do get(la, ex, ey - 1, ez) else m3 end
+    let m5 = if get(la, ex, ey, ez + 1) > m4 do get(la, ex, ey, ez + 1) else m4 end
+    let m6 = if get(la, ex, ey, ez - 1) > m5 do get(la, ex, ey, ez - 1) else m5 end
+    if m6 < 1 do 1 else if m6 > relight_radius() do relight_radius() else m6 end end
+  end
+
   @[no_alloc]
   pfn clampi(v : Int, lo : Int, hi : Int) : Int do
     if v < lo do lo else if v > hi do hi else v end end
@@ -306,8 +328,16 @@ mod CubeForge.Light do
   pfn zero_plane(la : NativeU8Arr, x0 : Int, x1 : Int, y : Int, z : Int, z1 : Int) : NativeU8Arr do
     if z > z1 do la else zero_plane(zero_row(la, x0, x1, y, z), x0, x1, y, z + 1, z1) end
   end
+  -- One memset per row in the shim (cf_u8_zero_box); the byte-at-a-time
+  -- version above it is kept as the reference the tests can compare against.
   pfn zero_box_go(la : NativeU8Arr, x0 : Int, x1 : Int, y : Int, y1 : Int, z0 : Int, z1 : Int) : NativeU8Arr do
-    if y > y1 do la else zero_box_go(zero_plane(la, x0, x1, y, z0, z1), x0, x1, y + 1, y1, z0, z1) end
+    if y > y1 do la else CubeForge.Ffi.Window.u8_zero_box(la, x0, x1, y, y1, z0, z1) end
+  end
+  doc "The shim's box clear, for tests."
+  fn zero_box(la : NativeU8Arr, x0 : Int, x1 : Int, y : Int, y1 : Int, z0 : Int, z1 : Int) : NativeU8Arr do zero_box_go(la, x0, x1, y, y1, z0, z1) end
+  doc "The byte-at-a-time box clear, for tests that check the shim's against it."
+  fn zero_box_slow(la : NativeU8Arr, x0 : Int, x1 : Int, y : Int, y1 : Int, z0 : Int, z1 : Int) : NativeU8Arr do
+    if y > y1 do la else zero_box_slow(zero_plane(la, x0, x1, y, z0, z1), x0, x1, y + 1, y1, z0, z1) end
   end
 
   -- Re-seed the sky column of every (x, z) in the box, over the box's y range
@@ -409,16 +439,22 @@ mod CubeForge.Light do
   @[no_alloc]
   -- The value voxel (x, y, z) should take from a neighbour at [lv], or 0 for
   -- nothing to do: outside the world, already as bright, opaque, or too dim.
-  pfn give_level(la : NativeU8Arr, w : CubeForge.World.World, x : Int, y : Int, z : Int, lv : Int) : Int do
+  -- [occ] is the world's occupancy field: occ_solid() where the voxel blocks
+  -- light. A solid neighbour is answered from that byte without fetching its
+  -- block -- a chunk lookup per neighbour (GAPS G82) was the sweep's largest
+  -- cost, and the ground under a lit region is most of the solid answers. Air,
+  -- water and leaves still read the block for their opacity: only opaque is
+  -- tracked in the field (see occ_value).
+  pfn give_level(la : NativeU8Arr, occ : NativeU8Arr, x : Int, y : Int, z : Int, lv : Int) : Int do
     if x < 0 || x >= 128 || y < 0 || y >= 256 || z < 0 || z >= 128 do 0
     else
       let cur = NativeArray.get_u8(la, index(x, y, z))
       if lv - 1 <= cur do 0
       else
-        let id = CubeForge.World.block_at(w, x, y, z)
-        if is_opaque(id) do 0
+        let v = NativeArray.get_u8(occ, occ_index(x, y, z))
+        if v == occ_solid() do 0
         else
-          let nl = lv - 1 - opacity(id)
+          let nl = lv - 1 - v
           if nl <= cur do 0 else nl end
         end
       end
@@ -431,47 +467,47 @@ mod CubeForge.Light do
   -- cost 1.2 s a relight: while the cell holds both arrays their refcounts are
   -- 2, and every in-place write copies the field (GAPS G12/G68). So the level
   -- loop lives inside the walk, and nothing aggregate exists until it is over.
-  type Sweep = Sweep(NativeU8Arr, NativeIntArr)
-  fn sweep_field(s : Sweep) : NativeU8Arr do match s do Sweep(a, _) -> a end end
+  type Lists = Lists(NativeU8Arr, NativeIntArr)
+  fn sweep_field(s : Lists) : NativeU8Arr do match s do Lists(a, _) -> a end end
 
   -- One entry of level [lv]'s list: give to the six neighbours; a neighbour
   -- that takes a value of 2 or more goes on that level's list. Entries pushed
   -- meanwhile land on lower levels' lists, so following `next` here is safe.
   -- At the end of a list the walk steps down a level; after an overflow it
   -- finishes with full in-place scans.
-  pfn list_go(la : NativeU8Arr, wl : NativeIntArr, w : CubeForge.World.World, lv : Int, e : Int,
-              x0 : Int, x1 : Int, y0 : Int, y1 : Int, z0 : Int, z1 : Int) : Sweep do
-    if lv <= 1 do Sweep(la, wl)
+  pfn list_go(la : NativeU8Arr, wl : NativeIntArr, occ : NativeU8Arr, lv : Int, e : Int,
+              x0 : Int, x1 : Int, y0 : Int, y1 : Int, z0 : Int, z1 : Int) : Lists do
+    if lv <= 1 do Lists(la, wl)
     else if e == 0 do
-      if wl_overflowed(wl) do Sweep(full_sweep_ip(la, w, lv - 1, x0, x1, y0, y1, z0, z1), wl)
-      else list_go(la, wl, w, lv - 1, wl_head(wl, lv - 1), x0, x1, y0, y1, z0, z1) end
+      if wl_overflowed(wl) do Lists(full_sweep_ip(la, occ, lv - 1, x0, x1, y0, y1, z0, z1), wl)
+      else list_go(la, wl, occ, lv - 1, wl_head(wl, lv - 1), x0, x1, y0, y1, z0, z1) end
     else
       let i = wl_entry_index(wl, e)
       let nxt = wl_entry_next(wl, e)
-      if !at_level(la, i, lv) do list_go(la, wl, w, lv, nxt, x0, x1, y0, y1, z0, z1)
+      if !at_level(la, i, lv) do list_go(la, wl, occ, lv, nxt, x0, x1, y0, y1, z0, z1)
       else
         let x = i % 128
         let y = i / 16384
         let z = (i / 128) % 128
-        let n1 = give_level(la, w, x + 1, y, z, lv)
+        let n1 = give_level(la, occ, x + 1, y, z, lv)
         let a1 = if n1 > 0 do NativeArray.set_u8(la, flat(x + 1, y, z), n1) else la end
         let l1 = if n1 >= 2 do wl_push(wl, n1, flat(x + 1, y, z)) else wl end
-        let n2 = give_level(a1, w, x - 1, y, z, lv)
+        let n2 = give_level(a1, occ, x - 1, y, z, lv)
         let a2 = if n2 > 0 do NativeArray.set_u8(a1, flat(x - 1, y, z), n2) else a1 end
         let l2 = if n2 >= 2 do wl_push(l1, n2, flat(x - 1, y, z)) else l1 end
-        let n3 = give_level(a2, w, x, y + 1, z, lv)
+        let n3 = give_level(a2, occ, x, y + 1, z, lv)
         let a3 = if n3 > 0 do NativeArray.set_u8(a2, flat(x, y + 1, z), n3) else a2 end
         let l3 = if n3 >= 2 do wl_push(l2, n3, flat(x, y + 1, z)) else l2 end
-        let n4 = give_level(a3, w, x, y - 1, z, lv)
+        let n4 = give_level(a3, occ, x, y - 1, z, lv)
         let a4 = if n4 > 0 do NativeArray.set_u8(a3, flat(x, y - 1, z), n4) else a3 end
         let l4 = if n4 >= 2 do wl_push(l3, n4, flat(x, y - 1, z)) else l3 end
-        let n5 = give_level(a4, w, x, y, z + 1, lv)
+        let n5 = give_level(a4, occ, x, y, z + 1, lv)
         let a5 = if n5 > 0 do NativeArray.set_u8(a4, flat(x, y, z + 1), n5) else a4 end
         let l5 = if n5 >= 2 do wl_push(l4, n5, flat(x, y, z + 1)) else l4 end
-        let n6 = give_level(a5, w, x, y, z - 1, lv)
+        let n6 = give_level(a5, occ, x, y, z - 1, lv)
         let a6 = if n6 > 0 do NativeArray.set_u8(a5, flat(x, y, z - 1), n6) else a5 end
         let l6 = if n6 >= 2 do wl_push(l5, n6, flat(x, y, z - 1)) else l5 end
-        list_go(a6, l6, w, lv, nxt, x0, x1, y0, y1, z0, z1)
+        list_go(a6, l6, occ, lv, nxt, x0, x1, y0, y1, z0, z1)
       end
     end end
   end
@@ -480,39 +516,39 @@ mod CubeForge.Light do
   -- level. A write at [lv] produces a value below [lv], so a voxel written
   -- earlier in the same scan is never processed by it -- the same order the
   -- two-buffer sweep had.
-  pfn full_row_ip(la : NativeU8Arr, w : CubeForge.World.World, lv : Int, x : Int, x1 : Int, y : Int, z : Int) : NativeU8Arr do
+  pfn full_row_ip(la : NativeU8Arr, occ : NativeU8Arr, lv : Int, x : Int, x1 : Int, y : Int, z : Int) : NativeU8Arr do
     if x > x1 do la
-    else if !at_level(la, flat(x, y, z), lv) do full_row_ip(la, w, lv, x + 1, x1, y, z)
+    else if !at_level(la, flat(x, y, z), lv) do full_row_ip(la, occ, lv, x + 1, x1, y, z)
     else
-      let n1 = give_level(la, w, x + 1, y, z, lv)
+      let n1 = give_level(la, occ, x + 1, y, z, lv)
       let a1 = if n1 > 0 do NativeArray.set_u8(la, flat(x + 1, y, z), n1) else la end
-      let n2 = give_level(a1, w, x - 1, y, z, lv)
+      let n2 = give_level(a1, occ, x - 1, y, z, lv)
       let a2 = if n2 > 0 do NativeArray.set_u8(a1, flat(x - 1, y, z), n2) else a1 end
-      let n3 = give_level(a2, w, x, y + 1, z, lv)
+      let n3 = give_level(a2, occ, x, y + 1, z, lv)
       let a3 = if n3 > 0 do NativeArray.set_u8(a2, flat(x, y + 1, z), n3) else a2 end
-      let n4 = give_level(a3, w, x, y - 1, z, lv)
+      let n4 = give_level(a3, occ, x, y - 1, z, lv)
       let a4 = if n4 > 0 do NativeArray.set_u8(a3, flat(x, y - 1, z), n4) else a3 end
-      let n5 = give_level(a4, w, x, y, z + 1, lv)
+      let n5 = give_level(a4, occ, x, y, z + 1, lv)
       let a5 = if n5 > 0 do NativeArray.set_u8(a4, flat(x, y, z + 1), n5) else a4 end
-      let n6 = give_level(a5, w, x, y, z - 1, lv)
-      full_row_ip(if n6 > 0 do NativeArray.set_u8(a5, flat(x, y, z - 1), n6) else a5 end, w, lv, x + 1, x1, y, z)
+      let n6 = give_level(a5, occ, x, y, z - 1, lv)
+      full_row_ip(if n6 > 0 do NativeArray.set_u8(a5, flat(x, y, z - 1), n6) else a5 end, occ, lv, x + 1, x1, y, z)
     end end
   end
-  pfn full_plane_ip(la : NativeU8Arr, w : CubeForge.World.World, lv : Int, x0 : Int, x1 : Int, y : Int, z : Int, z1 : Int) : NativeU8Arr do
-    if z > z1 do la else full_plane_ip(full_row_ip(la, w, lv, x0, x1, y, z), w, lv, x0, x1, y, z + 1, z1) end
+  pfn full_plane_ip(la : NativeU8Arr, occ : NativeU8Arr, lv : Int, x0 : Int, x1 : Int, y : Int, z : Int, z1 : Int) : NativeU8Arr do
+    if z > z1 do la else full_plane_ip(full_row_ip(la, occ, lv, x0, x1, y, z), occ, lv, x0, x1, y, z + 1, z1) end
   end
-  pfn full_level_ip(la : NativeU8Arr, w : CubeForge.World.World, lv : Int, x0 : Int, x1 : Int, y : Int, y1 : Int, z0 : Int, z1 : Int) : NativeU8Arr do
-    if y > y1 do la else full_level_ip(full_plane_ip(la, w, lv, x0, x1, y, z0, z1), w, lv, x0, x1, y + 1, y1, z0, z1) end
+  pfn full_level_ip(la : NativeU8Arr, occ : NativeU8Arr, lv : Int, x0 : Int, x1 : Int, y : Int, y1 : Int, z0 : Int, z1 : Int) : NativeU8Arr do
+    if y > y1 do la else full_level_ip(full_plane_ip(la, occ, lv, x0, x1, y, z0, z1), occ, lv, x0, x1, y + 1, y1, z0, z1) end
   end
-  pfn full_sweep_ip(la : NativeU8Arr, w : CubeForge.World.World, lv : Int, x0 : Int, x1 : Int, y0 : Int, y1 : Int, z0 : Int, z1 : Int) : NativeU8Arr do
-    if lv <= 1 do la else full_sweep_ip(full_level_ip(la, w, lv, x0, x1, y0, y1, z0, z1), w, lv - 1, x0, x1, y0, y1, z0, z1) end
+  pfn full_sweep_ip(la : NativeU8Arr, occ : NativeU8Arr, lv : Int, x0 : Int, x1 : Int, y0 : Int, y1 : Int, z0 : Int, z1 : Int) : NativeU8Arr do
+    if lv <= 1 do la else full_sweep_ip(full_level_ip(la, occ, lv, x0, x1, y0, y1, z0, z1), occ, lv - 1, x0, x1, y0, y1, z0, z1) end
   end
 
-  doc "Sweep the scan box to a fixed point in place, by per-level worklists. [la] must be uniquely owned. Equivalent to box_sweep_go2 on copies, without the copies or the fourteen box scans."
+  doc "Lists the scan box to a fixed point in place, by per-level worklists. [la] must be uniquely owned. Equivalent to box_sweep_go2 on copies, without the copies or the fourteen box scans."
   fn sweep_box_lists(la : NativeU8Arr, w : CubeForge.World.World, x0 : Int, x1 : Int, y0 : Int, y1 : Int, z0 : Int, z1 : Int) : NativeU8Arr do
     let vol = (x1 - x0 + 1) * (y1 - y0 + 1) * (z1 - z0 + 1)
     let wl = gather_box(la, wl_new(4 * vol + 64), x0, x1, y0, y1, z0, z1)
-    sweep_field(list_go(la, wl, w, max_level(), wl_head(wl, max_level()), x0, x1, y0, y1, z0, z1))
+    sweep_field(list_go(la, wl, CubeForge.World.occupancy(w), max_level(), wl_head(wl, max_level()), x0, x1, y0, y1, z0, z1))
   end
 
   -- Lowest y light can reach descending from (x, y, z): the first opaque block
@@ -549,8 +585,15 @@ mod CubeForge.Light do
   pfn mark_plane(m : NativeIntArr, a : NativeU8Arr, b : NativeU8Arr, x0 : Int, x1 : Int, y : Int, z : Int, z1 : Int) : NativeIntArr do
     if z > z1 do m else mark_plane(mark_row(m, a, b, x0, x1, y, z), a, b, x0, x1, y, z + 1, z1) end
   end
+  -- A memcmp per row in the shim (cf_mark_box), walking only rows that differ.
   pfn mark_box(m : NativeIntArr, a : NativeU8Arr, b : NativeU8Arr, x0 : Int, x1 : Int, y : Int, y1 : Int, z0 : Int, z1 : Int) : NativeIntArr do
-    if y > y1 do m else mark_box(mark_plane(m, a, b, x0, x1, y, z0, z1), a, b, x0, x1, y + 1, y1, z0, z1) end
+    if y > y1 do m else CubeForge.Ffi.Window.mark_box(m, a, b, x0, x1, y, y1, z0, z1) end
+  end
+  doc "The shim's section diff, for tests."
+  fn mark_box_fast(m : NativeIntArr, a : NativeU8Arr, b : NativeU8Arr, x0 : Int, x1 : Int, y : Int, y1 : Int, z0 : Int, z1 : Int) : NativeIntArr do mark_box(m, a, b, x0, x1, y, y1, z0, z1) end
+  doc "The voxel-at-a-time section diff, for tests that check the shim's against it."
+  fn mark_box_slow(m : NativeIntArr, a : NativeU8Arr, b : NativeU8Arr, x0 : Int, x1 : Int, y : Int, y1 : Int, z0 : Int, z1 : Int) : NativeIntArr do
+    if y > y1 do m else mark_box_slow(mark_plane(m, a, b, x0, x1, y, z0, z1), a, b, x0, x1, y + 1, y1, z0, z1) end
   end
 
   doc "The 16-bit section mask for chunk (cx, cz), read out of a marks array."
@@ -569,7 +612,7 @@ mod CubeForge.Light do
 
   doc "Repair the skylight field after the block at (ex, ey, ez) changed, reporting which sections moved. [w] is the world after the edit."
   fn relight_marked(la : NativeU8Arr, w : CubeForge.World.World, ex : Int, ey : Int, ez : Int) : Relit do
-    let r = relight_radius()
+    let r = reach(la, ex, ey, ez, 0)
     let cx0 = clampi(ex - r, 0, 127)
     let cx1 = clampi(ex + r, 0, 127)
     let cz0 = clampi(ez - r, 0, 127)
@@ -593,7 +636,11 @@ mod CubeForge.Light do
     let sy1 = clampi(ey + r + 1, 0, 255)
     let above_len = if sy1 >= 254 do volume() else (sy1 + 2) * 16384 end
     let above = copy_prefix(la, above_len)
-    let la1 = zero_box_go(la, cx0, cx1, cy0, cy1, cz0, cz1)
+    -- The field is the World's, so it is shared here; the first byte written
+    -- used to copy all 4 MB silently (copy-on-write) and every later write
+    -- landed in the copy. The copy is now explicit, so the shim's clear can
+    -- insist on a unique field and the cost is what it always was.
+    let la1 = zero_box_go(copy_prefix(la, volume()), cx0, cx1, cy0, cy1, cz0, cz1)
     let la2 = seed_box_go(la1, w, above, cx0, cx1 - cx0 + 1, cz0, cy1, cy0, 0, (cx1 - cx0 + 1) * (cz1 - cz0 + 1))
     -- scan box: one wider, so the unchanged voxels around the edit feed inward
     let sx0 = clampi(ex - r - 1, 0, 127)
@@ -671,7 +718,7 @@ mod CubeForge.Light do
   end
 
   fn relight_block_marked(lb : NativeU8Arr, w : CubeForge.World.World, ex : Int, ey : Int, ez : Int) : Relit do
-    let r = relight_radius()
+    let r = reach(lb, ex, ey, ez, emission(CubeForge.World.block_at(w, ex, ey, ez)))
     let cx0 = clampi(ex - r, 0, 127)
     let cx1 = clampi(ex + r, 0, 127)
     let cz0 = clampi(ez - r, 0, 127)
@@ -704,7 +751,8 @@ mod CubeForge.Light do
     -- is a contiguous prefix of the flat index, so every copy is that prefix.
     let plen = if sy1 >= 254 do volume() else (sy1 + 2) * 16384 end
     let before = copy_prefix(lb, plen)
-    let lb1 = zero_box_go(lb, cx0, cx1, cy0, cy1, cz0, cz1)
+    -- an explicit copy of the shared field, as in relight_marked
+    let lb1 = zero_box_go(copy_prefix(lb, volume()), cx0, cx1, cy0, cy1, cz0, cz1)
     let lb2 = seed_emit_box_go(lb1, w, cx0, cx1 - cx0 + 1, cz0, cy0, cy1, 0, (cx1 - cx0 + 1) * (cz1 - cz0 + 1))
     -- scan box: one wider, so the unchanged voxels around the edit feed inward
     let sx0 = clampi(ex - r - 1, 0, 127)
@@ -760,7 +808,7 @@ mod CubeForge.Light do
       let lx = i % 16
       let ly = i / chunk_layer()
       let lz = (i / 16) % 16
-      let v = if occludes(C.get_idx(c, i)) do occ_solid() else 0 end
+      let v = occ_value(C.get_idx(c, i))
       occ_chunk_go(NativeArray.set_u8(o, occ_index(16 * cx + lx, ly, 16 * cz + lz), v), c, cx, cz, i + 1, stop)
     end
   end
@@ -874,8 +922,10 @@ mod CubeForge.Light do
 
   doc "Byte stored for an occluding voxel. 255, not 1: the GPU side is a normalized GL_R8 texture, where a stored 1 samples back as 1/255 and would never register as solid."
   fn occ_solid() : Int do 255 end
+  doc "The occupancy byte for a block: occ_solid() when it blocks light, else its opacity (0 air, 2 water, 6 leaves). The shadow shader, the coarse counts and the AO read 255 alone as solid; the light sweep reads the byte as the neighbour's opacity. World.set_block and World.set_cells -- the only two block writers -- keep it, and every World constructor builds it."
+  fn occ_value(id : Int) : Int do if is_opaque(id) do occ_solid() else opacity(id) end end
 
-  doc "The world's occupancy field: occ_solid() where a voxel blocks light, 0 elsewhere. Built for upload, not retained."
+  doc "The world's occupancy field: occ_value of every voxel -- occ_solid() where it blocks light, its opacity elsewhere. Built for upload, kept in the World for the shadow texture, the AO and the light sweep."
   fn occupancy(w : CubeForge.World.World) : NativeU8Arr do
     -- A chunk's flat index is ordered by y, so stopping past the highest non-air
     -- layer skips the empty sky. The buffer starts zeroed, which is exactly the

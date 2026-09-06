@@ -1687,6 +1687,125 @@ spawn pitch in hundredths of a radian), the reticle is a warm cream against
 the white it keeps over sky and water. Budget 11.26 ms best of 3 on a machine
 still carrying other sessions' benchmarks.
 
+## The world tick, part two: the fungus era (2026-09-05)
+
+The tick work recorded above was measured against a world without the fungus
+system. When that landed, main measured ~11% slower than the day before --
+252-259 fps to 224-228 at 1920x1200, interleaved against a rebuild of the
+previous tree on the same machine at the same moment. The gap was identical at
+320x240 and with shadows off, so it was CPU, not fragments.
+
+It was not a regression. It was new features doing real work, and they were
+already routed through the machinery this branch had built: the mycelium
+migrations, fruit growth and glow relights all stage into the remesh queue
+without ever having been told it exists. What had grown was the climate tick.
+
+### The dirty set's assumption expired
+
+`Biome.tick` eases only awake columns, and it was built on the observation that
+almost everything settles. The fungus climate feedback moves a row's target by
+more than one ease step, so a column chasing it is never on it: **about four
+thousand of the sixteen thousand columns are permanently awake** where before
+almost none were. The dirty set still earns its keep -- four thousand beats
+sixteen -- but the sweep it guards had grown back into the biggest phase in the
+tick, 1.9 ms before the fungus work and 2.8 ms after, all on one frame.
+
+Split in two. `tick_begin` keeps the whole-map half -- rescan the water flags,
+recompute the distance field, wake what moved -- on one frame, because that is
+O(map) whatever is awake. `tick_slice` sweeps the awake columns of one slice,
+and a slice runs every frame, covering the map once per period. Each column is
+still visited exactly once per period, so the ease rate and the hold counter are
+unchanged.
+
+`Myc.tick` had to move with it: the two fields alternate -- the biome reads the
+network's pulls, the network reads the climate the biome eased -- so the sweep
+must be COMPLETE before it looks. It runs on the frame the last slice lands.
+
+| | fps | worst frame |
+|---|---|---|
+| before | 230-235 | 10.2-19.2 ms |
+| after  | 247-250 | 9.7-10.7 ms |
+
+The field slot fell from 4.6-5.2 ms to 1.57 ms. **The mechanics are proved
+rather than argued: with nothing easing (`CF_BIOME_RATE=0 CF_MYC_RATE=0`) the
+sharded and unsharded builds produce identical hashes on all four fields**,
+which is what says the slices cover every column exactly once, none missed and
+none twice.
+
+### Mining, the last synchronous thing
+
+Everything else had been bounded by the queue and a block edit had not, so it
+became the tallest thing in the game: 11.5 ms mean, 16 ms worst. Measured, it
+split 1.4-2.3 ms of block and occupancy writes, 5.7-6.9 ms of relight, 1.4-5.9
+ms of remesh -- and the relight had doubled when the fungus work gave the world
+a second light field.
+
+- **The block-light pass is a provable no-op in the dark.** With no block light
+  anywhere in the scan box there is nothing to clear, nothing to seed (an
+  emissive block inside the box would have lit its own cell), and nothing
+  outside can reach in without lighting the ring, which the scan box contains.
+  The edit's own block is the one thing that can add light without being in the
+  field yet, so it is tested separately. Where it fires: **1.76-2.57 ms ->
+  0.15-0.23**, the cost of the box scan that proves it.
+- **The remesh splits.** The edited section is rebuilt in the frame the click
+  landed, so the block still vanishes under the cursor with no delay; its
+  neighbours go through the queue. Verified where it matters: with
+  `CF_AUTOBREAK` mining throughout, the drained mesh equals a full rebuild
+  (935674909), so what an edit defers converges on what doing it synchronously
+  produced.
+- **Starting the bounded sweep at the box's brightest voxel** was worth 0.6 ms
+  and did NOT survive: the worklist sweep landed on main the same day and
+  supersedes it outright, since a worklist never visits an empty level at all.
+  The measurement is kept for the reason it was small, which still applies to
+  anything bounding that box: it reaches fifteen blocks ABOVE the edit, so it
+  holds lit sky until the player is more than fifteen deep, and a descent spends
+  most of its time with a full-brightness box.
+
+  block edit   mean 11.5 -> 9.4 ms, worst 16.1 -> 10.8 ms
+
+### Four things measured and NOT done
+
+Each of these looks alarming in the source and is not worth touching. They are
+recorded so the next reader does not spend the day finding out again.
+
+- **Budgeting the water tick.** Planned off a 7.9 ms figure that predated the
+  remesh queue. Re-measured after it: **calls 0.7-1.6 ms, apply 0.07 ms**. The
+  7.9 was the remesh, and the queue had already taken it.
+- **Per-chunk biome field storage.** A whole-array copy per edit looks like the
+  obvious cost -- `note_edits` and `rescan_box` each copy 16,384 entries. They
+  cost **0.28-0.33 ms and 0.14-0.15 ms**, about 0.067 ms a frame. Per-chunk
+  storage would remove nearly all of it and buy nothing at this world size. It
+  is a tidiness change, not a performance one.
+- **A settle tolerance on the climate offsets.** Meant to cut the four thousand
+  awake columns. At 0.002 it does nothing (3213 -> 3288). There is a knee, and
+  it is in the wrong place: 0.02 gives 2338, 0.1 gives 165 -- and 0.1 is a THIRD
+  of the gap between classification thresholds, so a column could settle that
+  far from its target and land in the wrong biome. The deeper reason not to
+  bother: once the sweep is sharded the awake set costs **0.13-0.16 ms a
+  frame**, so cutting it by a third saves 0.04. The 2.8 ms that motivated the
+  work was already stale when the work was proposed.
+- **Parameterizing the world size.** See the world_size_test commit: refinement
+  predicates cannot reference a constant function, and deriving the bounds took
+  the build from 85 unverified obligations to 100.
+
+### On measuring at all
+
+Two things cost more time than any optimization here.
+
+**This machine's background load swings results by 1.5-2x.** The same binary
+measured 95 fps and 198 fps on the same day. Every number in this section is an
+A/B pair taken back to back, interleaved, because nothing else is trustworthy.
+A report of "perf issues on main" was chased to a load average of 72 from three
+other sessions compiling; current main and the pre-merge build measured
+identically.
+
+**A budget test that straddles its threshold is worse than none.** At 12 ms
+`scratch/frame_budget.sh` gave 11.52, 11.88, 11.94, 12.07, 12.17, 12.23 and
+12.82 across one day, on code whose only measured change was elsewhere;
+best-of-6 did not settle it. It now asserts 16 ms -- a frame at 60 Hz, the
+property that survives a busy machine -- and the sharper number lives here,
+where it cannot rot into a false alarm. For the 120 Hz frame run
+`frame_budget.sh 8.3` on an idle box and read it as a measurement, not a gate.
 
 ## Oasis and fungal grove (2026-09-05)
 
@@ -1835,3 +1954,198 @@ layer (89), so no shader or vertex-format change.
   "expected CubeForge.Model.Set but got Set" -- renamed `Templates`; the
   alias `M` is taken by `CubeForge.Math.Mat4` across the test binary.
 - 378 tests (365 before).
+
+## Perf pass: the drain, the mesher, the relight's edges (2026-09-05)
+
+Method: a `slow frame` line under `CF_AUTOFLOW` names every frame over 4 ms
+with its phase of the period; a `drain chunk` line times each chunk's remesh
+and upload; `CF_VEG_LOG=1` splits a tree edit into blocks / relight /
+occupancy / rescan; and `sample` on the release binary (outside the sandbox,
+`-mayDie`) gave call graphs -- once on the pinned scenario, twice on
+`CF_WORKERS=1 CF_MESH_REPS=80`, a serial mesher loop that is pure mesher.
+The mesh hash on the `state:` line at frame 30 of the pinned scenario
+(`380281180`) was the oracle for every mesher change: it did not move once.
+
+**What the frame looked like.** The worst frames were the ODD phases at 5-9 ms:
+the mesh drain, four sections a frame, with an opaque section at 0.6-1.0 ms.
+Water sections were 0.05 ms; the cost was retexturing and fungus migration
+owing ~10 opaque sections a period. Phase 6 (a tree or body) was 6-9 ms.
+
+**Where a section's time went** (serial mesher profile): the allocator. Every
+Float in March is a heap object; a rectangle was some sixty of them across
+quad_sized, pack_shade, layer_for (a chain of boxed literal returns, 15% by
+itself) -- `march_alloc` + `march_alloc_float` + `decrc` + free were ~60% of
+mesh time. The six-direction mask fill I rewrote first was a minor term.
+
+| change | measure | before | after |
+|---|---|---|---|
+| per-phase drain budgets (3 odd / 2 retexture / 1 water, field / 0 veg) | worst frame | 10.6 ms | 10.1 |
+| one-pass mask fill (six directions from one cell walk) | opaque section | 0.7 ms | ~0.6 (noise) |
+| `F32Buf.push_vertex`: one cell rebuild per vertex, not nine | serial mesh-all x3 | 788-899 ms | (small) |
+| `cf_mesh_quad`: the rectangle written in C from ints + key + layer table | opaque section | 0.6 | 0.45 |
+| `cf_mesh_slice`: the whole per-slice greedy merge in C, mask read only | opaque section | 0.45 | **0.22-0.29** |
+| `F32Buf.grow` as one blit; section buffers start at 16k floats | serial mesh-all x3 | 788-899 | **398-400 ms** |
+| the same | startup mesh all, 64 chunks | 270 ms | **197 ms** |
+| `cf_gfx_sync_box`: one texture box + exact coarse recount | tree edit, occupancy | 0.6 ms | **0.02** |
+| staged upload: sixteen `glBufferSubData` become one | drain uploads over 1 ms | 7-8 of 44 | **0 of 44** |
+| double-buffered mesh VBOs, capacity kept | (no measurable change on its own; kept for the staging) | | |
+| `cf_u8_zero_box` / `cf_mark_box`: the relight's clear and section diff | tree relight | 2-5 ms | 2-5 ms (no change) |
+| **frame budget** (`frame_budget.sh 16 400 3`) | worst frame | **10.6-11.6 ms** | **8.2 ms** |
+
+Two things that did not pay: the relight's box clear and diff in C (the
+March versions were not where the relight's time is -- the sweep and the
+seed are), and GL_DYNAMIC_DRAW / double buffering for the upload stalls (the
+stall was per call; staging fixed it, the buffers stayed).
+
+**Layout notes for the shim work.** An extern's borrowed array arrives with
+rc 2 (the borrow itself), so a "write through a borrowed reference" guard of
+rc == 1 trips; cf_mesh_slice consumes and returns the buffer and hands the
+count back in the reserved slot past the worst-case region. The relight's
+field is the World's and was silently copy-on-write on its first byte; the
+copy is explicit now (`copy_prefix(la, volume())`) so the shim's clear can
+insist on a unique field, at the cost it always had.
+
+**Left on the table, measured.** A tree edit is now: blocks 0.8-1.3 ms
+(Veg.plant: a 64 KB chunk copy per `set_block`, ~40 of them, and a chunk
+lookup per candidate cell), relight 2-5 ms (the sweep and the seed), rescan
+0.3. And a finding that touches everything: `Array.PVec.get` walks a 32-long
+list at the leaf and computes the tail's length by walking it, so a chunk
+lookup on a 64-chunk world is ~50 pointer hops (`Array.lst_nth` in every
+profile, 2% of the frame); `World.block_at` pays it per voxel in the relight's
+`give_level`. GAPS G82. Phase 6 is the worst frame now: 6.1 ms mean, 8.6 max.
+
+432 tests. `CF_VEG_LOG` and the `slow frame` / `drain chunk` lines stay as
+diagnostics; the shim additions are `cf_f32_stamp`, `cf_mesh_quad`,
+`cf_mesh_slice`, `cf_u8_zero_box`, `cf_mark_box`, `cf_gfx_sync_box`, all under
+the blit's rc == 1 contract.
+
+## G82 followed up: the world's chunks in a binary tree (2026-09-05)
+
+`probes/pvec_get` timed the stdlib vector against a complete binary tree of
+64 leaves, one million gets and a hundred thousand sets each, release build:
+
+| | `Array.PVec` | `CubeForge.Tree` |
+|---|---|---|
+| get, indices spread | 112 ns | 72 ns |
+| get, index 0 / index 63 | 61 / 154 ns | |
+| set | 860 ns | 200 ns |
+
+Per call the gap is modest; the volume is not. `World.chunk_at` is a `get`
+and `World.set_block` a `set`, and the relight, the water scan, the biome's
+water flags, vegetation and fruit all go through `World.block_at` a voxel at a
+time. The world now keeps its chunks in `CubeForge.Tree` (six matches to a
+chunk, six node allocations to replace one; `World.chunks` converts to a PVec
+for the save format). Same seed, same pinned scenario, mesh hash unchanged:
+
+| | before | after |
+|---|---|---|
+| tree edit, relight | 2.3-5.8 ms | **1.8-3.4 ms** |
+| tree edit, blocks | 0.8-1.3 ms | 0.7-0.9 ms |
+| biome field build at startup | 228 ms | **123 ms** |
+| skylight + block-light flood at startup | 150 ms | 141 ms |
+| startup mesh all | 197 ms | 185 ms |
+| **frame budget, worst frame** | 8.2 ms | **5.7-6.6 ms** (two runs) |
+
+The sampler had put `Array.lst_nth` at 2% of the frame. That was the top of
+the stack only: the rest of a `get` -- `trie_get`, `get` itself, the tail
+length walk, and the cache misses a 50-hop list walk means -- did not show
+under one name. A structure change the profile rated at 2% took a third off
+the worst frame. 438 tests.
+## The relight box, and where the frame's memory goes (2026-09-05)
+
+**The relight box is sized to the light around the edit.** `Light.reach`:
+the brightest level at the edit voxel or beside it before the edit, plus the
+new block's emission, capped at 15. Light lost by placing a block was at most
+the voxel's own level; light gained by breaking one is at most a neighbour's
+level less one, and an opening sky shaft shows as the voxel above at 15. A
+level L propagates L - 1 steps, so a box of radius L holds every voxel that
+can move, and the clear, the seed, the before-copy, the section diff and the
+sweep are all passes over that box. Surface edits in daylight still get 15;
+a block-light edit beside mycelium glowing at 3 gets a 5-wide box instead of
+33. Oracle tests for a dim gallery and for a block-light edit beside dim
+mycelium added; all "incremental equals full flood" tests pass.
+
+| | before | after |
+|---|---|---|
+| a fruit body's slot (stamp, both relights, occupancy, rescan), median of 40 | ~6 ms | **3.8 ms** |
+| budget | 10.25 ms | 10.03 ms best of 3 |
+
+**The 139 live objects a frame are a leak, and it is large.** `cf_rss_bytes`
+(the shim, from `task_info`) gives the gauge a byte view: the process grows
+~1.8 MB a frame, 5.7 GB resident after 2,400 frames, identically on the old
+toolchain pin. Stage probes on a frame: the water tick retains 4.6 MB per
+tick, the biome slice ~350 KB every frame, the mycelium tick 480 KB, the
+drain ~100 KB; every stage that replaces part of the world leaves the old
+part alive. The stack pointer does not move between frames, so the loop is a
+true tail call, and making its parameters owned through identity functions
+changed nothing. `MARCH_TRACE_GC=1`'s allocation log (25 GB for 140 frames)
+gives the survivors: 64 KB chunk arrays at 29 a frame, 4 MB light fields,
+0.5 MB relight prefix copies, the field arrays, and thousands of 32-byte
+list cells. Three compiler-side causes, each with a repro:
+
+1. **A library-defined type gets no deep drop (GAPS G79).** Type definitions
+   are registered under qualified names; use sites carry the short name;
+   `Repr.find_variant` is exact. The drop pass found no constructors for
+   essentially every library type, freed each dying cell shallowly and leaked
+   its children. `probes/drop_xmod` (WHICH=1,2): 2.1 GB -> 8 MB with the fix
+   on the March branch `fix/drop-short-type-names` (checkout under the
+   session scratchpad). On this project it freed the field arrays (16 KB
+   survivors 811 -> 247, 131 KB 392 -> 106) but not the chunks.
+2. **A closure environment is freed shallowly (G80).** Every captured value
+   leaks. `probes/drop_xmod` WHICH=5: a thousand closures capturing 1 MB each,
+   called once and dropped, leave 1.07 GB resident. This is the chunk leak:
+   `Array.set`'s two update paths capture the new element in a closure, so
+   every persistent-vector update in every March program leaks the element.
+   WHICH=4 (a 64-element vector, 4,000 replacements of 64 KB arrays): 339 MB
+   resident against 4 MB live. Needs a per-closure-type drop or a runtime
+   release that knows the capture layout; not attempted here.
+3. **A named binding unused in one arm of a lifted closure is never released
+   (G81).** `Array.set`'s `lst_set` bound the replaced element as `h` and left
+   it unused in the replacing arm; the IR has no release for it, where a
+   wildcard gets one. Fixed in the stdlib on the same March branch by matching
+   with `_` in that arm; the probe still leaks through (2).
+
+Until the toolchain carries those fixes the project pins March main
+unchanged (`watch-9ca8a98d`). Two project-side releases added on the way,
+`Biome.release` and `Myc.release`, destructure a replaced field so its arrays
+die as bindings; harmless with the fix, and they cover (1) for those two
+types without it. The four colliding short type names (Field, Relit, Felled,
+Sweep across modules) were renamed unique; a collision also forces Boxed in
+the compiler and is worth avoiding regardless.
+
+
+
+## The relight reads opacity from the occupancy field (2026-09-05)
+
+The sweep's remaining cost was `World.block_at` per neighbour, to learn
+whether the neighbour is air, water (opacity 2), leaves (6) or opaque. The
+occupancy field already held a byte per voxel for the shadow texture; it now
+holds `Light.occ_value`: 255 where the block is opaque (what the shader, the
+AO and the coarse counts read as solid, unchanged), else the block's opacity.
+The sweep reads that byte and never fetches the block.
+
+What made it correct: the field has to be complete. Two attempts said so.
+The first wrote the finer byte only where `set_occupied` was called and read
+water as air wherever the water actors had applied cells or leaf decay had
+run -- the relight-equals-full-flood tests failed and the mesh hash moved. The
+second used the byte only for solid neighbours and gained nothing: the reads
+are on air and water. So every block write now keeps the byte -- there are
+exactly two writers, `World.set_block` and `World.set_cells`, and
+`set_occupied` is gone -- and every World constructor builds the field, so a
+relight never runs against a stale one.
+
+| | before | after |
+|---|---|---|
+| tree edit, relight | 1.8-3.4 ms | **1.3-2.2 ms** |
+| frame budget, worst frame | 5.7-6.6 ms | **5.75 ms** |
+| mesh hash at frame 30 | 380281180 | 380281180 |
+
+A side effect worth knowing: a bush edit now pays ~0.3 ms it did not before.
+Its leaves were written with `set_block` alone and never touched the
+occupancy field; now every edit's first write to that shared 4 MB field is a
+copy-on-write. Trees paid it already through `set_occupied`.
+
+Not kept from this stretch: a VAO per mesh slot (six alternating runs were
+noise, so 192 attribute-pointer sets a frame are not where a quiet frame's
+time is on this driver). Kept: the shim's `getenv("CF_DEBUG")` on every draw
+call is now read once.

@@ -39,12 +39,12 @@ mod CubeForge.Test.Myc do
   end
 
 
-  pfn tick_n(f : CubeForge.Myc.Field, n : Int, ta : NativeFloatArr, ma : NativeFloatArr, rate : Float, k : Int) : CubeForge.Myc.Field do
+  pfn tick_n(f : CubeForge.Myc.Net, n : Int, ta : NativeFloatArr, ma : NativeFloatArr, rate : Float, k : Int) : CubeForge.Myc.Net do
     if k <= 0 do f else tick_n(Myc.tick(f, n, ta, ma, rate), n, ta, ma, rate, k - 1) end
   end
 
   -- Chebyshev radius of species [sp] around (cx, cz): the farthest held column.
-  pfn radius_go(f : CubeForge.Myc.Field, n : Int, sp : Int, cx : Int, cz : Int, i : Int, best : Int) : Int do
+  pfn radius_go(f : CubeForge.Myc.Net, n : Int, sp : Int, cx : Int, cz : Int, i : Int, best : Int) : Int do
     if i >= n * n do best
     else
       let x = i % n
@@ -64,7 +64,7 @@ mod CubeForge.Test.Myc do
 
 
   -- Tick [f] both ways for [k] ticks, asserting they agree after every tick.
-  pfn agree_go(a : CubeForge.Myc.Field, b : CubeForge.Myc.Field, n : Int, ta : NativeFloatArr, ma : NativeFloatArr, rate : Float, k : Int, t : Int) : Bool do
+  pfn agree_go(a : CubeForge.Myc.Net, b : CubeForge.Myc.Net, n : Int, ta : NativeFloatArr, ma : NativeFloatArr, rate : Float, k : Int, t : Int) : Bool do
     if k <= 0 do true
     else
       let a1 = Myc.tick(a, n, ta, ma, rate)
@@ -74,7 +74,7 @@ mod CubeForge.Test.Myc do
       else agree_go(a1, b1, n, ta, ma, rate, k - 1, t + 1) end end
     end
   end
-  pfn same_vigour(a : CubeForge.Myc.Field, b : CubeForge.Myc.Field, n : Int, i : Int) : Bool do
+  pfn same_vigour(a : CubeForge.Myc.Net, b : CubeForge.Myc.Net, n : Int, i : Int) : Bool do
     if i >= n * n do true
     else if Myc.vigour_of(a, n, i % n, i / n) != Myc.vigour_of(b, n, i % n, i / n) do false
     else same_vigour(a, b, n, i + 1) end end
