@@ -542,20 +542,25 @@ mod CubeForge.World do
   pfn band_z0(n : Int, dz : Int) : Int do if dz > 0 do n - 1 else 0 end end
   pfn band_z1(n : Int, dz : Int) : Int do if dz < 0 do 0 else n - 1 end end
 
-  doc """
-  Stage one of a shift: the blocks. Slides the window by ([dx], [dz]) chunks --
-  one of them zero and the other -1 or 1 -- generating or un-caching the band
-  that comes in, sliding the shown, dirty and hash arrays, and building the
-  band's occupancy. [blobs] are the column blobs of the chunks leaving (by local
-  index; only the dirty ones are kept); the cache gives back what it holds for
-  the band, and `restored` lists it.
+  -- A shift with its chunks in place but none of its fields: what shift_chunks
+  -- hands shift_fields. The world inside has the new chunks and the new origin
+  -- and every field still at the OLD origin, so it is not a world anyone may
+  -- render or read a field from -- it lives in the frame loop's staging value
+  -- and nowhere else. The list is the evicted cache including this shift's own
+  -- evictions, which the dirty and hash arrays still need.
+  type HalfShift = HalfShift(World, List(Evicted))
+  fn half_world(h : HalfShift) : World do match h do HalfShift(w, _) -> w end end
 
-  The returned world's LIGHT IS NOT VALID in the band: both fields are slid, so
-  the band comes back dark. `shift_light` finishes it, and `shift` is the two
-  together. They are separate so the frame loop can pay for them on separate
-  frames (see the staging comment on Staged in cube_forge.march).
+  doc """
+  Stage one of a shift: the chunks. Pours the band's lake tiles, evicts the
+  dirty chunks leaving, and generates or un-caches the band that comes in.
+
+  This is the expensive half and it is expensive for a reason that splitting it
+  further will not fix: the twelve new chunks are generated in one pmap, so its
+  cost is the LATENCY of a single chunk generation (~23 ms), not the sum. Half
+  a band costs the same as a whole one.
   """
-  fn shift_blocks(w : World, dx : Int, dz : Int, seed : Int, workers : Int, blobs : List(Blob)) : World do
+  fn shift_chunks(w : World, dx : Int, dz : Int, seed : Int, workers : Int, blobs : List(Blob)) : HalfShift do
     match w do
       World(cs, la, lb, o, sh, n, mo, ox, oz, dt, ca, _, tl, gh) ->
         let ox1 = ox + dx
@@ -564,9 +569,9 @@ mod CubeForge.World do
         let bx1 = band_x1(n, dx)
         let bz0 = band_z0(n, dz)
         let bz1 = band_z1(n, dz)
-        -- its lake tiles: a band of eight chunks spans at most two, and a
-        -- tile poured before (a shift within it) is taken from the world's
-        -- tile list rather than poured again
+        -- its lake tiles: a band spans at most two, and a tile poured before
+        -- (a shift within it) is taken from the world's tile list rather than
+        -- poured again. Lakes.tile is memoised in the shim besides.
         let ta = tile_for(tl, seed, ox1 + bx0, oz1 + bz0)
         let tl1 = remember_tile(tl, ta)
         let tb = if CubeForge.Lakes.tile_holds(ta, ox1 + bx1, oz1 + bz1) do ta else tile_for(tl1, seed, ox1 + bx1, oz1 + bz1) end
@@ -574,18 +579,60 @@ mod CubeForge.World do
         let ca1 = evict_go(cs, dt, n, dx, dz, ox, oz, blobs, 0, ca, gh)
         let rs = restored_go(ca1, n, dx, dz, ox1, oz1, 0, Nil)
         let cs1 = CubeForge.Tree.from_list(List.pmap_n(coords(n), fn i -> shifted_chunk(cs, n, i, dx, dz, ox1, oz1, seed, ta, tb, ca1), workers), C.new())
-        let c = 16 * n
-        let sh1 = restore_shown_go(shift_shown_go(sh, NativeArray.make_u8(c * c, 0), c, 16 * dx, 16 * dz, 0), rs, n, ox1, oz1)
-        let dt1 = shift_dirty_go(dt, NativeArray.make_u8(n * n, 0), n, dx, dz, ox1, oz1, ca1, 0)
-        let gh1 = shift_hash_go(gh, cs1, NativeArray.make_int(n * n, 0), n, dx, dz, ox1, oz1, ca1, 0)
-        let ca2 = drop_restored(ca1, rs)
-        -- The occupancy field belongs to this stage, not the light one: the
-        -- light sweep reads a neighbour's opacity out of it
-        -- (Light.sweep_box_lists -> list_go), so a band still zeroed from
-        -- shift_occ would light the incoming chunks as if they were air.
-        let w0 = World(cs1, CubeForge.Light.shift_field(la, dx, dz), CubeForge.Light.shift_field(lb, dx, dz), CubeForge.Light.shift_occ(o, dx, dz), sh1, n, mo, ox1, oz1, dt1, ca2, rs, tl2, gh1)
-        set_occupancy(w0, CubeForge.Light.occ_band(occupancy(w0), w0, bx0, bx1, bz0, bz1))
+        -- the new chunks and the new origin; every field is still the old one
+        HalfShift(World(cs1, la, lb, o, sh, n, mo, ox1, oz1, dt, ca1, rs, tl2, gh), ca1)
     end
+  end
+
+  doc """
+  Stage two of a shift: the per-column arrays and the fields. Slides shown,
+  dirty and the generation hashes, slides both light fields and the occupancy
+  field, and builds the band's occupancy.
+
+  The returned world's LIGHT IS NOT VALID in the band: both fields are slid, so
+  the band comes back dark. [shift_light] finishes it, and [shift] is all three
+  together. They are separate so the frame loop can pay for them on separate
+  frames (see the staging comment on Staged in cube_forge.march).
+  """
+  fn shift_fields(h : HalfShift, dx : Int, dz : Int, workers : Int) : World do
+    match h do
+      HalfShift(hw, ca1) ->
+        match hw do
+          World(cs1, la, lb, o, sh, n, mo, ox1, oz1, dt, _, rs, tl2, gh) ->
+            let bx0 = band_x0(n, dx)
+            let bx1 = band_x1(n, dx)
+            let bz0 = band_z0(n, dz)
+            let bz1 = band_z1(n, dz)
+            let c = 16 * n
+            let sh1 = restore_shown_go(shift_shown_go(sh, NativeArray.make_u8(c * c, 0), c, 16 * dx, 16 * dz, 0), rs, n, ox1, oz1)
+            let dt1 = shift_dirty_go(dt, NativeArray.make_u8(n * n, 0), n, dx, dz, ox1, oz1, ca1, 0)
+            let gh1 = shift_hash_go(gh, cs1, NativeArray.make_int(n * n, 0), n, dx, dz, ox1, oz1, ca1, 0)
+            let ca2 = drop_restored(ca1, rs)
+            -- The three fields slide independently, and the occupancy band goes
+            -- with the occupancy slide: reading it needs only the chunks, which
+            -- [hw] already has. So all three run as one pmap rather than in
+            -- series -- the occupancy leg is much the longest, and the two light
+            -- slides ride along inside it.
+            --
+            -- The occupancy field belongs to THIS stage and not the light one:
+            -- the light sweep reads a neighbour's opacity out of it
+            -- (Light.sweep_box_lists -> list_go), so a band still zeroed from
+            -- shift_occ would light the incoming chunks as if they were air.
+            let parts = List.pmap_n(Cons(0, Cons(1, Cons(2, Nil))),
+                                    fn i -> if i == 0 do CubeForge.Light.shift_field(la, dx, dz)
+                                            else if i == 1 do CubeForge.Light.shift_field(lb, dx, dz)
+                                            else CubeForge.Light.occ_band(CubeForge.Light.shift_occ(o, dx, dz), hw, bx0, bx1, bz0, bz1) end end, workers)
+            match parts do
+              Cons(la1, Cons(lb1, Cons(o1, _))) -> World(cs1, la1, lb1, o1, sh1, n, mo, ox1, oz1, dt1, ca2, rs, tl2, gh1)
+              _ -> hw
+            end
+        end
+    end
+  end
+
+  doc "Stages one and two together: every caller that does not care about frame budget."
+  fn shift_blocks(w : World, dx : Int, dz : Int, seed : Int, workers : Int, blobs : List(Blob)) : World do
+    shift_fields(shift_chunks(w, dx, dz, seed, workers, blobs), dx, dz, workers)
   end
 
   doc "Stage two of a shift: light the band that [shift_blocks] brought in, for the same ([dx], [dz]). The two fields are independent once the occupancy is in, so they are swept as a pair."

@@ -1208,15 +1208,20 @@ mod CubeForge do
   -- Every source above sea level: told to the shim, and its chunk flagged so the
   -- water actor ticks from the first frame (a chunk with a spring is always live).
   -- ── A shift in flight ──────────────────────────────────────────────────
-  -- A window shift is ~45 ms of work and a frame's budget is 16.7 ms, so it is
-  -- paid over four frames instead of one. The stages are values carried in the
+  -- A window shift is ~90 ms of work and a frame's budget is 16.7 ms, so it is
+  -- paid over five frames instead of one. The stages are values carried in the
   -- Frame, NOT in the Scene: the Scene stays wholly on the old window until the
   -- commit, so every staging frame still renders a coherent world.
   --
-  --   StBlocks  queued; next frame runs World.shift_blocks   (~18 ms)
-  --   StLight   blocks done; next frame runs World.shift_light (~11 ms)
+  --   StChunks  queued; next frame generates the band         (~23 ms)
+  --   StFields  chunks in; next frame slides the fields        (~20 ms)
+  --   StLight   fields in; next frame lights the band          (~22 ms)
   --   StMesh    lit; next frame meshes the band that came in   (~6 ms)
-  --   StCommit  meshed; next frame swaps the scene over        (~14 ms)
+  --   StCommit  meshed; next frame swaps the scene over        (~22 ms)
+  --
+  -- StChunks is the floor: its twelve chunks are generated in one pmap, so it
+  -- costs one chunk generation's LATENCY, not their sum, and splitting the band
+  -- would not move it. Under it is faster terrain generation, not more stages.
   --
   -- While a shift is staged the world is FROZEN (see `frozen` in the frame
   -- loop): the water tick, the biome and mycelium ticks and migrations,
@@ -1226,7 +1231,8 @@ mod CubeForge do
   -- frames is ~67 ms, under a tenth of a tick period and about 0.8 blocks of
   -- walking against the 16 blocks of slack the central 2x2 leaves.
   type Staged = NoShift
-              | StBlocks(Int, Int)
+              | StChunks(Int, Int)
+              | StFields(Int, Int, CubeForge.World.HalfShift)
               | StLight(Int, Int, CubeForge.World.World)
               | StMesh(Int, Int, CubeForge.World.World)
               | StCommit(Int, Int, CubeForge.World.World, List(CubeForge.ChunkMesh.ChunkMesh))
@@ -1390,13 +1396,14 @@ mod CubeForge do
     else if shift_src(d, n, dx, dz) < 0 do owe_moved_go(pend, n, dx, dz, d + 1)
     else owe_moved_go(owe_sections(pend, d % n, d / n, 65535, 0, n), n, dx, dz, d + 1) end end
   end
-  -- Stage 1: the blocks of the shift. Reads the scene, returns the new world;
-  -- the scene itself is untouched, so this frame still renders the old window.
-  pfn stage_blocks(sc, dx : Int, dz : Int, seed : Int, workers : Int) : CubeForge.World.World do
+  -- Stage 1: the band's chunks. Reads the scene, returns the half-shifted
+  -- world; the scene itself is untouched, so this frame still renders the old
+  -- window.
+  pfn stage_chunks(sc, dx : Int, dz : Int, seed : Int, workers : Int) : CubeForge.World.HalfShift do
     match sc do
       Scene(w, _, _, _, _, _, _, _, _, _, myc) ->
         let n = World.side(w)
-        World.shift_blocks(w, dx, dz, seed, workers, leaving_blobs(w, myc, n, dx, dz, n * n - 1, Nil))
+        World.shift_chunks(w, dx, dz, seed, workers, leaving_blobs(w, myc, n, dx, dz, n * n - 1, Nil))
     end
   end
 
@@ -1456,9 +1463,13 @@ mod CubeForge do
     let t0 = Win.time()
     match st do
       NoShift -> Advanced(sc, NoShift)
-      StBlocks(dx, dz) ->
-        let w = stage_blocks(sc, dx, dz, seed, workers)
-        if log do println("  shift stage blocks " ++ ms(Win.time() -. t0)) else () end
+      StChunks(dx, dz) ->
+        let h = stage_chunks(sc, dx, dz, seed, workers)
+        if log do println("  shift stage chunks " ++ ms(Win.time() -. t0)) else () end
+        Advanced(sc, StFields(dx, dz, h))
+      StFields(dx, dz, h) ->
+        let w = World.shift_fields(h, dx, dz, workers)
+        if log do println("  shift stage fields " ++ ms(Win.time() -. t0)) else () end
         Advanced(sc, StLight(dx, dz, w))
       StLight(dx, dz, w) ->
         let w1 = World.shift_light(w, dx, dz)
@@ -1744,7 +1755,7 @@ mod CubeForge do
   -- [place_id] > 0 forces a block id for scripted edits.
   -- [frozen]: a window shift is in flight, so no edit may land (see Staged).
   -- The ray, the outline and the break's progress bar all keep running; only
-  -- the completion and the placement wait, at most four frames.
+  -- the completion and the placement wait, at most five frames.
   pfn interact(sc, p : CubeForge.Player.Player, break_held : Bool, place_now : Bool, place_id : Int, new_sel : Int, dt : Float, seed : Int, now : Float, frozen : Bool) do
     match sc do
       Scene(world, counts, outline, _, ui0, pids, flags, meshes, bio, pend, myc) ->
@@ -2140,7 +2151,7 @@ mod CubeForge do
           -- nothing they see moves.
           let sdx = if is_staged(staged_in) do 0 else shift_dx(player_in) end
           let sdz = if sdx != 0 || is_staged(staged_in) do 0 else shift_dz(player_in) end
-          let st_in = if sdx != 0 || sdz != 0 do StBlocks(sdx, sdz) else staged_in end
+          let st_in = if sdx != 0 || sdz != 0 do StChunks(sdx, sdz) else staged_in end
           -- Committing this frame? then the player steps back the chunk the
           -- window stepped forward, on the same frame the scene swaps over.
           let cdx = match st_in do

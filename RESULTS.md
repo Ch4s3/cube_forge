@@ -2658,3 +2658,58 @@ Seed 7, release, uncapped, 19 899 frames, 11 shifts:
 The shift's own stages are all that break budget now. `blocks` is ~14 ms of
 twelve parallel chunk generations plus the field slides; splitting it means
 generating the band in halves.
+
+
+## The shift's stages split again (2026-09-06)
+
+`blocks` was 47 ms of the staged shift's 91 and the only stage far over budget.
+Timing it (`CF_STREAM_LOG=1`) at twelve chunks:
+
+| | ms |
+|---|---|
+| tiles + evict | 4.0 |
+| **chunk pmap** | **23** |
+| shown/dirty/hash arrays | 4.0 |
+| field slides | 4.5 |
+| occupancy band | 11.5 |
+
+So it split into `StChunks` (tiles, evict, the band's chunks) and `StFields`
+(the arrays, the three field slides, the occupancy band), and the three slides
+run as one pmap with the occupancy band riding inside the occupancy leg -- that
+leg needs only the chunks, which the half-shifted world already has.
+
+`World.shift_blocks` is now `shift_chunks` then `shift_fields`, joined by a
+`HalfShift`: the new chunks and the new origin with every field still at the
+old origin. It is not a world anyone may render or read a field from, and it
+never reaches the Scene -- it lives in the frame loop's staging value.
+
+| stage | before | after |
+|---|---|---|
+| chunks | — | **26.5** |
+| fields | — | **17.1** (22.8 before the slides were paired) |
+| blocks | 47.3 | — |
+| light | 21.6 | 21.5 |
+| mesh | 6.0 | 5.6 |
+| commit | 21.8 | 20.3 |
+| worst stage | **47.3** | **26.5** |
+| max frame | 55.3 | 49.5 |
+| frames over 16.67 (19 899 frames, 11 shifts) | 34 | 43 |
+
+The worst stage nearly halves; the count of over-budget frames rises, because a
+shift is now five frames of which four are over rather than four of which three
+are. That is the trade the split is: no single lurch, a few more small ones.
+
+None of the three remaining stages will yield to more splitting:
+
+- **chunks, 26.5 ms** — the twelve new chunks go through one pmap, so the cost
+  is one chunk generation's LATENCY, not their sum. Half a band costs the same
+  as a whole one. Under this is faster terrain generation.
+- **light, 21.5 ms** — the sky and block bands already run as a pair, so the
+  stage costs one band. Splitting them across frames would make each frame cost
+  what both cost together now.
+- **commit, 20.3 ms** — every GL call of the shift is here and has to be:
+  `gfx_shift`, the occupancy upload and the band's mesh uploads must land on one
+  frame or a buffer mixes two origins.
+
+468 tests. Light oracle at the accepted water baseline (sky 47/142/99 at frames
+30/400/1200, block 2/2/1).
