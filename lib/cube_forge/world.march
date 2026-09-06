@@ -84,15 +84,15 @@ mod CubeForge.World do
   end
 
   -- A repaired world together with the sections whose light (either field) changed.
-  type Relit = Relit(World, NativeIntArr)
-  fn relit_world(r : Relit) : World do match r do Relit(w, _) -> w end end
-  fn relit_marks(r : Relit) : NativeIntArr do match r do Relit(_, m) -> m end end
+  type Repaired = Repaired(World, NativeIntArr)
+  fn relit_world(r : Repaired) : World do match r do Repaired(w, _) -> w end end
+  fn relit_marks(r : Repaired) : NativeIntArr do match r do Repaired(_, m) -> m end end
 
   doc "Repair both light fields after an edit at a world coordinate, reporting the union of the sections either moved."
-  fn relight_marked(w : World, x : Int, y : Int, z : Int) : Relit do
+  fn relight_marked(w : World, x : Int, y : Int, z : Int) : Repaired do
     let rs = CubeForge.Light.relight_marked(light(w), w, x, y, z)
     let rb = CubeForge.Light.relight_block_marked(block_light(w), w, x, y, z)
-    Relit(set_block_light(set_light(w, CubeForge.Light.relit_field(rs)), CubeForge.Light.relit_field(rb)),
+    Repaired(set_block_light(set_light(w, CubeForge.Light.relit_field(rs)), CubeForge.Light.relit_field(rb)),
           CubeForge.Light.or_marks(CubeForge.Light.relit_marks(rs), CubeForge.Light.relit_marks(rb)))
   end
 

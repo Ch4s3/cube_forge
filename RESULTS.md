@@ -2051,3 +2051,64 @@ the stack only: the rest of a `get` -- `trie_get`, `get` itself, the tail
 length walk, and the cache misses a 50-hop list walk means -- did not show
 under one name. A structure change the profile rated at 2% took a third off
 the worst frame. 438 tests.
+## The relight box, and where the frame's memory goes (2026-09-05)
+
+**The relight box is sized to the light around the edit.** `Light.reach`:
+the brightest level at the edit voxel or beside it before the edit, plus the
+new block's emission, capped at 15. Light lost by placing a block was at most
+the voxel's own level; light gained by breaking one is at most a neighbour's
+level less one, and an opening sky shaft shows as the voxel above at 15. A
+level L propagates L - 1 steps, so a box of radius L holds every voxel that
+can move, and the clear, the seed, the before-copy, the section diff and the
+sweep are all passes over that box. Surface edits in daylight still get 15;
+a block-light edit beside mycelium glowing at 3 gets a 5-wide box instead of
+33. Oracle tests for a dim gallery and for a block-light edit beside dim
+mycelium added; all "incremental equals full flood" tests pass.
+
+| | before | after |
+|---|---|---|
+| a fruit body's slot (stamp, both relights, occupancy, rescan), median of 40 | ~6 ms | **3.8 ms** |
+| budget | 10.25 ms | 10.03 ms best of 3 |
+
+**The 139 live objects a frame are a leak, and it is large.** `cf_rss_bytes`
+(the shim, from `task_info`) gives the gauge a byte view: the process grows
+~1.8 MB a frame, 5.7 GB resident after 2,400 frames, identically on the old
+toolchain pin. Stage probes on a frame: the water tick retains 4.6 MB per
+tick, the biome slice ~350 KB every frame, the mycelium tick 480 KB, the
+drain ~100 KB; every stage that replaces part of the world leaves the old
+part alive. The stack pointer does not move between frames, so the loop is a
+true tail call, and making its parameters owned through identity functions
+changed nothing. `MARCH_TRACE_GC=1`'s allocation log (25 GB for 140 frames)
+gives the survivors: 64 KB chunk arrays at 29 a frame, 4 MB light fields,
+0.5 MB relight prefix copies, the field arrays, and thousands of 32-byte
+list cells. Three compiler-side causes, each with a repro:
+
+1. **A library-defined type gets no deep drop (GAPS G79).** Type definitions
+   are registered under qualified names; use sites carry the short name;
+   `Repr.find_variant` is exact. The drop pass found no constructors for
+   essentially every library type, freed each dying cell shallowly and leaked
+   its children. `probes/drop_xmod` (WHICH=1,2): 2.1 GB -> 8 MB with the fix
+   on the March branch `fix/drop-short-type-names` (checkout under the
+   session scratchpad). On this project it freed the field arrays (16 KB
+   survivors 811 -> 247, 131 KB 392 -> 106) but not the chunks.
+2. **A closure environment is freed shallowly (G80).** Every captured value
+   leaks. `probes/drop_xmod` WHICH=5: a thousand closures capturing 1 MB each,
+   called once and dropped, leave 1.07 GB resident. This is the chunk leak:
+   `Array.set`'s two update paths capture the new element in a closure, so
+   every persistent-vector update in every March program leaks the element.
+   WHICH=4 (a 64-element vector, 4,000 replacements of 64 KB arrays): 339 MB
+   resident against 4 MB live. Needs a per-closure-type drop or a runtime
+   release that knows the capture layout; not attempted here.
+3. **A named binding unused in one arm of a lifted closure is never released
+   (G81).** `Array.set`'s `lst_set` bound the replaced element as `h` and left
+   it unused in the replacing arm; the IR has no release for it, where a
+   wildcard gets one. Fixed in the stdlib on the same March branch by matching
+   with `_` in that arm; the probe still leaks through (2).
+
+Until the toolchain carries those fixes the project pins March main
+unchanged (`watch-9ca8a98d`). Two project-side releases added on the way,
+`Biome.release` and `Myc.release`, destructure a replaced field so its arrays
+die as bindings; harmless with the fix, and they cover (1) for those two
+types without it. The four colliding short type names (Field, Relit, Felled,
+Sweep across modules) were renamed unique; a collision also forces Boxed in
+the compiler and is worth avoiding regardless.
