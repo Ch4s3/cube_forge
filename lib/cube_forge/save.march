@@ -26,32 +26,35 @@ mod CubeForge.Save do
   -- seed, saved_at (unix seconds), player [px py pz vx vy vz yaw pitch],
   -- inventory [72 slot ints then the selected slot], seconds into the day,
   -- weather [phase, ticks left, intensity, bolt], the window origin in chunks
-  -- (x, z), the cached chunks as cx, cz, generation hash triples, and the
-  -- generation hash of each window chunk in grid order (see World.gen_hashes)
-  type Header = Header(Int, Int, NativeFloatArr, NativeIntArr, Float, NativeFloatArr, Int, Int, List(Int), List(Int))
+  -- (x, z), the cached chunks as cx, cz, generation hash triples, the
+  -- generation hash of each window chunk in grid order (see World.gen_hashes),
+  -- and the species the player has scanned as a bitmask
+  type Header = Header(Int, Int, NativeFloatArr, NativeIntArr, Float, NativeFloatArr, Int, Int, List(Int), List(Int), Int)
 
   fn version() : Int do 1 end
   fn player_floats() : Int do 8 end
   fn inventory_ints() : Int do 73 end
   fn weather_floats() : Int do 4 end
 
-  fn header_new(seed : Int, saved_at : Int, player : NativeFloatArr, inv : NativeIntArr, day : Float, wx : NativeFloatArr) : Header do
-    Header(seed, saved_at, player, inv, day, wx, 0, 0, Nil, Nil)
+  fn header_new(seed : Int, saved_at : Int, player : NativeFloatArr, inv : NativeIntArr, day : Float, wx : NativeFloatArr, known : Int) : Header do
+    Header(seed, saved_at, player, inv, day, wx, 0, 0, Nil, Nil, known)
   end
   doc "The header with the window's origin and the cached chunks' coordinates (cx, cz pairs, flattened)."
   fn with_window(h : Header, ox : Int, oz : Int, cached : List(Int), hashes : List(Int)) : Header do
-    match h do Header(s, t, p, i, d, w, _, _, _, _) -> Header(s, t, p, i, d, w, ox, oz, cached, hashes) end
+    match h do Header(s, t, p, i, d, w, _, _, _, _, k) -> Header(s, t, p, i, d, w, ox, oz, cached, hashes, k) end
   end
-  fn h_seed(h : Header) : Int do match h do Header(s, _, _, _, _, _, _, _, _, _) -> s end end
-  fn h_saved_at(h : Header) : Int do match h do Header(_, t, _, _, _, _, _, _, _, _) -> t end end
-  fn h_player(h : Header) : NativeFloatArr do match h do Header(_, _, p, _, _, _, _, _, _, _) -> p end end
-  fn h_inventory(h : Header) : NativeIntArr do match h do Header(_, _, _, i, _, _, _, _, _, _) -> i end end
-  fn h_day(h : Header) : Float do match h do Header(_, _, _, _, d, _, _, _, _, _) -> d end end
-  fn h_weather(h : Header) : NativeFloatArr do match h do Header(_, _, _, _, _, w, _, _, _, _) -> w end end
-  fn h_origin_x(h : Header) : Int do match h do Header(_, _, _, _, _, _, ox, _, _, _) -> ox end end
-  fn h_origin_z(h : Header) : Int do match h do Header(_, _, _, _, _, _, _, oz, _, _) -> oz end end
-  fn h_cached(h : Header) : List(Int) do match h do Header(_, _, _, _, _, _, _, _, c, _) -> c end end
-  fn h_hashes(h : Header) : List(Int) do match h do Header(_, _, _, _, _, _, _, _, _, hs) -> hs end end
+  fn h_seed(h : Header) : Int do match h do Header(s, _, _, _, _, _, _, _, _, _, _) -> s end end
+  fn h_saved_at(h : Header) : Int do match h do Header(_, t, _, _, _, _, _, _, _, _, _) -> t end end
+  fn h_player(h : Header) : NativeFloatArr do match h do Header(_, _, p, _, _, _, _, _, _, _, _) -> p end end
+  fn h_inventory(h : Header) : NativeIntArr do match h do Header(_, _, _, i, _, _, _, _, _, _, _) -> i end end
+  fn h_day(h : Header) : Float do match h do Header(_, _, _, _, d, _, _, _, _, _, _) -> d end end
+  fn h_weather(h : Header) : NativeFloatArr do match h do Header(_, _, _, _, _, w, _, _, _, _, _) -> w end end
+  fn h_origin_x(h : Header) : Int do match h do Header(_, _, _, _, _, _, ox, _, _, _, _) -> ox end end
+  fn h_origin_z(h : Header) : Int do match h do Header(_, _, _, _, _, _, _, oz, _, _, _) -> oz end end
+  fn h_cached(h : Header) : List(Int) do match h do Header(_, _, _, _, _, _, _, _, c, _, _) -> c end end
+  fn h_hashes(h : Header) : List(Int) do match h do Header(_, _, _, _, _, _, _, _, _, hs, _) -> hs end end
+  doc "The species the player has scanned, as a bitmask. A save written before scanning existed has no such line and reads 0, which is the right answer for it and needs no migration."
+  fn h_known(h : Header) : Int do match h do Header(_, _, _, _, _, _, _, _, _, _, k) -> k end end
 
   -- ── Encoding ─────────────────────────────────────────────────────────────
 
@@ -81,6 +84,7 @@ mod CubeForge.Save do
     ++ "origin " ++ int_to_string(h_origin_x(h)) ++ " " ++ int_to_string(h_origin_z(h)) ++ "\n"
     ++ "cached" ++ ints_list_go(h_cached(h), "") ++ "\n"
     ++ "hashes" ++ ints_list_go(h_hashes(h), "") ++ "\n"
+    ++ "known " ++ int_to_string(h_known(h)) ++ "\n"
   end
 
   -- ── Parsing ──────────────────────────────────────────────────────────────
@@ -156,6 +160,18 @@ mod CubeForge.Save do
       Err(_) -> Nil
     end
   end
+  -- A field that may be absent: an older save has no `known` line, and the
+  -- absence means nothing has been scanned rather than that the file is broken.
+  pfn int_field_or(lines : List(String), key : String, dflt : Int) : Int do
+    match find_line(lines, key) do
+      Ok(toks) ->
+        match parse_int_tok(toks, key) do
+          Ok(v) -> v
+          Err(_) -> dflt
+        end
+      Err(_) -> dflt
+    end
+  end
   pfn int_field(lines : List(String), key : String) : Result(Int, String) do
     match find_line(lines, key) do
       Ok(toks) -> parse_int_tok(toks, key)
@@ -210,7 +226,7 @@ mod CubeForge.Save do
                             Ok(a) -> a
                             Err(_) -> NativeArray.make_int(2, 0)
                           end
-                          Ok(Header(seed, at, p, inv, day, wx, NativeArray.get_int(oxz, 0), NativeArray.get_int(oxz, 1), int_list_field(lines, "cached"), int_list_field(lines, "hashes")))
+                          Ok(Header(seed, at, p, inv, day, wx, NativeArray.get_int(oxz, 0), NativeArray.get_int(oxz, 1), int_list_field(lines, "cached"), int_list_field(lines, "hashes"), int_field_or(lines, "known", 0)))
                       end
                     end
                   end

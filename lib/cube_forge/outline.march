@@ -7,7 +7,7 @@ mod CubeForge.Outline do
 
   pfn v(b : CubeForge.F32Buf.F32Buf, x : Float, y : Float, z : Float) : CubeForge.F32Buf.F32Buf do
     -- uv = (0, 0), layer 0, shade 0 => black in the untextured shader path
-    b |> B.push3(x, y, z) |> B.push(0.0) |> B.push(0.0) |> B.push(0.0) |> B.push(0.0) |> B.push(0.0) |> B.push(Vx.plain())
+    b |> B.push3(x, y, z) |> B.push(0.0) |> B.push(0.0) |> B.push(0.0) |> B.push(0.0) |> B.push(0.0) |> B.push(Vx.plain()) |> B.push(0.0)
   end
 
   pfn edge(b : CubeForge.F32Buf.F32Buf, x0 : Float, y0 : Float, z0 : Float, x1 : Float, y1 : Float, z1 : Float) : CubeForge.F32Buf.F32Buf do

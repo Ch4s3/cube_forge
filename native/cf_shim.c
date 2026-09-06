@@ -189,13 +189,26 @@ void cf_win_set_fullscreen(int64_t on) {
 }
 
 /* ── GL: shader program + one VAO shared by every mesh ──────────────────────
- * Vertex layout (9 floats): pos.xyz, uv, layer, shade, face, fx.
+ * Vertex layout (10 floats): pos.xyz, uv, layer, sky, face, fx, block light.
+ *
+ * Sky and block light are SEPARATE attributes and must stay that way. They
+ * were once one float, sky in the fraction and block light as an even integer
+ * above it, unpacked in the fragment shader. A varying is interpolated across
+ * the triangle, and the unpack is not linear: between two corners that are
+ * both fully sunlit but differ in block light, the decoded sky ran 1.0, 1.4,
+ * 1.8, 0.2, 0.6, 1.0 -- a sawtooth that painted near-black bands over lit
+ * ground wherever a glowing block stood. Two channels cannot share one
+ * interpolated scalar.
  * `fx` packs an effect id and an alpha: effect * 256 + alpha*255, exact
  * because floats hold integers to 2^24. Effect 1 is precipitation.
  * `face` is 0..5 (+y -y +x -x +z -z); the vertex shader turns it into a normal
  * for the flashlight and into the directional multiplier that used to be baked
  * into `shade` by the mesher.                                                  */
-#define CF_VERT_FLOATS 9
+#define CF_VERT_FLOATS 10
+/* Floats in one merged rectangle: six vertices. Every reserve on both sides of
+ * the FFI is stated in these terms -- a literal here and a literal in
+ * F32Buf.push_quad drifted apart the moment the vertex grew. */
+#define CF_QUAD_FLOATS (6 * CF_VERT_FLOATS)
 #define CF_PRECIP_SLOT 249
 static GLuint g_prog = 0, g_vao = 0;
 static GLint  g_u_vp = -1, g_u_tex = -1;
@@ -208,12 +221,13 @@ static const char *VS =
     "layout(location=3) in float a_shade;\n"
     "layout(location=4) in float a_face;\n"
     "layout(location=5) in float a_fx;\n"
+    "layout(location=6) in float a_blk;\n"
     "uniform mat4 u_vp;\n"
     "uniform float u_time;\n"
     /* The slot's offset: a chunk mesh is baked at the window-local origin it
      * had when meshed, and the window has since slid (cf_gfx_shift). */
     "uniform vec2 u_off;\n"
-    "out vec2 v_uv; out float v_layer; out float v_shade;\n"
+    "out vec2 v_uv; out float v_layer; out float v_shade; out float v_blk;\n"
     "out vec3 v_world; out vec3 v_normal; out float v_fx;\n"
     "const vec3 NORMALS[6] = vec3[6](vec3(0,1,0), vec3(0,-1,0), vec3(1,0,0), vec3(-1,0,0), vec3(0,0,1), vec3(0,0,-1));\n"
     "void main(){\n"
@@ -233,12 +247,13 @@ static const char *VS =
      * used to be folded in here is replaced by a real N.L against a sun that
      * moves, computed per fragment. */
     "  v_shade = a_shade;\n"
+    "  v_blk = a_blk;\n"
     "  v_world = a_pos + vec3(u_off.x, 0.0, u_off.y); v_normal = NORMALS[f];\n"
     "  v_fx = a_fx;\n"
     "}\n";
 static const char *FS =
     "#version 330 core\n"
-    "in vec2 v_uv; in float v_layer; in float v_shade;\n"
+    "in vec2 v_uv; in float v_layer; in float v_shade; in float v_blk;\n"
     "in vec3 v_world; in vec3 v_normal; in float v_fx;\n"
     "uniform sampler2DArray u_tex;\n"
     "uniform int u_use_tex;\n"
@@ -259,6 +274,12 @@ static const char *FS =
     "uniform float u_overcast;\n"
     "uniform float u_bolt;\n"
     "uniform float u_time;\n"
+    "uniform vec3  u_species[6];\n"
+    "uniform int   u_myc_first;\n"
+    "uniform int   u_myc_count;\n"
+    "uniform float u_branch;\n"
+    "uniform float u_branch_scale;\n"
+    "uniform float u_branch_sharp;\n"
     "out vec4 o_color;\n"
     /* The beam shape never varies at runtime, only its position, aim and
      * on/off state, so the cone half-angles are constants rather than uniforms. */
@@ -379,6 +400,27 @@ static const char *FS =
     "  return smoothstep(0.75, 1.0, hit / maxDist);\n"
     "}\n"
     "float hash12(vec2 v){ return fract(sin(dot(v, vec2(12.9898, 78.233))) * 43758.5453); }\n"
+    "float vnoise(vec2 p){\n"
+    "  vec2 i = floor(p), f = fract(p);\n"
+    "  f = f * f * (3.0 - 2.0 * f);\n"
+    "  float a = hash12(i), b = hash12(i + vec2(1.0, 0.0));\n"
+    "  float c = hash12(i + vec2(0.0, 1.0)), d = hash12(i + vec2(1.0, 1.0));\n"
+    "  return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);\n"
+    "}\n"
+    /* Hyphae: ridged, domain-warped value noise. The ridge is where the
+     * noise crosses its midpoint, which wanders and FORKS -- that fork is
+     * what reads as branching, and no tile can produce it because the
+     * threads have to run on across a block boundary. Fed world-space
+     * coordinates, so a filament crosses from block to block unbroken and
+     * the pattern never repeats. The warp keeps the ridges from reading as
+     * contour lines on a map. */
+    "float hyphae(vec2 p){\n"
+    "  vec2 w = p * u_branch_scale;\n"
+    "  vec2 q = w + 0.75 * vec2(vnoise(w * 0.55), vnoise(w * 0.55 + 19.7));\n"
+    "  float n = 0.65 * vnoise(q * 1.15) + 0.35 * vnoise(q * 2.60);\n"
+    "  float ridge = 1.0 - abs(2.0 * n - 1.0);\n"
+    "  return smoothstep(u_branch_sharp, 1.0, ridge);\n"
+    "}\n"
     /* Hard shadows are one ray. Soft shadows spread SOFT_TAPS over a small cone:
      * because the rays diverge, the penumbra widens with distance from the
      * caster on its own, which is what real soft shadows do. The cone is rotated
@@ -414,8 +456,8 @@ static const char *FS =
     /* The shade float packs two channels (see Vertex.pack_shade): sky shade in
      * [0, 1], and block-light shade in even integers above it. Overlays push a
      * plain shade in [0, 1], which decodes as sky-only and leaves them alone. */
-    "  float sk = v_shade - 2.0 * floor(v_shade * 0.5);\n"
-    "  float bl = floor(v_shade * 0.5) / 255.0;\n"
+    "  float sk = v_shade;\n"
+    "  float bl = v_blk;\n"
     "  float spd = float(fxw & 255) / 255.0 * 7.0;\n"
     /* Flowing water scrolls its ripple along the flow; still water drifts;
      * fast or falling water blends toward the foam layer. */
@@ -426,6 +468,19 @@ static const char *FS =
     "  float foam = (fe == 11) ? 1.0 : ((fe >= 2 && fe <= 9) ? spd / 7.0 : 0.0);\n"
     "  if (foam > 0.0 && u_use_tex == 1) t = mix(t, texture(u_tex, vec3(uv * 1.5, 16.0)), foam * 0.7);\n"
     "  if (u_cutout == 1 && t.a < 0.5) discard;\n"
+    /* Mycelium wears its species colour twice: a wash baked into the tile
+     * (CubeForge.Texture.myc_tint) and these filaments, drawn here because
+     * they must not stop at a block edge. The layer index carries the
+     * species -- layers are myc_first + 6 * base + (species - 1) -- so no
+     * vertex channel is needed. Overlays (u_unlit) are not the world. */
+    "  if (u_branch > 0.0 && u_unlit == 0 && u_use_tex == 1) {\n"
+    "    int mycl = int(v_layer + 0.5) - u_myc_first;\n"
+    "    if (mycl >= 0 && mycl < u_myc_count) {\n"
+    "      vec3 an = abs(v_normal);\n"
+    "      vec2 pw = (an.y > 0.5) ? v_world.xz : ((an.x > 0.5) ? v_world.zy : v_world.xy);\n"
+    "      t.rgb = mix(t.rgb, u_species[mycl % 6], hyphae(pw) * u_branch);\n"
+    "    }\n"
+    "  }\n"
     "  float moon = clamp((MOON_UNTIL - u_sun) / MOON_UNTIL, 0.0, 1.0);\n"
     /* Cloud does not remove light, it diffuses it: ambient rises as the direct
      * term falls, which is why an overcast day is flat rather than dark.
@@ -520,6 +575,12 @@ static inline GLuint vbo_of(int64_t slot) { return g_vbo_cur[slot] ? g_vbo_b[slo
 /* A VAO per mesh slot was tried (2026-09-05 perf pass): 192 chunk draws a frame as one bind and one draw each. A/B over six alternating runs was noise, so the shared VAO stays. */
 static int g_debug = -1;
 static inline int cf_debug(void) { if (g_debug < 0) g_debug = getenv("CF_DEBUG") != NULL; return g_debug; }
+static GLint  g_u_species = -1;
+static GLint  g_u_myc_first = -1;
+static GLint  g_u_myc_count = -1;
+static GLint  g_u_branch = -1;
+static GLint  g_u_branch_scale = -1;
+static GLint  g_u_branch_sharp = -1;
 static GLint  g_u_use_tex = -1;
 static GLint  g_u_cutout = -1;
 static GLint  g_u_sun = -1, g_u_eye = -1, g_u_dir = -1, g_u_flash = -1;
@@ -557,6 +618,12 @@ int64_t cf_gfx_init(void) {
     glDeleteShader(vs); glDeleteShader(fs);
     g_u_vp = glGetUniformLocation(g_prog, "u_vp");
     g_u_tex = glGetUniformLocation(g_prog, "u_tex");
+    g_u_species   = glGetUniformLocation(g_prog, "u_species");
+    g_u_myc_first = glGetUniformLocation(g_prog, "u_myc_first");
+    g_u_myc_count = glGetUniformLocation(g_prog, "u_myc_count");
+    g_u_branch    = glGetUniformLocation(g_prog, "u_branch");
+    g_u_branch_scale = glGetUniformLocation(g_prog, "u_branch_scale");
+    g_u_branch_sharp = glGetUniformLocation(g_prog, "u_branch_sharp");
     g_u_use_tex = glGetUniformLocation(g_prog, "u_use_tex");
     g_u_cutout = glGetUniformLocation(g_prog, "u_cutout");
     g_u_sun = glGetUniformLocation(g_prog, "u_sun");
@@ -672,6 +739,7 @@ void cf_gfx_draw(int64_t slot, int64_t nverts) {
     glEnableVertexAttribArray(3); glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, stride, (void *)(6 * 4));
     glEnableVertexAttribArray(4); glVertexAttribPointer(4, 1, GL_FLOAT, GL_FALSE, stride, (void *)(7 * 4));
     glEnableVertexAttribArray(5); glVertexAttribPointer(5, 1, GL_FLOAT, GL_FALSE, stride, (void *)(8 * 4));
+    glEnableVertexAttribArray(6); glVertexAttribPointer(6, 1, GL_FLOAT, GL_FALSE, stride, (void *)(9 * 4));
     glDrawArrays(GL_TRIANGLES, 0, (GLsizei)nverts);
     if (cf_debug()) { fprintf(stderr, "cf: draw slot=%lld nverts=%lld glerr=%d prog=%u vao=%u\n", (long long)slot, (long long)nverts, (int)glGetError(), g_prog, g_vao); }
 }
@@ -1002,6 +1070,7 @@ static void pcl_vert(float *v, float x, float y, float z,
     v[6] = 1.0f;                    /* shade: unlit, so this is a pass-through */
     v[7] = 0.0f;                    /* face */
     v[8] = fx;                      /* effect 1 + alpha, packed */
+    v[9] = 0.0f;                    /* block light: overlays and particles carry none */
 }
 
 /* Step every live particle, rebuild the geometry, and upload it. One call per
@@ -1096,7 +1165,11 @@ static const float CF_BIOME_RGB[CF_BIOME_COUNT][3] = {
 static float  *g_biome_vtx = NULL;
 static int64_t g_biome_cap = 0;
 
-void cf_biome_map_upload(void *biomes, int64_t n) {
+/* [active] is the biome field's per-column active flag -- the dirty set the tick
+ * keeps so it can skip settled columns. It is exactly "this column is still
+ * changing", so the survey's drift marking is free: no new pass, no new state,
+ * just a lighter colour where the world is in motion. */
+void cf_biome_map_upload(void *biomes, void *active, int64_t n) {
     int64_t cells = n * n;
     if (cells > g_biome_cap) {
         free(g_biome_vtx);
@@ -1104,9 +1177,16 @@ void cf_biome_map_upload(void *biomes, int64_t n) {
         g_biome_cap = cells;
     }
     const unsigned char *b = (const unsigned char *)narr_data(biomes);
+    const unsigned char *act = (const unsigned char *)narr_data(active);
     for (int64_t i = 0; i < cells; i++) {
         float x0 = (float)(i % n), z0 = (float)(i / n), x1 = x0 + 1.0f, z1 = z0 + 1.0f;
-        const float *c = CF_BIOME_RGB[b[i] < CF_BIOME_COUNT ? b[i] : 0];
+        const float *cb = CF_BIOME_RGB[b[i] < CF_BIOME_COUNT ? b[i] : 0];
+        /* drifting columns lift toward white, so an irrigated valley lights up
+         * as it changes and goes quiet as it settles */
+        float lit[3];
+        if (act && act[i]) { for (int k = 0; k < 3; k++) lit[k] = cb[k] + (1.0f - cb[k]) * 0.55f; }
+        else               { for (int k = 0; k < 3; k++) lit[k] = cb[k]; }
+        const float *c = lit;
         float *v = g_biome_vtx + i * 6 * CF_VERT_FLOATS;
         /* winding matches the mesher's top face: (x0,z0)->(x0,z1)->(x1,z1)->(x1,z0) */
         pcl_vert(v + 0 * CF_VERT_FLOATS, x0, CF_BIOME_Y, z0, c[0], c[1], c[2], 255.0f);
@@ -1350,26 +1430,30 @@ void *cf_f32_stamp(void *dst, int64_t di, void *src, int64_t si, int64_t n, doub
     int64_t rc = *(int64_t *)dst;
     if (rc != 1) { fprintf(stderr, "cf_f32_stamp: destination is shared (rc=%lld); refusing to write in place\n", (long long)rc); abort(); }
     if (n <= 0) return dst;
-    if (di < 0 || si < 0 || di + n > narr_len(dst) || si + n > narr_len(src) || n % 9 != 0) {
+    if (di < 0 || si < 0 || di + n > narr_len(dst) || si + n > narr_len(src) || n % CF_VERT_FLOATS != 0) {
         fprintf(stderr, "cf_f32_stamp: out of range (di=%lld si=%lld n=%lld dst=%lld src=%lld)\n",
                 (long long)di, (long long)si, (long long)n, (long long)narr_len(dst), (long long)narr_len(src));
         abort();
     }
     float *d = (float *)narr_data(dst) + di;
     const float *s = (const float *)narr_data(src) + si;
-    for (int64_t i = 0; i < n; i += 9) {
+    /* [shade] arrives packed and is split into the two light attributes, as in
+     * cf_vert: the template's own slots 6 and 9 are placeholders. */
+    double blk = floor(shade * 0.5);
+    for (int64_t i = 0; i < n; i += CF_VERT_FLOATS) {
         d[i + 0] = (float)((double)s[i + 0] + dx);
         d[i + 1] = (float)((double)s[i + 1] + dy);
         d[i + 2] = (float)((double)s[i + 2] + dz);
         d[i + 3] = s[i + 3]; d[i + 4] = s[i + 4]; d[i + 5] = s[i + 5];
-        d[i + 6] = (float)shade;
+        d[i + 6] = (float)(shade - 2.0 * blk);
         d[i + 7] = s[i + 7]; d[i + 8] = s[i + 8];
+        d[i + 9] = (float)(blk / 255.0);
     }
     return dst;
 }
 
 /* ── The greedy mesher's quad, written here ──────────────────────────────────
- * One merged rectangle of the section mesher: 6 vertices x 9 floats at
+ * One merged rectangle of the section mesher: 6 vertices x CF_VERT_FLOATS floats at
  * dst[at..], from the integer description the greedy pass has (direction d,
  * section sy, slice a, mask cell (u, v), size wd x h, the packed key) plus the
  * chunk origin and the texture-layer table. This is Mesher.emit_rect and
@@ -1391,9 +1475,14 @@ static double cf_corner_blk(int64_t p) { return ((double)(p / 64) / 15.0) * cf_c
 static double cf_clamp01(double v) { return v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v); }
 static double cf_pack_shade(double sky, double blk) { return 2.0 * (double)(int64_t)(cf_clamp01(blk) * 255.0 + 0.5) + cf_clamp01(sky); }
 static double cf_brightness(double p) { double h = floor(p / 2.0); return (p - 2.0 * h) + h / 255.0; }
+/* [shade] arrives packed (see cf_pack_shade / CubeForge.Vertex.pack_shade) and is
+ * split HERE, on the CPU, into the two attributes the GPU interpolates. The
+ * packed form never reaches a varying -- see the layout note above. */
 static void cf_vert(float *o, double x, double y, double z, double u, double v, double layer, double shade, double face) {
+    double blk = floor(shade * 0.5);
     o[0] = (float)x; o[1] = (float)y; o[2] = (float)z; o[3] = (float)u; o[4] = (float)v;
-    o[5] = (float)layer; o[6] = (float)shade; o[7] = (float)face; o[8] = 255.0f;
+    o[5] = (float)layer; o[6] = (float)(shade - 2.0 * blk); o[7] = (float)face; o[8] = 255.0f;
+    o[9] = (float)(blk / 255.0);
 }
 static void cf_quad_into(float *o, int64_t d, int64_t sy, int64_t a, int64_t u, int64_t v, int64_t wd, int64_t h,
                          int64_t key, double ox, double oz, const float *tab, int64_t ntab);
@@ -1401,7 +1490,7 @@ void *cf_mesh_quad(void *dst, int64_t at, int64_t d, int64_t sy, int64_t a, int6
                    int64_t key, double ox, double oz, void *layers) {
     int64_t rc = *(int64_t *)dst;
     if (rc != 1) { fprintf(stderr, "cf_mesh_quad: destination is shared (rc=%lld); refusing to write in place\n", (long long)rc); abort(); }
-    if (at < 0 || at + 54 > narr_len(dst)) { fprintf(stderr, "cf_mesh_quad: out of range (at=%lld dst=%lld)\n", (long long)at, (long long)narr_len(dst)); abort(); }
+    if (at < 0 || at + 6 * CF_VERT_FLOATS > narr_len(dst)) { fprintf(stderr, "cf_mesh_quad: out of range (at=%lld dst=%lld)\n", (long long)at, (long long)narr_len(dst)); abort(); }
     cf_quad_into((float *)narr_data(dst) + at, d, sy, a, u, v, wd, h, key, ox, oz, (const float *)narr_data(layers), narr_len(layers));
     return dst;
 }
@@ -1411,9 +1500,9 @@ void *cf_mesh_quad(void *dst, int64_t at, int64_t d, int64_t sy, int64_t a, int6
  * first unclaimed cell in index order, widest run along u of the same key,
  * tallest stack of such rows along v -- each written as a quad at dst[at..].
  * Works on a local copy of the slice, so the March mask is read only. dst is
- * consumed and returned like cf_f32_blit's; the caller reserves 256 * 54 + 1
+ * consumed and returned like cf_f32_blit's; the caller reserves 256 * CF_QUAD_FLOATS + 1
  * floats past [at], and the number of floats written comes back in the slot
- * at dst[at + 256 * 54], past anything this call wrote, for the caller to
+ * at dst[at + 256 * CF_QUAD_FLOATS], past anything this call wrote, for the caller to
  * read and adopt as the new length (an extern returns one value, and the
  * buffer is the one that must come back). Replaces Mesher.greedy_go: its
  * per-cell variant rebuild and run scans were a third of a section's mesh
@@ -1422,7 +1511,7 @@ void *cf_mesh_slice(void *dst, int64_t at, void *mask, int64_t base, int64_t d, 
                     double ox, double oz, void *layers) {
     int64_t rc = *(int64_t *)dst;
     if (rc != 1) { fprintf(stderr, "cf_mesh_slice: destination is shared (rc=%lld); refusing to write in place\n", (long long)rc); abort(); }
-    if (at < 0 || at + 256 * 54 + 1 > narr_len(dst) || base < 0 || base + 256 > narr_len(mask)) {
+    if (at < 0 || at + 256 * CF_QUAD_FLOATS + 1 > narr_len(dst) || base < 0 || base + 256 > narr_len(mask)) {
         fprintf(stderr, "cf_mesh_slice: out of range (at=%lld dst=%lld base=%lld mask=%lld)\n", (long long)at, (long long)narr_len(dst), (long long)base, (long long)narr_len(mask));
         abort();
     }
@@ -1448,9 +1537,9 @@ void *cf_mesh_slice(void *dst, int64_t at, void *mask, int64_t base, int64_t d, 
         }
         for (int64_t k = 0; k < wd * h; k++) m[u + k % wd + 16 * (v + k / wd)] = 0;
         cf_quad_into(o + written, d, sy, a, u, v, wd, h, key, ox, oz, tab, ntab);
-        written += 54;
+        written += CF_QUAD_FLOATS;
     }
-    o[256 * 54] = (float)written;
+    o[256 * CF_QUAD_FLOATS] = (float)written;
     return dst;
 }
 
@@ -1512,18 +1601,18 @@ static void cf_quad_into(float *o, int64_t d, int64_t sy, int64_t a, int64_t u, 
     int flip = cf_brightness(S[0]) + cf_brightness(S[2]) < cf_brightness(S[1]) + cf_brightness(S[3]);
     if (flip) {
         cf_vert(o + 0,  X[1], Y[1], Z[1], uw,  0.0, layer, S[1], face);
-        cf_vert(o + 9,  X[2], Y[2], Z[2], uw,  vh,  layer, S[2], face);
-        cf_vert(o + 18, X[3], Y[3], Z[3], 0.0, vh,  layer, S[3], face);
-        cf_vert(o + 27, X[1], Y[1], Z[1], uw,  0.0, layer, S[1], face);
-        cf_vert(o + 36, X[3], Y[3], Z[3], 0.0, vh,  layer, S[3], face);
-        cf_vert(o + 45, X[0], Y[0], Z[0], 0.0, 0.0, layer, S[0], face);
+        cf_vert(o + 10,  X[2], Y[2], Z[2], uw,  vh,  layer, S[2], face);
+        cf_vert(o + 20, X[3], Y[3], Z[3], 0.0, vh,  layer, S[3], face);
+        cf_vert(o + 30, X[1], Y[1], Z[1], uw,  0.0, layer, S[1], face);
+        cf_vert(o + 40, X[3], Y[3], Z[3], 0.0, vh,  layer, S[3], face);
+        cf_vert(o + 50, X[0], Y[0], Z[0], 0.0, 0.0, layer, S[0], face);
     } else {
         cf_vert(o + 0,  X[0], Y[0], Z[0], 0.0, 0.0, layer, S[0], face);
-        cf_vert(o + 9,  X[1], Y[1], Z[1], uw,  0.0, layer, S[1], face);
-        cf_vert(o + 18, X[2], Y[2], Z[2], uw,  vh,  layer, S[2], face);
-        cf_vert(o + 27, X[0], Y[0], Z[0], 0.0, 0.0, layer, S[0], face);
-        cf_vert(o + 36, X[2], Y[2], Z[2], uw,  vh,  layer, S[2], face);
-        cf_vert(o + 45, X[3], Y[3], Z[3], 0.0, vh,  layer, S[3], face);
+        cf_vert(o + 10,  X[1], Y[1], Z[1], uw,  0.0, layer, S[1], face);
+        cf_vert(o + 20, X[2], Y[2], Z[2], uw,  vh,  layer, S[2], face);
+        cf_vert(o + 30, X[0], Y[0], Z[0], 0.0, 0.0, layer, S[0], face);
+        cf_vert(o + 40, X[2], Y[2], Z[2], uw,  vh,  layer, S[2], face);
+        cf_vert(o + 50, X[3], Y[3], Z[3], 0.0, vh,  layer, S[3], face);
     }
 }
 
@@ -1630,6 +1719,20 @@ void cf_gfx_set_sky(double sx, double sy, double sz, double mx, double my, doubl
 void cf_gfx_set_time(double t) {
     glUseProgram(g_prog);
     glUniform1f(g_u_time, (float)t);
+}
+
+/* The mycelium filament overlay: which texture layers are mycelium, the
+ * species colours they are drawn in (3 floats each, 0..1), and how strongly.
+ * Set once at startup -- none of it changes while a world runs. */
+void cf_gfx_set_myc(int64_t first, int64_t count, void *rgb, double branch, double scale, double sharp) {
+    if (!g_prog) return;
+    glUseProgram(g_prog);
+    glUniform3fv(g_u_species, (GLsizei)(narr_len(rgb) / 3), (const float *)narr_data(rgb));
+    glUniform1i(g_u_myc_first, (int)first);
+    glUniform1i(g_u_myc_count, (int)count);
+    glUniform1f(g_u_branch, (float)branch);
+    glUniform1f(g_u_branch_scale, (float)scale);
+    glUniform1f(g_u_branch_sharp, (float)sharp);
 }
 
 void cf_gfx_set_weather(double fog_density, double overcast, double bolt) {

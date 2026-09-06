@@ -441,7 +441,7 @@ mod CubeForge.Test.Flow do
   -- A slot holding one chunk: the lake from above plus a spring high on the land.
   pfn slot_dir() : String do "test_saves_tmp" end
   pfn dummy_header() : CubeForge.Save.Header do
-    Save.header_new(7, 0, NativeArray.make_float(8, 0.0), NativeArray.make_int(73, 0), 0.0, NativeArray.make_float(4, 0.0))
+    Save.header_new(7, 0, NativeArray.make_float(8, 0.0), NativeArray.make_int(73, 0), 0.0, NativeArray.make_float(4, 0.0), 0)
   end
   pfn write_lake_slot(slot : Int) : CubeForge.Chunk.Chunk do
     let c = C.set(lake_go(C.new(), 0), 12, 80, 12, C.water())
