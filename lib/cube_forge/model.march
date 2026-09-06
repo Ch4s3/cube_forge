@@ -55,15 +55,11 @@ mod CubeForge.Model do
   fn c_bush_light() : Int do 21 end
   fn c_bush_stem() : Int do 22 end
   -- Fauna. Animals are Model templates too (CubeForge.Fauna builds them with
-  -- `template`), so their colours live in the same palette layer: the texture
-  -- loop already writes all 256 texels, so a row here needs no texture work.
-  fn c_pipit() : Int do 23 end
-  fn c_pipit_dark() : Int do 24 end
-  fn c_pipit_pale() : Int do 25 end
+  -- `template_n`), so their colours live in the same palette layer.
+  -- The two accents every animal shares. A species' own three tones are
+  -- generated (CubeForge.Fauna.palette_base and up), not listed here: sixteen
+  -- species is a table, and forty-eight literals in this chain is not one.
   fn c_beak() : Int do 26 end
-  fn c_sunfin() : Int do 27 end
-  fn c_sunfin_fin() : Int do 28 end
-  fn c_sunfin_pale() : Int do 29 end
   fn c_eye() : Int do 30 end
 
   doc "Palette colour k, red channel."
@@ -116,9 +112,28 @@ mod CubeForge.Model do
   fn cell_n(g : NativeU8Arr, n : Int, x : Int, y : Int, z : Int) : Int do
     if x < 0 || y < 0 || z < 0 || x >= n || y >= n || z >= n do 0 else NativeArray.get_u8(g, idx_n(n, x, y, z)) end
   end
-  doc "Fill the box [x0, x1] x [y0, y1] x [z0, z1] of a grid [n] a side."
+  pfn lo(a : Int, b : Int) : Int do if a < b do a else b end end
+  pfn hi(a : Int, b : Int) : Int do if a < b do b else a end end
+
+  doc """
+  Fill the box [x0, x1] x [y0, y1] x [z0, z1] of a grid [n] a side.
+
+  The bounds are SORTED, not required in order. An inverted range used to be an
+  empty one -- the cell count came out zero or negative and the loop wrote
+  nothing -- and that silence cost three real bugs in the fauna bodies: a tail
+  sweeping toward -z whose connector arrived descending, and two birds whose
+  wing taper crossed itself on a short body, all of which produced a body that
+  built cleanly and was simply missing a part. A caller that hands over a
+  reversed range means the box between the two, and gets it.
+  """
   fn box_n(g : NativeU8Arr, n : Int, x0 : Int, y0 : Int, z0 : Int, x1 : Int, y1 : Int, z1 : Int, k : Int) : NativeU8Arr do
-    box_n_go(g, n, x0, y0, z0, x1, y1, z1, k, 0, (x1 - x0 + 1) * (y1 - y0 + 1) * (z1 - z0 + 1))
+    let xa = lo(x0, x1)
+    let xb = hi(x0, x1)
+    let ya = lo(y0, y1)
+    let yb = hi(y0, y1)
+    let za = lo(z0, z1)
+    let zb = hi(z0, z1)
+    box_n_go(g, n, xa, ya, za, xb, yb, zb, k, 0, (xb - xa + 1) * (yb - ya + 1) * (zb - za + 1))
   end
   pfn box_n_go(g : NativeU8Arr, n : Int, x0 : Int, y0 : Int, z0 : Int, x1 : Int, y1 : Int, z1 : Int, k : Int, i : Int, cnt : Int) : NativeU8Arr do
     if i >= cnt do g
@@ -270,20 +285,73 @@ mod CubeForge.Model do
     else if cell_n(g, n, x + dox(d), y + doy(d), z + doz(d)) != 0 do 0
     else k end end
   end
-  pfn fill_go(g : NativeU8Arr, n : Int, d : Int, a : Int, i : Int, mask : NativeIntArr) : NativeIntArr do
-    if i >= n * n do mask else fill_go(g, n, d, a, i + 1, NativeArray.set_int(mask, i, face_at(g, n, d, a, i % n, i / n))) end
+  -- ── The greedy pass, over the shape's bounding box ────────────────────────
+  -- The sweep is 6n slices of n x n mask cells, and a body fills a fraction of
+  -- its grid -- an animal is maybe a third of it, and the slices past its nose
+  -- and beyond its wingtips are empty. Scanning them is the whole cost at a
+  -- fine grid: at 64 cells a side the 54 fauna templates took 2.4 seconds of
+  -- startup, against 0.3 at 32.
+  --
+  -- So the box holding every filled cell is found once, and both the fill and
+  -- the greedy walk stay inside it. Mask cells outside are never written and
+  -- never read, so they stay 0 from the allocation.
+  type Box = Box(Int, Int, Int, Int, Int, Int)
+  fn box_x0(b : Box) : Int do match b do Box(v, _, _, _, _, _) -> v end end
+  fn box_x1(b : Box) : Int do match b do Box(_, v, _, _, _, _) -> v end end
+  fn box_y0(b : Box) : Int do match b do Box(_, _, v, _, _, _) -> v end end
+  fn box_y1(b : Box) : Int do match b do Box(_, _, _, v, _, _) -> v end end
+  fn box_z0(b : Box) : Int do match b do Box(_, _, _, _, v, _) -> v end end
+  fn box_z1(b : Box) : Int do match b do Box(_, _, _, _, _, v) -> v end end
+
+  pfn bbox_go(g : NativeU8Arr, n : Int, i : Int, b : Box) : Box do
+    if i >= n * n * n do b
+    else if NativeArray.get_u8(g, i) == 0 do bbox_go(g, n, i + 1, b)
+    else
+      let x = i % n
+      let z = (i / n) % n
+      let y = i / (n * n)
+      match b do
+        Box(x0, x1, y0, y1, z0, z1) ->
+          bbox_go(g, n, i + 1, Box(if x < x0 do x else x0 end, if x > x1 do x else x1 end,
+                                   if y < y0 do y else y0 end, if y > y1 do y else y1 end,
+                                   if z < z0 do z else z0 end, if z > z1 do z else z1 end))
+      end
+    end end
   end
-  pfn run_w(mask : NativeIntArr, n : Int, u : Int, v : Int, k : Int, wd : Int) : Int do
-    if u + wd >= n do wd
-    else if NativeArray.get_int(mask, u + wd + n * v) == k do run_w(mask, n, u, v, k, wd + 1) else wd end end
+  doc "The smallest box holding every filled cell of a grid [n] a side. Empty grids come back inverted, which every loop below reads as nothing to do."
+  fn bbox(g : NativeU8Arr, n : Int) : Box do bbox_go(g, n, 0, Box(n, 0 - 1, n, 0 - 1, n, 0 - 1)) end
+
+  -- The slice axis and the two mask axes, per direction: d 0/1 slice y over
+  -- (x, z); d 2/3 slice x over (z, y); d 4/5 slice z over (x, y).
+  pfn axis_lo(b : Box, which : Int) : Int do
+    if which == 0 do box_x0(b) else if which == 1 do box_y0(b) else box_z0(b) end end
+  end
+  pfn axis_hi(b : Box, which : Int) : Int do
+    if which == 0 do box_x1(b) else if which == 1 do box_y1(b) else box_z1(b) end end
+  end
+  pfn slice_axis(d : Int) : Int do if d <= 1 do 1 else if d <= 3 do 0 else 2 end end end
+  pfn u_axis(d : Int) : Int do if d <= 1 do 0 else if d <= 3 do 2 else 0 end end end
+  pfn v_axis(d : Int) : Int do if d <= 1 do 2 else 1 end end
+
+  pfn fill_row(g : NativeU8Arr, n : Int, d : Int, a : Int, v : Int, u : Int, uhi : Int, mask : NativeIntArr) : NativeIntArr do
+    if u > uhi do mask
+    else fill_row(g, n, d, a, v, u + 1, uhi, NativeArray.set_int(mask, u + n * v, face_at(g, n, d, a, u, v))) end
+  end
+  pfn fill_go(g : NativeU8Arr, n : Int, d : Int, a : Int, ulo : Int, uhi : Int, v : Int, vhi : Int, mask : NativeIntArr) : NativeIntArr do
+    if v > vhi do mask
+    else fill_go(g, n, d, a, ulo, uhi, v + 1, vhi, fill_row(g, n, d, a, v, ulo, uhi, mask)) end
+  end
+  pfn run_w(mask : NativeIntArr, n : Int, uhi : Int, u : Int, v : Int, k : Int, wd : Int) : Int do
+    if u + wd > uhi do wd
+    else if NativeArray.get_int(mask, u + wd + n * v) == k do run_w(mask, n, uhi, u, v, k, wd + 1) else wd end end
   end
   pfn row_ok(mask : NativeIntArr, n : Int, u : Int, v : Int, k : Int, wd : Int, j : Int) : Bool do
     if j >= wd do true
     else if NativeArray.get_int(mask, u + j + n * v) == k do row_ok(mask, n, u, v, k, wd, j + 1) else false end end
   end
-  pfn run_h(mask : NativeIntArr, n : Int, u : Int, v : Int, k : Int, wd : Int, h : Int) : Int do
-    if v + h >= n do h
-    else if row_ok(mask, n, u, v + h, k, wd, 0) do run_h(mask, n, u, v, k, wd, h + 1) else h end end
+  pfn run_h(mask : NativeIntArr, n : Int, vhi : Int, u : Int, v : Int, k : Int, wd : Int, h : Int) : Int do
+    if v + h > vhi do h
+    else if row_ok(mask, n, u, v + h, k, wd, 0) do run_h(mask, n, vhi, u, v, k, wd, h + 1) else h end end
   end
   pfn clear_go(mask : NativeIntArr, n : Int, u : Int, v : Int, wd : Int, h : Int, j : Int) : NativeIntArr do
     if j >= wd * h do mask else clear_go(NativeArray.set_int(mask, u + j % wd + n * (v + j / wd), 0), n, u, v, wd, h, j + 1) end
@@ -298,7 +366,7 @@ mod CubeForge.Model do
     b |> vert(x0, y0, z0, k, d) |> vert(x1, y1, z1, k, d) |> vert(x2, y2, z2, k, d)
       |> vert(x0, y0, z0, k, d) |> vert(x2, y2, z2, k, d) |> vert(x3, y3, z3, k, d)
   end
-  -- One merged rectangle, wound as Mesher.emit_rect winds each direction, at 1/8 scale.
+  -- One merged rectangle, wound as Mesher.emit_rect winds each direction, at 1/n scale.
   pfn emit(b : CubeForge.F32Buf.F32Buf, n : Int, d : Int, a : Int, u : Int, v : Int, wd : Int, h : Int, k : Int) : CubeForge.F32Buf.F32Buf do
     let s = 1.0 /. int_to_float(n)
     let fa = int_to_float(a) *. s
@@ -318,37 +386,52 @@ mod CubeForge.Model do
   end
 
   type Greedy = Greedy(CubeForge.F32Buf.F32Buf, NativeIntArr)
-  pfn greedy_go(g : Greedy, n : Int, d : Int, a : Int, i : Int) : Greedy do
-    if i >= n * n do g
+  pfn greedy_row(g : Greedy, n : Int, d : Int, a : Int, ulo : Int, uhi : Int, vhi : Int, u : Int, v : Int) : Greedy do
+    if u > uhi do g
     else
       match g do
         Greedy(b, mask) ->
-          let k = NativeArray.get_int(mask, i)
-          if k == 0 do greedy_go(Greedy(b, mask), n, d, a, i + 1)
+          let k = NativeArray.get_int(mask, u + n * v)
+          if k == 0 do greedy_row(Greedy(b, mask), n, d, a, ulo, uhi, vhi, u + 1, v)
           else
-            let u = i % n
-            let v = i / n
-            let wd = run_w(mask, n, u, v, k, 1)
-            let h = run_h(mask, n, u, v, k, wd, 1)
-            greedy_go(Greedy(emit(b, n, d, a, u, v, wd, h, k), clear_go(mask, n, u, v, wd, h, 0)), n, d, a, i + 1)
+            let wd = run_w(mask, n, uhi, u, v, k, 1)
+            let h = run_h(mask, n, vhi, u, v, k, wd, 1)
+            greedy_row(Greedy(emit(b, n, d, a, u, v, wd, h, k), clear_go(mask, n, u, v, wd, h, 0)), n, d, a, ulo, uhi, vhi, u + 1, v)
           end
       end
     end
   end
-  pfn slices_go(g : Greedy, grid : NativeU8Arr, n : Int, d : Int, a : Int) : Greedy do
-    if a >= n do g
+  pfn greedy_go(g : Greedy, n : Int, d : Int, a : Int, ulo : Int, uhi : Int, v : Int, vhi : Int) : Greedy do
+    if v > vhi do g
+    else greedy_go(greedy_row(g, n, d, a, ulo, uhi, vhi, ulo, v), n, d, a, ulo, uhi, v + 1, vhi) end
+  end
+  pfn slices_go(g : Greedy, grid : NativeU8Arr, n : Int, bb : Box, d : Int, a : Int, ahi : Int) : Greedy do
+    if a > ahi do g
     else
+      let ulo = axis_lo(bb, u_axis(d))
+      let uhi = axis_hi(bb, u_axis(d))
+      let vlo = axis_lo(bb, v_axis(d))
+      let vhi = axis_hi(bb, v_axis(d))
       match g do
-        Greedy(b, mask) -> slices_go(greedy_go(Greedy(b, fill_go(grid, n, d, a, 0, mask)), n, d, a, 0), grid, n, d, a + 1)
+        Greedy(b, mask) ->
+          slices_go(greedy_go(Greedy(b, fill_go(grid, n, d, a, ulo, uhi, vlo, vhi, mask)), n, d, a, ulo, uhi, vlo, vhi),
+                    grid, n, bb, d, a + 1, ahi)
       end
     end
   end
-  pfn dirs_go(g : Greedy, grid : NativeU8Arr, n : Int, d : Int) : Greedy do
-    if d >= 6 do g else dirs_go(slices_go(g, grid, n, d, 0), grid, n, d + 1) end
+  pfn dirs_go(g : Greedy, grid : NativeU8Arr, n : Int, bb : Box, d : Int) : Greedy do
+    if d >= 6 do g
+    else
+      -- A face can sit one slice OUTSIDE the filled box, on the far side of the
+      -- outermost cell, so each axis is walked one past its bound.
+      let alo = axis_lo(bb, slice_axis(d)) - 1
+      let ahi = axis_hi(bb, slice_axis(d)) + 1
+      dirs_go(slices_go(g, grid, n, bb, d, if alo < 0 do 0 else alo end, if ahi >= n do n - 1 else ahi end), grid, n, bb, d + 1)
+    end
   end
   doc "Greedy-mesh a grid [n] a side into a template: vertices in the 10-float layout, positions in [0, 1], shade 1."
   fn template_n(grid : NativeU8Arr, n : Int) : CubeForge.F32Buf.F32Buf do
-    match dirs_go(Greedy(B.new(1024), NativeArray.make_int(n * n, 0)), grid, n, 0) do
+    match dirs_go(Greedy(B.new(1024), NativeArray.make_int(n * n, 0)), grid, n, bbox(grid, n), 0) do
       Greedy(b, _) -> b
     end
   end

@@ -30,7 +30,7 @@ mod CubeForge.Test.Fauna do
   describe "Fauna bodies" do
     test "every pose of every species meshes to something, and stays under the face cap" do
       let s = F.build()
-      Test.assert_eq_int(F.template_count(), 6, "two species, three poses each")
+      Test.assert_eq_int(F.template_count(), 54, "eighteen species, three poses each")
       Test.assert_true(nonempty_go(s, 0), "no empty body")
       Test.assert_true(cap_go(s, 0), "every body under the face cap")
     end
@@ -42,9 +42,11 @@ mod CubeForge.Test.Fauna do
       let down = F.template_of(F.sp_grasspipit(), 0)
       let up = F.template_of(F.sp_grasspipit(), 2)
       Test.assert_true(F.offset(s, down) != F.offset(s, up), "different places in the blob")
-      let b0 = B.stamp_xf(B.new(4096), F.blob(s), F.offset(s, down), F.floats(s, down), 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0)
-      let b1 = B.stamp_xf(B.new(4096), F.blob(s), F.offset(s, up), F.floats(s, up), 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0)
-      Test.assert_true(B.len(b0) != B.len(b1) || at(b0, 0, 1) != at(b1, 0, 1), "the wings are not in the same place")
+      -- Compare the whole template, not its length and first vertex: two
+      -- mirror-image bends greedy-mesh to the same number of quads and put
+      -- their first face in the same place, so that proxy said "identical" for
+      -- wings that plainly were not.
+      Test.assert_true(F.blob_hash(s, down) != F.blob_hash(s, up), "the wings are not in the same place")
     end
   end
 
@@ -59,53 +61,67 @@ mod CubeForge.Test.Fauna do
   -- filled cell would have PASSED that bird: the wing was a solid slab, so its
   -- own cells touched each other perfectly well. Only reaching every cell from
   -- one seed catches a part that is whole and in the wrong place.
-  pfn marked(m : NativeU8Arr, x : Int, y : Int, z : Int) : Bool do
-    if x < 0 || y < 0 || z < 0 || x >= F.grid() || y >= F.grid() || z >= F.grid() do false
-    else NativeArray.get_u8(m, Mdl.idx_n(F.grid(), x, y, z)) != 0 end
-  end
-  pfn nb_marked(m : NativeU8Arr, x : Int, y : Int, z : Int) : Bool do
-    marked(m, x + 1, y, z) || marked(m, x - 1, y, z) || marked(m, x, y + 1, z)
-      || marked(m, x, y - 1, z) || marked(m, x, y, z + 1) || marked(m, x, y, z - 1)
-  end
-  pfn flood_sweep(g : NativeU8Arr, m : NativeU8Arr, i : Int) : NativeU8Arr do
-    if i >= F.grid() * F.grid() * F.grid() do m
+  -- A worklist flood, not repeated sweeps. Sweeping the whole grid until the
+  -- marked count stops changing is O(cells x rounds), which was fine at 16 cells
+  -- a side and is 260,000 cells x 54 templates at 64. This visits each cell
+  -- once: pop, mark, push the six neighbours.
+  pfn vol() : Int do F.grid() * F.grid() * F.grid() end
+  pfn at_idx(x : Int, y : Int, z : Int) : Int do Mdl.idx_n(F.grid(), x, y, z) end
+
+  pfn push_if(g : NativeU8Arr, m : NativeU8Arr, st : List(Int), x : Int, y : Int, z : Int) : List(Int) do
+    let n = F.grid()
+    if x < 0 do st
+    else if y < 0 do st
+    else if z < 0 do st
+    else if x >= n do st
+    else if y >= n do st
+    else if z >= n do st
     else
-      let n = F.grid()
-      let x = i % n
-      let z = (i / n) % n
-      let y = i / (n * n)
-      -- nested rather than &&: the guards must be checked in order (GAPS G33)
-      if Mdl.cell_n(g, F.grid(), x, y, z) == 0 do flood_sweep(g, m, i + 1)
-      else if NativeArray.get_u8(m, i) != 0 do flood_sweep(g, m, i + 1)
-      else if nb_marked(m, x, y, z) do flood_sweep(g, NativeArray.set_u8(m, i, 1), i + 1)
-      else flood_sweep(g, m, i + 1) end end end
+      let i = at_idx(x, y, z)
+      if NativeArray.get_u8(g, i) == 0 do st
+      else if NativeArray.get_u8(m, i) != 0 do st
+      else Cons(i, st) end end
+    end end end end end end
+  end
+
+  type Flood = Flood(NativeU8Arr, Int)
+  pfn flood_go(g : NativeU8Arr, m : NativeU8Arr, st : List(Int), seen : Int) : Flood do
+    match st do
+      Nil -> Flood(m, seen)
+      Cons(i, rest) ->
+        if NativeArray.get_u8(m, i) != 0 do flood_go(g, m, rest, seen)
+        else
+          let n = F.grid()
+          let x = i % n
+          let z = (i / n) % n
+          let y = i / (n * n)
+          let m1 = NativeArray.set_u8(m, i, 1)
+          let s1 = push_if(g, m1, rest, x + 1, y, z)
+          let s2 = push_if(g, m1, s1, x - 1, y, z)
+          let s3 = push_if(g, m1, s2, x, y + 1, z)
+          let s4 = push_if(g, m1, s3, x, y - 1, z)
+          let s5 = push_if(g, m1, s4, x, y, z + 1)
+          flood_go(g, m1, push_if(g, m1, s5, x, y, z - 1), seen + 1)
+        end
     end
   end
-  pfn count_u8(a : NativeU8Arr, i : Int, acc : Int) : Int do
-    if i >= F.grid() * F.grid() * F.grid() do acc else count_u8(a, i + 1, if NativeArray.get_u8(a, i) != 0 do acc + 1 else acc end) end
-  end
+
   pfn count_filled(g : NativeU8Arr, i : Int, acc : Int) : Int do
-    if i >= F.grid() * F.grid() * F.grid() do acc else count_filled(g, i + 1, if NativeArray.get_u8(g, i) != 0 do acc + 1 else acc end) end
+    if i >= vol() do acc else count_filled(g, i + 1, if NativeArray.get_u8(g, i) != 0 do acc + 1 else acc end) end
   end
   pfn first_filled(g : NativeU8Arr, i : Int) : Int do
-    if i >= F.grid() * F.grid() * F.grid() do 0 - 1
+    if i >= vol() do 0 - 1
     else if NativeArray.get_u8(g, i) != 0 do i
     else first_filled(g, i + 1) end end
-  end
-  -- Grow the marked set to a fixpoint. Capped: a shape that somehow needed more
-  -- rounds than it has cells would otherwise not terminate.
-  pfn flood(g : NativeU8Arr, m : NativeU8Arr, prev : Int, rounds : Int) : NativeU8Arr do
-    if rounds <= 0 do m
-    else
-      let m1 = flood_sweep(g, m, 0)
-      let n = count_u8(m1, 0, 0)
-      if n == prev do m1 else flood(g, m1, n, rounds - 1) end
-    end
   end
   pfn one_piece(g : NativeU8Arr) : Bool do
     let seed = first_filled(g, 0)
     if seed < 0 do false
-    else count_u8(flood(g, NativeArray.set_u8(NativeArray.make_u8(F.grid() * F.grid() * F.grid(), 0), seed, 1), 0, 96), 0, 0) == count_filled(g, 0, 0) end
+    else
+      match flood_go(g, NativeArray.make_u8(vol(), 0), Cons(seed, Nil), 0) do
+        Flood(_, seen) -> seen == count_filled(g, 0, 0)
+      end
+    end
   end
   pfn all_one_piece(k : Int) : Bool do
     if k >= F.template_count() do true
@@ -121,9 +137,9 @@ mod CubeForge.Test.Fauna do
     test "the flood fill can actually fail" do
       -- A negative control. Without this, "every body is connected" might only
       -- mean the checker says yes to everything.
-      let apart = Mdl.box_n(Mdl.box_n(Mdl.empty_n(F.grid()), F.grid(), 5, 5, 5, 6, 6, 6, 1), F.grid(), 0, 0, 0, 1, 1, 1, 1)
+      let apart = Mdl.box_n(Mdl.box_n(Mdl.empty_n(F.grid()), F.grid(), 20, 20, 20, 24, 24, 24, 1), F.grid(), 0, 0, 0, 2, 2, 2, 1)
       Test.assert_true(!one_piece(apart), "two separated blocks are not one piece")
-      Test.assert_true(one_piece(Mdl.box_n(Mdl.empty_n(F.grid()), F.grid(), 5, 5, 5, 6, 6, 6, 1)), "one block is")
+      Test.assert_true(one_piece(Mdl.box_n(Mdl.empty_n(F.grid()), F.grid(), 20, 20, 20, 24, 24, 24, 1)), "one block is")
     end
   end
 

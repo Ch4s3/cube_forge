@@ -26,24 +26,130 @@ mod CubeForge.Fauna do
   alias CubeForge.Vertex as Vx
 
   -- ── The table ─────────────────────────────────────────────────────────────
+  -- One row per species and nothing else. The two generators below build every
+  -- pose from these numbers, so adding a species is adding a line -- not a
+  -- grid, not a texture, not a draw call.
+  --
+  -- Ids are ordered so the kind is a range rather than a list: birds 1..10,
+  -- fish 11..18. `is_fish` is then a comparison, and it is asked of every
+  -- animal of every flock every tick.
   doc "Species ids are 1-based; 0 is no animal."
-  fn count() : Int do 2 end
+  fn count() : Int do 18 end
+  doc "Ids above this are fish."
+  fn last_bird() : Int do 10 end
+
   fn sp_grasspipit() : Int do 1 end
-  fn sp_sunfin() : Int do 2 end
+  fn sp_cinderfinch() : Int do 2 end
+  fn sp_pinecrest() : Int do 3 end
+  fn sp_frostgull() : Int do 4 end
+  fn sp_marshheron() : Int do 5 end
+  fn sp_ridgehawk() : Int do 6 end
+  fn sp_duskowl() : Int do 7 end
+  fn sp_stoneratite() : Int do 8 end
+  fn sp_mossmoa() : Int do 9 end
+  fn sp_brinewaddle() : Int do 10 end
+  fn sp_sunfin() : Int do 11 end
+  fn sp_frostshiner() : Int do 12 end
+  fn sp_reedcarp() : Int do 13 end
+  fn sp_shoalback() : Int do 14 end
+  fn sp_kelpjaw() : Int do 15 end
+  fn sp_glasseel() : Int do 16 end
+  fn sp_deepmaw() : Int do 17 end
+  fn sp_bladefin() : Int do 18 end
 
   fn name(sp : Int) : String do
-    if sp == 1 do "Grasspipit" else if sp == 2 do "Sunfin" else "none" end end
+    if sp == 1 do "Grasspipit" else if sp == 2 do "Cinderfinch" else if sp == 3 do "Pinecrest"
+    else if sp == 4 do "Frostgull" else if sp == 5 do "Marshheron" else if sp == 6 do "Ridgehawk"
+    else if sp == 7 do "Duskowl" else if sp == 8 do "Stoneratite" else if sp == 9 do "Mossmoa"
+    else if sp == 10 do "Brinewaddle" else if sp == 11 do "Sunfin" else if sp == 12 do "Frostshiner"
+    else if sp == 13 do "Reedcarp" else if sp == 14 do "Shoalback" else if sp == 15 do "Kelpjaw"
+    else if sp == 16 do "Glasseel" else if sp == 17 do "Deepmaw" else if sp == 18 do "Bladefin"
+    else "none" end end end end end end end end end end end end end end end end end end 
   end
 
   doc "Fish hold a depth band; birds hold a biome. The axis a species is keyed on."
-  fn is_fish(sp : Int) : Bool do sp == 2 end
+  fn is_fish(sp : Int) : Bool do sp > last_bird() end
 
-  doc "Feeds by night and roosts by day. The forest owl to the forest finch: what makes the day cycle read as a shift change rather than as a dimmer."
-  fn nocturnal(sp : Int) : Bool do false end
+  -- ── When it is awake ──────────────────────────────────────────────────────
+  doc "Activity: 0 by day, 1 by night, 2 at dawn and dusk."
+  fn act_day() : Int do 0 end
+  fn act_night() : Int do 1 end
+  fn act_twilight() : Int do 2 end
 
-  doc "Body length in blocks: the uniform scale the stamp applies. A grid is one block across at scale 1."
+  doc """
+  When this species feeds.
+
+  The Duskowl shares the forest with the Pinecrest and takes the night shift,
+  which is what makes the day cycle read as a shift change rather than as a
+  dimmer -- the forest is never empty, it is worked by different birds. The
+  twilight species are the ones you have to go out at the right hour to see.
+  """
+  fn activity(sp : Int) : Int do
+    if sp == 2 do act_twilight() else if sp == 5 do act_twilight() else if sp == 7 do act_night()
+    else if sp == 9 do act_twilight() else if sp == 13 do act_twilight() else if sp == 16 do act_night()
+    else if sp == 17 do act_night()
+    else act_day() end end end end end end end 
+  end
+  doc "Feeds by night and roosts by day."
+  fn nocturnal(sp : Int) : Bool do activity(sp) == act_night() end
+
+  doc """
+  Body length in blocks: the uniform scale the stamp applies. A grid is one
+  block across at scale 1.
+
+  The spread is the point. A Cinderfinch is a fifth of a block and a Mossmoa is
+  over four -- twenty to one -- so a roster read at a distance is a roster of
+  recognisably different animals rather than one animal in eighteen colours. The
+  small end has to stay small for the large end to mean anything.
+  """
   fn body_scale(sp : Int) : Float do
-    if sp == 1 do 0.4 else if sp == 2 do 0.35 else 1.0 end end
+    if sp == 1 do 0.34 else if sp == 2 do 0.22 else if sp == 3 do 0.52
+    else if sp == 4 do 0.80 else if sp == 5 do 1.55 else if sp == 6 do 1.35
+    else if sp == 7 do 0.92 else if sp == 8 do 3.20 else if sp == 9 do 4.60
+    else if sp == 10 do 1.10 else if sp == 11 do 0.24 else if sp == 12 do 0.26
+    else if sp == 13 do 0.78 else if sp == 14 do 0.28 else if sp == 15 do 0.98
+    else if sp == 16 do 2.60 else if sp == 17 do 2.70 else if sp == 18 do 3.60
+    else 1.00 end end end end end end end end end end end end end end end end end end 
+  end
+
+  -- ── Niches ────────────────────────────────────────────────────────────────
+  -- Every niche is keyed on a number the world already maintains, so habitat
+  -- answers a shovel without a new field anywhere. Fish are keyed on DEPTH (the
+  -- surface minus the bed, so digging changes it); birds on the BIOME, which
+  -- the climate field already decides and the player already moves.
+  --
+  -- The population tick reads these; nothing else does yet.
+  doc "Shallowest water this fish will hold, in blocks below the surface."
+  fn depth_lo(sp : Int) : Int do
+    if sp == 11 do 1 else if sp == 12 do 1 else if sp == 13 do 2
+    else if sp == 14 do 3 else if sp == 15 do 4 else if sp == 16 do 14
+    else if sp == 17 do 18 else if sp == 18 do 6
+    else 0 end end end end end end end end 
+  end
+
+  doc "Deepest water this fish will hold. Past this it is somebody else's water."
+  fn depth_hi(sp : Int) : Int do
+    if sp == 11 do 4 else if sp == 12 do 5 else if sp == 13 do 6
+    else if sp == 14 do 10 else if sp == 15 do 12 else if sp == 16 do 40
+    else if sp == 17 do 60 else if sp == 18 do 40
+    else 0 end end end end end end end end 
+  end
+
+  doc "This fish wants a small body of water -- a pond or a lake, not a sea. Biome.water_reach_at tells the two apart."
+  fn wants_small_water(sp : Int) : Bool do sp == 11 || sp == 12 || sp == 13 end
+
+  doc """
+  Whether bird [sp] lives in biome [b] (CubeForge.Biome's ids).
+
+  0 tundra, 1 taiga, 2 grassland, 3 forest, 4 desert, 5 wetland, 6 beach,
+  7 alpine, 8 oasis, 9 grove.
+  """
+  fn wants_biome(sp : Int, b : Int) : Bool do
+    if sp == 1 do b == 2 || b == 8 else if sp == 2 do b == 4 || b == 8 else if sp == 3 do b == 1 || b == 3
+    else if sp == 4 do b == 6 || b == 0 else if sp == 5 do b == 5 else if sp == 6 do b == 7 || b == 0
+    else if sp == 7 do b == 3 || b == 9 else if sp == 8 do b == 2 || b == 4 else if sp == 9 do b == 3 || b == 1
+    else if sp == 10 do b == 6 || b == 0
+    else false end end end end end end end end end end 
   end
 
   doc "Poses per species: wings down/mid/up for a bird, tail centre/left/right for a fish."
@@ -53,7 +159,7 @@ mod CubeForge.Fauna do
   fn template_count() : Int do count() * poses() end
 
   doc "The quads a body may greedy-mesh to. Held by a test: a body that grows past this is a body that costs too much to draw a hundred of."
-  fn face_cap() : Int do 260 end
+  fn face_cap() : Int do 520 end
 
   -- ── Body plans ────────────────────────────────────────────────────────────
   -- A species does not get a hand-built grid. It gets a ROW -- how long, how
@@ -70,66 +176,257 @@ mod CubeForge.Fauna do
   -- and centres it on the grid, so yaw 0 is facing east.
 
   doc """
-  Sub-cubes along a body's edge: 16, not the 8 a block model uses.
+  Sub-cubes along a body's edge: 64, against the 8 a block model uses.
 
   Eight was tried first and every animal read as a stack of slabs. The reason is
   not subtlety: at 8 a wing is an eighth of a block thick because that is the
-  THINNEST THING THAT EXISTS, so a wing, a fin, a beak and a leg are all the
-  same weight as the body they hang off, and nothing can be slender. At 16 a
-  wing can be one cell against a body four, which is the difference between a
-  bird and a brick with flaps.
+  THINNEST THING THAT EXISTS, so a wing, a fin, a beak and a leg all weigh as
+  much as the body they hang off and nothing can be slender. Sixteen fixed the
+  slabs; going further is what lets a wing be a sixtieth of the body it hangs
+  off, and gives a head enough cells to be rounded rather than boxed.
 
-  The greedy pass merges the flat faces away, so the cost is nowhere near the
-  eightfold the cell count suggests -- see RESULTS.
+  The greedy pass merges flat faces away, so the cost is nowhere near the
+  cell count suggests: a bigger grid holding the same shapes meshes to the same
+  quads, and only the detail actually added is paid for. See RESULTS.
   """
-  fn grid() : Int do 16 end
+  fn grid() : Int do 64 end
 
-  doc "Body length in cells."
+  doc """
+  A plan number, in cells of the current grid.
+
+  Every row is written in 32nds -- the resolution the roster was designed at --
+  and scaled here. So the grid can be raised without touching eighteen tables,
+  and the numbers that are NOT wrapped in this are the ones that should stay one
+  cell however fine the grid gets: a wing's thickness, a fin's, an eye. Those
+  are what actually get finer as the grid grows.
+  """
+  fn cells(n : Int) : Int do n * grid() / 32 end
+
+  -- Every number below is in grid() cells, via cells(): the plan is written at
+  -- one resolution and the grid can move under it. The body starts at
+  -- body_x0() and the head, beak and tail are placed off its own extent, so a
+  -- row only says how big the animal is, never where any of it goes.
+  doc "Body length. The head takes head_len() more and the beak two beyond that."
   fn plan_len(sp : Int) : Int do
-    if sp == 1 do 6 else if sp == 2 do 7 else 6 end end
+    if sp == 1 do 11 else if sp == 2 do 9 else if sp == 3 do 11
+    else if sp == 4 do 13 else if sp == 5 do 11 else if sp == 6 do 13
+    else if sp == 7 do 9 else if sp == 8 do 13 else if sp == 9 do 15
+    else if sp == 10 do 9 else if sp == 11 do 13 else if sp == 12 do 13
+    else if sp == 13 do 15 else if sp == 14 do 11 else if sp == 15 do 15
+    else if sp == 16 do 16 else if sp == 17 do 16 else if sp == 18 do 16
+    else 11 end end end end end end end end end end end end end end end end end end 
   end
-  doc "Body height in cells."
+
+  doc "Body height."
   fn plan_tall(sp : Int) : Int do
-    if sp == 1 do 4 else if sp == 2 do 4 else 4 end end
+    if sp == 1 do 7 else if sp == 2 do 7 else if sp == 3 do 9
+    else if sp == 4 do 7 else if sp == 5 do 7 else if sp == 6 do 9
+    else if sp == 7 do 9 else if sp == 8 do 9 else if sp == 9 do 13
+    else if sp == 10 do 15 else if sp == 11 do 7 else if sp == 12 do 5
+    else if sp == 13 do 9 else if sp == 14 do 5 else if sp == 15 do 9
+    else if sp == 16 do 5 else if sp == 17 do 11 else if sp == 18 do 11
+    else 7 end end end end end end end end end end end end end end end end end end 
   end
-  doc "Body width in cells, always centred on the grid."
+
+  doc "Body width, always centred on the grid."
   fn plan_wide(sp : Int) : Int do
-    if sp == 1 do 4 else if sp == 2 do 3 else 4 end end
+    if sp == 1 do 7 else if sp == 2 do 7 else if sp == 3 do 7
+    else if sp == 4 do 7 else if sp == 5 do 5 else if sp == 6 do 7
+    else if sp == 7 do 9 else if sp == 8 do 7 else if sp == 9 do 9
+    else if sp == 10 do 9 else if sp == 11 do 5 else if sp == 12 do 5
+    else if sp == 13 do 7 else if sp == 14 do 5 else if sp == 15 do 7
+    else if sp == 16 do 5 else if sp == 17 do 9 else if sp == 18 do 7
+    else 7 end end end end end end end end end end end end end end end end end end 
   end
-  doc "How far past the body's flank a wing reaches: 0 flightless, otherwise cells."
-  fn plan_wing(sp : Int) : Int do if sp == 1 do 5 else 0 end end
-  doc "How far above the body's back the head sits."
-  fn plan_neck(sp : Int) : Int do if sp == 1 do 2 else 0 end end
-  doc "Tail length in cells, aft of the body."
+
+  doc """
+  How far past the body's flank a wing reaches; 0 is flightless.
+
+  Capped at body_z0(sp): a wing reaching further would have its outer cells fall
+  off the grid, and put_n drops those silently, so the bird would quietly lose
+  its wingtips. A soarer gets its span from a narrow body rather than a longer
+  wing. A short span on an upright bird is a FLIPPER.
+  """
+  fn plan_wing(sp : Int) : Int do
+    if sp == 1 do 9 else if sp == 2 do 7 else if sp == 3 do 9
+    else if sp == 4 do 12 else if sp == 5 do 11 else if sp == 6 do 12
+    else if sp == 7 do 9 else if sp == 10 do 3
+    else 0 end end end end end end end end 
+  end
+
+  doc "How far above the body's back the head sits. Capped so head_y() stays on the grid, and lower again on a crested species, which builds above its own head."
+  fn plan_neck(sp : Int) : Int do
+    if sp == 1 do 3 else if sp == 2 do 3 else if sp == 3 do 3
+    else if sp == 4 do 3 else if sp == 5 do 8 else if sp == 6 do 2
+    else if sp == 7 do 2 else if sp == 8 do 8 else if sp == 9 do 5
+    else if sp == 10 do 3
+    else 0 end end end end end end end end end end 
+  end
+
+  doc "Tail length, aft of the body. Capped at body_x0()."
   fn plan_tail(sp : Int) : Int do
-    if sp == 1 do 4 else if sp == 2 do 3 else 3 end end
+    if sp == 1 do 7 else if sp == 2 do 6 else if sp == 3 do 7
+    else if sp == 4 do 6 else if sp == 5 do 6 else if sp == 6 do 7
+    else if sp == 7 do 6 else if sp == 8 do 4 else if sp == 9 do 4
+    else if sp == 10 do 3 else if sp == 11 do 6 else if sp == 12 do 6
+    else if sp == 13 do 6 else if sp == 14 do 6 else if sp == 15 do 7
+    else if sp == 16 do 9 else if sp == 17 do 8 else if sp == 18 do 8
+    else 6 end end end end end end end end end end end end end end end end end end 
+  end
+
+  doc """
+  Stands upright: the head goes on TOP of the body rather than in front of it.
+
+  This is the whole of what makes a penguin a penguin here. Everything else --
+  short wings, legs, a dark back and a pale front -- it already had from the
+  ordinary rows.
+  """
+  fn plan_upright(sp : Int) : Bool do sp == 10 end
+
+  doc "Stands on legs. A bird that does not fly needs them; so does one that stands upright, whatever its wings do."
+  fn plan_legs(sp : Int) : Bool do sp == 8 || sp == 9 || sp == 10 end
+
+  doc "A raised crest along the head and a hooked beak under it: what turns a large flightless bird from a big chicken into something you would rather not startle."
+  fn plan_crest(sp : Int) : Bool do sp == 9 end
+
+  doc "Height of the dorsal fin. Three is a fish; eight is a fin you see before you see the animal."
+  fn plan_dorsal(sp : Int) : Int do
+    if sp == 11 do 3 else if sp == 12 do 2 else if sp == 13 do 3
+    else if sp == 14 do 2 else if sp == 15 do 3 else if sp == 16 do 1
+    else if sp == 17 do 3 else if sp == 18 do 8
+    else 0 end end end end end end end end 
+  end
+
+  doc "Pectoral fins on the flanks. An eel has none, which is most of why it reads as an eel."
+  fn plan_pectorals(sp : Int) : Bool do sp == 11 || sp == 12 || sp == 13 || sp == 14 || sp == 15 || sp == 17 || sp == 18 end
+
+  doc "A bird that does not fly. A penguin has wings and is one of these."
+  fn flightless(sp : Int) : Bool do
+    if is_fish(sp) do false else plan_wing(sp) <= 0 || plan_upright(sp) end
   end
 
   -- The body's own extent. Every other part is placed against these, never
   -- against a literal.
-  fn body_x0() : Int do 5 end
-  fn body_x1(sp : Int) : Int do body_x0() + plan_len(sp) - 1 end
-  fn body_y0() : Int do 6 end
-  fn body_y1(sp : Int) : Int do body_y0() + plan_tall(sp) - 1 end
-  fn body_z0(sp : Int) : Int do (grid() - plan_wide(sp)) / 2 end
-  fn body_z1(sp : Int) : Int do body_z0(sp) + plan_wide(sp) - 1 end
+  fn body_x0() : Int do cells(10) end
+  fn body_x1(sp : Int) : Int do body_x0() + cells(plan_len(sp)) - 1 end
+  fn body_y0() : Int do cells(12) end
+  fn body_y1(sp : Int) : Int do body_y0() + cells(plan_tall(sp)) - 1 end
+  fn body_z0(sp : Int) : Int do (grid() - cells(plan_wide(sp))) / 2 end
+  fn body_z1(sp : Int) : Int do body_z0(sp) + cells(plan_wide(sp)) - 1 end
   doc "The head's top: the body's back plus the neck."
-  fn head_y(sp : Int) : Int do body_y1(sp) + plan_neck(sp) end
+  fn head_y(sp : Int) : Int do body_y1(sp) + cells(plan_neck(sp)) end
+  doc "Head length, forward of the body (or above it, standing upright)."
+  fn head_len() : Int do cells(4) end
 
-  fn c_body(sp : Int) : Int do if sp == 1 do Mdl.c_pipit() else Mdl.c_sunfin() end end
-  fn c_dark(sp : Int) : Int do if sp == 1 do Mdl.c_pipit_dark() else Mdl.c_sunfin_fin() end end
-  fn c_pale(sp : Int) : Int do if sp == 1 do Mdl.c_pipit_pale() else Mdl.c_sunfin_pale() end end
-  -- The accent is the beak or snout. A bird's is dark; a fish's is its own
-  -- colour, because the eye should be the only black a fish has.
+  doc "The one colour a species is, red channel."
+  fn base_r(sp : Int) : Int do
+    if sp == 1 do 150 else if sp == 2 do 196 else if sp == 3 do 86
+    else if sp == 4 do 222 else if sp == 5 do 128 else if sp == 6 do 120
+    else if sp == 7 do 108 else if sp == 8 do 146 else if sp == 9 do 78
+    else if sp == 10 do 52 else if sp == 11 do 226 else if sp == 12 do 176
+    else if sp == 13 do 150 else if sp == 14 do 140 else if sp == 15 do 92
+    else if sp == 16 do 198 else if sp == 17 do 72 else if sp == 18 do 96
+    else 128 end end end end end end end end end end end end end end end end end end 
+  end
+  fn base_g(sp : Int) : Int do
+    if sp == 1 do 112 else if sp == 2 do 120 else if sp == 3 do 116
+    else if sp == 4 do 228 else if sp == 5 do 140 else if sp == 6 do 96
+    else if sp == 7 do 92 else if sp == 8 do 138 else if sp == 9 do 86
+    else if sp == 10 do 58 else if sp == 11 do 134 else if sp == 12 do 206
+    else if sp == 13 do 140 else if sp == 14 do 176 else if sp == 15 do 132
+    else if sp == 16 do 206 else if sp == 17 do 84 else if sp == 18 do 108
+    else 128 end end end end end end end end end end end end end end end end end end 
+  end
+  fn base_b(sp : Int) : Int do
+    if sp == 1 do 72 else if sp == 2 do 64 else if sp == 3 do 74
+    else if sp == 4 do 236 else if sp == 5 do 150 else if sp == 6 do 74
+    else if sp == 7 do 110 else if sp == 8 do 120 else if sp == 9 do 60
+    else if sp == 10 do 70 else if sp == 11 do 62 else if sp == 12 do 226
+    else if sp == 13 do 70 else if sp == 14 do 200 else if sp == 15 do 88
+    else if sp == 16 do 214 else if sp == 17 do 112 else if sp == 18 do 124
+    else 128 end end end end end end end end end end end end end end end end end end 
+  end
+
+  -- ── Colour ────────────────────────────────────────────────────────────────
+  -- A species gets ONE colour. Its shading and its underside are derived, so
+  -- sixteen species are sixteen lines rather than forty-eight, and no two of
+  -- them can drift out of key with each other.
+  doc "First palette texel of the fauna range. Model owns 0..30; CubeForge.Texture fills this range from here."
+  fn palette_base() : Int do 32 end
+  doc "Palette texels the fauna range takes: three a species."
+  fn palette_span() : Int do 3 * count() end
+  doc "Palette texel of species [sp]'s body colour; +1 is its shading, +2 its underside."
+  fn c_body(sp : Int) : Int do palette_base() + 3 * (sp - 1) end
+  fn c_dark(sp : Int) : Int do c_body(sp) + 1 end
+  fn c_pale(sp : Int) : Int do c_body(sp) + 2 end
+  -- The accent is the beak or snout. A bird's is dark and reads as a beak; a
+  -- fish's is its own colour, because the eye is the only black a fish should
+  -- have and a black snout beside a black eye is just a hole in the head.
   fn c_accent(sp : Int) : Int do if is_fish(sp) do c_body(sp) else Mdl.c_beak() end end
 
+  pfn shade_of(v : Int) : Int do v * 62 / 100 end
+  pfn pale_of(v : Int) : Int do v + (255 - v) * 65 / 100 end
+  doc "Red of fauna palette slot [k], 0 .. palette_span() - 1. CubeForge.Texture writes these into the model palette layer."
+  fn palette_r(k : Int) : Int do
+    let sp = k / 3 + 1
+    let which = k % 3
+    if which == 0 do base_r(sp) else if which == 1 do shade_of(base_r(sp)) else pale_of(base_r(sp)) end end
+  end
+  fn palette_g(k : Int) : Int do
+    let sp = k / 3 + 1
+    let which = k % 3
+    if which == 0 do base_g(sp) else if which == 1 do shade_of(base_g(sp)) else pale_of(base_g(sp)) end end
+  end
+  fn palette_b(k : Int) : Int do
+    let sp = k / 3 + 1
+    let which = k % 3
+    if which == 0 do base_b(sp) else if which == 1 do shade_of(base_b(sp)) else pale_of(base_b(sp)) end end
+  end
+
+  -- ── The generators ────────────────────────────────────────────────────────
   pfn bx(g : NativeU8Arr, x0 : Int, y0 : Int, z0 : Int, x1 : Int, y1 : Int, z1 : Int, k : Int) : NativeU8Arr do
     Mdl.box_n(g, grid(), x0, y0, z0, x1, y1, z1, k)
   end
 
-  -- The trunk every plan starts from. The body is rounded by shaving the four
-  -- long edges -- at 16 there are enough cells for that to read as a curve
-  -- rather than as a chamfer.
+  -- The body is rounded by shaving its four long edges. At 16 cells a side that
+  -- was a chamfer; with enough cells it reads as a curve, so the shave is
+  -- proportional and deeper on the wide bodies.
+  pfn round_body(g : NativeU8Arr, sp : Int) : NativeU8Arr do
+    let x0 = body_x0()
+    let x1 = body_x1(sp)
+    let z0 = body_z0(sp)
+    let z1 = body_z1(sp)
+    let y0 = body_y0()
+    let y1 = body_y1(sp)
+    let r = cells(1)
+    let g1 = bx(bx(g, x0, y1 - r + 1, z0, x1, y1, z0 + r - 1, 0), x0, y1 - r + 1, z1 - r + 1, x1, y1, z1, 0)
+    bx(bx(g1, x0, y0, z0, x1, y0 + r - 1, z0 + r - 1, 0), x0, y0, z1 - r + 1, x1, y0 + r - 1, z1, 0)
+  end
+
+  -- Eyes: ONE cell each, on the head's flanks. This is what a fine grid buys --
+  -- at sixteen an eye was a quarter of the face and the animal looked stunned.
+  pfn eyes(g : NativeU8Arr, sp : Int, x : Int, y : Int) : NativeU8Arr do
+    let zl = body_z0(sp) + cells(2) - 1
+    let zr = body_z1(sp) - cells(2) + 1
+    Mdl.put_n(Mdl.put_n(g, grid(), x, y, zl, Mdl.c_eye()), grid(), x, y, zr, Mdl.c_eye())
+  end
+
+  -- A crest along the head and a hook under the beak. Two small shapes, and
+  -- between them the difference between a big flightless bird and one you would
+  -- rather not startle.
+  pfn crest(g : NativeU8Arr, sp : Int, bx0 : Int, bx1 : Int, hy : Int) : NativeU8Arr do
+    if !plan_crest(sp) do g
+    else
+      let zc = (body_z0(sp) + body_z1(sp)) / 2
+      let g1 = bx(g, bx0, hy + 1, zc, bx1, hy + cells(2), zc, c_dark(sp))
+      -- and a hook: the beak tip turned down
+      bx(g1, bx1 + cells(2), hy - cells(5), zc - cells(1) + 1, bx1 + cells(2), hy - cells(3), zc + cells(1) - 1, c_dark(sp))
+    end
+  end
+
+  -- The trunk every plan starts from: body, underside, head, beak and eyes.
+  -- An UPRIGHT bird puts its head on top of the body instead of in front of it,
+  -- and that single branch is the whole of what makes a penguin.
   pfn trunk(sp : Int) : NativeU8Arr do
     let x0 = body_x0()
     let x1 = body_x1(sp)
@@ -138,115 +435,163 @@ mod CubeForge.Fauna do
     let y0 = body_y0()
     let y1 = body_y1(sp)
     let hy = head_y(sp)
-    let g0 = bx(Mdl.empty_n(grid()), x0, y0, z0, x1, y1, z1, c_body(sp))
-    -- shave the top and bottom flank edges so the body is not a box
-    let g1 = bx(bx(g0, x0, y1, z0, x1, y1, z0, 0), x0, y1, z1, x1, y1, z1, 0)
-    let g2 = bx(bx(g1, x0, y0, z0, x1, y0, z0, 0), x0, y0, z1, x1, y0, z1, 0)
-    -- a pale underside, inset so it is the belly and not a stripe
-    let g3 = bx(g2, x0 + 1, y0 - 1, z0 + 1, x1 - 1, y0 - 1, z1 - 1, c_pale(sp))
-    -- the head: narrower than the body, one cell forward of it, raised by the neck
-    let g4 = bx(g3, x1 + 1, hy - 2, z0 + 1, x1 + 2, hy, z1 - 1, c_body(sp))
+    let up = plan_upright(sp)
+    let g0 = round_body(bx(Mdl.empty_n(grid()), x0, y0, z0, x1, y1, z1, c_body(sp)), sp)
+    -- a pale underside, inset so it is a belly and not a stripe. Standing
+    -- upright it is a FRONT rather than a belly, which is what a penguin is.
+    let g1 = if up do bx(g0, x1, y0 + cells(2), z0 + cells(1), x1, y1 - cells(2), z1 - cells(1), c_pale(sp))
+             else bx(g0, x0 + cells(2), y0 - cells(2), z0 + cells(1), x1 - cells(2), y0 - 1, z1 - cells(1), c_pale(sp)) end
+    -- the head: narrower than the body, forward of it -- or above it
+    let hx0 = if up do x1 - head_len() + 1 else x1 + 1 end
+    let hx1 = if up do x1 else x1 + head_len() end
+    let hy0 = if up do y1 + 1 else hy - cells(4) end
+    let g2 = bx(g1, hx0, hy0, z0 + cells(2), hx1, hy, z1 - cells(2), c_body(sp))
+    -- its top corners knocked off, so it is a head rather than a brick
+    let g3 = bx(bx(g2, hx0, hy, z0 + cells(2), hx0 + cells(1) - 1, hy, z1 - cells(2), 0),
+                hx1 - cells(1) + 1, hy, z0 + cells(2), hx1, hy, z1 - cells(2), 0)
     -- a neck fills the step up to a raised head, so nothing is left hanging
-    let g5 = if plan_neck(sp) > 0 do bx(g4, x1, y1, z0 + 1, x1 + 1, hy, z1 - 1, c_body(sp)) else g4 end
-    -- the accent forward of the head: a beak, or a snout
-    let g6 = bx(g5, x1 + 3, hy - 1, z0 + 1, x1 + 3, hy - 1, z1 - 1, c_accent(sp))
-    -- eyes proud of the head's flanks, so the animal has a front
-    Mdl.put_n(Mdl.put_n(g6, grid(), x1 + 2, hy - 1, z0, Mdl.c_eye()), grid(), x1 + 2, hy - 1, z1, Mdl.c_eye())
+    let g4 = if plan_neck(sp) > 0 do bx(g3, hx0, y1, z0 + cells(2), hx0 + cells(2), hy, z1 - cells(2), c_body(sp)) else g3 end
+    -- the beak or snout, forward of the head and thinner than it
+    let g5 = bx(g4, hx1 + 1, hy - cells(3), z0 + cells(3), hx1 + cells(2), hy - cells(2), z1 - cells(3), c_accent(sp))
+    eyes(crest(g5, sp, hx0, hx1, hy), sp, hx1 - cells(1), hy - cells(2))
   end
 
   -- ── Birds ─────────────────────────────────────────────────────────────────
   -- A wing is built outward from the flank a cell at a time, so cell n always
-  -- shares a face with cell n - 1, and cell 1 with the body. The flap bends it
-  -- progressively -- the tip travels furthest -- and a cell that stepped in both
-  -- z and y at once would meet its neighbour along an EDGE and the wing would
-  -- come off at the joint, so each column spans from the last height to its own.
-  -- The bend is half a cell of height per cell of span, not one: a wing that
-  -- rose a cell each step was a five-step staircase standing on the bird's back
-  -- rather than a wing.
+  -- shares a face with cell n - 1, and cell 1 with the body. It is ONE cell
+  -- thick whatever the grid is -- a sixtieth of the body it hangs off at this
+  -- resolution, where at sixteen it was a fifteenth and read as a plank.
+  --
+  -- The flap bends it progressively; a cell stepping in both z and y at once
+  -- would meet its neighbour along an edge, so each column spans from the last
+  -- height to its own.
   pfn wing_y(p : Int, out : Int) : Int do
-    if p == 1 do body_y0() + 2
-    else if p == 0 do body_y0() + 2 - out / 2
-    else body_y0() + 2 + out / 2 end end
+    if p == 1 do body_y0() + cells(4)
+    else if p == 0 do body_y0() + cells(4) - out / 3
+    else body_y0() + cells(4) + out / 3 end end
   end
-  -- A wing tapers: full length at the shoulder, shorter at the tip.
-  pfn wing_back(sp : Int, out : Int) : Int do body_x1(sp) - 1 - out / 2 end
+  -- A wing tapers: full length at the shoulder, shorter at the tip. On a short
+  -- body with a long span the two ends of the taper meet, and past that they
+  -- would cross, so the far end is held at the near one and the tip stays one
+  -- cell rather than reversing.
+  pfn wing_front(sp : Int, out : Int) : Int do body_x0() + out / 2 end
+  pfn wing_back(sp : Int, out : Int) : Int do
+    let b = body_x1(sp) - 1 - out / 3
+    if b < wing_front(sp, out) do wing_front(sp, out) else b end
+  end
   pfn wing_col(g : NativeU8Arr, sp : Int, z : Int, ylo : Int, yhi : Int, out : Int, k : Int) : NativeU8Arr do
-    bx(g, body_x0() + out / 2, ylo, z, wing_back(sp, out), yhi, z, k)
+    bx(g, wing_front(sp, out), ylo, z, wing_back(sp, out), yhi, z, k)
   end
-  pfn wing_go(g : NativeU8Arr, sp : Int, p : Int, out : Int) : NativeU8Arr do
-    if out > plan_wing(sp) do g
+  pfn wing_go(g : NativeU8Arr, sp : Int, p : Int, out : Int, span : Int) : NativeU8Arr do
+    if out > span do g
     else
       let y = wing_y(p, out)
       let yp = wing_y(p, out - 1)
-      let ylo = if y < yp do y else yp end
-      let yhi = if y < yp do yp else y end
-      let k = if out > plan_wing(sp) - 2 do c_dark(sp) else c_body(sp) end
-      let g1 = wing_col(g, sp, body_z0(sp) - out, ylo, yhi, out, k)
-      wing_go(wing_col(g1, sp, body_z1(sp) + out, ylo, yhi, out, k), sp, p, out + 1)
+      -- the outer third of the span is the dark primaries
+      let k = if out * 3 > span * 2 do c_dark(sp) else c_body(sp) end
+      let g1 = wing_col(g, sp, body_z0(sp) - out, y, yp, out, k)
+      wing_go(wing_col(g1, sp, body_z1(sp) + out, y, yp, out, k), sp, p, out + 1, span)
     end
   end
-  -- A bird's tail: a flat fan, wider than the body and one cell thick.
-  pfn bird_tail(g : NativeU8Arr, sp : Int) : NativeU8Arr do
-    bx(g, body_x0() - plan_tail(sp), body_y0() + 1, body_z0(sp), body_x0() - 1, body_y0() + 1, body_z1(sp), c_dark(sp))
-  end
-  -- A flightless bird gets legs instead of wings, which is also what stops it
-  -- reading as a bird that is merely sitting down.
-  pfn legs(g : NativeU8Arr, sp : Int) : NativeU8Arr do
-    let g1 = bx(g, body_x0() + 1, 0, body_z0(sp) + 1, body_x0() + 1, body_y0() - 2, body_z0(sp) + 1, c_dark(sp))
-    bx(g1, body_x1(sp) - 1, 0, body_z1(sp) - 1, body_x1(sp) - 1, body_y0() - 2, body_z1(sp) - 1, c_dark(sp))
+
+  -- A flipper is a wing that gave up: a thin plate down the flank of an upright
+  -- body, angling back as it goes out. The pose still moves it, so a penguin
+  -- still paddles.
+  pfn flipper_go(g : NativeU8Arr, sp : Int, p : Int, out : Int, span : Int) : NativeU8Arr do
+    if out > span do g
+    else
+      let lean = if p == 1 do 0 else if p == 0 do 0 - out else out end end
+      let top = body_y1(sp) - cells(3) + lean
+      let bot = body_y0() + cells(3) + lean
+      let x0 = body_x1(sp) - cells(4)
+      let x1 = body_x1(sp) - cells(1)
+      let k = if out * 2 > span do c_dark(sp) else c_body(sp) end
+      let g1 = bx(g, x0, bot, body_z0(sp) - out, x1, top, body_z0(sp) - out, k)
+      flipper_go(bx(g1, x0, bot, body_z1(sp) + out, x1, top, body_z1(sp) + out, k), sp, p, out + 1, span)
+    end
   end
 
-  doc "A bird of species [sp] in pose [p]: 0 wings down, 1 level, 2 up. A flightless bird stands on legs."
+  -- A bird's tail: a flat fan, wider than the body and one cell thick.
+  pfn bird_tail(g : NativeU8Arr, sp : Int) : NativeU8Arr do
+    bx(g, body_x0() - cells(plan_tail(sp)), body_y0() + cells(2), body_z0(sp) - cells(1),
+       body_x0() - 1, body_y0() + cells(2), body_z1(sp) + cells(1), c_dark(sp))
+  end
+  -- Legs: from the floor to the body itself, not to where the belly would be.
+  -- Stopping short of the body and letting the underside bridge the gap works
+  -- for every bird that HAS an underside -- and an upright bird has a front
+  -- instead, so its legs hung in the air a few cells below it.
+  pfn legs(g : NativeU8Arr, sp : Int) : NativeU8Arr do
+    let z0 = body_z0(sp)
+    let z1 = body_z1(sp)
+    let fx = body_x0() + cells(3)
+    let ax = body_x1(sp) - cells(3)
+    let g1 = bx(g, fx, 0, z0 + cells(1), fx + cells(1), body_y0() - 1, z0 + cells(2), c_dark(sp))
+    bx(g1, ax, 0, z1 - cells(2), ax + cells(1), body_y0() - 1, z1 - cells(1), c_dark(sp))
+  end
+
+  doc "A bird of species [sp] in pose [p]: 0 wings down, 1 level, 2 up. An upright bird paddles its flippers instead, and a flightless one just walks."
   fn bird(sp : Int, p : Int) : NativeU8Arr do
-    let g = bird_tail(trunk(sp), sp)
-    if plan_wing(sp) <= 0 do legs(g, sp) else wing_go(g, sp, p, 1) end
+    let g0 = if plan_upright(sp) do trunk(sp) else bird_tail(trunk(sp), sp) end
+    let span = cells(plan_wing(sp))
+    let g1 = if span <= 0 do g0
+             else if plan_upright(sp) do flipper_go(g0, sp, p, 1, span)
+             else wing_go(g0, sp, p, 1, span) end end
+    if plan_legs(sp) do legs(g1, sp) else g1 end
   end
 
   -- ── Fish ──────────────────────────────────────────────────────────────────
   -- The tail is a tall thin blade that sweeps across the poses, built from the
-  -- body's aft cell outward and offset at most one cell in z per step, so a full
-  -- sweep is still a connected tail rather than a fin swimming alongside.
+  -- body's aft cell outward and offset at most one cell in z a step, so a full
+  -- sweep is a connected tail rather than a fin swimming alongside.
   pfn sweep(p : Int, step : Int) : Int do
-    if p == 0 do 0 else if p == 1 do 0 - step else step end end
+    if p == 0 do 0 else if p == 1 do 0 - (step + 1) / 2 else (step + 1) / 2 end end
   end
-  pfn tailfin_go(g : NativeU8Arr, sp : Int, p : Int, step : Int) : NativeU8Arr do
-    if step > plan_tail(sp) do g
+  pfn tailfin_go(g : NativeU8Arr, sp : Int, p : Int, step : Int, span : Int) : NativeU8Arr do
+    if step > span do g
     else
-      let x = body_x0() - step
-      let dz = sweep(p, step)
-      let zc = (body_z0(sp) + body_z1(sp)) / 2 + dz
-      -- the blade deepens toward the tip, by half a cell a step: a full cell
-      -- each way made a tail fin taller than the fish
+      let zmid = (body_z0(sp) + body_z1(sp)) / 2
+      let zc = zmid + sweep(p, step)
+      let zp = zmid + sweep(p, step - 1)
+      -- the blade deepens toward the tip, by half a cell a step
       let spread = (step + 1) / 2
-      let g1 = bx(g, x, body_y0() - spread, zc, x, body_y1(sp) + spread, zc, c_dark(sp))
-      -- and spans back to where the previous cell was, so the sweep stays joined.
-      -- The two z bounds are sorted: a tail sweeping toward -z hands them over
-      -- in descending order, and box_n counts an inverted range as empty and
-      -- silently writes nothing -- which is a tail in two pieces.
-      let zp = (body_z0(sp) + body_z1(sp)) / 2 + sweep(p, step - 1)
-      let zlo = if zc < zp do zc else zp end
-      let zhi = if zc < zp do zp else zc end
-      let g2 = if dz == sweep(p, step - 1) do g1
-               else bx(g1, x, body_y0(), zlo, x, body_y1(sp), zhi, c_dark(sp)) end
-      tailfin_go(g2, sp, p, step + 1)
+      let g1 = bx(g, body_x0() - step, body_y0() - spread, zc, body_x0() - step, body_y1(sp) + spread, zc, c_dark(sp))
+      -- and spans back to where the last cell was, so the sweep stays joined
+      let g2 = bx(g1, body_x0() - step, body_y0(), zp, body_x0() - step, body_y1(sp), zc, c_dark(sp))
+      tailfin_go(g2, sp, p, step + 1, span)
     end
   end
-  -- Pectoral fins: small, one cell thick, on the flanks behind the head.
+  -- Pectoral fins: one cell thick, on the flanks behind the head, swept back.
+  -- An eel has none, which is most of why an eel reads as an eel.
   pfn pectorals(g : NativeU8Arr, sp : Int) : NativeU8Arr do
-    let x = body_x1(sp) - 1
-    -- one row up from the body's underside: the rounding shave takes the
-    -- bottom flank cells, and a fin hung off those attaches to nothing
-    let y = body_y0() + 1
-    let g1 = bx(g, x - 1, y, body_z0(sp) - 1, x, y, body_z0(sp) - 1, c_dark(sp))
-    bx(g1, x - 1, y, body_z1(sp) + 1, x, y, body_z1(sp) + 1, c_dark(sp))
+    if !plan_pectorals(sp) do g
+    else
+      let x = body_x1(sp) - cells(3)
+      -- one row up from the underside: the rounding shave takes the bottom
+      -- flank cells, and a fin hung off those attaches to nothing
+      let y = body_y0() + cells(2)
+      let g1 = bx(g, x - cells(3), y, body_z0(sp) - 1, x, y - cells(1), body_z0(sp) - 1, c_dark(sp))
+      bx(g1, x - cells(3), y, body_z1(sp) + 1, x, y - cells(1), body_z1(sp) + 1, c_dark(sp))
+    end
+  end
+
+  -- The dorsal fin, one cell thick, built a layer at a time with its LEADING
+  -- edge swept back: the trailing edge stays over the tail and the front of the
+  -- fin recedes as it rises. A rectangle of the same height reads as a sail; a
+  -- swept one reads as a shark, and it is the same eight cells either way.
+  pfn dorsal_go(g : NativeU8Arr, sp : Int, zc : Int, j : Int, d : Int) : NativeU8Arr do
+    if j >= d do g
+    else
+      let xb = body_x0() + cells(3)
+      let xf = body_x1(sp) - cells(4) - j * cells(1)
+      if xf < xb do g
+      else dorsal_go(bx(g, xb, body_y1(sp) + 1 + j, zc, xf, body_y1(sp) + 1 + j, zc, c_dark(sp)), sp, zc, j + 1, d) end
+    end
   end
 
   doc "A fish of species [sp] in pose [p]: 0 tail centred, 1 swept to -z, 2 swept to +z."
   fn fish(sp : Int, p : Int) : NativeU8Arr do
     let zc = (body_z0(sp) + body_z1(sp)) / 2
-    -- a dorsal fin on the back, one cell thick, over the middle of the body
-    let g1 = bx(trunk(sp), body_x0() + 2, body_y1(sp) + 1, zc, body_x1(sp) - 2, body_y1(sp) + 2, zc, c_dark(sp))
-    tailfin_go(pectorals(g1, sp), sp, p, 1)
+    tailfin_go(pectorals(dorsal_go(trunk(sp), sp, zc, 0, cells(plan_dorsal(sp))), sp), sp, p, 1, cells(plan_tail(sp)))
   end
 
   doc "The grid for template id [k]."
@@ -279,6 +624,14 @@ mod CubeForge.Fauna do
   fn floats(s : Poses, k : Int) : Int do match s do Poses(_, o) -> NativeArray.get_int(o, k + 1) - NativeArray.get_int(o, k) end end
   doc "Quads in template [k]."
   fn faces(s : Poses, k : Int) : Int do floats(s, k) / (6 * Vx.floats()) end
+
+  doc "A number over every float of template [k]: what tells two poses apart when their quad counts happen to match."
+  fn blob_hash(s : Poses, k : Int) : Int do bh_go(blob(s), offset(s, k), offset(s, k) + floats(s, k), 2166136261) end
+  pfn bh_go(d : NativeF32Arr, i : Int, stop : Int, acc : Int) : Int do
+    if i >= stop do acc
+    else bh_go(d, i + 1, stop, int_and(acc * 16777619 + float_to_int(NativeArray.get_f32(d, i) *. 256.0), 1073741823))
+    end
+  end
 
   -- ── Drawing ───────────────────────────────────────────────────────────────
   doc "Mesh slot for the fauna buffer. 192..243 are free; the chunk meshes end at 191 and the overlays start at 244."
@@ -353,34 +706,45 @@ mod CubeForge.Fauna do
   fn demo_ahead() : Float do 7.0 end
 
   doc "How large a specimen is drawn: big enough to read a silhouette from, whatever the species' real size."
-  fn specimen_scale() : Float do 1.6 end
+  fn specimen_scale() : Float do 2.0 end
   doc "How far ahead a specimen stands."
-  fn specimen_ahead() : Float do 5.0 end
+  fn specimen_ahead() : Float do 15.0 end
+
+  doc "The pose a specimen stands in: level for a bird, tail centred for a fish."
+  fn rest_pose(sp : Int) : Int do if is_fish(sp) do 0 else 1 end end
+  doc "Specimens across a row."
+  fn specimen_cols() : Int do 6 end
 
   pfn specimen_go(b : CubeForge.F32Buf.F32Buf, s : Poses, cx : Float, cy : Float, cz : Float, fx : Float, fz : Float, i : Int) : CubeForge.F32Buf.F32Buf do
-    if i >= count() * poses() do b
+    if i >= count() do b
     else
-      let sp = i / poses() + 1
-      let p = i % poses()
-      -- laid out across the view: species down the rows, poses along the row
-      let across = int_to_float(p) *. 2.2 -. 2.2
-      let up = 2.6 -. int_to_float(sp - 1) *. 2.6
-      specimen_go(stamp_s(b, s, sp, p,
+      let sp = i + 1
+      -- birds on the top row, fish below, in the order the table lists them
+      let across = (int_to_float(i % specimen_cols()) -. int_to_float(specimen_cols() - 1) /. 2.0) *. 3.6
+      let up = 7.2 -. int_to_float(i / specimen_cols()) *. 3.6
+      specimen_go(stamp_s(b, s, sp, rest_pose(sp),
                           cx +. specimen_ahead() *. fx -. across *. fz,
                           cy +. up,
                           cz +. specimen_ahead() *. fz +. across *. fx,
-                          -- broadside to the eye: a silhouette, not a nose
-                          Math.atan2(fx, 0.0 -. fz),
+                          -- Three quarters on, not broadside. Side-on shows the
+                          -- profile and hides the wings entirely -- they run
+                          -- across the body, so they are edge-on and a pixel
+                          -- wide -- and the wingspan is the thing most worth
+                          -- looking at on a bird.
+                          Math.atan2(fx, 0.0 -. fz) +. 0.7,
                           Vx.pack_shade(1.0, 0.0), specimen_scale()),
                   s, cx, cy, cz, fx, fz, i + 1)
     end
   end
 
   doc """
-  Every species in every pose, still, broadside, in a grid in front of the eye.
+  Every species, once, still, broadside, in two rows in front of the eye.
 
-  A moving flock at its true size is a few pixels and proves only that something
-  is drawn. This is how a body is actually inspected: CF_FAUNA_DEMO=2.
+  Drawn at ONE size rather than at their own, which is the opposite of what the
+  roster says: a Sunfin is a third of a block and a Mossmoa is two and a half,
+  and at their real sizes half of them are a few pixels. This board is for
+  checking the bodies; the sizes are a column in the table and are checked by
+  standing next to one.
   """
   fn demo_specimens(b : CubeForge.F32Buf.F32Buf, s : Poses, cx : Float, cy : Float, cz : Float, fx : Float, fz : Float) : CubeForge.F32Buf.F32Buf do
     specimen_go(B.clear(b), s, cx, cy, cz, fx, fz, 0)

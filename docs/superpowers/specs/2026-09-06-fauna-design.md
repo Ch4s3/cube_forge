@@ -285,7 +285,21 @@ Each slice is independently verifiable and independently useful.
    exactly wrong for a fish, whose floor would sit above its own ceiling and
    push it out of the lake. Fish get the bed from a bounded `surface_y` walk
    instead.
-3. **The species table and the full roster.** All sixteen, poses and colours.
+3. **The species table and the full roster.** *(done)* Eighteen species, poses
+   and colours, generated from a data table rather than hand-written: a species
+   is a row, and the March if-chains are emitted from it, so eighteen entries
+   cannot drift out of step across a dozen functions.
+
+   Two species were added on top of the plan — a **Brinewaddle** (upright,
+   flippers, legs: a penguin is one branch in the head placement plus rows it
+   already had) and a **Bladefin** (a swept dorsal fin eight cells tall). The
+   **Mossmoa** grew a crest and a hooked beak, and the **Glasseel** got long.
+
+   The grid went 16 -> 32 -> 64 cells a side, which is what lets a wing be a
+   sixtieth of the body it hangs off rather than a fifteenth. That cost 2.4
+   seconds of startup until the greedy pass was restricted to each shape's
+   bounding box; it is now ~0.3 s, and the world mesh hash is byte-identical
+   across the change.
 4. **Populations.** Capacity from habitat, the ease, the sparse registry,
    save/load. Oracle: dig a pond headlessly (`CF_AUTOCANAL`'s trick) and assert
    a school exists a fixed number of ticks later; drain it and assert it goes.

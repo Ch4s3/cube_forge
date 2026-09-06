@@ -2519,3 +2519,55 @@ across frames.
 sunfin in the nearest water — which for seed 7 is an upland lake at y 81, not
 the sea, and so a decent test of the case the sea-level assumption would have
 got wrong.
+
+## The roster: eighteen species from a table
+
+Slice 3. The species table is now *generated* from a data file rather than
+hand-written: eighteen rows produce the March if-chains for names, activity,
+size, niche, six plan numbers and a colour. Hand-editing a dozen chains to
+insert a species in the middle is how off-by-one `end` counts get in, and one
+extra `end` silently closes the module — the parse error points at whatever
+follows, not at the chain.
+
+**Finer voxels, and what they cost.** 16 cells a side fixed the slabs; 32 gave
+a head enough cells to round; 64 is what makes a wing one cell against a body of
+sixty. Naively that is 8x the greedy work of 32, and it showed: startup went
+from 1.7 s to 4.2 s.
+
+The fix is that a body fills a fraction of its grid. The greedy pass sweeps 6n
+slices of n x n mask cells, and at 64 most of those slices are past the animal's
+nose or beyond its wingtips. Finding the bounding box once and keeping both the
+fill and the walk inside it took the fauna templates from 2.4 s to ~0.3 s —
+startup 2.3 s against a 1.7-2.1 s baseline. The block models go through the same
+parameterised code and their mesh hash is byte-identical (413448066), which is
+the only reason a refactor of the mesher was safe to make at all.
+
+**Size range.** 0.22 blocks (Cinderfinch) to 4.20 (Mossmoa), about twenty to
+one. The small end has to stay small for the large end to mean anything.
+
+**Three shapes that are branches, not new code.** A penguin is `plan_upright`:
+the head goes on top of the body instead of in front of it, and the pale
+underside becomes a pale front. It already had short wings, legs and a dark back
+from ordinary rows. A shark is `plan_dorsal` at 8 with a swept leading edge — a
+rectangle of the same height reads as a sail. An eel is `plan_pectorals` false,
+which is most of why an eel reads as an eel.
+
+**The connectivity oracle earned its keep twice more.** A penguin's legs stopped
+at `body_y0 - cells(2)`, relying on the belly to bridge to the body — and an
+upright bird has a front instead of a belly, so its legs hung in the air. And
+the wing taper's two ends crossed on a short body with a long span, which
+`box_n` treated as an empty range and silently skipped: three birds lost their
+wings entirely and still built clean.
+
+That was the third time an inverted range vanished, so `box_n` now **sorts** its
+bounds. A caller handing over a reversed range means the box between the two,
+and gets it.
+
+The test itself had to change twice as the grid grew: repeated sweeps until the
+marked count settles is O(cells x rounds), which is fine at 16 and hopeless at
+64 x 54 templates. It is a worklist flood now — pop, mark, push the six
+neighbours — and the suite runs in about 90 s.
+
+**What it costs.** Live flocks against no flocks, interleaved, three runs each:
+worst frame 7.4-8.0 ms against 6.5-7.3, frame rate within noise. The frame
+budget gate is 6.71 ms against 16.
