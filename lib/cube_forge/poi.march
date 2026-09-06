@@ -114,7 +114,7 @@ mod CubeForge.Poi do
   end
   doc "Fraction of cells in full country holding one."
   fn density(k : Int) : Float do
-    if k == k_butte() do 0.35 else if k == k_arch() do 0.5 else if k == k_cavern() do 0.45 else 0.4 end end end
+    if k == k_butte() do 0.35 else if k == k_arch() do 0.5 else if k == k_cavern() do 0.65 else 0.4 end end end
   end
   doc "Frequency of the kind's country octave: how wide a region of them is."
   fn cty_freq(k : Int) : Float do
@@ -128,14 +128,17 @@ mod CubeForge.Poi do
   fn cty_band(k : Int) : Float do 0.10 end
   doc "How far outside a chunk an instance may sit and still write into it."
   fn reach(k : Int) : Int do
-    if k == k_butte() do 12 else if k == k_arch() do 26 else if k == k_cavern() do 50 else 58 end end end
+    if k == k_butte() do 12 else if k == k_arch() do 26 else if k == k_cavern() do 54 else 58 end end end
   end
   doc "The least a landmark's ground must stand above sea level."
   fn min_ground(k : Int) : Int do
     if k == k_butte() do 0
     else if k == k_arch() do N.sea_level() + 5
-    -- a cavern needs rock over it, or it is a hole in a hillside
-    else if k == k_cavern() do N.sea_level() + 24
+    -- A cavern needs rock over it across its whole footprint, not just at its
+    -- site (see `cover`). That makes this threshold do far more work than it
+    -- looks: at sea + 26 it held over a fifty-block cross and no world in forty
+    -- seeds had a cavern at all.
+    else if k == k_cavern() do N.sea_level() + 18
     else N.sea_level() + 3 end end end
   end
 
@@ -162,14 +165,14 @@ mod CubeForge.Poi do
     if k == k_butte() do (if i == p_len() do 5 else if i == p_wide() do 5 else if i == p_top() do 74 else 0 end end end)
     else if k == k_arch() do (if i == p_len() do 24 else if i == p_wide() do 5 else if i == p_rise() do 26 else 0 end end end)
     -- cavern: len is how far its chambers spread, wide is a chamber's radius
-    else if k == k_cavern() do (if i == p_len() do 18 else if i == p_wide() do 12 else if i == p_depth() do 28 else 0 end end end)
+    else if k == k_cavern() do (if i == p_len() do 16 else if i == p_wide() do 12 else if i == p_depth() do 30 else 0 end end end)
     -- tree: len is the crown's radius, wide the trunk's, rise the trunk's height
     else (if i == p_len() do 26 else if i == p_wide() do 4 else if i == p_rise() do 14 else 0 end end end) end end end
   end
   fn phi(k : Int, i : Int) : Int do
     if k == k_butte() do (if i == p_len() do 11 else if i == p_wide() do 11 else if i == p_top() do 100 else 0 end end end)
     else if k == k_arch() do (if i == p_len() do 36 else if i == p_wide() do 8 else if i == p_rise() do 40 else 0 end end end)
-    else if k == k_cavern() do (if i == p_len() do 28 else if i == p_wide() do 18 else if i == p_depth() do 42 else 0 end end end)
+    else if k == k_cavern() do (if i == p_len() do 26 else if i == p_wide() do 20 else if i == p_depth() do 44 else 0 end end end)
     else (if i == p_len() do 38 else if i == p_wide() do 6 else if i == p_rise() do 22 else 0 end end end) end end end
   end
 
@@ -250,12 +253,36 @@ mod CubeForge.Poi do
     if class_of(k) == cls_scatter() do hash(k, cx, cz, seed, 1) <= density(k) *. scale
     else
       if hash(k, cx, cz, seed, 1) > density(k) *. scale *. country(k, sx(k, cx, cz, seed), sz(k, cx, cz, seed), seed) do false
-      else N.height_base(sx(k, cx, cz, seed), sz(k, cx, cz, seed), seed) >= min_ground(k) end
+      else cover(k, cx, cz, seed) >= min_ground(k) end
     end
   end
 
-  doc "The ground an instance stands on: height_base at its site, which carries no POI term."
-  fn ground(k : Int, cx : Int, cz : Int, seed : Int) : Int do N.height_base(sx(k, cx, cz, seed), sz(k, cx, cz, seed), seed) end
+  doc """
+  The lowest ground over the instance's whole footprint, not just at its site.
+  A cavern spreads its chambers thirty blocks sideways, and the site's own
+  column says nothing about the hillside they run into: checking the site alone
+  put chambers through the side of a hill, where the sea promptly filled them.
+  Only a landmark that reaches wide needs the probes; everything else asks its
+  own column.
+  """
+  fn cover(k : Int, cx : Int, cz : Int, seed : Int) : Int do
+    let x = sx(k, cx, cz, seed)
+    let z = sz(k, cx, cz, seed)
+    let at = N.height_base(x, z, seed)
+    if k != k_cavern() do at
+    else
+      -- the chambers sit within p_len of the site, so that is the span that has
+      -- to be covered; probing out to len + wide as well rejected every world
+      let r = param(k, cx, cz, seed, p_len())
+      Math.min_int(Math.min_int(at, Math.min_int(N.height_base(x + r, z, seed), N.height_base(x - r, z, seed))),
+                   Math.min_int(N.height_base(x, z + r, seed), N.height_base(x, z - r, seed)))
+    end
+  end
+
+  doc "The ground an instance stands on: height_base at its site, which carries no POI term. A cavern hangs off its cover instead, so a chamber under a slope follows the low side rather than the high one."
+  fn ground(k : Int, cx : Int, cz : Int, seed : Int) : Int do
+    if k == k_cavern() do cover(k, cx, cz, seed) else N.height_base(sx(k, cx, cz, seed), sz(k, cx, cz, seed), seed) end
+  end
 
   -- ── The height pass ──────────────────────────────────────────────────────
 
@@ -450,8 +477,12 @@ mod CubeForge.Poi do
   fn cham_y(k : Int, cx : Int, cz : Int, seed : Int, j : Int, g : Int) : Float do
     int_to_float(g - param(k, cx, cz, seed, p_depth())) +. (hash(k, cx, cz, seed, 42 + 3 * j) -. 0.5) *. 10.0
   end
+  -- The multiplier never exceeds 1, so `phi(p_wide)` is a true maximum and the
+  -- roof rule can be written against it. It used to reach 1.25, which put a
+  -- chamber's ceiling above the rock the rule had reserved for it: at the
+  -- largest radius the caverns broke the surface and flooded.
   fn cham_r(k : Int, cx : Int, cz : Int, seed : Int, j : Int) : Float do
-    int_to_float(param(k, cx, cz, seed, p_wide())) *. (0.70 +. 0.55 *. hash(k, cx, cz, seed, 60 + j))
+    int_to_float(param(k, cx, cz, seed, p_wide())) *. (0.62 +. 0.38 *. hash(k, cx, cz, seed, 60 + j))
   end
 
   -- The nearest chamber's surface, as a fraction of its radius: under 1 is
@@ -482,7 +513,7 @@ mod CubeForge.Poi do
   -- once when the beam count changed, and a collision here is invisible -- two
   -- draws that should be independent quietly agree.
   doc "Beams crossing each chamber."
-  fn beams() : Int do 7 end
+  fn beams() : Int do 5 end
 
   -- Beam [b] of chamber [j]: a segment through the chamber at a hashed
   -- attitude, longer than the chamber is wide so it drives into both walls.
@@ -509,8 +540,8 @@ mod CubeForge.Poi do
   doc "Half the beam's length, in blocks. A long one overshoots the chamber's radius, so it is embedded in the rock at both ends; a short one is a stub a third of the way across."
   fn beam_half(k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int) : Float do
     let h = hash(k, cx, cz, seed, 112 + 4 * (7 * j + b))
-    if beam_long(k, cx, cz, seed, j, b) do cham_r(k, cx, cz, seed, j) *. (1.10 +. 0.60 *. h)
-    else cham_r(k, cx, cz, seed, j) *. (0.35 +. 0.30 *. h) end
+    if beam_long(k, cx, cz, seed, j, b) do cham_r(k, cx, cz, seed, j) *. (0.90 +. 0.45 *. h)
+    else cham_r(k, cx, cz, seed, j) *. (0.30 +. 0.25 *. h) end
   end
   doc """
   The beam's radius at its thickest, in blocks. That thickness against its
@@ -522,7 +553,7 @@ mod CubeForge.Poi do
     let h = hash(k, cx, cz, seed, 113 + 4 * (7 * j + b))
     -- the long ones carry the look, so they are the medium-thick ones; the
     -- short ones stay slender or they read as boulders rather than crystals
-    if beam_long(k, cx, cz, seed, j, b) do 1.4 +. 1.0 *. h else 0.8 +. 0.5 *. h end
+    if beam_long(k, cx, cz, seed, j, b) do 2.0 +. 1.3 *. h else 1.0 +. 0.6 *. h end
   end
   doc "How thick the beam is at position [t] along it, as a fraction of beam_rad: full over the middle and drawn to a point at both ends, the way a crystal terminates."
   fn beam_taper(t : Float) : Float do
@@ -537,9 +568,11 @@ mod CubeForge.Poi do
       let l = beam_half(k, cx, cz, seed, j, b)
       -- the beam is offset from the chamber's centre, so the three of them
       -- cross rather than all passing through one point
-      let ou = cham_u(k, cx, cz, seed, j) +. (hash(k, cx, cz, seed, 200 + 7 * j + b) -. 0.5) *. cham_r(k, cx, cz, seed, j)
-      let ov = cham_v(k, cx, cz, seed, j) +. (hash(k, cx, cz, seed, 230 + 7 * j + b) -. 0.5) *. cham_r(k, cx, cz, seed, j)
-      let oy = cham_y(k, cx, cz, seed, j, g) +. (hash(k, cx, cz, seed, 260 + 7 * j + b) -. 0.5) *. cham_r(k, cx, cz, seed, j) *. 0.8
+      -- spread wide: at half this the five shafts all passed through the middle
+      -- and merged into one white mass with no shaft visible in it
+      let ou = cham_u(k, cx, cz, seed, j) +. (hash(k, cx, cz, seed, 200 + 7 * j + b) -. 0.5) *. 1.5 *. cham_r(k, cx, cz, seed, j)
+      let ov = cham_v(k, cx, cz, seed, j) +. (hash(k, cx, cz, seed, 230 + 7 * j + b) -. 0.5) *. 1.5 *. cham_r(k, cx, cz, seed, j)
+      let oy = cham_y(k, cx, cz, seed, j, g) +. (hash(k, cx, cz, seed, 260 + 7 * j + b) -. 0.5) *. cham_r(k, cx, cz, seed, j) *. 1.1
       let dx = beam_dx(k, cx, cz, seed, j, b) *. l
       let dy = beam_dy(k, cx, cz, seed, j, b) *. l
       let dz = beam_dz(k, cx, cz, seed, j, b) *. l
@@ -566,7 +599,7 @@ mod CubeForge.Poi do
     -- the fine growth: blades on the shell, floor and ceiling both. Sparser now
     -- that the beams carry the look; a lining only on the floor lit the chamber
     -- from below and left its roof black
-    else if d > 0.88 && N.hash2(wx * 31 + y, wz * 17 - y, seed + 909) < 0.18 do C.crystal()
+    else if d > 0.88 && N.hash2(wx * 31 + y, wz * 17 - y, seed + 909) < 0.09 do C.crystal()
     else 0 end end end end
   end
 
@@ -788,6 +821,8 @@ mod CubeForge.Poi do
     else if hh > 0 && hh + roof() > rise do false
     -- 2, underground: a chamber keeps a roof's worth of rock over it, whatever
     -- its radius and however shallow it is allowed to sit
+    -- the widest a chamber can be is phi(p_wide) exactly (see cham_r), and it
+    -- must still keep a roof's worth of rock over it at the shallowest depth
     else if k == k_cavern() && plo(k, p_depth()) < phi(k, p_wide()) + roof() do false
     else if k == k_cavern() && min_ground(k) < plo(k, p_depth()) + phi(k, p_wide()) do false
     -- 3: a kind with a level top declares an absolute one

@@ -2533,3 +2533,38 @@ needs three block-light fields rather than one.
 
 478 tests. `CF_POI=0` and `CF_POI=1` still agree at seed 7 (mesh 484802240) --
 the bias touches no block that world contains. Worst frame 7.18 ms against 16.
+
+
+## Room to be big (2026-09-06)
+
+The shafts still did not read as big shafts, and again the reason was not the
+shafts. **Five of them in a chamber barely wider than they were long merged into
+one white mass**, and a crystal you cannot see the ends of is not a crystal, it
+is a wall. What was needed was air: the chamber went from radius 8-13 to 12-20
+and depth 22-34 to 30-44, the beam centres spread to 1.5x the chamber radius so
+they stop passing through one point, the count came back to five, and the fine
+blade growth halved again to 0.09 of shell voxels.
+
+Two bugs surfaced doing it, both in placement rather than shape.
+
+**`cham_r` could exceed `p_wide`.** It scaled the radius by 0.70 to 1.25, and
+the roof rule was written against `phi(p_wide)` — a number the chamber could
+therefore beat by a quarter. At the largest radius the caverns broke the surface
+and the sea poured in. The multiplier is now 0.62 to 1.00, so `phi(p_wide)` is a
+true maximum and the rule means what it says.
+
+**`here` checked the ground at the site only.** A cavern spreads its chambers
+thirty blocks sideways, and the site's own column says nothing about the
+hillside they run into: chambers came out of the side of hills and flooded.
+`cover` now takes the *lowest* ground over a cross of five probes at `p_len`,
+and `ground` hangs the chambers off that rather than off the site, so a chamber
+under a slope follows the low side. That is the same shape of fix as the arch's
+foot probes, and it is the second time this session that a landmark's rules were
+right at its centre and wrong over its footprint.
+
+The threshold does far more work than it looks once it has to hold over a
+fifty-block cross: at sea + 26 no world in forty seeds had a cavern at all, and
+it settled at sea + 18 with the density raised to 0.65.
+
+478 tests. `CF_POI=0` and `CF_POI=1` agree at seed 7 (mesh 484802240). Worst
+frame 6.48 ms.
