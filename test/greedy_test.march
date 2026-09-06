@@ -119,7 +119,7 @@ mod CubeForge.Test.Greedy do
     if i >= 256 do c else grass_go(C.set(c, i % 16, 69, i / 16, 1), i + 1) end
   end
   pfn grass_top16_world() : CubeForge.World.World do
-    CubeForge.World.World(Array.from_list([grass_go(flat_cells(C.new(), 0), 0)]), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.World.shown_new(), 1, CubeForge.World.default_models())
+    CubeForge.World.of_chunk_list([grass_go(flat_cells(C.new(), 0), 0)], 1)
   end
 
   describe "greedy sections" do

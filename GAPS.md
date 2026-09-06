@@ -1433,7 +1433,12 @@ in the next iteration a copy (G12/G68 restated for this shape).
   profile of this project at ~2% of the frame; `World.chunk_at` is one such
   call, and `World.block_at` pays it per voxel in the light sweep's
   `give_level`, the water scan, vegetation and fruit.
+- Measured (`probes/pvec_get`, release): get 112 ns average (61 at index 0,
+  154 at index 63), set 860 ns, against 72 / 200 ns for a complete binary
+  tree of 64 leaves in plain March variants.
+- **Done instead:** `lib/cube_forge/tree.march`, a complete binary tree the
+  World keeps its chunks in; `World.chunks` converts to a PVec for the save
+  format. Worst frame 8.2 -> 5.7-6.6 ms, biome field build 228 -> 123 ms
+  (RESULTS). The mesher already took its five chunks as arguments.
 - **Would need:** array-backed leaves and a stored tail length in the stdlib
-  `PVec`, or a fixed-size object array. Worked around locally only where a
-  loop could hoist the chunk (the mesher takes its five chunks as arguments;
-  the seed walks a chunk at a time).
+  `PVec`, or a fixed-size object array.

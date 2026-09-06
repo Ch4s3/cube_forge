@@ -8,7 +8,7 @@ mod CubeForge.World do
 
   alias CubeForge.Chunk as C
 
-  type World = World(Array.PVec(CubeForge.Chunk.Chunk), NativeU8Arr, NativeU8Arr, NativeU8Arr, NativeU8Arr, Int, CubeForge.Model.Templates)   -- chunks, skylight field, block-light field, occupancy field, shown species per column, side length in chunks, the model templates the mesher stamps
+  type World = World(CubeForge.Tree.Tree(CubeForge.Chunk.Chunk), NativeU8Arr, NativeU8Arr, NativeU8Arr, NativeU8Arr, Int, CubeForge.Model.Templates)   -- chunks, skylight field, block-light field, occupancy field, shown species per column, side length in chunks, the model templates the mesher stamps
 
   doc "The world's side in chunks. The one number the world's size comes from."
   fn size() : Int do 8 end
@@ -106,12 +106,12 @@ mod CubeForge.World do
 
   doc "The chunk at grid (cx, cz); panics if out of bounds."
   fn chunk_at(w : World, cx : Int, cz : Int) : CubeForge.Chunk.Chunk do
-    match w do World(cs, _, _, _, _, n, _) -> Array.get(cs, cx + n * cz) end
+    match w do World(cs, _, _, _, _, n, _) -> CubeForge.Tree.get(cs, cx + n * cz) end
   end
 
   doc "Replace the chunk at grid (cx, cz)."
   fn set_chunk(w : World, cx : Int, cz : Int, c : CubeForge.Chunk.Chunk) : World do
-    match w do World(cs, la, lb, o, sh, n, mo) -> World(Array.set(cs, cx + n * cz, c), la, lb, o, sh, n, mo) end
+    match w do World(cs, la, lb, o, sh, n, mo) -> World(CubeForge.Tree.set(cs, cx + n * cz, c), la, lb, o, sh, n, mo) end
   end
 
   fn floor_div16(v : Int) : Int do if v >= 0 do v / 16 else (v - 15) / 16 end end
@@ -224,19 +224,23 @@ mod CubeForge.World do
     -- the lake table once, read by every chunk (a read only: no copy -- GAPS G68)
     let lk = CubeForge.Lakes.levels(seed, n)
     let chunks = List.pmap_n(coords(n), fn i -> C.generate_lakes(16 * (i % n), 16 * (i / n), seed, lk, n), workers)
-    World(Array.from_list(chunks), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), shown_new(), n, default_models())
+    World(CubeForge.Tree.from_list(chunks), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), shown_new(), n, default_models())
   end
 
   doc "A world over chunks read from a save, with empty light and occupancy fields (rebuilt by the caller)."
   fn from_chunks(chunks : Array.PVec(CubeForge.Chunk.Chunk), n : Int) : World do
-    World(chunks, CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), shown_new(), n, default_models())
+    World(CubeForge.Tree.from_list(Array.to_list(chunks)), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), shown_new(), n, default_models())
   end
-  doc "The chunk array, in grid order."
-  fn chunks(w : World) : Array.PVec(CubeForge.Chunk.Chunk) do match w do World(cs, _, _, _, _, _, _) -> cs end end
+  doc "The chunk array, in grid order, as a PVec for the save format and tests. The World itself keeps a Tree (GAPS G71); this converts."
+  fn chunks(w : World) : Array.PVec(CubeForge.Chunk.Chunk) do match w do World(cs, _, _, _, _, _, _) -> Array.from_list(CubeForge.Tree.to_list(cs)) end end
+  doc "The world over a list of chunks in grid order: the constructor tests use."
+  fn of_chunk_list(chunks : List(CubeForge.Chunk.Chunk), n : Int) : World do
+    World(CubeForge.Tree.from_list(chunks), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), shown_new(), n, default_models())
+  end
 
   fn generate_scalar(n : Int, seed : Int, workers : Int) : World do
     let chunks = List.pmap_n(coords(n), fn i -> C.generate_scalar(16 * (i % n), 16 * (i / n), seed), workers)
-    World(Array.from_list(chunks), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), shown_new(), n, default_models())
+    World(CubeForge.Tree.from_list(chunks), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), shown_new(), n, default_models())
   end
 
   -- A rolling hash over every voxel of every chunk. Four million reads, so this

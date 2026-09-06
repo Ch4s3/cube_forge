@@ -1,0 +1,35 @@
+-- Tree: the complete binary tree the world keeps its chunks in (GAPS G71).
+mod CubeForge.Test.Tree do
+
+  import Test
+  alias CubeForge.Tree as Tr
+
+  pfn ints(i : Int, acc : List(Int)) : List(Int) do if i < 0 do acc else ints(i - 1, Cons(i * 10, acc)) end end
+  pfn all_match(t : CubeForge.Tree.Tree(Int), i : Int, n : Int) : Bool do
+    if i >= n do true else if Tr.get(t, i) == i * 10 do all_match(t, i + 1, n) else false end end
+  end
+
+  describe "Tree" do
+    test "a power-of-two count round-trips by index and by list" do
+      let t = Tr.from_list(ints(63, Nil))
+      Test.assert_eq_int(Tr.length(t), 64, "length")
+      Test.assert_true(all_match(t, 0, 64), "every index reads back")
+      Test.assert_eq_int(List.length(Tr.to_list(t)), 64, "to_list length")
+    end
+    test "set replaces one element and leaves the rest" do
+      let t = Tr.set(Tr.from_list(ints(63, Nil)), 37, 999)
+      Test.assert_eq_int(Tr.get(t, 37), 999, "the set one")
+      Test.assert_eq_int(Tr.get(t, 36), 360, "its neighbour")
+      Test.assert_eq_int(Tr.get(t, 63), 630, "the last")
+    end
+    test "a count that is not a power of two is padded and still indexes correctly" do
+      let t = Tr.from_list(ints(8, Nil))
+      Test.assert_eq_int(Tr.length(t), 9, "nine")
+      Test.assert_true(all_match(t, 0, 9), "all nine")
+      Test.assert_eq_int(Tr.get(Tr.set(t, 8, 5), 8), 5, "the last is settable")
+      Test.assert_eq_int(Tr.length(Tr.from_list(Cons(1, Nil))), 1, "one leaf")
+      Test.assert_eq_int(Tr.get(Tr.from_list(Cons(7, Nil)), 0), 7, "and it reads")
+    end
+  end
+
+end

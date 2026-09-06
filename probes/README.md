@@ -16,3 +16,4 @@ Small standalone forge projects / files that reproduce each finding in
 - `oneline_match.march` — (control) one-line match with tuple patterns parses
 - `actor_probe/` — control: native arrays in actor state, List reply, Actor.call inside pmap all work
 - `probe_ffi5/` — G51, an extern returning its borrowed argument is a use-after-free; `consume` fixes it
+- `pvec_get/` — G71, `Array.get`/`Array.set` on a 64-element PVec against a complete binary tree: 112 vs 72 ns a get, 860 vs 200 ns a set

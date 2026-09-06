@@ -2018,3 +2018,36 @@ profile, 2% of the frame); `World.block_at` pays it per voxel in the relight's
 diagnostics; the shim additions are `cf_f32_stamp`, `cf_mesh_quad`,
 `cf_mesh_slice`, `cf_u8_zero_box`, `cf_mark_box`, `cf_gfx_sync_box`, all under
 the blit's rc == 1 contract.
+
+## G71 followed up: the world's chunks in a binary tree (2026-09-05)
+
+`probes/pvec_get` timed the stdlib vector against a complete binary tree of
+64 leaves, one million gets and a hundred thousand sets each, release build:
+
+| | `Array.PVec` | `CubeForge.Tree` |
+|---|---|---|
+| get, indices spread | 112 ns | 72 ns |
+| get, index 0 / index 63 | 61 / 154 ns | |
+| set | 860 ns | 200 ns |
+
+Per call the gap is modest; the volume is not. `World.chunk_at` is a `get`
+and `World.set_block` a `set`, and the relight, the water scan, the biome's
+water flags, vegetation and fruit all go through `World.block_at` a voxel at a
+time. The world now keeps its chunks in `CubeForge.Tree` (six matches to a
+chunk, six node allocations to replace one; `World.chunks` converts to a PVec
+for the save format). Same seed, same pinned scenario, mesh hash unchanged:
+
+| | before | after |
+|---|---|---|
+| tree edit, relight | 2.3-5.8 ms | **1.8-3.4 ms** |
+| tree edit, blocks | 0.8-1.3 ms | 0.7-0.9 ms |
+| biome field build at startup | 228 ms | **123 ms** |
+| skylight + block-light flood at startup | 150 ms | 141 ms |
+| startup mesh all | 197 ms | 185 ms |
+| **frame budget, worst frame** | 8.2 ms | **5.7-6.6 ms** (two runs) |
+
+The sampler had put `Array.lst_nth` at 2% of the frame. That was the top of
+the stack only: the rest of a `get` -- `trie_get`, `get` itself, the tail
+length walk, and the cache misses a 50-hop list walk means -- did not show
+under one name. A structure change the profile rated at 2% took a third off
+the worst frame. 438 tests.

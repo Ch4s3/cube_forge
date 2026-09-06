@@ -2,3 +2,6 @@
 /march-phases/
 *.ll
 test_saves_tmp/
+
+# every forge build dir, the probes included
+**/.march/
