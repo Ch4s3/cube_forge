@@ -222,7 +222,7 @@ mod CubeForge.Light do
     else level_go(src, give6(src, dst, w, i % size_x(), i / layer(), (i / size_x()) % size_z(), lv), w, lv, i + 1, stop) end end
   end
 
-  -- Sweep levels [lv] down to 2. Each level writes into a FRESH buffer rather
+  -- Lists levels [lv] down to 2. Each level writes into a FRESH buffer rather
   -- than swapping the previous pair: `src` is read during the level, which
   -- leaves its refcount at 2, and a shared array cannot be a blit destination
   -- (GAPS.md G21). Fifteen 4 MB allocations per flood buys a memcpy per level.
@@ -292,6 +292,28 @@ mod CubeForge.Light do
   -- than the box it clears.
 
   fn relight_radius() : Int do 15 end
+
+  -- How far an edit at (ex, ey, ez) can change a field: no further than the
+  -- brightest light that was at the edit or beside it before the edit, plus
+  -- whatever the new block emits. Light lost by placing a block was at most
+  -- the edit voxel's own level; light gained by breaking one is at most a
+  -- neighbour's level less one, and a sky shaft opening shows as the voxel
+  -- above at max_level(). A value of L propagates L - 1 steps, so a box of
+  -- radius L around the edit holds every voxel that can move. Surface edits
+  -- in daylight still get the full 15; an edit in a dim gallery, or a
+  -- block-light edit near mycelium glowing at 3, gets a box a few voxels
+  -- wide instead of 33 -- and the clear, the seed, the copy and the diff are
+  -- all passes over that box.
+  fn reach(la : NativeU8Arr, ex : Int, ey : Int, ez : Int, extra : Int) : Int do
+    let m0 = if extra > get(la, ex, ey, ez) do extra else get(la, ex, ey, ez) end
+    let m1 = if get(la, ex + 1, ey, ez) > m0 do get(la, ex + 1, ey, ez) else m0 end
+    let m2 = if get(la, ex - 1, ey, ez) > m1 do get(la, ex - 1, ey, ez) else m1 end
+    let m3 = if get(la, ex, ey + 1, ez) > m2 do get(la, ex, ey + 1, ez) else m2 end
+    let m4 = if get(la, ex, ey - 1, ez) > m3 do get(la, ex, ey - 1, ez) else m3 end
+    let m5 = if get(la, ex, ey, ez + 1) > m4 do get(la, ex, ey, ez + 1) else m4 end
+    let m6 = if get(la, ex, ey, ez - 1) > m5 do get(la, ex, ey, ez - 1) else m5 end
+    if m6 < 1 do 1 else if m6 > relight_radius() do relight_radius() else m6 end end
+  end
 
   @[no_alloc]
   pfn clampi(v : Int, lo : Int, hi : Int) : Int do
@@ -431,8 +453,8 @@ mod CubeForge.Light do
   -- cost 1.2 s a relight: while the cell holds both arrays their refcounts are
   -- 2, and every in-place write copies the field (GAPS G12/G68). So the level
   -- loop lives inside the walk, and nothing aggregate exists until it is over.
-  type Sweep = Sweep(NativeU8Arr, NativeIntArr)
-  fn sweep_field(s : Sweep) : NativeU8Arr do match s do Sweep(a, _) -> a end end
+  type Lists = Lists(NativeU8Arr, NativeIntArr)
+  fn sweep_field(s : Lists) : NativeU8Arr do match s do Lists(a, _) -> a end end
 
   -- One entry of level [lv]'s list: give to the six neighbours; a neighbour
   -- that takes a value of 2 or more goes on that level's list. Entries pushed
@@ -440,10 +462,10 @@ mod CubeForge.Light do
   -- At the end of a list the walk steps down a level; after an overflow it
   -- finishes with full in-place scans.
   pfn list_go(la : NativeU8Arr, wl : NativeIntArr, w : CubeForge.World.World, lv : Int, e : Int,
-              x0 : Int, x1 : Int, y0 : Int, y1 : Int, z0 : Int, z1 : Int) : Sweep do
-    if lv <= 1 do Sweep(la, wl)
+              x0 : Int, x1 : Int, y0 : Int, y1 : Int, z0 : Int, z1 : Int) : Lists do
+    if lv <= 1 do Lists(la, wl)
     else if e == 0 do
-      if wl_overflowed(wl) do Sweep(full_sweep_ip(la, w, lv - 1, x0, x1, y0, y1, z0, z1), wl)
+      if wl_overflowed(wl) do Lists(full_sweep_ip(la, w, lv - 1, x0, x1, y0, y1, z0, z1), wl)
       else list_go(la, wl, w, lv - 1, wl_head(wl, lv - 1), x0, x1, y0, y1, z0, z1) end
     else
       let i = wl_entry_index(wl, e)
@@ -508,7 +530,7 @@ mod CubeForge.Light do
     if lv <= 1 do la else full_sweep_ip(full_level_ip(la, w, lv, x0, x1, y0, y1, z0, z1), w, lv - 1, x0, x1, y0, y1, z0, z1) end
   end
 
-  doc "Sweep the scan box to a fixed point in place, by per-level worklists. [la] must be uniquely owned. Equivalent to box_sweep_go2 on copies, without the copies or the fourteen box scans."
+  doc "Lists the scan box to a fixed point in place, by per-level worklists. [la] must be uniquely owned. Equivalent to box_sweep_go2 on copies, without the copies or the fourteen box scans."
   fn sweep_box_lists(la : NativeU8Arr, w : CubeForge.World.World, x0 : Int, x1 : Int, y0 : Int, y1 : Int, z0 : Int, z1 : Int) : NativeU8Arr do
     let vol = (x1 - x0 + 1) * (y1 - y0 + 1) * (z1 - z0 + 1)
     let wl = gather_box(la, wl_new(4 * vol + 64), x0, x1, y0, y1, z0, z1)
@@ -569,7 +591,7 @@ mod CubeForge.Light do
 
   doc "Repair the skylight field after the block at (ex, ey, ez) changed, reporting which sections moved. [w] is the world after the edit."
   fn relight_marked(la : NativeU8Arr, w : CubeForge.World.World, ex : Int, ey : Int, ez : Int) : Relit do
-    let r = relight_radius()
+    let r = reach(la, ex, ey, ez, 0)
     let cx0 = clampi(ex - r, 0, 127)
     let cx1 = clampi(ex + r, 0, 127)
     let cz0 = clampi(ez - r, 0, 127)
@@ -664,7 +686,7 @@ mod CubeForge.Light do
   end
 
   fn relight_block_marked(lb : NativeU8Arr, w : CubeForge.World.World, ex : Int, ey : Int, ez : Int) : Relit do
-    let r = relight_radius()
+    let r = reach(lb, ex, ey, ez, emission(CubeForge.World.block_at(w, ex, ey, ez)))
     let cx0 = clampi(ex - r, 0, 127)
     let cx1 = clampi(ex + r, 0, 127)
     let cz0 = clampi(ez - r, 0, 127)

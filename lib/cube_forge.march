@@ -89,7 +89,7 @@ mod CubeForge do
   -- selected block id, water actor pids (Array, one per chunk), per-chunk "has dirty cells" flags
   -- `p` is the water-actor Pid type: Pid(state) cannot be written in an annotation (GAPS.md G45), so it is a parameter.
   -- ... and the per-chunk section meshes
-  type Scene(p) = Scene(CubeForge.World.World, NativeIntArr, CubeForge.F32Buf.F32Buf, CubeForge.Raycast.Hit, Ui, Array.PVec(p), NativeIntArr, Array.PVec(CubeForge.ChunkMesh.ChunkMesh), CubeForge.Biome.Field, NativeIntArr, CubeForge.Myc.Field)   -- ..., and the sections whose mesh is owed a rebuild (pass bitmask per section slot)
+  type Scene(p) = Scene(CubeForge.World.World, NativeIntArr, CubeForge.F32Buf.F32Buf, CubeForge.Raycast.Hit, Ui, Array.PVec(p), NativeIntArr, Array.PVec(CubeForge.ChunkMesh.ChunkMesh), CubeForge.Biome.Field, NativeIntArr, CubeForge.Myc.Net)   -- ..., and the sections whose mesh is owed a rebuild (pass bitmask per section slot)
   -- inventory + hotbar buffers (untextured, textured icons) + last built HUD key
   -- + the ground readout's buffer and the text it was last built from
   -- + the food effects (see CubeForge.Effects)
@@ -800,8 +800,8 @@ mod CubeForge do
         end
     end
   end
-  type FruitEdited = FruitEdited(CubeForge.World.World, CubeForge.Biome.Field, CubeForge.Myc.Field, NativeIntArr)
-  pfn fruit_edits(w : CubeForge.World.World, bio : CubeForge.Biome.Field, myc : CubeForge.Myc.Field, marks : NativeIntArr, seed : Int, n : Int, entries : List(Int)) : FruitEdited do
+  type FruitEdited = FruitEdited(CubeForge.World.World, CubeForge.Biome.Field, CubeForge.Myc.Net, NativeIntArr)
+  pfn fruit_edits(w : CubeForge.World.World, bio : CubeForge.Biome.Field, myc : CubeForge.Myc.Net, marks : NativeIntArr, seed : Int, n : Int, entries : List(Int)) : FruitEdited do
     match entries do
       Nil -> FruitEdited(w, bio, myc, marks)
       Cons(e, rest) ->
@@ -919,7 +919,7 @@ mod CubeForge do
   -- them. Glow columns outside the window stay candidates for a later slot.
   -- Skips wet columns and columns whose surface cannot carry mycelium.
   type MycMigrated = MycMigrated(CubeForge.World.World, NativeIntArr, Int, Int, Int)   -- world, marks, anchor x, anchor h, anchor z (x < 0: none)
-  pfn migrate_myc_go(w : CubeForge.World.World, bio : CubeForge.Biome.Field, myc : CubeForge.Myc.Field, marks : NativeIntArr,
+  pfn migrate_myc_go(w : CubeForge.World.World, bio : CubeForge.Biome.Field, myc : CubeForge.Myc.Net, marks : NativeIntArr,
                      n : Int, seed : Int, cols : List(Int), ax : Int, ah : Int, az : Int) : MycMigrated do
     match cols do
       Nil -> MycMigrated(w, marks, ax, ah, az)
@@ -982,7 +982,7 @@ mod CubeForge do
   -- is flooded afterwards, so nothing here relights. Walked chunk by chunk
   -- with one batched write each: World.set_block copies the 64 KB chunk per
   -- call, and 2,500 wild columns through it cost 700 ms of memcpy.
-  pfn shown_cells_go(w : CubeForge.World.World, bio : CubeForge.Biome.Field, myc : CubeForge.Myc.Field, cols : Int, cx : Int, cz : Int, j : Int, cells : List(Int)) : List(Int) do
+  pfn shown_cells_go(w : CubeForge.World.World, bio : CubeForge.Biome.Field, myc : CubeForge.Myc.Net, cols : Int, cx : Int, cz : Int, j : Int, cells : List(Int)) : List(Int) do
     if j >= 256 do cells
     else
       let x = 16 * cx + j % 16
@@ -998,7 +998,7 @@ mod CubeForge do
       end
     end
   end
-  pfn shown_mark_go(w : CubeForge.World.World, bio : CubeForge.Biome.Field, myc : CubeForge.Myc.Field, cols : Int, cx : Int, cz : Int, j : Int) : CubeForge.World.World do
+  pfn shown_mark_go(w : CubeForge.World.World, bio : CubeForge.Biome.Field, myc : CubeForge.Myc.Net, cols : Int, cx : Int, cz : Int, j : Int) : CubeForge.World.World do
     if j >= 256 do w
     else
       let x = 16 * cx + j % 16
@@ -1010,7 +1010,7 @@ mod CubeForge do
       shown_mark_go(if ok do World.set_shown(w, x, z, want) else w end, bio, myc, cols, cx, cz, j + 1)
     end
   end
-  pfn apply_shown_all(w : CubeForge.World.World, bio : CubeForge.Biome.Field, myc : CubeForge.Myc.Field, n : Int, ci : Int) : CubeForge.World.World do
+  pfn apply_shown_all(w : CubeForge.World.World, bio : CubeForge.Biome.Field, myc : CubeForge.Myc.Net, n : Int, ci : Int) : CubeForge.World.World do
     if ci >= n * n do w
     else
       let cx = ci % n
@@ -1191,7 +1191,7 @@ mod CubeForge do
 
   -- The canonical giant-tier column of each 16x16 cell within one cell of the
   -- player, with its species and shown species: which cells could fruit a giant.
-  pfn giant_cells(w : CubeForge.World.World, f : CubeForge.Myc.Field, seed : Int, px : Int, pz : Int, k : Int, acc : String) : String do
+  pfn giant_cells(w : CubeForge.World.World, f : CubeForge.Myc.Net, seed : Int, px : Int, pz : Int, k : Int, acc : String) : String do
     if k >= 9 do acc
     else
       let cx = px / 16 - 1 + k % 3
@@ -1210,7 +1210,7 @@ mod CubeForge do
     if i >= n do acc else count_u8(a, i + 1, n, if NativeArray.get_u8(a, i) != 0 do acc + 1 else acc end) end
   end
 
-  pfn myc_summary(f : CubeForge.Myc.Field, n : Int, sp : Int, acc : String) : String do
+  pfn myc_summary(f : CubeForge.Myc.Net, n : Int, sp : Int, acc : String) : String do
     if sp > Species.count() do acc
     else myc_summary(f, n, sp + 1, acc ++ Species.name(sp) ++ " " ++ int_to_string(Myc.count_species(f, n, sp)) ++ "  ") end
   end
@@ -1370,9 +1370,22 @@ mod CubeForge do
   @[no_alloc]
   pfn scene_with_ui(sc, u : Ui) do match sc do Scene(w, c, o, h, _, p, f, m, b, q, myc) -> Scene(w, c, o, h, u, p, f, m, b, q, myc) end end
   pfn scene_biome(sc) : CubeForge.Biome.Field do match sc do Scene(_, _, _, _, _, _, _, _, b, _, myc) -> b end end
-  pfn scene_myc(sc) : CubeForge.Myc.Field do match sc do Scene(_, _, _, _, _, _, _, _, _, _, m) -> m end end
-  pfn scene_with_myc(sc, m : CubeForge.Myc.Field) do match sc do Scene(w, c, o, h, u, p, f, ms, b, q, _) -> Scene(w, c, o, h, u, p, f, ms, b, q, m) end end
-  pfn scene_with_biome(sc, b : CubeForge.Biome.Field) do match sc do Scene(w, c, o, h, u, p, f, m, _, q, myc) -> Scene(w, c, o, h, u, p, f, m, b, q, myc) end end
+  pfn scene_myc(sc) : CubeForge.Myc.Net do match sc do Scene(_, _, _, _, _, _, _, _, _, _, m) -> m end end
+  -- The replaced field is released array by array: see Biome.release (GAPS G71).
+  pfn scene_with_myc(sc, m : CubeForge.Myc.Net) do
+    match sc do
+      Scene(w, c, o, h, u, p, f, ms, b, q, old) ->
+        let _ = Myc.release(old)
+        Scene(w, c, o, h, u, p, f, ms, b, q, m)
+    end
+  end
+  pfn scene_with_biome(sc, b : CubeForge.Biome.Field) do
+    match sc do
+      Scene(w, c, o, h, u, p, f, m, old, q, myc) ->
+        let _ = Biome.release(old)
+        Scene(w, c, o, h, u, p, f, m, b, q, myc)
+    end
+  end
   fn inv_string(sc) : String do
     let i = ui_inv(scene_ui(sc))
     "inv " ++ slots_string(i, 0, "") ++ "sel=" ++ int_to_string(Inv.sel(i)) ++ " progress=" ++ float_to_string(Inv.progress(i))
@@ -1572,7 +1585,7 @@ mod CubeForge do
 
   doc "Write the session into [slot]. Prints the outcome; true on success."
   -- The fields blob: species, vigour, reach, shown, then the eased axes.
-  pfn fields_blob(w : CubeForge.World.World, bio : CubeForge.Biome.Field, myc : CubeForge.Myc.Field) : NativeU8Arr do
+  pfn fields_blob(w : CubeForge.World.World, bio : CubeForge.Biome.Field, myc : CubeForge.Myc.Net) : NativeU8Arr do
     let n = World.side(w) * 16
     let b0 = Myc.to_bytes(myc, n, NativeArray.make_u8(Save.fields_bytes(World.side(w)), 0), 0)
     let b1 = Win.u8_blit(b0, 3 * n * n, World.shown(w), 0, n * n)
@@ -1588,7 +1601,7 @@ mod CubeForge do
     end
   end
 
-  pfn save_game(slot : Int, w : CubeForge.World.World, p : CubeForge.Player.Player, inv : CubeForge.Inventory.Inv, seed : Int, day : Float, wxpid, bio : CubeForge.Biome.Field, myc : CubeForge.Myc.Field) : Bool do
+  pfn save_game(slot : Int, w : CubeForge.World.World, p : CubeForge.Player.Player, inv : CubeForge.Inventory.Inv, seed : Int, day : Float, wxpid, bio : CubeForge.Biome.Field, myc : CubeForge.Myc.Net) : Bool do
     let ts0 = Win.time()
     let wx = match Weather.call_snapshot(wxpid) do
       Ok(l) -> Weather.phase_to_floats(Weather.unpack_phase(l))
@@ -2172,7 +2185,7 @@ mod CubeForge do
           -- allocation gauge: sample the live-object delta over frames 100..200
           let sample1 = if frame == 100 do Win.live_allocs() else sample end
           if frame == 200 do
-            println("live-object delta over frames 100..200: " ++ int_to_string(Win.live_allocs() - sample1) ++ " (" ++ int_to_string((Win.live_allocs() - sample1) / 100) ++ " per frame)")
+            println("live-object delta over frames 100..200: " ++ int_to_string(Win.live_allocs() - sample1) ++ " (" ++ int_to_string((Win.live_allocs() - sample1) / 100) ++ " per frame); resident " ++ int_to_string(Win.rss_bytes() / 1048576) ++ " MB")
           else () end
           frame_loop(Frame(frame + 1, now, player1, sample1, view1, vp1, map_mode1, marker1, flash1, wnow, bnow, inv_open2, drag2, menu5, menubuf1, next_seed1, worst1, worst_at1, sched1), k, sc2, nchunks, proj, map_proj, fps1, wxpid, seed, first, t0, day0)
         end

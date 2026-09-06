@@ -23,6 +23,7 @@
 #include <stdint.h>
 #include <math.h>
 #include <pthread.h>
+#include <mach/mach.h>
 
 /* ── NativeArray payload access ──────────────────────────────────────────────
  * March's NativeArray heap layout (runtime/march_runtime.c, NATIVE_ARR_HDR):
@@ -1306,4 +1307,12 @@ double  cf_in_mouse_dy(void)          { return g_in.mouse_dy; }
 double  cf_in_scroll_dy(void)         { return g_in.scroll_dy; }
 void    cf_in_capture_cursor(int64_t on) {
     if (g_win) glfwSetInputMode(g_win, GLFW_CURSOR, on ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_NORMAL);
+}
+
+/* Current resident set size in bytes (the allocation gauge's byte view). */
+int64_t cf_rss_bytes(void) {
+    struct mach_task_basic_info info;
+    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO, (task_info_t)&info, &count) != KERN_SUCCESS) return -1;
+    return (int64_t)info.resident_size;
 }

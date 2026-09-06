@@ -55,6 +55,7 @@ mod CubeForge.Ffi.Window do
     fn x_gfx_draw_lines(slot: Int, nverts: Int): Unit = "cf_gfx_draw_lines"
     fn x_gfx_dump_bmp(path: String): Int = "cf_gfx_dump_bmp"
     fn x_live_allocs(): Int = "march_live_allocs"
+    fn x_rss_bytes(): Int = "cf_rss_bytes"
     fn x_gfx_upload_texture(pixels: NativeU8Arr, w: Int, h: Int, layers: Int): Unit = "cf_gfx_upload_texture"
   end
 
@@ -158,6 +159,8 @@ mod CubeForge.Ffi.Window do
   fn gfx_dump_bmp(path : String) : Int do x_gfx_dump_bmp(path) end
   doc "Runtime leak gauge: net live March heap objects (debug/verification only)."
   fn live_allocs() : Int do x_live_allocs() end
+  doc "Resident set size in bytes, for the allocation gauge's byte view."
+  fn rss_bytes() : Int do x_rss_bytes() end
   doc "Upload an RGBA8 texture array (layer-major) and switch the shader to textured mode."
   fn gfx_upload_texture(pixels : NativeU8Arr, w : Int, h : Int, layers : Int) : Unit do x_gfx_upload_texture(pixels, w, h, layers) end
 

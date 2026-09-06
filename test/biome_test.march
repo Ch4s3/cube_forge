@@ -288,7 +288,7 @@ mod CubeForge.Test.Biome do
   end
 
   -- ── The grove ─────────────────────────────────────────────────────────────
-  pfn tick_net_k(f : CubeForge.Biome.Field, w : CubeForge.World.World, m : CubeForge.Myc.Field, drow : NativeU8Arr, k : Int) : CubeForge.Biome.Field do
+  pfn tick_net_k(f : CubeForge.Biome.Field, w : CubeForge.World.World, m : CubeForge.Myc.Net, drow : NativeU8Arr, k : Int) : CubeForge.Biome.Field do
     let n = Biome.cols(w)
     if k <= 0 do f
     else tick_net_k(Biome.tick_net(f, w, 7, 0.05, Biome.no_pulls(n), Biome.no_rows(n), 1.0, CubeForge.Myc.field_species(m), CubeForge.Myc.field_vigour(m), drow), w, m, drow, k - 1) end
