@@ -247,6 +247,8 @@ mod CubeForge.Texture do
   -- Layer 21 + 6 * base_index + (species - 1). Each layer REPRODUCES its base
   -- from the base's formula rather than copying the base layer: reading the
   -- array while writing it would copy all 60 KB per texel (GAPS G21).
+  doc "Mycelium layers in the atlas: seven bases x six species, contiguous from myc_layer(0, 1)."
+  fn myc_layer_count() : Int do 42 end
   doc "Texture layer for mycelium over base index [k] (0..6) in species [sp] (1..6)."
   fn myc_layer(k : Int, sp : Int) : Float do int_to_float(21 + 6 * k + (sp - 1)) end
 

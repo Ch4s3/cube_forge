@@ -274,6 +274,12 @@ static const char *FS =
     "uniform float u_overcast;\n"
     "uniform float u_bolt;\n"
     "uniform float u_time;\n"
+    "uniform vec3  u_species[6];\n"
+    "uniform int   u_myc_first;\n"
+    "uniform int   u_myc_count;\n"
+    "uniform float u_branch;\n"
+    "uniform float u_branch_scale;\n"
+    "uniform float u_branch_sharp;\n"
     "out vec4 o_color;\n"
     /* The beam shape never varies at runtime, only its position, aim and
      * on/off state, so the cone half-angles are constants rather than uniforms. */
@@ -394,6 +400,27 @@ static const char *FS =
     "  return smoothstep(0.75, 1.0, hit / maxDist);\n"
     "}\n"
     "float hash12(vec2 v){ return fract(sin(dot(v, vec2(12.9898, 78.233))) * 43758.5453); }\n"
+    "float vnoise(vec2 p){\n"
+    "  vec2 i = floor(p), f = fract(p);\n"
+    "  f = f * f * (3.0 - 2.0 * f);\n"
+    "  float a = hash12(i), b = hash12(i + vec2(1.0, 0.0));\n"
+    "  float c = hash12(i + vec2(0.0, 1.0)), d = hash12(i + vec2(1.0, 1.0));\n"
+    "  return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);\n"
+    "}\n"
+    /* Hyphae: ridged, domain-warped value noise. The ridge is where the
+     * noise crosses its midpoint, which wanders and FORKS -- that fork is
+     * what reads as branching, and no tile can produce it because the
+     * threads have to run on across a block boundary. Fed world-space
+     * coordinates, so a filament crosses from block to block unbroken and
+     * the pattern never repeats. The warp keeps the ridges from reading as
+     * contour lines on a map. */
+    "float hyphae(vec2 p){\n"
+    "  vec2 w = p * u_branch_scale;\n"
+    "  vec2 q = w + 0.75 * vec2(vnoise(w * 0.55), vnoise(w * 0.55 + 19.7));\n"
+    "  float n = 0.65 * vnoise(q * 1.15) + 0.35 * vnoise(q * 2.60);\n"
+    "  float ridge = 1.0 - abs(2.0 * n - 1.0);\n"
+    "  return smoothstep(u_branch_sharp, 1.0, ridge);\n"
+    "}\n"
     /* Hard shadows are one ray. Soft shadows spread SOFT_TAPS over a small cone:
      * because the rays diverge, the penumbra widens with distance from the
      * caster on its own, which is what real soft shadows do. The cone is rotated
@@ -441,6 +468,19 @@ static const char *FS =
     "  float foam = (fe == 11) ? 1.0 : ((fe >= 2 && fe <= 9) ? spd / 7.0 : 0.0);\n"
     "  if (foam > 0.0 && u_use_tex == 1) t = mix(t, texture(u_tex, vec3(uv * 1.5, 16.0)), foam * 0.7);\n"
     "  if (u_cutout == 1 && t.a < 0.5) discard;\n"
+    /* Mycelium wears its species colour twice: a wash baked into the tile
+     * (CubeForge.Texture.myc_tint) and these filaments, drawn here because
+     * they must not stop at a block edge. The layer index carries the
+     * species -- layers are myc_first + 6 * base + (species - 1) -- so no
+     * vertex channel is needed. Overlays (u_unlit) are not the world. */
+    "  if (u_branch > 0.0 && u_unlit == 0 && u_use_tex == 1) {\n"
+    "    int mycl = int(v_layer + 0.5) - u_myc_first;\n"
+    "    if (mycl >= 0 && mycl < u_myc_count) {\n"
+    "      vec3 an = abs(v_normal);\n"
+    "      vec2 pw = (an.y > 0.5) ? v_world.xz : ((an.x > 0.5) ? v_world.zy : v_world.xy);\n"
+    "      t.rgb = mix(t.rgb, u_species[mycl % 6], hyphae(pw) * u_branch);\n"
+    "    }\n"
+    "  }\n"
     "  float moon = clamp((MOON_UNTIL - u_sun) / MOON_UNTIL, 0.0, 1.0);\n"
     /* Cloud does not remove light, it diffuses it: ambient rises as the direct
      * term falls, which is why an overcast day is flat rather than dark.
@@ -535,6 +575,12 @@ static inline GLuint vbo_of(int64_t slot) { return g_vbo_cur[slot] ? g_vbo_b[slo
 /* A VAO per mesh slot was tried (2026-09-05 perf pass): 192 chunk draws a frame as one bind and one draw each. A/B over six alternating runs was noise, so the shared VAO stays. */
 static int g_debug = -1;
 static inline int cf_debug(void) { if (g_debug < 0) g_debug = getenv("CF_DEBUG") != NULL; return g_debug; }
+static GLint  g_u_species = -1;
+static GLint  g_u_myc_first = -1;
+static GLint  g_u_myc_count = -1;
+static GLint  g_u_branch = -1;
+static GLint  g_u_branch_scale = -1;
+static GLint  g_u_branch_sharp = -1;
 static GLint  g_u_use_tex = -1;
 static GLint  g_u_cutout = -1;
 static GLint  g_u_sun = -1, g_u_eye = -1, g_u_dir = -1, g_u_flash = -1;
@@ -572,6 +618,12 @@ int64_t cf_gfx_init(void) {
     glDeleteShader(vs); glDeleteShader(fs);
     g_u_vp = glGetUniformLocation(g_prog, "u_vp");
     g_u_tex = glGetUniformLocation(g_prog, "u_tex");
+    g_u_species   = glGetUniformLocation(g_prog, "u_species");
+    g_u_myc_first = glGetUniformLocation(g_prog, "u_myc_first");
+    g_u_myc_count = glGetUniformLocation(g_prog, "u_myc_count");
+    g_u_branch    = glGetUniformLocation(g_prog, "u_branch");
+    g_u_branch_scale = glGetUniformLocation(g_prog, "u_branch_scale");
+    g_u_branch_sharp = glGetUniformLocation(g_prog, "u_branch_sharp");
     g_u_use_tex = glGetUniformLocation(g_prog, "u_use_tex");
     g_u_cutout = glGetUniformLocation(g_prog, "u_cutout");
     g_u_sun = glGetUniformLocation(g_prog, "u_sun");
@@ -1656,6 +1708,20 @@ void cf_gfx_set_sky(double sx, double sy, double sz, double mx, double my, doubl
 void cf_gfx_set_time(double t) {
     glUseProgram(g_prog);
     glUniform1f(g_u_time, (float)t);
+}
+
+/* The mycelium filament overlay: which texture layers are mycelium, the
+ * species colours they are drawn in (3 floats each, 0..1), and how strongly.
+ * Set once at startup -- none of it changes while a world runs. */
+void cf_gfx_set_myc(int64_t first, int64_t count, void *rgb, double branch, double scale, double sharp) {
+    if (!g_prog) return;
+    glUseProgram(g_prog);
+    glUniform3fv(g_u_species, (GLsizei)(narr_len(rgb) / 3), (const float *)narr_data(rgb));
+    glUniform1i(g_u_myc_first, (int)first);
+    glUniform1i(g_u_myc_count, (int)count);
+    glUniform1f(g_u_branch, (float)branch);
+    glUniform1f(g_u_branch_scale, (float)scale);
+    glUniform1f(g_u_branch_sharp, (float)sharp);
 }
 
 void cf_gfx_set_weather(double fog_density, double overcast, double bolt) {

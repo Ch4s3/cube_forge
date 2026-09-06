@@ -2329,3 +2329,37 @@ sky 1.0, three tenths of the way across it decodes to 0.2), the other that
 `push_vertex` lands sky in slot 6 and block light in slot 9. A point test of
 the encode/decode passed throughout and could never have caught this -- the bug
 lives between the vertices, not at them.
+
+
+## Branching filaments, drawn in the shader (2026-09-06)
+
+The tile gives mycelium a warm cast; this gives it threads. They are drawn in
+the fragment shader, not baked into the texture, for one reason: **a tile
+cannot branch across a block boundary.** Sixteen edge-connection variants per
+(base, species) would be 672 layers against the atlas's 92, and the threads
+would still repeat every block. Fed world-space coordinates instead, a
+filament crosses from block to block unbroken and the pattern never tiles.
+
+`hyphae(p)` is ridged, domain-warped value noise: the ridge is where the noise
+crosses its midpoint, and that line wanders and forks, which is what reads as
+branching. Two octaves, one warp, sixteen `hash12` calls per mycelium
+fragment.
+
+The shader needs no new vertex data. The layer index already carries the
+species -- mycelium layers run `myc_first + 6 * base + (species - 1)` -- so
+`(layer - first) % 6` is the species, and the six colours arrive once at
+startup in a uniform, from `Species.colour_*`, the same source the map overlay
+and the tiles use. Guarded on `u_unlit == 0 && u_use_tex == 1`, so overlays and
+the map are untouched.
+
+Defaults `Species.branch_strength` 60, `branch_scale` 500, `branch_sharp` 93,
+each overridable (`CF_MYC_BRANCH`, `CF_MYC_BRANCH_SCALE`, `CF_MYC_BRANCH_SHARP`)
+-- the settings were chosen by sweeping them from one build. Scale is the
+knob that matters: at 100 the threads were blurred smudges several blocks
+wide; from about 450 up they read as filaments.
+`docs/fungus-filaments.png` is the tile alone against the tile with threads.
+
+Cost is under the noise floor. Wild world, 600 frames: 284 fps with, 267
+without. Standing in a patch that fills the screen: 269 with, 259 without --
+the "with" runs measured faster both times, which is how much of a difference
+there is to find. Budget 6.32 ms, 460 tests, lint clean.
