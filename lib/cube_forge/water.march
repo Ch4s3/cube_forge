@@ -499,11 +499,17 @@ mod CubeForge.Water do
     end
   end
 
+  -- The lake tile is a pure function of the seed: this actor computes its own,
+  -- and a neighbour in another tile (a chunk on a tile edge) computes that one.
+  -- The world is unbounded: every neighbour exists, and generates.
+  pfn nb_chunk(x : Int, z : Int, cx : Int, cz : Int, seed : Int, lk : CubeForge.Lakes.Tile) : CubeForge.Chunk.Chunk do
+    let t = if CubeForge.Lakes.same_tile(x, z, cx, cz) do lk else CubeForge.Lakes.tile_of_chunk(seed, x, z) end
+    C.generate_lakes(16 * x, 16 * z, seed, t)
+  end
   pfn load_sim(cx : Int, cz : Int, n : Int, seed : Int) : Sim do
-    -- the lake table is a pure function of the seed: this actor computes its own
-    let lk = CubeForge.Lakes.levels(seed, n)
-    let c = C.generate_lakes(16 * cx, 16 * cz, seed, lk, n)
-    let nb = fn (x, z) -> if x >= 0 && x < n && z >= 0 && z < n do C.generate_lakes(16 * x, 16 * z, seed, lk, n) else C.new() end
+    let lk = CubeForge.Lakes.tile_of_chunk(seed, cx, cz)
+    let c = C.generate_lakes(16 * cx, 16 * cz, seed, lk)
+    let nb = fn (x, z) -> nb_chunk(x, z, cx, cz, seed, lk)
     let e0 = load_edge(empty_edges(), 0, nb(cx, cz - 1))
     let e1 = load_edge(e0, 1, nb(cx, cz + 1))
     let e2 = load_edge(e1, 2, nb(cx + 1, cz))

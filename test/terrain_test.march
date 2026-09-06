@@ -212,7 +212,7 @@ mod CubeForge.Test.Terrain do
     end
   end
   pfn chunk_of(col : Int, seed : Int) : CubeForge.Chunk.Chunk do
-    C.generate_lakes(col % 4096 / 16 * 16, col / 4096 / 16 * 16, seed, CubeForge.Lakes.levels(seed, 8), 8)
+    C.generate_lakes(col % 4096 / 16 * 16, col / 4096 / 16 * 16, seed, CubeForge.Lakes.levels(seed, 8))
   end
 
   describe "climate-shaped ground" do

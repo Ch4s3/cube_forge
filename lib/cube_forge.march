@@ -2426,12 +2426,12 @@ mod CubeForge do
     else if h < 86 do "="
     else "+" end end end end end end end
   end
-  pfn map_row_go(n : Int, z : Int, x : Int, seed : Int, lk : NativeU8Arr, acc : String) : String do
+  pfn map_row_go(n : Int, z : Int, x : Int, seed : Int, lk : CubeForge.Lakes.Tile, acc : String) : String do
     if x >= 16 * n do acc
     else
       let h = CubeForge.Noise.height(x, z, seed)
       let slope = CubeForge.Noise.slope(x, z, seed)
-      let lake = CubeForge.Lakes.level_at(lk, n, x, z)
+      let lake = CubeForge.Lakes.level_at(lk, x, z)
       -- d dune field, g glacier, b bog: the climate-shaped ground, over the material
       let ch = if spring_in_2x2(x, z, seed, 0) do "s"
                else if lake == 0 && h >= Chunk.sea_level() && CubeForge.Noise.glacier_at(x, z, seed) do "g"
@@ -2441,7 +2441,7 @@ mod CubeForge do
       map_row_go(n, z, x + 2, seed, lk, acc ++ ch)
     end
   end
-  pfn map_go(n : Int, z : Int, seed : Int, lk : NativeU8Arr) : Unit do
+  pfn map_go(n : Int, z : Int, seed : Int, lk : CubeForge.Lakes.Tile) : Unit do
     if z >= 16 * n do ()
     else
       println("  " ++ map_row_go(n, z, 0, seed, lk, ""))

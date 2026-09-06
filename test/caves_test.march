@@ -58,9 +58,9 @@ mod CubeForge.Test.Caves do
   -- under its surface) with an open horizontal neighbour inside the chunk.
   pfn open(id : Int) : Bool do C.open_for_spring(id) end
   -- A lake cell beside a notch column is the lake's outlet, not a leak.
-  pfn by_notch(lk : NativeU8Arr, wx : Int, wz : Int) : Bool do
-    CubeForge.Lakes.notch_at(lk, 8, wx + 1, wz) || CubeForge.Lakes.notch_at(lk, 8, wx - 1, wz)
-      || CubeForge.Lakes.notch_at(lk, 8, wx, wz + 1) || CubeForge.Lakes.notch_at(lk, 8, wx, wz - 1)
+  pfn by_notch(lk : CubeForge.Lakes.Tile, wx : Int, wz : Int) : Bool do
+    CubeForge.Lakes.notch_at(lk, wx + 1, wz) || CubeForge.Lakes.notch_at(lk, wx - 1, wz)
+      || CubeForge.Lakes.notch_at(lk, wx, wz + 1) || CubeForge.Lakes.notch_at(lk, wx, wz - 1)
   end
   pfn leaks_col(c : CubeForge.Chunk.Chunk, x : Int, z : Int, y : Int, level : Int, acc : Int) : Int do
     if y > level do acc
@@ -71,21 +71,21 @@ mod CubeForge.Test.Caves do
       leaks_col(c, x, z, y + 1, level, if leak do acc + 1 else acc end)
     end
   end
-  pfn leaks_chunk(c : CubeForge.Chunk.Chunk, wx0 : Int, wz0 : Int, lk : NativeU8Arr, i : Int, acc : Int) : Int do
+  pfn leaks_chunk(c : CubeForge.Chunk.Chunk, wx0 : Int, wz0 : Int, lk : CubeForge.Lakes.Tile, i : Int, acc : Int) : Int do
     if i >= 256 do acc
     else
       let x = i % 16
       let z = i / 16
-      let level = CubeForge.Lakes.level_at(lk, 8, wx0 + x, wz0 + z)
+      let level = CubeForge.Lakes.level_at(lk, wx0 + x, wz0 + z)
       leaks_chunk(c, wx0, wz0, lk, i + 1, if level == 0 || by_notch(lk, wx0 + x, wz0 + z) do acc else leaks_col(c, x, z, C.sea_level() + 1, level, acc) end)
     end
   end
-  pfn leaks_world(seed : Int, lk : NativeU8Arr, ci : Int, acc : Int) : Int do
+  pfn leaks_world(seed : Int, lk : CubeForge.Lakes.Tile, ci : Int, acc : Int) : Int do
     if ci >= 64 do acc
     else
       let wx0 = 16 * (ci % 8)
       let wz0 = 16 * (ci / 8)
-      leaks_world(seed, lk, ci + 1, leaks_chunk(C.generate_lakes(wx0, wz0, seed, lk, 8), wx0, wz0, lk, 0, acc))
+      leaks_world(seed, lk, ci + 1, leaks_chunk(C.generate_lakes(wx0, wz0, seed, lk), wx0, wz0, lk, 0, acc))
     end
   end
 
