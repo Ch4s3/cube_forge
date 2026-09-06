@@ -160,15 +160,30 @@ Checks worth writing:
   survey is what makes them purposeful. Dedicated channelling or levelling
   tools are a separate question, deliberately left open.
 
+## Decisions
+
+**Scanning reads both fruit and mycelium** (decided 2026-09-06). Fruit is what a
+player notices first -- it is the visible, findable thing -- and mycelium is the
+species' actual presence, so a patch with no fruit standing on it is still a
+specimen. Requiring fruit alone would make discovery depend on the fruit cycle's
+timing; requiring mycelium alone would send players hunting for a texture they
+have no reason to read yet. Both, and the prompt appears for whichever is under
+the reticle.
+
+**The trend ignores the hold counter** (decided 2026-09-06). The question was
+whether `BECOMING DESERT` is premature when the hold counter would still
+suppress the flip. It is not, because the two answer different questions. The
+trend is a DESTINATION: `classify` at the targets, which the axes reach over
+minutes at 1/10800 a tick. The hold counter is a DEBOUNCE at arrival: thirty
+consecutive ticks of disagreement, which at about eleven ticks a second is under
+three seconds. A column reading `GRASSLAND ... BECOMING FOREST` during those
+three seconds is telling the exact truth twice over -- it is grassland, and it
+is becoming forest. Consulting the counter would only make the instrument
+silent about a change that is genuinely underway.
+
 ## Open questions
 
-- **Trend versus the hold counter.** A column can be drifting while the hold
-  counter (30 consecutive disagreements) still suppresses the flip. `BECOMING
-  DESERT` would then be true of the axes and premature about the biome. Options:
-  say it anyway, qualify it, or read the hold counter and only announce a change
-  the counter would accept. Wants a decision before implementation.
 - **Panel legibility.** Five lines of a 3x5 glyph font at menu pixel size may
-  crowd. May need a smaller pixel size or fewer lines.
-- **Scanning fruit versus mycelium.** Fruit is the visible, findable thing;
-  mycelium is the species' actual presence. Probably both, but fruit is the one
-  a player will notice first.
+  crowd. May need a smaller pixel size or fewer lines. An implementation
+  detail, to settle when the panel is laid out against a real frame rather than
+  in advance.

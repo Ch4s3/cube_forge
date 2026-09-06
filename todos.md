@@ -44,8 +44,9 @@ measurements.
   map reusing `Biome.active`. Species advice is gated behind scanning (`E`) a
   living specimen, so the six climate bands are a reason to explore. Adds no
   simulation; the canal loop it exposes is already tested by `CF_AUTOCANAL`.
-  Open: trend versus the hold counter; panel legibility; scanning fruit or
-  mycelium.
+  Decided: a scan reads fruit or mycelium, either one; the trend ignores the
+  hold counter, which debounces arrival over ~3s while the trend names a
+  destination minutes away. Open: panel legibility against a real frame.
 
 ## Engine
 
