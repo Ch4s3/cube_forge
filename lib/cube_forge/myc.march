@@ -95,46 +95,53 @@ mod CubeForge.Myc do
 
   -- ── Shifting the window ────────────────────────────────────────────────
   -- The window slid by (dx, dz) chunks: column (x, z) is what was at
-  -- (x + 16dx, z + 16dz). Columns that came in are empty (the evicted cache
-  -- restores them later); every column is marked dirty and every row too, so
-  -- the next tick looks at all of them once, as the first tick does.
-  pfn shift_u8_go(src : NativeU8Arr, dst : NativeU8Arr, n : Int, sx : Int, sz : Int, i : Int) : NativeU8Arr do
-    if i >= n * n do dst
+  -- (x + 16dx, z + 16dz). The overlap moves by one blit per row per array;
+  -- columns that came in are empty (the evicted cache restores them later),
+  -- the pulls are redone around the band, and every column and row is
+  -- marked dirty so the next tick looks at all of them once.
+  pfn shift_u8_rows(src : NativeU8Arr, dst : NativeU8Arr, n : Int, sx : Int, sz : Int, z : Int) : NativeU8Arr do
+    if z >= n do dst
     else
-      let x = i % n + sx
-      let z = i / n + sz
-      if x < 0 || x >= n || z < 0 || z >= n do shift_u8_go(src, dst, n, sx, sz, i + 1)
-      else shift_u8_go(src, NativeArray.set_u8(dst, i, NativeArray.get_u8(src, x + n * z)), n, sx, sz, i + 1) end
+      let zs = z + sz
+      let len = n - (if sx < 0 do 0 - sx else sx end)
+      let xs0 = if sx > 0 do sx else 0 end
+      let xd0 = if sx > 0 do 0 else 0 - sx end
+      if zs < 0 || zs >= n do shift_u8_rows(src, dst, n, sx, sz, z + 1)
+      else shift_u8_rows(src, Win.u8_blit(dst, z * n + xd0, src, zs * n + xs0, len), n, sx, sz, z + 1) end
     end
   end
-  pfn shift_f32_go(src : NativeF32Arr, dst : NativeF32Arr, n : Int, sx : Int, sz : Int, k : Int, i : Int) : NativeF32Arr do
-    if i >= n * n do dst
+  -- k floats per column (1, or 2 for the paired arrays)
+  pfn shift_f32_rows(src : NativeF32Arr, dst : NativeF32Arr, n : Int, sx : Int, sz : Int, k : Int, z : Int) : NativeF32Arr do
+    if z >= n do dst
     else
-      let x = i % n + sx
-      let z = i / n + sz
-      if x < 0 || x >= n || z < 0 || z >= n do shift_f32_go(src, dst, n, sx, sz, k, i + 1)
-      else
-        let j = x + n * z
-        let d1 = NativeArray.set_f32(dst, k * i, NativeArray.get_f32(src, k * j))
-        shift_f32_go(src, if k == 2 do NativeArray.set_f32(d1, 2 * i + 1, NativeArray.get_f32(src, 2 * j + 1)) else d1 end, n, sx, sz, k, i + 1)
-      end
+      let zs = z + sz
+      let len = n - (if sx < 0 do 0 - sx else sx end)
+      let xs0 = if sx > 0 do sx else 0 end
+      let xd0 = if sx > 0 do 0 else 0 - sx end
+      if zs < 0 || zs >= n do shift_f32_rows(src, dst, n, sx, sz, k, z + 1)
+      else shift_f32_rows(src, Win.f32_blit(dst, k * (z * n + xd0), src, k * (zs * n + xs0), k * len), n, sx, sz, k, z + 1) end
     end
   end
   doc "The field moved by ([dx], [dz]) chunks over an n-column window; the band that came in is empty and everything is marked for the next tick."
   fn shift(f : Field, n : Int, dx : Int, dz : Int) : Field do
     let sx = 16 * dx
     let sz = 16 * dz
+    -- the band's columns, widened by one so the pulls beside it are redone too
+    let bx0 = if dx > 0 do n - 17 else 0 end
+    let bx1 = if dx < 0 do 16 else n - 1 end
+    let bz0 = if dz > 0 do n - 17 else 0 end
+    let bz1 = if dz < 0 do 16 else n - 1 end
     match f do
-      Field(sps, vg, rc, hd, cl, _, cs, _, _) ->
-        let sps1 = shift_u8_go(sps, NativeArray.make_u8(n * n, 0), n, sx, sz, 0)
+      Field(sps, vg, rc, hd, cl, _, cs, pl, _) ->
+        let sps1 = shift_u8_rows(sps, NativeArray.make_u8(n * n, 0), n, sx, sz, 0)
         Field(sps1,
-              shift_f32_go(vg, NativeArray.make_f32(n * n, 0.0), n, sx, sz, 1, 0),
-              shift_u8_go(rc, NativeArray.make_u8(n * n, 0), n, sx, sz, 0),
-              shift_u8_go(hd, NativeArray.make_u8(n * n, 0), n, sx, sz, 0),
-              shift_u8_go(cl, NativeArray.make_u8(n * n, 0), n, sx, sz, 0),
+              shift_f32_rows(vg, NativeArray.make_f32(n * n, 0.0), n, sx, sz, 1, 0),
+              shift_u8_rows(rc, NativeArray.make_u8(n * n, 0), n, sx, sz, 0),
+              shift_u8_rows(hd, NativeArray.make_u8(n * n, 0), n, sx, sz, 0),
+              shift_u8_rows(cl, NativeArray.make_u8(n * n, 0), n, sx, sz, 0),
               NativeArray.make_u8(n * n, 1),
-              shift_f32_go(cs, NativeArray.make_f32(2 * n * n, -1.0), n, sx, sz, 2, 0),
-              repull_box(sps1, NativeArray.make_f32(2 * n * n, 0.0), n, 0, 0, n - 1, n - 1),
+              shift_f32_rows(cs, NativeArray.make_f32(2 * n * n, -1.0), n, sx, sz, 2, 0),
+              repull_box(sps1, shift_f32_rows(pl, NativeArray.make_f32(2 * n * n, 0.0), n, sx, sz, 2, 0), n, bx0, bz0, bx1, bz1),
               NativeArray.make_u8(n, 1))
     end
   end

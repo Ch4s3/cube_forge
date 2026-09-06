@@ -171,34 +171,39 @@ the cache. Old slots (files by window index, origin 0) still read.
 - **Lake tiles** are kept in the world, at most four, so a shift inside a
   tile does not pour it again (26 ms when it does).
 - **The cache** keys on the dirty flag `set_chunk` sets, so a chunk the
-  water sim or the fungus touched is kept too; after a load every window
-  chunk is marked dirty (it may differ from its generation). The cache
-  therefore grows with most of the visited area, 64 KB a chunk plus a 1 KB
-  column blob. Open: a content hash against regeneration to drop chunks
-  that merely moved water, and a bound on the cache with spill to disk.
+  water sim or the fungus touched is flagged too -- but a flagged chunk
+  whose blocks hash to what it generated to (the world keeps each chunk's
+  generation hash; a walk of the 65,536 voxels is 0.15 ms) is dropped at
+  eviction: water that came and went, a fungus that retreated. The hashes
+  travel with the cache entries and the save header (`hashes`, and the
+  `cached` list is cx, cz, hash triples). Open: a bound on the cache with
+  spill to disk for a long walk through edited ground.
 - **The size row and `CF_SIZE`** went; the world has no size. A seed's size
   byte is ignored and still reproduces.
 
-A shift, seed 1234 at age 50, walking south (`CF_STREAM_LOG=1`):
+A shift, seed 1234 at age 50, walking south (`CF_STREAM_LOG=1`), after
+the cuts of the same day (the biome shift blits its rows and scans the band
+from the band's own top through the chunk directly, 17 ms -> 2; the sky
+sweep's box stops at the band's top; the fungus shift blits, 0.2 ms):
 
 | stage | ms |
 |---|---|
 | world: generate 8 chunks (pmap) | 12 |
 | world: slide three voxel fields (blits) | 1-2 |
-| world: light the band (sky) | 19 |
+| world: light the band (sky) | 14 |
 | world: light the band (block light) | 6 |
 | world: occupancy of the band | 5 |
-| biome and mycelium field shifts | 22 |
+| world: hash the chunks leaving | 1 |
+| biome and mycelium field shifts | 2 |
 | shim shift, occupancy upload, array remaps | 4 |
-| mesh the band (pmap) and upload | 12 |
+| mesh the band (pmap) and upload | 11 |
 | actors and springs | 3 |
-| **a shift within a tile** | **84** |
+| **a shift within a tile** | **63-70** |
 | a shift that pours a new tile | +26 |
 
-Frame rate on the walk 105 fps against 110 standing; the worst frame is
-the shift. Open: the biome shift is element-wise over nine arrays (a blit
-of the u8 ones and an f32 store would halve it), and the sky sweep's box
-could stop at the band's lowest ground rather than y = 0.
+Frame rate on the walk 102-105 fps against 110 standing; the worst frame
+is the shift. What is left is generation, the sky sweep and the meshing,
+each already parallel or bounded by the band.
 
 Persistence: a walk across two shifts saved to a scratch slot (origin
 `0 -2`, twelve cached chunks, 90 files) and loaded back with the same

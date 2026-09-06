@@ -827,16 +827,34 @@ mod CubeForge.Light do
     else if cx > cx1 do occ_band_go(o, w, cx0, cx1, cz0, cz1, cx0, cz + 1, stop)
     else occ_band_go(occ_chunk_go(o, CubeForge.World.chunk_at(w, cx, cz), cx, cz, 0, stop), w, cx0, cx1, cz0, cz1, cx + 1, cz, stop) end end
   end
+  -- The highest non-air voxel over the band and the chunks the sweep's
+  -- apron reaches (one chunk either side): above it everything is sky and
+  -- the sweep has nothing to do. The world's sky floor is a mountain
+  -- somewhere; the band's own is usually lower, and the box's height is
+  -- the sweep's cost.
+  pfn band_top_go(w : CubeForge.World.World, cx0 : Int, cx1 : Int, cz0 : Int, cz1 : Int, cx : Int, cz : Int, acc : Int) : Int do
+    if cz > cz1 do acc
+    else if cx > cx1 do band_top_go(w, cx0, cx1, cz0, cz1, cx0, cz + 1, acc)
+    else
+      let t = if CubeForge.World.in_bounds(w, cx, cz) do chunk_top(CubeForge.World.chunk_at(w, cx, cz), 65535) else 0 end
+      band_top_go(w, cx0, cx1, cz0, cz1, cx + 1, cz, if t > acc do t else acc end)
+    end end
+  end
+  fn band_top(w : CubeForge.World.World, cx0 : Int, cx1 : Int, cz0 : Int, cz1 : Int) : Int do
+    clampi(band_top_go(w, cx0 - 1, cx1 + 1, cz0 - 1, cz1 + 1, cx0 - 1, cz0 - 1, 0) + 2, 0, 255)
+  end
+
   doc """
   Light the band of chunks [cx0, cx1] x [cz0, cz1] (local chunk coordinates)
   that a shift brought in: seed their sky columns, then sweep the band widened
-  by relight_radius() so light from the chunks that stayed crosses the seam.
-  [la] must be uniquely owned (a fresh shift_field result).
+  by relight_radius() so light from the chunks that stayed crosses the seam,
+  up to the band's own top (band_top). [la] must be uniquely owned (a fresh
+  shift_field result).
   """
   fn light_band(la : NativeU8Arr, w : CubeForge.World.World, cx0 : Int, cx1 : Int, cz0 : Int, cz1 : Int) : NativeU8Arr do
     let r = relight_radius()
     let la1 = seed_band_go(la, w, cx0, cx1, cz0, cz1, cx0, cz0)
-    sweep_box_lists(la1, w, clampi(16 * cx0 - r, 0, 127), clampi(16 * cx1 + 15 + r, 0, 127), 0, clampi(sky_floor(w) + 1, 0, 255),
+    sweep_box_lists(la1, w, clampi(16 * cx0 - r, 0, 127), clampi(16 * cx1 + 15 + r, 0, 127), 0, band_top(w, cx0, cx1, cz0, cz1),
                     clampi(16 * cz0 - r, 0, 127), clampi(16 * cz1 + 15 + r, 0, 127))
   end
   doc "light_band for the block-light field: re-seed the band's emitters, then sweep."
@@ -844,7 +862,7 @@ mod CubeForge.Light do
     let r = relight_radius()
     let bw = 16 * (cx1 - cx0 + 1)
     let bd = 16 * (cz1 - cz0 + 1)
-    let top = clampi(sky_floor(w) + 1, 0, 255)
+    let top = band_top(w, cx0, cx1, cz0, cz1)
     let lb1 = seed_emit_box_go(lb, w, 16 * cx0, bw, 16 * cz0, 0, top, 0, bw * bd)
     sweep_box_lists(lb1, w, clampi(16 * cx0 - r, 0, 127), clampi(16 * cx1 + 15 + r, 0, 127), 0, top,
                     clampi(16 * cz0 - r, 0, 127), clampi(16 * cz1 + 15 + r, 0, 127))

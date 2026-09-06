@@ -109,6 +109,14 @@ mod CubeForge.Test.Stream do
       Test.assert_eq_int(List.length(W.cache(w2)), 0, "the cache gave it back")
       Test.assert_eq_int(List.length(W.restored(w2)), 1, "the shift reports it")
     end
+    test "a dirty chunk back at its generation is dropped, not cached" do
+      let w0 = W.generate(8, seed(), 1)
+      let was = W.block_at(w0, 5, 200, 5)
+      let w1 = W.set_block(W.set_block(w0, 5, 200, 5, 3), 5, 200, 5, was)   -- written, and written back
+      Test.assert_true(W.is_dirty(w1, 0, 0), "the chunk is flagged")
+      let w2 = W.shift(w1, 1, 0, seed(), 1, Nil)
+      Test.assert_eq_int(List.length(W.cache(w2)), 0, "but it hashed to its generation, so it was dropped")
+    end
     test "a column blob carries fungus and shown species across an eviction" do
       let n = 128
       let m0 = CubeForge.Myc.plant(CubeForge.Myc.build(n), n, 5, 5, 2)

@@ -1204,6 +1204,7 @@ mod CubeForge do
         let w1 = World.shift(w, dx, dz, seed, workers, leaving_blobs(w, myc, n, dx, dz, n * n - 1, Nil))
         let t1 = Win.time()
         let bio1 = Biome.shift(bio, w1, dx, dz, seed)
+        let t1b = Win.time()
         let myc1 = restore_myc(Myc.shift(myc, 16 * n, dx, dz), w1, n, World.restored(w1))
         let t2 = Win.time()
         Win.gfx_shift(dx, dz)
@@ -1226,7 +1227,7 @@ mod CubeForge do
             -- CF_STREAM_LOG=1: one line per shift with where its time went
             if Env.get_int("CF_STREAM_LOG", 0) == 1 do
               println("window shift (" ++ int_to_string(dx) ++ "," ++ int_to_string(dz) ++ ") -> origin (" ++ int_to_string(World.origin_x(w1)) ++ "," ++ int_to_string(World.origin_z(w1)) ++ ") in " ++ ms(Win.time() -. t0)
-                      ++ ": world " ++ ms(t1 -. t0) ++ " fields " ++ ms(t2 -. t1) ++ " gl+remap " ++ ms(t3 -. t2) ++ " mesh " ++ ms(t4 -. t3) ++ " actors+springs " ++ ms(Win.time() -. t4))
+                      ++ ": world " ++ ms(t1 -. t0) ++ " biome " ++ ms(t1b -. t1) ++ " myc " ++ ms(t2 -. t1b) ++ " gl+remap " ++ ms(t3 -. t2) ++ " mesh " ++ ms(t4 -. t3) ++ " actors+springs " ++ ms(Win.time() -. t4))
             else () end
             Scene(w1, counts2, outline, hit, ui, pids1, flags2, Array.from_list(mlist), bio1, pend1, myc1)
         end
@@ -1789,7 +1790,7 @@ mod CubeForge do
       Err(_) -> Weather.phase_to_floats(Weather.start())
     end
     let h = Save.header_new(seed, DateTime.now(), Player.to_floats(p), Inv.to_ints(inv), day, wx)
-    match Save.write_world(Save.dir(), slot, World.chunks(w), World.side(w), World.origin_x(w), World.origin_z(w), World.cache(w), h, fields_blob(w, bio, myc)) do
+    match Save.write_world(Save.dir(), slot, World.chunks(w), World.side(w), World.origin_x(w), World.origin_z(w), World.cache(w), World.gen_hashes(w), h, fields_blob(w, bio, myc)) do
       Ok(_) ->
         println("saved slot " ++ int_to_string(slot) ++ " in " ++ ms(Win.time() -. ts0) ++ ", world hash " ++ int_to_string(World.state_hash(w)))
         true
@@ -2846,7 +2847,7 @@ mod CubeForge do
     end
     let t1 = System.monotonic_time()
     let world_dark = match loaded do
-      Loaded(h, cs, ca) -> World.with_cache(World.with_origin(World.from_chunks(cs, n), Save.h_origin_x(h), Save.h_origin_z(h)), ca, NativeArray.make_u8(n * n, 1))
+      Loaded(h, cs, ca) -> World.with_hashes(World.with_cache(World.with_origin(World.from_chunks(cs, n), Save.h_origin_x(h), Save.h_origin_z(h)), ca, NativeArray.make_u8(n * n, 1)), Save.h_hashes(h))
       NoLoad -> World.generate(n, seed, workers)
     end
     -- stage 1a: the climate and the wild fungus. The biome field is pure over

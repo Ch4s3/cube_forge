@@ -348,51 +348,85 @@ mod CubeForge.Biome do
 
   -- ── Shifting the window ────────────────────────────────────────────────
   -- The window slid by (dx, dz) chunks: column (x, z) is what was at
-  -- (x + 16dx, z + 16dz). A column that came in is scanned and given its
-  -- targets as a fresh build would (temperature from the world column,
-  -- moisture dry until the distances are swept), its distance marked stale so
-  -- tick_begin resweeps, and set active so the tick classifies it.
-  pfn shift_go(f : Field, w : CubeForge.World.World, n : Int, top : Int, sx : Int, sz : Int, seed : Int, i : Int,
-               hs : NativeU8Arr, ws : NativeU8Arr, ta : NativeFloatArr, ma : NativeFloatArr, bs : NativeU8Arr,
-               hold : NativeU8Arr, tb : NativeFloatArr, ds : NativeU8Arr, act : NativeU8Arr) : Field do
-    if i >= n * n do Field(hs, ws, ta, ma, bs, hold, tb, ds, act)
+  -- (x + 16dx, z + 16dz). The overlap moves by one blit per row per array
+  -- (nine arrays, 128 rows); only the columns that came in are visited one
+  -- by one: scanned and given their targets as a fresh build would
+  -- (temperature from the world column, moisture dry until the distances are
+  -- swept), their distance marked stale so tick_begin resweeps, and set
+  -- active so the tick classifies them.
+  pfn shift_u8_rows(src : NativeU8Arr, dst : NativeU8Arr, n : Int, sx : Int, sz : Int, z : Int) : NativeU8Arr do
+    if z >= n do dst
     else
-      let x = i % n
-      let z = i / n
-      let ox = x + sx
-      let oz = z + sz
-      if ox >= 0 && ox < n && oz >= 0 && oz < n do
-        let j = ox + n * oz
-        match f do
-          Field(hs0, ws0, ta0, ma0, bs0, hold0, tb0, ds0, act0) ->
-            shift_go(f, w, n, top, sx, sz, seed, i + 1,
-                     NativeArray.set_u8(hs, i, NativeArray.get_u8(hs0, j)), NativeArray.set_u8(ws, i, NativeArray.get_u8(ws0, j)),
-                     NativeArray.set_float(ta, i, NativeArray.get_float(ta0, j)), NativeArray.set_float(ma, i, NativeArray.get_float(ma0, j)),
-                     NativeArray.set_u8(bs, i, NativeArray.get_u8(bs0, j)), NativeArray.set_u8(hold, i, NativeArray.get_u8(hold0, j)),
-                     NativeArray.set_float(tb, i, NativeArray.get_float(tb0, j)), NativeArray.set_u8(ds, i, NativeArray.get_u8(ds0, j)),
-                     NativeArray.set_u8(act, i, NativeArray.get_u8(act0, j)))
-        end
-      else
-        let h = surface_go(w, x, z, top)
-        let wet = if wet_at(w, x, z, h) do 1 else 0 end
-        let base = temp_base(W.world_x(w, x), W.world_z(w, z), seed)
-        let t = temp_from_base(base, h)
-        shift_go(f, w, n, top, sx, sz, seed, i + 1,
-                 NativeArray.set_u8(hs, i, h), NativeArray.set_u8(ws, i, wet),
-                 NativeArray.set_float(ta, i, t), NativeArray.set_float(ma, i, 0.0),
-                 NativeArray.set_u8(bs, i, classify(t, 0.0, h, reach())), NativeArray.set_u8(hold, i, 0),
-                 NativeArray.set_float(tb, i, base), NativeArray.set_u8(ds, i, stale()),
-                 NativeArray.set_u8(act, i, 1))
-      end
+      let zs = z + sz
+      let len = n - (if sx < 0 do 0 - sx else sx end)
+      let xs0 = if sx > 0 do sx else 0 end
+      let xd0 = if sx > 0 do 0 else 0 - sx end
+      if zs < 0 || zs >= n do shift_u8_rows(src, dst, n, sx, sz, z + 1)
+      else shift_u8_rows(src, CubeForge.Ffi.Window.u8_blit(dst, z * n + xd0, src, zs * n + xs0, len), n, sx, sz, z + 1) end
     end
+  end
+  pfn shift_f64_rows(src : NativeFloatArr, dst : NativeFloatArr, n : Int, sx : Int, sz : Int, z : Int) : NativeFloatArr do
+    if z >= n do dst
+    else
+      let zs = z + sz
+      let len = n - (if sx < 0 do 0 - sx else sx end)
+      let xs0 = if sx > 0 do sx else 0 end
+      let xd0 = if sx > 0 do 0 else 0 - sx end
+      if zs < 0 || zs >= n do shift_f64_rows(src, dst, n, sx, sz, z + 1)
+      else shift_f64_rows(src, CubeForge.Ffi.Window.f64_blit(dst, z * n + xd0, src, zs * n + xs0, len), n, sx, sz, z + 1) end
+    end
+  end
+  -- A column's surface and wetness read from its chunk directly: the world's
+  -- block lookup costs a chunk fetch per block, and a band is 2,048 columns
+  -- of up to a hundred blocks each (GAPS G64: fetch the chunk once).
+  pfn surface_in(c : CubeForge.Chunk.Chunk, lx : Int, lz : Int, y : Int) : Int do
+    if y <= 0 do 0
+    else if C.get(c, lx, y, lz) != 0 do y
+    else surface_in(c, lx, lz, y - 1) end end
+  end
+  pfn wet_in(c : CubeForge.Chunk.Chunk, lx : Int, lz : Int, h : Int) : Bool do
+    C.is_water(C.get(c, lx, h, lz)) || (h < 255 && C.is_water(C.get(c, lx, h + 1, lz)))
+  end
+  -- The band that came in, in columns: [bx0, bx1] x [bz0, bz1] of the window.
+  pfn band_go(f : Field, w : CubeForge.World.World, n : Int, top : Int, seed : Int, bx0 : Int, bx1 : Int, bz0 : Int, bz1 : Int, x : Int, z : Int) : Field do
+    if z > bz1 do f
+    else if x > bx1 do band_go(f, w, n, top, seed, bx0, bx1, bz0, bz1, bx0, z + 1)
+    else
+      match f do
+        Field(hs, ws, ta, ma, bs, hold, tb, ds, act) ->
+          let i = x + n * z
+          let c = W.chunk_at(w, x / 16, z / 16)
+          let h = surface_in(c, x % 16, z % 16, top)
+          let base = temp_base(W.world_x(w, x), W.world_z(w, z), seed)
+          let t = temp_from_base(base, h)
+          band_go(Field(NativeArray.set_u8(hs, i, h), NativeArray.set_u8(ws, i, if wet_in(c, x % 16, z % 16, h) do 1 else 0 end),
+                        NativeArray.set_float(ta, i, t), NativeArray.set_float(ma, i, 0.0),
+                        NativeArray.set_u8(bs, i, classify(t, 0.0, h, reach())), NativeArray.set_u8(hold, i, 0),
+                        NativeArray.set_float(tb, i, base), NativeArray.set_u8(ds, i, stale()), NativeArray.set_u8(act, i, 1)),
+                  w, n, top, seed, bx0, bx1, bz0, bz1, x + 1, z)
+      end
+    end end
   end
   doc "The field moved by ([dx], [dz]) chunks over the shifted world [w]; the band that came in is scanned and woken."
   fn shift(f : Field, w : CubeForge.World.World, dx : Int, dz : Int, seed : Int) : Field do
     let n = cols(w)
-    shift_go(f, w, n, CubeForge.Light.sky_floor(w), 16 * dx, 16 * dz, seed, 0,
-             NativeArray.make_u8(n * n, 0), NativeArray.make_u8(n * n, 0), NativeArray.make_float(n * n, 0.0), NativeArray.make_float(n * n, 0.0),
-             NativeArray.make_u8(n * n, 0), NativeArray.make_u8(n * n, 0), NativeArray.make_float(n * n, 0.0), NativeArray.make_u8(n * n, reach()),
-             NativeArray.make_u8(n * n, 0))
+    let sx = 16 * dx
+    let sz = 16 * dz
+    -- the band's columns: the strip the shift exposed
+    let bx0 = if dx > 0 do n - 16 else 0 end
+    let bx1 = if dx < 0 do 15 else n - 1 end
+    let bz0 = if dz > 0 do n - 16 else 0 end
+    let bz1 = if dz < 0 do 15 else n - 1 end
+    match f do
+      Field(hs, ws, ta, ma, bs, hold, tb, ds, act) ->
+        let f1 = Field(shift_u8_rows(hs, NativeArray.make_u8(n * n, 0), n, sx, sz, 0), shift_u8_rows(ws, NativeArray.make_u8(n * n, 0), n, sx, sz, 0),
+                       shift_f64_rows(ta, NativeArray.make_float(n * n, 0.0), n, sx, sz, 0), shift_f64_rows(ma, NativeArray.make_float(n * n, 0.0), n, sx, sz, 0),
+                       shift_u8_rows(bs, NativeArray.make_u8(n * n, 0), n, sx, sz, 0), shift_u8_rows(hold, NativeArray.make_u8(n * n, 0), n, sx, sz, 0),
+                       shift_f64_rows(tb, NativeArray.make_float(n * n, 0.0), n, sx, sz, 0), shift_u8_rows(ds, NativeArray.make_u8(n * n, reach()), n, sx, sz, 0),
+                       shift_u8_rows(act, NativeArray.make_u8(n * n, 0), n, sx, sz, 0))
+        -- scan down from the band's own top, not the world's sky floor
+        band_go(f1, w, n, CubeForge.Light.band_top(w, bx0 / 16, bx1 / 16, bz0 / 16, bz1 / 16), seed, bx0, bx1, bz0, bz1, bx0, bz0)
+    end
   end
 
   fn height_of(f : Field, wx : Int, wz : Int) : Int do

@@ -26,8 +26,9 @@ mod CubeForge.Save do
   -- seed, saved_at (unix seconds), player [px py pz vx vy vz yaw pitch],
   -- inventory [72 slot ints then the selected slot], seconds into the day,
   -- weather [phase, ticks left, intensity, bolt], the window origin in chunks
-  -- (x, z), and the cached chunks as world coordinates cx, cz, cx, cz ...
-  type Header = Header(Int, Int, NativeFloatArr, NativeIntArr, Float, NativeFloatArr, Int, Int, List(Int))
+  -- (x, z), the cached chunks as cx, cz, generation hash triples, and the
+  -- generation hash of each window chunk in grid order (see World.gen_hashes)
+  type Header = Header(Int, Int, NativeFloatArr, NativeIntArr, Float, NativeFloatArr, Int, Int, List(Int), List(Int))
 
   fn version() : Int do 1 end
   fn player_floats() : Int do 8 end
@@ -35,21 +36,22 @@ mod CubeForge.Save do
   fn weather_floats() : Int do 4 end
 
   fn header_new(seed : Int, saved_at : Int, player : NativeFloatArr, inv : NativeIntArr, day : Float, wx : NativeFloatArr) : Header do
-    Header(seed, saved_at, player, inv, day, wx, 0, 0, Nil)
+    Header(seed, saved_at, player, inv, day, wx, 0, 0, Nil, Nil)
   end
   doc "The header with the window's origin and the cached chunks' coordinates (cx, cz pairs, flattened)."
-  fn with_window(h : Header, ox : Int, oz : Int, cached : List(Int)) : Header do
-    match h do Header(s, t, p, i, d, w, _, _, _) -> Header(s, t, p, i, d, w, ox, oz, cached) end
+  fn with_window(h : Header, ox : Int, oz : Int, cached : List(Int), hashes : List(Int)) : Header do
+    match h do Header(s, t, p, i, d, w, _, _, _, _) -> Header(s, t, p, i, d, w, ox, oz, cached, hashes) end
   end
-  fn h_seed(h : Header) : Int do match h do Header(s, _, _, _, _, _, _, _, _) -> s end end
-  fn h_saved_at(h : Header) : Int do match h do Header(_, t, _, _, _, _, _, _, _) -> t end end
-  fn h_player(h : Header) : NativeFloatArr do match h do Header(_, _, p, _, _, _, _, _, _) -> p end end
-  fn h_inventory(h : Header) : NativeIntArr do match h do Header(_, _, _, i, _, _, _, _, _) -> i end end
-  fn h_day(h : Header) : Float do match h do Header(_, _, _, _, d, _, _, _, _) -> d end end
-  fn h_weather(h : Header) : NativeFloatArr do match h do Header(_, _, _, _, _, w, _, _, _) -> w end end
-  fn h_origin_x(h : Header) : Int do match h do Header(_, _, _, _, _, _, ox, _, _) -> ox end end
-  fn h_origin_z(h : Header) : Int do match h do Header(_, _, _, _, _, _, _, oz, _) -> oz end end
-  fn h_cached(h : Header) : List(Int) do match h do Header(_, _, _, _, _, _, _, _, c) -> c end end
+  fn h_seed(h : Header) : Int do match h do Header(s, _, _, _, _, _, _, _, _, _) -> s end end
+  fn h_saved_at(h : Header) : Int do match h do Header(_, t, _, _, _, _, _, _, _, _) -> t end end
+  fn h_player(h : Header) : NativeFloatArr do match h do Header(_, _, p, _, _, _, _, _, _, _) -> p end end
+  fn h_inventory(h : Header) : NativeIntArr do match h do Header(_, _, _, i, _, _, _, _, _, _) -> i end end
+  fn h_day(h : Header) : Float do match h do Header(_, _, _, _, d, _, _, _, _, _) -> d end end
+  fn h_weather(h : Header) : NativeFloatArr do match h do Header(_, _, _, _, _, w, _, _, _, _) -> w end end
+  fn h_origin_x(h : Header) : Int do match h do Header(_, _, _, _, _, _, ox, _, _, _) -> ox end end
+  fn h_origin_z(h : Header) : Int do match h do Header(_, _, _, _, _, _, _, oz, _, _) -> oz end end
+  fn h_cached(h : Header) : List(Int) do match h do Header(_, _, _, _, _, _, _, _, c, _) -> c end end
+  fn h_hashes(h : Header) : List(Int) do match h do Header(_, _, _, _, _, _, _, _, _, hs) -> hs end end
 
   -- ── Encoding ─────────────────────────────────────────────────────────────
 
@@ -78,6 +80,7 @@ mod CubeForge.Save do
     ++ "weather" ++ floats_go(h_weather(h), 0, weather_floats(), "") ++ "\n"
     ++ "origin " ++ int_to_string(h_origin_x(h)) ++ " " ++ int_to_string(h_origin_z(h)) ++ "\n"
     ++ "cached" ++ ints_list_go(h_cached(h), "") ++ "\n"
+    ++ "hashes" ++ ints_list_go(h_hashes(h), "") ++ "\n"
   end
 
   -- ── Parsing ──────────────────────────────────────────────────────────────
@@ -207,7 +210,7 @@ mod CubeForge.Save do
                             Ok(a) -> a
                             Err(_) -> NativeArray.make_int(2, 0)
                           end
-                          Ok(Header(seed, at, p, inv, day, wx, NativeArray.get_int(oxz, 0), NativeArray.get_int(oxz, 1), int_list_field(lines, "cached")))
+                          Ok(Header(seed, at, p, inv, day, wx, NativeArray.get_int(oxz, 0), NativeArray.get_int(oxz, 1), int_list_field(lines, "cached"), int_list_field(lines, "hashes")))
                       end
                     end
                   end
@@ -290,13 +293,13 @@ mod CubeForge.Save do
   pfn cached_coords(cache : List(CubeForge.World.Evicted), acc : List(Int)) : List(Int) do
     match cache do
       Nil -> List.reverse(acc)
-      Cons(e, rest) -> cached_coords(rest, Cons(CubeForge.World.ev_cz(e), Cons(CubeForge.World.ev_cx(e), acc)))
+      Cons(e, rest) -> cached_coords(rest, Cons(CubeForge.World.ev_hash(e), Cons(CubeForge.World.ev_cz(e), Cons(CubeForge.World.ev_cx(e), acc))))
     end
   end
 
   doc "Write a slot: the directory, the window's chunk files by world coordinates, the cached chunks with their column blobs, the fields blob (when [fields] is not empty), then the header last with the origin and the cached list. Stops at the first failure."
   fn write_world(d : String, slot : Int, chunks : Array.PVec(CubeForge.Chunk.Chunk), side : Int, ox : Int, oz : Int,
-                 cache : List(CubeForge.World.Evicted), h : Header, fields : NativeU8Arr) : Result(Unit, String) do
+                 cache : List(CubeForge.World.Evicted), hashes : List(Int), h : Header, fields : NativeU8Arr) : Result(Unit, String) do
     match Dir.mkdir_p(slot_dir(d, slot)) do
       Err(_) -> Err(err_text("create", slot_dir(d, slot)))
       Ok(_) ->
@@ -309,7 +312,7 @@ mod CubeForge.Save do
                 match write_fields(d, slot, fields) do
                   Err(e) -> Err(e)
                   Ok(_) ->
-                    match File.write(header_path(d, slot), encode_header(with_window(h, ox, oz, cached_coords(cache, Nil)), side)) do
+                    match File.write(header_path(d, slot), encode_header(with_window(h, ox, oz, cached_coords(cache, Nil), hashes), side)) do
                       Ok(_) -> Ok(())
                       Err(_) -> Err(err_text("write", header_path(d, slot)))
                     end
@@ -321,7 +324,7 @@ mod CubeForge.Save do
 
   doc "Write a slot at origin 0 with no cache and a fields blob: the pre-streaming shape, kept for the tests."
   fn write_with_fields(d : String, slot : Int, chunks : Array.PVec(CubeForge.Chunk.Chunk), side : Int, h : Header, fields : NativeU8Arr) : Result(Unit, String) do
-    write_world(d, slot, chunks, side, 0, 0, Nil, h, fields)
+    write_world(d, slot, chunks, side, 0, 0, Nil, Nil, h, fields)
   end
 
   doc "Write a slot without a fields blob."
@@ -421,9 +424,9 @@ mod CubeForge.Save do
   end
   pfn read_cache_go(d : String, slot : Int, coords : List(Int), acc : List(CubeForge.World.Evicted)) : List(CubeForge.World.Evicted) do
     match coords do
-      Cons(cx, Cons(cz, rest)) ->
+      Cons(cx, Cons(cz, Cons(gh, rest))) ->
         match read_chunk_any(d, slot, cx, cz) do
-          Ok(c) -> read_cache_go(d, slot, rest, Cons(CubeForge.World.Evicted(cx, cz, c, read_cols(d, slot, cx, cz)), acc))
+          Ok(c) -> read_cache_go(d, slot, rest, Cons(CubeForge.World.Evicted(cx, cz, c, read_cols(d, slot, cx, cz), gh), acc))
           Err(_) -> read_cache_go(d, slot, rest, acc)
         end
       _ -> acc

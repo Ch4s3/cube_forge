@@ -1221,6 +1221,21 @@ void *cf_f32_blit(void *dst, int64_t di, void *src, int64_t si, int64_t n) {
     return dst;
 }
 
+/* The f64 twin, for the biome field's NativeFloatArr columns (a window
+ * shift slides them a row at a time). Same rc == 1 contract. */
+void *cf_f64_blit(void *dst, int64_t di, void *src, int64_t si, int64_t n) {
+    int64_t rc = *(int64_t *)dst;
+    if (rc != 1) { fprintf(stderr, "cf_f64_blit: destination is shared (rc=%lld); refusing to write in place\n", (long long)rc); abort(); }
+    if (n <= 0) return dst;
+    if (di < 0 || si < 0 || di + n > narr_len(dst) || si + n > narr_len(src)) {
+        fprintf(stderr, "cf_f64_blit: out of range (di=%lld si=%lld n=%lld dst=%lld src=%lld)\n",
+                (long long)di, (long long)si, (long long)n, (long long)narr_len(dst), (long long)narr_len(src));
+        abort();
+    }
+    memcpy((double *)narr_data(dst) + di, (const double *)narr_data(src) + si, (size_t)n * 8);
+    return dst;
+}
+
 /* The u8 twin of cf_f32_blit, for the skylight field: copy n bytes from
  * src[si..] into dst[di..] under the same rc == 1 contract. The lighting sweep
  * copies the whole 4 MB field once per level, which is a memcpy here and 4.2M
