@@ -491,7 +491,7 @@ mod CubeForge.Chunk do
     -- the caves are carved last: through the strata, under the trees, never
     -- through water. The structure POIs are stamped after the carve, so a worm
     -- cannot eat an arch, and after planting, so an arch is not overgrown.
-    CubeForge.Poi.stamp(CubeForge.Caves.carve(plant_lakes(fill_noise_go(new(), 0, hs, ps, wx0, wz0, seed, lk), wx0, wz0, seed, lk), wx0, wz0, seed, lk), wx0, wz0, seed)
+    CubeForge.Poi.carve(CubeForge.Caves.carve(plant_lakes(fill_noise_go(new(), 0, hs, ps, wx0, wz0, seed, lk), wx0, wz0, seed, lk), wx0, wz0, seed, lk), wx0, wz0, seed)
   end
 
   -- ── Vegetation ──────────────────────────────────────────────────────────────

@@ -2704,52 +2704,45 @@ mod CubeForge do
     end
   end
 
-  -- CF_TERRAIN_STATS: the points of interest in the world span -- butte columns
-  -- (a landform term inside Noise.height) and arch sites (a structure Poi
-  -- stamps). Both are rare by design, so a world with none of either is the
-  -- normal case and the line says so.
-  -- count in the high half, the first column found in the low half (1-based, so
-  -- 0 means none), packed count * 1000000 + first
-  pfn poi_butte_go(n : Int, i : Int, seed : Int, acc : Int, first : Int) : Int do
+  -- CF_TERRAIN_STATS: the points of interest in the world span. Both kinds are
+  -- rare by design, so a world with none of either is the normal case and the
+  -- line says so. CF_POI_PREVIEW=<kind> draws a kind's shape instead of hunting
+  -- for one (CubeForge.Poi.preview).
+  pfn poi_rise_go(n : Int, i : Int, seed : Int, acc : Int, first : Int) : Int do
     let span = 16 * n
     if i >= span * span do acc * 1000000 + first
     else
       let wx = i % span
       let wz = i / span
       if CubeForge.Noise.height(wx, wz, seed) > CubeForge.Noise.height_base(wx, wz, seed) do
-        poi_butte_go(n, i + 1, seed, acc + 1, if first == 0 do wx * 1000 + wz + 1 else first end)
-      else poi_butte_go(n, i + 1, seed, acc, first) end
+        poi_rise_go(n, i + 1, seed, acc + 1, if first == 0 do wx * 1000 + wz + 1 else first end)
+      else poi_rise_go(n, i + 1, seed, acc, first) end
     end
   end
-  pfn poi_arch_go(n : Int, i : Int, seed : Int, scale : Float, acc : Int, first : Int) : Int do
-    let cells = 16 * n / CubeForge.Noise.arch_cell() + 1
-    if i >= cells * cells do acc * 1000000 + first
+  pfn poi_cells_go(n : Int, k : Int, i : Int, seed : Int, scale : Float, acc : Int) : Int do
+    let cells = 16 * n / CubeForge.Poi.cell(k) + 1
+    if i >= cells * cells do acc
     else
       let cx = i % cells
       let cz = i / cells
-      if !CubeForge.Noise.arch_here(cx, cz, seed, scale) do poi_arch_go(n, i + 1, seed, scale, acc, first)
+      if !CubeForge.Poi.here(k, cx, cz, seed, scale) do poi_cells_go(n, k, i + 1, seed, scale, acc)
       else
-        let wx = CubeForge.Noise.arch_sx(cx, cz, seed)
-        let wz = CubeForge.Noise.arch_sz(cx, cz, seed)
-        let deg = float_to_int(CubeForge.Noise.arch_angle(cx, cz, seed) *. 57.2957795)
-        println("  arch: site " ++ int_to_string(wx) ++ "," ++ int_to_string(wz)
-                ++ "  ground " ++ int_to_string(CubeForge.Noise.height_base(wx, wz, seed))
-                ++ "  half-length " ++ int_to_string(CubeForge.Noise.arch_len(cx, cz, seed))
-                ++ "  rise " ++ int_to_string(CubeForge.Noise.arch_rise(cx, cz, seed))
-                ++ "  opening " ++ int_to_string(2 * CubeForge.Noise.arch_hole_w(cx, cz, seed)) ++ "x" ++ int_to_string(CubeForge.Noise.arch_hole_h(cx, cz, seed))
-                ++ "  bearing " ++ int_to_string(deg) ++ " deg")
-        -- first is 1-based so 0 means none; the world span is 0..127 in both axes
-        poi_arch_go(n, i + 1, seed, scale, acc + 1, if first == 0 do wx * 1000 + wz + 1 else first end)
+        println("  " ++ CubeForge.Poi.kind_name(k) ++ ": site " ++ int_to_string(CubeForge.Poi.sx(k, cx, cz, seed)) ++ "," ++ int_to_string(CubeForge.Poi.sz(k, cx, cz, seed))
+                ++ "  ground " ++ int_to_string(CubeForge.Poi.ground(k, cx, cz, seed))
+                ++ "  len " ++ int_to_string(CubeForge.Poi.param(k, cx, cz, seed, CubeForge.Poi.p_len()))
+                ++ "  rise " ++ int_to_string(CubeForge.Poi.param(k, cx, cz, seed, CubeForge.Poi.p_rise()))
+                ++ "  opening " ++ int_to_string(2 * CubeForge.Poi.param(k, cx, cz, seed, CubeForge.Poi.p_hole_w())) ++ "x" ++ int_to_string(CubeForge.Poi.param(k, cx, cz, seed, CubeForge.Poi.p_hole_h()))
+                ++ "  bearing " ++ int_to_string(float_to_int(CubeForge.Poi.bearing(k, cx, cz, seed) *. 57.2957795)) ++ " deg")
+        poi_cells_go(n, k, i + 1, seed, scale, acc + 1)
       end
     end
   end
   pfn poi_report(n : Int, seed : Int) : Unit do
-    let b = poi_butte_go(n, 0, seed, 0, 0)
-    let a = poi_arch_go(n, 0, seed, CubeForge.Noise.poi_scale(), 0, 0)
-    println("  poi: " ++ int_to_string(b / 1000000) ++ " butte columns"
-            ++ (if b % 1000000 == 0 do "" else " (first at " ++ int_to_string((b % 1000000 - 1) / 1000) ++ ", " ++ int_to_string((b % 1000000 - 1) % 1000) ++ ")" end)
-            ++ ", " ++ int_to_string(a / 1000000) ++ " arches"
-            ++ (if a % 1000000 == 0 do "" else " (first at " ++ int_to_string((a % 1000000 - 1) / 1000) ++ ", " ++ int_to_string((a % 1000000 - 1) % 1000) ++ ")" end))
+    let r = poi_rise_go(n, 0, seed, 0, 0)
+    let a = poi_cells_go(n, CubeForge.Poi.k_arch(), 0, seed, CubeForge.Poi.poi_scale(), 0)
+    println("  poi: " ++ int_to_string(r / 1000000) ++ " columns raised by a landform"
+            ++ (if r % 1000000 == 0 do "" else " (first at " ++ int_to_string((r % 1000000 - 1) / 1000) ++ ", " ++ int_to_string((r % 1000000 - 1) % 1000) ++ ")" end)
+            ++ ", " ++ int_to_string(a) ++ " arches")
   end
 
   -- CF_TERRAIN_MAP=1 (alongside CF_TERRAIN_STATS): the world as a character map, one
@@ -3049,6 +3042,10 @@ mod CubeForge do
     let meshes = mesh_all(world, n, workers)
     let t3 = System.monotonic_time()
     let nverts = count_verts(meshes, 0)
+    -- CF_POI_PREVIEW=<kind>: draw the kind's shape on flat ground and stop.
+    -- Iterating on a shape belongs here, not in a world with a blind camera.
+    let pv = Env.get_int("CF_POI_PREVIEW", -1)
+    if pv >= 0 && pv < CubeForge.Poi.kinds() do CubeForge.Poi.preview(pv, seed) else () end
     if Env.get_int("CF_TERRAIN_STATS", 0) == 1 do
       stats_go(n, 0, seed, 999, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
       springs_go(n, 0, seed, 0, 0)

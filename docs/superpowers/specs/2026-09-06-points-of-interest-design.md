@@ -251,3 +251,70 @@ measurements; the parts that change what this document says:
   first of each, which is what actually got used.
 - Neither shape was confirmed visually; both are confirmed by cross-section,
   by the tests, and by the world hash. See RESULTS.
+
+## 10. The template (2026-09-06, after the arch was written twice)
+
+The arch shipped twice and was wrong both times, because every kind was its own
+algorithm arrived at by trying it, taking a screenshot, and trying again. The
+screenshots were the worst part: a rare feature in a 128-block window, a camera
+whose yaw is fixed by the window manager, and four rounds of blind sweeps that
+landed on a peak, in a lake and under water. `CubeForge.Poi` is now a template
+instead, and the iteration happens somewhere it can be seen.
+
+**One distinction decides almost everything: scatter or landmark.**
+
+*Scatter* kinds are many and small, on a small cell grid. Their rules must be
+read at the **column** being evaluated, because a site probe would run for nine
+cells on every column and no small-cell kind can afford that. So a scatter fades
+at the edge of its country rather than stopping, and its shapes may be clipped.
+Buttes are a scatter.
+
+*Landmark* kinds are few and large. Their rules are read once at the **site**,
+so every column agrees about whether one exists and how big it is -- which is
+exactly what lets a landmark be **carved** as well as raised. It is whole or
+absent, never clipped. The arch is a landmark; so are the crystal cavern, the
+giant tree and the atoll.
+
+**Shape is separated from placement.** `shape_at` is the shape alone; `rise_at`
+is the shape once placement has agreed there is one. The preview draws the
+shape, which is why it works at all -- the first run of it drew an empty sky,
+because it had asked whether an instance happened to be placed at the sample
+cell.
+
+**The rules, checked for every kind by one test** (`Poi.rule_ok`):
+
+1. `reach <= cell`, so two of a kind never overlap and a column looks only at
+   the 3x3 around it.
+2. An opening is strictly inside the mass carrying it: twice its half-width
+   under the flat top, and a band of at least `roof()` above it. **This is the
+   rule the first arch broke** -- an opening as tall as the rise is a lintel.
+3. A level top comes from an absolute top level, never a rise added to the
+   ground, which tilts with the slope under it.
+4. A vertical wall uses `prof_hard`; anything meant to blend uses `prof_flat`
+   or `prof_round`. There is no fifth, ad-hoc option, and a one-block ramp --
+   which is what the first butte rim was -- is none of them.
+5. A landmark's site rules read `height_base`, never `height`.
+
+Derived parameters exist so rule 2 holds by construction: an arch's opening is
+45% of its half-length and its rise less a roof, so no knob can make the opening
+wider than the mass over it.
+
+**`CF_POI_PREVIEW=<kind>`** draws the kind's table and two orthographic sections
+of it standing on flat ground. Every iteration on a shape belongs there.
+
+```
+poi preview: arch  (landmark)
+  cell 160  density 50%  country over 56% at 1/285 blocks  reach 26
+  len 31  wide 6  rise 30  top 0  opening 26x20  rules ok
+   30              ###############
+   25           #####################
+   20           ##########.##########
+   15         ########.........########
+   10         #######...........#######
+    5        #######.............#######
+    0 ##############.............##############
+```
+
+Adding a kind is now: a row in the placement table, a row in the parameter
+table, a case in `shape_at` built from the shared profiles, and -- if it needs
+one -- a case in the carve. The invariants and the preview come with it.
