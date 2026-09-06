@@ -424,16 +424,71 @@ mod CubeForge.Poi do
     end
   end
 
+  -- ── Selenite beams ───────────────────────────────────────────────────────
+  -- A model blade cannot be longer than the cell it is drawn in, so the LONG
+  -- crystals are geometry, not models: a beam is a segment through the chamber,
+  -- the same primitive the giant tree's boughs use, and the block it is made of
+  -- greedy-meshes into a prism. Naica's are metres across and span the cave.
+
+  doc "Beams crossing each chamber."
+  fn beams() : Int do 2 end
+
+  -- Beam [b] of chamber [j]: a segment through the chamber at a hashed
+  -- attitude, longer than the chamber is wide so it drives into both walls.
+  pfn beam_dx(k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int) : Float do
+    Math.cos(hash(k, cx, cz, seed, 110 + 4 * (3 * j + b)) *. 6.2831853) *. Math.cos(hash(k, cx, cz, seed, 111 + 4 * (3 * j + b)) *. 1.4 -. 0.7)
+  end
+  pfn beam_dy(k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int) : Float do
+    Math.sin(hash(k, cx, cz, seed, 111 + 4 * (3 * j + b)) *. 1.4 -. 0.7)
+  end
+  pfn beam_dz(k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int) : Float do
+    Math.sin(hash(k, cx, cz, seed, 110 + 4 * (3 * j + b)) *. 6.2831853) *. Math.cos(hash(k, cx, cz, seed, 111 + 4 * (3 * j + b)) *. 1.4 -. 0.7)
+  end
+  doc "Half the beam's length, in blocks: longer than the chamber's radius, so it is embedded in the rock at both ends."
+  fn beam_half(k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int) : Float do
+    cham_r(k, cx, cz, seed, j) *. (0.95 +. 0.45 *. hash(k, cx, cz, seed, 112 + 4 * (3 * j + b)))
+  end
+  doc "The beam's radius in blocks: 1.3 .. 2.5, so a shaft is three to five blocks across. Wider than this and two beams fill the chamber they are supposed to cross."
+  fn beam_rad(k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int) : Float do
+    1.3 +. 1.2 *. hash(k, cx, cz, seed, 113 + 4 * (3 * j + b))
+  end
+
+  -- Nearest beam of chamber [j], as a fraction of its own radius.
+  pfn beam_d(k : Int, cx : Int, cz : Int, seed : Int, u : Float, v : Float, y : Float, g : Int, j : Int, b : Int, best : Float) : Float do
+    if b >= beams() do best
+    else
+      let l = beam_half(k, cx, cz, seed, j, b)
+      -- the beam is offset from the chamber's centre, so the three of them
+      -- cross rather than all passing through one point
+      let ou = cham_u(k, cx, cz, seed, j) +. (hash(k, cx, cz, seed, 140 + 3 * j + b) -. 0.5) *. cham_r(k, cx, cz, seed, j)
+      let ov = cham_v(k, cx, cz, seed, j) +. (hash(k, cx, cz, seed, 150 + 3 * j + b) -. 0.5) *. cham_r(k, cx, cz, seed, j)
+      let oy = cham_y(k, cx, cz, seed, j, g) +. (hash(k, cx, cz, seed, 160 + 3 * j + b) -. 0.5) *. cham_r(k, cx, cz, seed, j) *. 0.8
+      let dx = beam_dx(k, cx, cz, seed, j, b) *. l
+      let dy = beam_dy(k, cx, cz, seed, j, b) *. l
+      let dz = beam_dz(k, cx, cz, seed, j, b) *. l
+      let d = Math.sqrt(seg_d2(u, y, v, ou -. dx, oy -. dy, ov -. dz, ou +. dx, oy +. dy, ov +. dz)) /. beam_rad(k, cx, cz, seed, j, b)
+      beam_d(k, cx, cz, seed, u, v, y, g, j, b + 1, Math.min_float(best, d))
+    end
+  end
+  pfn beams_d(k : Int, cx : Int, cz : Int, seed : Int, u : Float, v : Float, y : Float, g : Int, j : Int, best : Float) : Float do
+    if j >= chambers() do best
+    else beams_d(k, cx, cz, seed, u, v, y, g, j + 1, Math.min_float(best, beam_d(k, cx, cz, seed, u, v, y, g, j, 0, 9.0))) end
+  end
+
   pfn vol_cavern(k : Int, cx : Int, cz : Int, seed : Int, wx : Int, wz : Int, y : Int, g : Int) : Int do
-    let d = cav_d(k, cx, cz, seed, u_of(k, cx, cz, seed, wx, wz), v_of(k, cx, cz, seed, wx, wz), int_to_float(y), g, 0, 9.0)
-    if d >= 1.0 do 0 - 1
-    -- the crystals line the chamber's lower shell rather than standing as
-    -- separate spikes: a shell is a field, so the preview and the generator can
-    -- share it, and it clusters the way a geode does
-    -- floor AND ceiling: a lining only on the floor lit the chamber from below
-    -- and left its roof black, which read as a hole rather than a geode
-    else if d > 0.88 && N.hash2(wx * 31 + y, wz * 17 - y, seed + 909) < 0.26 do C.crystal()
-    else 0 end end
+    let u = u_of(k, cx, cz, seed, wx, wz)
+    let v = v_of(k, cx, cz, seed, wx, wz)
+    let d = cav_d(k, cx, cz, seed, u, v, int_to_float(y), g, 0, 9.0)
+    -- a little past the shell, so a beam is driven into the rock at both ends
+    -- rather than stopping neatly at the wall
+    if d >= 1.45 do 0 - 1
+    else if beams_d(k, cx, cz, seed, u, v, int_to_float(y), g, 0, 9.0) < 1.0 do C.crystal_beam()
+    else if d >= 1.0 do 0 - 1
+    -- the fine growth: blades on the shell, floor and ceiling both. Sparser now
+    -- that the beams carry the look; a lining only on the floor lit the chamber
+    -- from below and left its roof black
+    else if d > 0.88 && N.hash2(wx * 31 + y, wz * 17 - y, seed + 909) < 0.18 do C.crystal()
+    else 0 end end end end
   end
 
   -- ── The giant tree ───────────────────────────────────────────────────────
@@ -694,7 +749,7 @@ mod CubeForge.Poi do
     let wz = pv_wz(k, cx, cz, seed, u, v)
     let raised = shape_at(k, cx, cz, wx, wz, seed, int_to_float(g))
     let b = vol_block(k, cx, cz, seed, wx, wz, y, g)
-    if b > 0 do (if b == C.crystal() do "*" else if b == C.oak_log() do "T" else "o" end end)
+    if b > 0 do (if b == C.crystal() do "*" else if b == C.crystal_beam() do "X" else if b == C.oak_log() do "T" else "o" end end end)
     else if b == 0 do (if y <= g + raised do "." else " " end)
     else if y <= g do "#"
     else if y <= g + raised do ":"

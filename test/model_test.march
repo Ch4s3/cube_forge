@@ -87,7 +87,7 @@ mod CubeForge.Test.Model do
       Test.assert_eq_int(NativeArray.get_u8(a, off + 1), 150, "g")
       Test.assert_eq_int(NativeArray.get_u8(a, off + 2), 62, "b")
       Test.assert_eq_int(NativeArray.get_u8(a, off + 3), 255, "opaque")
-      Test.assert_eq_int(CubeForge.Texture.layers(), 93, "the palette, then crystal, is the last layer")
+      Test.assert_eq_int(CubeForge.Texture.layers(), 94, "the palette, then the two crystal layers")
     end
   end
 

@@ -65,13 +65,14 @@ mod CubeForge.Light do
     if id == C.glow_cap() do 10
     -- crystal: brighter than a glow cap, because a cavern is lit by nothing else
     else if id == C.crystal() do 14
+    else if id == C.crystal_beam() do 14
     -- dim 3, bright 6: measured at 2/4 a lone bright column lifted the ground
     -- by about 25/255 at night, too faint to read as lit
     else if C.is_myc(id) do 3 * C.myc_glow(id)
     -- fruit: a small body 6 bright / 3 dim, a cap 10 / 5; stems never glow
     else if C.is_fruit_small(id) do 3 * CubeForge.Species.glow(C.fruit_species(id))
     else if C.is_fruit_cap(id) do 5 * CubeForge.Species.glow(C.fruit_species(id))
-    else 0 end end end end end
+    else 0 end end end end end end
   end
 
   -- ── Seeding: sunlight down each column ────────────────────────────────────

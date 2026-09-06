@@ -2436,8 +2436,22 @@ bearing -- and, for a cavern, the world position of chamber 0, because the site
 column of a cavern is usually solid rock and standing there shows you nothing.
 `docs/poi-arch.png`, `docs/poi-giant-tree.png`, `docs/poi-crystal-cavern.png`.
 
-**Not done.** Naica's beams span a whole chamber; these are one cell each, so a
-patch reads as crystal growth rather than as crossing beams. Making a run of
-cells form a continuous shaft needs the blade's tip to be the next cell's base,
-which the variant hash cannot express -- it wants a direction field along the
-shell. Left as a follow-up.
+**Then the beams, the same day.** A model blade cannot be longer than the cell
+it is drawn in, so the long crystals could never come from the model layer at
+all -- they had to be geometry. A **selenite beam** is a segment through a
+chamber, the same primitive the giant tree's boughs already use, made of a
+second block (`crystal_beam`, id 70, texture layer 93) that greedy-meshes into a
+prism. Two per chamber, radius 1.3-2.5 so a shaft is three to five blocks
+across, and half-length 0.95-1.4 of the chamber's radius so each one drives into
+the rock at both ends rather than stopping neatly at the wall. Their offsets
+from the chamber centre are hashed independently, so they cross rather than all
+passing through one point.
+
+First attempt: three beams per chamber at radius up to 3.2. Two of them filled
+the chamber they were supposed to cross, and the preview showed it before the
+world did. The fine blade growth dropped from 0.26 to 0.18 of shell voxels at
+the same time, because the beams now carry the look.
+
+So the crystals are both things, and each is the mechanism that fits it: the
+fine growth is micro-voxel blades, because a cube read as a box; the shafts are
+geometry, because a model cannot leave its cell.

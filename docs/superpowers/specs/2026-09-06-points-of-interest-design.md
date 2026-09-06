@@ -341,6 +341,9 @@ the per-column scan.
 - The cavern's `p_depth` is 22..34 against a `min_ground` of sea + 24, so the
   roof rule holds by construction rather than by luck.
 
-Naica's beams span a whole chamber; these are one cell each. A continuous shaft
-needs a direction field along the shell so one blade's tip is the next one's
-base — a follow-up, noted in RESULTS.
+The crystals are two things, because one mechanism cannot be both: the fine
+growth on the shell is **micro-voxel blades** (a cube read as a box), and the
+long shafts are **geometry** — `crystal_beam`, id 70, laid down as segments
+through the chamber, because a model can never be longer than the cell it is
+drawn in. Two beams per chamber, three to five blocks across, driven into the
+rock at both ends.

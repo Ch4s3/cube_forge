@@ -99,8 +99,10 @@ mod CubeForge.Chunk do
   doc "Sandstone and shale: two of the rock strata's bands (see rock_id). Both harvest as stone."
   fn sandstone() : Int do 67 end
   fn shale() : Int do 68 end
-  doc "Crystal: the cavern's glow. Solid and opaque like any rock, but Light.emission gives it a level, so a crystal cavern is lit by what is in it rather than by a lamp the player has to carry down."
+  doc "Crystal: the fine growth on a cavern's shell, drawn as micro-voxel blades (Model.t_crystal) rather than cubes. Light.emission gives it a level, so a crystal cavern is lit by what is in it rather than by a lamp the player has to carry down."
   fn crystal() : Int do 69 end
+  doc "Crystal beam: the body of a selenite shaft. A blade cannot be longer than the cell it is drawn in, so the long ones are geometry -- runs of this block, greedy-meshed into a prism -- and this is the block they are made of."
+  fn crystal_beam() : Int do 70 end
   doc "Palm trunk and frond: the oasis tree. Fronds are foliage in every sense leaves are."
   fn palm_log() : Int do 65 end
   fn palm_frond() : Int do 66 end
