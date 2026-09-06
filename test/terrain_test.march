@@ -109,6 +109,19 @@ mod CubeForge.Test.Terrain do
   end
 
 
+  describe "world size" do
+    test "the size rides above the age in the seed and round-trips" do
+      Test.assert_eq_int(N.size_of(7), N.default_size(), "a plain seed is the full size")
+      Test.assert_eq_int(N.size_of(N.with_size(7, 4)), 4, "size back out")
+      Test.assert_eq_int(N.age_of(N.with_size(N.with_age(7, 42), 4)), 42, "the age survives a size")
+      Test.assert_eq_int(N.size_of(N.with_age(N.with_size(7, 6), 42)), 6, "the size survives an age")
+      Test.assert_eq_int(N.base_seed(N.with_age(N.with_size(7, 6), 42)), 7, "and the base")
+      Test.assert_eq_int(N.size_of(N.with_size(7, 2)), N.min_size(), "clamped low")
+      Test.assert_eq_int(N.size_of(N.with_size(7, 20)), N.max_size(), "clamped high")
+      Test.assert_true(N.value2(1.5, 2.5, N.with_size(7, 4)) == N.value2(1.5, 2.5, 7), "the noise ignores the size byte")
+    end
+  end
+
   describe "world age" do
     test "the age rides in the seed's high bits and round-trips" do
       Test.assert_eq_int(N.age_of(N.with_age(12345, 42)), 42, "age back out")
@@ -199,7 +212,7 @@ mod CubeForge.Test.Terrain do
     end
   end
   pfn chunk_of(col : Int, seed : Int) : CubeForge.Chunk.Chunk do
-    C.generate_lakes(col % 4096 / 16 * 16, col / 4096 / 16 * 16, seed, CubeForge.Lakes.levels(seed, 8), 8)
+    C.generate_lakes(col % 4096 / 16 * 16, col / 4096 / 16 * 16, seed, CubeForge.Lakes.levels(seed, 8))
   end
 
   describe "climate-shaped ground" do

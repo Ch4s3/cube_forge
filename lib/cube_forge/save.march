@@ -1,10 +1,18 @@
 -- Save — the on-disk format for a save slot.
 --
--- A slot is a directory: 64 raw chunk files and a text header written last, so
+-- A slot is a directory: raw chunk files and a text header written last, so
 -- a directory with chunks but no header is an incomplete save that lists as
 -- EMPTY and cannot be loaded. The header is `key value...` lines; unknown keys
 -- are ignored, missing keys are an error, so the format can grow without a
 -- migration and a truncated header cannot half-load.
+--
+-- Streaming (2026-09-05): the world is a window over an unbounded world, so a
+-- chunk file is named by its WORLD chunk coordinates (chunk_<cx>_<cz>.bin),
+-- the header carries the window's origin and the list of cached chunks --
+-- the dirty chunks the window has dropped, each with a cols_<cx>_<cz>.bin
+-- column blob -- and the window's own field blob is fields.bin as before. A
+-- slot written before this has chunk_00..63 by index at origin 0; those
+-- names are still read (read_chunk_any falls back to them).
 --
 -- See docs/superpowers/specs/2026-09-05-save-load-design.md.
 mod CubeForge.Save do
@@ -17,8 +25,10 @@ mod CubeForge.Save do
 
   -- seed, saved_at (unix seconds), player [px py pz vx vy vz yaw pitch],
   -- inventory [72 slot ints then the selected slot], seconds into the day,
-  -- weather [phase, ticks left, intensity, bolt]
-  type Header = Header(Int, Int, NativeFloatArr, NativeIntArr, Float, NativeFloatArr)
+  -- weather [phase, ticks left, intensity, bolt], the window origin in chunks
+  -- (x, z), the cached chunks as cx, cz, generation hash triples, and the
+  -- generation hash of each window chunk in grid order (see World.gen_hashes)
+  type Header = Header(Int, Int, NativeFloatArr, NativeIntArr, Float, NativeFloatArr, Int, Int, List(Int), List(Int))
 
   fn version() : Int do 1 end
   fn player_floats() : Int do 8 end
@@ -26,14 +36,22 @@ mod CubeForge.Save do
   fn weather_floats() : Int do 4 end
 
   fn header_new(seed : Int, saved_at : Int, player : NativeFloatArr, inv : NativeIntArr, day : Float, wx : NativeFloatArr) : Header do
-    Header(seed, saved_at, player, inv, day, wx)
+    Header(seed, saved_at, player, inv, day, wx, 0, 0, Nil, Nil)
   end
-  fn h_seed(h : Header) : Int do match h do Header(s, _, _, _, _, _) -> s end end
-  fn h_saved_at(h : Header) : Int do match h do Header(_, t, _, _, _, _) -> t end end
-  fn h_player(h : Header) : NativeFloatArr do match h do Header(_, _, p, _, _, _) -> p end end
-  fn h_inventory(h : Header) : NativeIntArr do match h do Header(_, _, _, i, _, _) -> i end end
-  fn h_day(h : Header) : Float do match h do Header(_, _, _, _, d, _) -> d end end
-  fn h_weather(h : Header) : NativeFloatArr do match h do Header(_, _, _, _, _, w) -> w end end
+  doc "The header with the window's origin and the cached chunks' coordinates (cx, cz pairs, flattened)."
+  fn with_window(h : Header, ox : Int, oz : Int, cached : List(Int), hashes : List(Int)) : Header do
+    match h do Header(s, t, p, i, d, w, _, _, _, _) -> Header(s, t, p, i, d, w, ox, oz, cached, hashes) end
+  end
+  fn h_seed(h : Header) : Int do match h do Header(s, _, _, _, _, _, _, _, _, _) -> s end end
+  fn h_saved_at(h : Header) : Int do match h do Header(_, t, _, _, _, _, _, _, _, _) -> t end end
+  fn h_player(h : Header) : NativeFloatArr do match h do Header(_, _, p, _, _, _, _, _, _, _) -> p end end
+  fn h_inventory(h : Header) : NativeIntArr do match h do Header(_, _, _, i, _, _, _, _, _, _) -> i end end
+  fn h_day(h : Header) : Float do match h do Header(_, _, _, _, d, _, _, _, _, _) -> d end end
+  fn h_weather(h : Header) : NativeFloatArr do match h do Header(_, _, _, _, _, w, _, _, _, _) -> w end end
+  fn h_origin_x(h : Header) : Int do match h do Header(_, _, _, _, _, _, ox, _, _, _) -> ox end end
+  fn h_origin_z(h : Header) : Int do match h do Header(_, _, _, _, _, _, _, oz, _, _) -> oz end end
+  fn h_cached(h : Header) : List(Int) do match h do Header(_, _, _, _, _, _, _, _, c, _) -> c end end
+  fn h_hashes(h : Header) : List(Int) do match h do Header(_, _, _, _, _, _, _, _, _, hs) -> hs end end
 
   -- ── Encoding ─────────────────────────────────────────────────────────────
 
@@ -44,7 +62,13 @@ mod CubeForge.Save do
     if i >= n do acc else ints_go(a, i + 1, n, acc ++ " " ++ int_to_string(NativeArray.get_int(a, i))) end
   end
 
-  doc "The header as text. One `key value...` line per field, newline terminated."
+  pfn ints_list_go(l : List(Int), acc : String) : String do
+    match l do
+      Nil -> acc
+      Cons(v, rest) -> ints_list_go(rest, acc ++ " " ++ int_to_string(v))
+    end
+  end
+  doc "The header as text. One `key value...` line per field, newline terminated. `origin` and `cached` are the window's; a reader without them takes origin 0 and nothing cached."
   fn encode_header(h : Header, side : Int) : String do
     "version " ++ int_to_string(version()) ++ "\n"
     ++ "side " ++ int_to_string(side) ++ "\n"
@@ -54,6 +78,9 @@ mod CubeForge.Save do
     ++ "inventory" ++ ints_go(h_inventory(h), 0, inventory_ints(), "") ++ "\n"
     ++ "day " ++ float_to_string(h_day(h)) ++ "\n"
     ++ "weather" ++ floats_go(h_weather(h), 0, weather_floats(), "") ++ "\n"
+    ++ "origin " ++ int_to_string(h_origin_x(h)) ++ " " ++ int_to_string(h_origin_z(h)) ++ "\n"
+    ++ "cached" ++ ints_list_go(h_cached(h), "") ++ "\n"
+    ++ "hashes" ++ ints_list_go(h_hashes(h), "") ++ "\n"
   end
 
   -- ── Parsing ──────────────────────────────────────────────────────────────
@@ -113,6 +140,22 @@ mod CubeForge.Save do
     end
   end
 
+  -- Every int after [key], or nothing when the line is absent or a token is not a number.
+  pfn int_list_go(toks : List(String), acc : List(Int)) : List(Int) do
+    match toks do
+      Nil -> List.reverse(acc)
+      Cons(t, rest) -> match String.to_int(t) do
+        Ok(v) -> int_list_go(rest, Cons(v, acc))
+        Err(_) -> int_list_go(rest, acc)
+      end
+    end
+  end
+  pfn int_list_field(lines : List(String), key : String) : List(Int) do
+    match find_line(lines, key) do
+      Ok(toks) -> int_list_go(toks, Nil)
+      Err(_) -> Nil
+    end
+  end
   pfn int_field(lines : List(String), key : String) : Result(Int, String) do
     match find_line(lines, key) do
       Ok(toks) -> parse_int_tok(toks, key)
@@ -138,7 +181,7 @@ mod CubeForge.Save do
     end
   end
 
-  doc "Parse a header. Fails on a missing key, a version other than [version], a side other than [side], or a malformed value."
+  doc "Parse a header. Fails on a missing key, a version other than [version], a side other than [side] (any side when [side] is negative: worlds come in sizes now, and the seed says which), or a malformed value."
   fn parse_header(s : String, side : Int) : Result(Header, String) do
     let lines = String.split(s, "\n")
     match int_field(lines, "version") do
@@ -148,7 +191,7 @@ mod CubeForge.Save do
         else match int_field(lines, "side") do
           Err(e) -> Err(e)
           Ok(sd) ->
-            if sd != side do Err("side " ++ int_to_string(sd) ++ ", this world is " ++ int_to_string(side))
+            if side >= 0 && sd != side do Err("side " ++ int_to_string(sd) ++ ", this world is " ++ int_to_string(side))
             else match int_field(lines, "seed") do
               Err(e) -> Err(e)
               Ok(seed) -> match int_field(lines, "saved_at") do
@@ -161,7 +204,13 @@ mod CubeForge.Save do
                       Err(e) -> Err(e)
                       Ok(day) -> match floats_field(lines, "weather", weather_floats()) do
                         Err(e) -> Err(e)
-                        Ok(wx) -> Ok(Header(seed, at, p, inv, day, wx))
+                        Ok(wx) ->
+                          -- the window: absent in a slot written before streaming
+                          let oxz = match ints_field(lines, "origin", 2) do
+                            Ok(a) -> a
+                            Err(_) -> NativeArray.make_int(2, 0)
+                          end
+                          Ok(Header(seed, at, p, inv, day, wx, NativeArray.get_int(oxz, 0), NativeArray.get_int(oxz, 1), int_list_field(lines, "cached"), int_list_field(lines, "hashes")))
                       end
                     end
                   end
@@ -182,23 +231,22 @@ mod CubeForge.Save do
   fn chunk_path(d : String, slot : Int, i : Int) : String do
     slot_dir(d, slot) ++ "/chunk_" ++ (if i < 10 do "0" else "" end) ++ int_to_string(i) ++ ".bin"
   end
+  doc "A chunk file by world chunk coordinates: chunk_<cx>_<cz>.bin."
+  fn chunk_path_at(d : String, slot : Int, cx : Int, cz : Int) : String do
+    slot_dir(d, slot) ++ "/chunk_" ++ int_to_string(cx) ++ "_" ++ int_to_string(cz) ++ ".bin"
+  end
+  doc "A cached chunk's column blob: cols_<cx>_<cz>.bin, 1024 bytes."
+  fn cols_path_at(d : String, slot : Int, cx : Int, cz : Int) : String do
+    slot_dir(d, slot) ++ "/cols_" ++ int_to_string(cx) ++ "_" ++ int_to_string(cz) ++ ".bin"
+  end
   fn chunk_bytes() : Int do 65536 end
+  fn cols_bytes() : Int do 1024 end
   doc "The fungus and climate fields of a slot, one blob: species, vigour, reach, shown (one byte per column each), then the eased temperature and moisture (two bytes each). Optional: a slot without it loads its fields from the seed."
   fn fields_path(d : String, slot : Int) : String do slot_dir(d, slot) ++ "/fields.bin" end
   fn fields_bytes(side : Int) : Int do 8 * (side * 16) * (side * 16) end
 
   -- FileError is private to the stdlib, so the message names the path, not the cause.
   pfn err_text(what : String, path : String) : String do "cannot " ++ what ++ " " ++ path end
-
-  pfn write_chunks_go(d : String, slot : Int, chunks : Array.PVec(CubeForge.Chunk.Chunk), i : Int, n : Int) : Result(Unit, String) do
-    if i >= n do Ok(())
-    else
-      match File.write(chunk_path(d, slot, i), Bytes.to_string(Bytes.from_u8_arr(C.raw(Array.get(chunks, i))))) do
-        Ok(_) -> write_chunks_go(d, slot, chunks, i + 1, n)
-        Err(_) -> Err(err_text("write", chunk_path(d, slot, i)))
-      end
-    end
-  end
 
   pfn write_fields(d : String, slot : Int, fields : NativeU8Arr) : Result(Unit, String) do
     if NativeArray.length_u8(fields) == 0 do Ok(())
@@ -210,24 +258,73 @@ mod CubeForge.Save do
     end
   end
 
-  doc "Write a slot: the directory, every chunk file, the fields blob (when [fields] is not empty), then the header last. Stops at the first failure."
-  fn write_with_fields(d : String, slot : Int, chunks : Array.PVec(CubeForge.Chunk.Chunk), side : Int, h : Header, fields : NativeU8Arr) : Result(Unit, String) do
+  pfn write_bytes(path : String, a : NativeU8Arr) : Result(Unit, String) do
+    match File.write(path, Bytes.to_string(Bytes.from_u8_arr(a))) do
+      Ok(_) -> Ok(())
+      Err(_) -> Err(err_text("write", path))
+    end
+  end
+  -- The window's chunks by world coordinates: local i is world (ox + i % side, oz + i / side).
+  pfn write_window_go(d : String, slot : Int, chunks : Array.PVec(CubeForge.Chunk.Chunk), side : Int, ox : Int, oz : Int, i : Int) : Result(Unit, String) do
+    if i >= side * side do Ok(())
+    else
+      match write_bytes(chunk_path_at(d, slot, ox + i % side, oz + i / side), C.raw(Array.get(chunks, i))) do
+        Ok(_) -> write_window_go(d, slot, chunks, side, ox, oz, i + 1)
+        Err(e) -> Err(e)
+      end
+    end
+  end
+  pfn write_cache_go(d : String, slot : Int, cache : List(CubeForge.World.Evicted)) : Result(Unit, String) do
+    match cache do
+      Nil -> Ok(())
+      Cons(e, rest) ->
+        let cx = CubeForge.World.ev_cx(e)
+        let cz = CubeForge.World.ev_cz(e)
+        match write_bytes(chunk_path_at(d, slot, cx, cz), C.raw(CubeForge.World.ev_chunk(e))) do
+          Err(er) -> Err(er)
+          Ok(_) ->
+            match write_bytes(cols_path_at(d, slot, cx, cz), CubeForge.World.ev_cols(e)) do
+              Err(er) -> Err(er)
+              Ok(_) -> write_cache_go(d, slot, rest)
+            end
+        end
+    end
+  end
+  pfn cached_coords(cache : List(CubeForge.World.Evicted), acc : List(Int)) : List(Int) do
+    match cache do
+      Nil -> List.reverse(acc)
+      Cons(e, rest) -> cached_coords(rest, Cons(CubeForge.World.ev_hash(e), Cons(CubeForge.World.ev_cz(e), Cons(CubeForge.World.ev_cx(e), acc))))
+    end
+  end
+
+  doc "Write a slot: the directory, the window's chunk files by world coordinates, the cached chunks with their column blobs, the fields blob (when [fields] is not empty), then the header last with the origin and the cached list. Stops at the first failure."
+  fn write_world(d : String, slot : Int, chunks : Array.PVec(CubeForge.Chunk.Chunk), side : Int, ox : Int, oz : Int,
+                 cache : List(CubeForge.World.Evicted), hashes : List(Int), h : Header, fields : NativeU8Arr) : Result(Unit, String) do
     match Dir.mkdir_p(slot_dir(d, slot)) do
       Err(_) -> Err(err_text("create", slot_dir(d, slot)))
       Ok(_) ->
-        match write_chunks_go(d, slot, chunks, 0, side * side) do
+        match write_window_go(d, slot, chunks, side, ox, oz, 0) do
           Err(e) -> Err(e)
           Ok(_) ->
-            match write_fields(d, slot, fields) do
+            match write_cache_go(d, slot, cache) do
               Err(e) -> Err(e)
               Ok(_) ->
-                match File.write(header_path(d, slot), encode_header(h, side)) do
-                  Ok(_) -> Ok(())
-                  Err(_) -> Err(err_text("write", header_path(d, slot)))
+                match write_fields(d, slot, fields) do
+                  Err(e) -> Err(e)
+                  Ok(_) ->
+                    match File.write(header_path(d, slot), encode_header(with_window(h, ox, oz, cached_coords(cache, Nil), hashes), side)) do
+                      Ok(_) -> Ok(())
+                      Err(_) -> Err(err_text("write", header_path(d, slot)))
+                    end
                 end
             end
         end
     end
+  end
+
+  doc "Write a slot at origin 0 with no cache and a fields blob: the pre-streaming shape, kept for the tests."
+  fn write_with_fields(d : String, slot : Int, chunks : Array.PVec(CubeForge.Chunk.Chunk), side : Int, h : Header, fields : NativeU8Arr) : Result(Unit, String) do
+    write_world(d, slot, chunks, side, 0, 0, Nil, Nil, h, fields)
   end
 
   doc "Write a slot without a fields blob."
@@ -254,25 +351,21 @@ mod CubeForge.Save do
   end
 
   -- Sizes come from reading the file: File.stat's record is private to the stdlib.
-  pfn check_chunks_go(d : String, slot : Int, i : Int, n : Int) : Result(Unit, String) do
-    if i >= n do Ok(())
+  pfn check_window_go(d : String, slot : Int, side : Int, ox : Int, oz : Int, i : Int) : Result(Unit, String) do
+    if i >= side * side do Ok(())
     else
-      match File.read(chunk_path(d, slot, i)) do
-        Err(_) -> Err(err_text("read", chunk_path(d, slot, i)))
-        Ok(s) ->
-          let size = String.byte_size(s)
-          if size != chunk_bytes() do Err("chunk " ++ int_to_string(i) ++ " is " ++ int_to_string(size) ++ " bytes")
-          else check_chunks_go(d, slot, i + 1, n) end
+      match read_chunk_any(d, slot, ox + i % side, oz + i / side) do
+        Ok(_) -> check_window_go(d, slot, side, ox, oz, i + 1)
+        Err(e) -> Err(e)
       end
     end
   end
-
-  doc "Validate a slot without loading it: the header parses and every chunk file has exactly [chunk_bytes]."
+  doc "Validate a slot without loading it: the header parses and every chunk file of its window reads at exactly [chunk_bytes]."
   fn check(d : String, slot : Int, side : Int) : Result(Header, String) do
     match read_header(d, slot, side) do
       Err(e) -> Err(e)
       Ok(h) ->
-        match check_chunks_go(d, slot, 0, side * side) do
+        match check_window_go(d, slot, if side < 0 do 8 else side end, h_origin_x(h), h_origin_z(h), 0) do
           Ok(_) -> Ok(h)
           Err(e) -> Err(e)
         end
@@ -291,6 +384,56 @@ mod CubeForge.Save do
       end
     end
   end
+
+  doc "The chunk file for world chunk (cx, cz): by its coordinates, else -- a slot written before streaming -- by its index at origin 0. What the water actors read."
+  fn read_chunk_any(d : String, slot : Int, cx : Int, cz : Int) : Result(CubeForge.Chunk.Chunk, String) do
+    match File.read(chunk_path_at(d, slot, cx, cz)) do
+      Ok(s) ->
+        let a = Bytes.to_u8_arr(Bytes.from_string(s))
+        if NativeArray.length_u8(a) != chunk_bytes() do Err("chunk " ++ int_to_string(cx) ++ "," ++ int_to_string(cz) ++ " is " ++ int_to_string(NativeArray.length_u8(a)) ++ " bytes")
+        else Ok(C.of_raw(a)) end
+      Err(_) ->
+        if cx >= 0 && cx < 8 && cz >= 0 && cz < 8 do read_chunk(d, slot, cx + 8 * cz)
+        else Err(err_text("read", chunk_path_at(d, slot, cx, cz))) end
+    end
+  end
+  doc "A cached chunk's column blob, or an empty array when it is missing or the wrong size."
+  fn read_cols(d : String, slot : Int, cx : Int, cz : Int) : NativeU8Arr do
+    match File.read(cols_path_at(d, slot, cx, cz)) do
+      Err(_) -> NativeArray.make_u8(0, 0)
+      Ok(s) ->
+        let a = Bytes.to_u8_arr(Bytes.from_string(s))
+        if NativeArray.length_u8(a) != cols_bytes() do NativeArray.make_u8(0, 0) else a end
+    end
+  end
+  pfn read_window_go(d : String, slot : Int, side : Int, ox : Int, oz : Int, i : Int, acc : List(CubeForge.Chunk.Chunk)) : Result(List(CubeForge.Chunk.Chunk), String) do
+    if i < 0 do Ok(acc)
+    else
+      match read_chunk_any(d, slot, ox + i % side, oz + i / side) do
+        Err(e) -> Err(e)
+        Ok(c) -> read_window_go(d, slot, side, ox, oz, i - 1, Cons(c, acc))
+      end
+    end
+  end
+  doc "Every chunk of the window at origin (ox, oz), in grid order."
+  fn read_window(d : String, slot : Int, side : Int, ox : Int, oz : Int) : Result(Array.PVec(CubeForge.Chunk.Chunk), String) do
+    match read_window_go(d, slot, side, ox, oz, side * side - 1, Nil) do
+      Ok(l) -> Ok(Array.from_list(l))
+      Err(e) -> Err(e)
+    end
+  end
+  pfn read_cache_go(d : String, slot : Int, coords : List(Int), acc : List(CubeForge.World.Evicted)) : List(CubeForge.World.Evicted) do
+    match coords do
+      Cons(cx, Cons(cz, Cons(gh, rest))) ->
+        match read_chunk_any(d, slot, cx, cz) do
+          Ok(c) -> read_cache_go(d, slot, rest, Cons(CubeForge.World.Evicted(cx, cz, c, read_cols(d, slot, cx, cz), gh), acc))
+          Err(_) -> read_cache_go(d, slot, rest, acc)
+        end
+      _ -> acc
+    end
+  end
+  doc "The cached chunks a header lists, read back; one that cannot be read is dropped (it regenerates)."
+  fn read_cache(d : String, slot : Int, coords : List(Int)) : List(CubeForge.World.Evicted) do read_cache_go(d, slot, coords, Nil) end
 
   doc "Read one chunk file of a slot."
   fn read_chunk(d : String, slot : Int, i : Int) : Result(CubeForge.Chunk.Chunk, String) do

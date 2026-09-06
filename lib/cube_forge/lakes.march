@@ -15,13 +15,31 @@
 -- height is under a lake whose surface is that level, and every column of one
 -- basin gets the same level by construction.
 --
--- The table is a pure function of the seed and the world's size, so the water
--- actors (which rebuild their chunks from the seed, and cannot be sent an
--- array -- GAPS G44) compute it themselves.
+-- The table is a pure function of the seed and the tile, so the water actors
+-- (which rebuild their chunks from the seed, and cannot be sent an array --
+-- GAPS G44) compute it themselves.
+--
+-- A TILE is a square of the world the pour runs over: tile (tx, tz) covers
+-- world columns 128tx .. 128tx+127, and its border drains. The world is
+-- unbounded (chunk streaming), so the pour cannot see all of it; a basin that
+-- crosses a tile seam is cut there and never fills. A Tile carries its origin
+-- so a chunk reads it by world column.
 mod CubeForge.Lakes do
 
   alias CubeForge.Noise as N
   alias CubeForge.Chunk as C
+
+  -- A poured table: origin x and z in blocks, side in blocks, then the levels
+  -- and pour flags end to end (see pour).
+  type Tile = Tile(Int, Int, Int, NativeU8Arr)
+
+  doc "Side of a tile in blocks: eight chunks, the window."
+  fn tile_size() : Int do 128 end
+  fn tile_ox(t : Tile) : Int do match t do Tile(ox, _, _, _) -> ox end end
+  fn tile_oz(t : Tile) : Int do match t do Tile(_, oz, _, _) -> oz end end
+  fn tile_side(t : Tile) : Int do match t do Tile(_, _, s, _) -> s end end
+  fn tile_table(t : Tile) : NativeU8Arr do match t do Tile(_, _, _, a) -> a end end
+  pfn floor_div(a : Int, b : Int) : Int do if a >= 0 do a / b else (a - b + 1) / b end end
 
   -- The array holds, per column, a pending spill level (< done_mark()) or a
   -- settled one (+ done_mark(), + pour_mark() when the column is a basin's
@@ -209,37 +227,61 @@ mod CubeForge.Lakes do
   -- into, so a dip in the sea bed that drains to the border below sea level
   -- is not a basin. It was: a "lake" at 55 in a sea at 62 was a column
   -- filled to 55, a hole in the ocean with walls of water.
-  pfn heights_go(hs : NativeIntArr, side : Int, seed : Int, i : Int) : NativeIntArr do
+  pfn heights_go(hs : NativeIntArr, side : Int, seed : Int, ox : Int, oz : Int, i : Int) : NativeIntArr do
     if i >= side * side do hs
-    else heights_go(NativeArray.set_int(hs, i, Math.max_int(N.height(i % side, i / side, seed), C.sea_level())), side, seed, i + 1) end
+    else heights_go(NativeArray.set_int(hs, i, Math.max_int(N.height(ox + i % side, oz + i / side, seed), C.sea_level())), side, seed, ox, oz, i + 1) end
   end
   pfn to_u8_go(lv : NativeIntArr, out : NativeU8Arr, i : Int, count : Int) : NativeU8Arr do
     if i >= count do out
     else to_u8_go(lv, NativeArray.set_u8(out, i, Math.min_int(at(lv, i), 255)), i + 1, count) end
   end
 
-  doc "Lake surface levels for a world of [n] chunks a side at [seed]: one byte per column, 0 where there is no lake, followed by one byte per column that is 1 at a pour point (see notch_at). The table every chunk and every water actor generates against."
-  fn levels(seed : Int, n : Int) : NativeU8Arr do
-    let side = 16 * n
-    let lv = pour(heights_go(NativeArray.make_int(side * side, 0), side, seed, 0), side)
-    to_u8_go(lv, NativeArray.make_u8(2 * side * side, 0), 0, 2 * side * side)
+  doc "The pour over the square of [side] blocks at world origin (ox, oz): one byte per column with the lake surface level (0 for none), then one byte per column that is 1 at a pour point (see notch_at)."
+  fn pour_at(seed : Int, ox : Int, oz : Int, side : Int) : Tile do
+    let lv = pour(heights_go(NativeArray.make_int(side * side, 0), side, seed, ox, oz, 0), side)
+    Tile(ox, oz, side, to_u8_go(lv, NativeArray.make_u8(2 * side * side, 0), 0, 2 * side * side))
   end
 
-  doc "No lakes: the empty table, which level_at reads as 0 everywhere."
-  fn none() : NativeU8Arr do NativeArray.make_u8(0, 0) end
+  doc "The table for a world of [n] chunks a side at origin 0: what a bounded world of that size generates against, and the tests."
+  fn levels(seed : Int, n : Int) : Tile do pour_at(seed, 0, 0, 16 * n) end
 
-  doc "The lake level at world column (wx, wz), 0 outside the world, off the table, or where there is none."
-  fn level_at(lk : NativeU8Arr, n : Int, wx : Int, wz : Int) : Int do
-    let side = 16 * n
-    if NativeArray.length_u8(lk) == 0 || wx < 0 || wz < 0 || wx >= side || wz >= side do 0
-    else NativeArray.get_u8(lk, wx + side * wz) end
+  doc "The tile (tx, tz): world columns 128tx .. 128tx+127. What a streamed chunk generates against."
+  fn tile(seed : Int, tx : Int, tz : Int) : Tile do pour_at(seed, tile_size() * tx, tile_size() * tz, tile_size()) end
+
+  doc "The tile world chunk (cx, cz) lies in."
+  fn tile_of_chunk(seed : Int, cx : Int, cz : Int) : Tile do tile(seed, floor_div(cx, 8), floor_div(cz, 8)) end
+  doc "Does tile [t] cover world chunk (cx, cz)."
+  fn tile_holds(t : Tile, cx : Int, cz : Int) : Bool do
+    match t do
+      Tile(ox, oz, side, _) -> side > 0 && 16 * cx >= ox && 16 * cx < ox + side && 16 * cz >= oz && 16 * cz < oz + side
+    end
+  end
+  doc "Are world chunks (ax, az) and (bx, bz) in the same tile: whether one pour serves both."
+  fn same_tile(ax : Int, az : Int, bx : Int, bz : Int) : Bool do floor_div(ax, 8) == floor_div(bx, 8) && floor_div(az, 8) == floor_div(bz, 8) end
+
+  doc "No lakes: the empty tile, which level_at reads as 0 everywhere."
+  fn none() : Tile do Tile(0, 0, 0, NativeArray.make_u8(0, 0)) end
+
+  doc "The lake level at world column (wx, wz), 0 off the tile or where there is none."
+  fn level_at(t : Tile, wx : Int, wz : Int) : Int do
+    match t do
+      Tile(ox, oz, side, lk) ->
+        let x = wx - ox
+        let z = wz - oz
+        if side == 0 || x < 0 || z < 0 || x >= side || z >= side do 0
+        else NativeArray.get_u8(lk, x + side * z) end
+    end
   end
 
-  doc "Is world column (wx, wz) a pour point -- the notch a lake overflows through; 0 off the table."
-  fn notch_at(lk : NativeU8Arr, n : Int, wx : Int, wz : Int) : Bool do
-    let side = 16 * n
-    if NativeArray.length_u8(lk) < 2 * side * side || wx < 0 || wz < 0 || wx >= side || wz >= side do false
-    else NativeArray.get_u8(lk, side * side + wx + side * wz) == 1 end
+  doc "Is world column (wx, wz) a pour point -- the notch a lake overflows through; false off the tile."
+  fn notch_at(t : Tile, wx : Int, wz : Int) : Bool do
+    match t do
+      Tile(ox, oz, side, lk) ->
+        let x = wx - ox
+        let z = wz - oz
+        if side == 0 || NativeArray.length_u8(lk) < 2 * side * side || x < 0 || z < 0 || x >= side || z >= side do false
+        else NativeArray.get_u8(lk, side * side + x + side * z) == 1 end
+    end
   end
 
   pfn count_go(lk : NativeU8Arr, i : Int, count : Int, cols : Int, top : Int) : Int do
@@ -250,11 +292,17 @@ mod CubeForge.Lakes do
     end
   end
   doc "Lake columns * 1000 + the highest lake surface, for the stats line."
-  fn summary(lk : NativeU8Arr) : Int do count_go(lk, 0, NativeArray.length_u8(lk) / 2, 0, 0) end
+  fn summary(t : Tile) : Int do
+    let lk = tile_table(t)
+    count_go(lk, 0, NativeArray.length_u8(lk) / 2, 0, 0)
+  end
   pfn notches_go(lk : NativeU8Arr, i : Int, count : Int, acc : Int) : Int do
     if i >= count do acc else notches_go(lk, i + 1, count, acc + NativeArray.get_u8(lk, count + i)) end
   end
   doc "How many pour points the table holds: the lakes' outlets."
-  fn notches(lk : NativeU8Arr) : Int do notches_go(lk, 0, NativeArray.length_u8(lk) / 2, 0) end
+  fn notches(t : Tile) : Int do
+    let lk = tile_table(t)
+    notches_go(lk, 0, NativeArray.length_u8(lk) / 2, 0)
+  end
 
 end

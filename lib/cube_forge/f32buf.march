@@ -51,13 +51,7 @@ mod CubeForge.F32Buf do
     end
   end
 
-  -- Copy [n] floats from src into dst (dst must be unique for in-place set).
-  pfn copy_into(src : NativeF32Arr, dst : NativeF32Arr, i : Int, n : Int) : NativeF32Arr do
-    if i >= n do dst
-    else copy_into(src, NativeArray.set_f32(dst, i, NativeArray.get_f32(src, i)), i + 1, n) end
-  end
-
-  -- One memcpy into the fresh array (cf_f32_blit), not copy_into: that was a
+  -- One memcpy into the fresh array (cf_f32_blit), not a March loop: that was a
   -- March-level set per float, and a section mesh of 27k floats grows three
   -- times on its way up, so the copies were costing more than the mesh.
   pfn grow(d : NativeF32Arr, n : Int, new_cap : {Int | _ >= 0}) : NativeF32Arr do
