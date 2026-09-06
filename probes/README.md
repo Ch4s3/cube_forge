@@ -16,3 +16,6 @@ Small standalone forge projects / files that reproduce each finding in
 - `oneline_match.march` — (control) one-line match with tuple patterns parses
 - `actor_probe/` — control: native arrays in actor state, List reply, Actor.call inside pmap all work
 - `probe_ffi5/` — G51, an extern returning its borrowed argument is a use-after-free; `consume` fixes it
+- `array_field_drop.march` — G71 control: the same cell shape in the MAIN module frees correctly (6 MB resident)
+- `drop_xmod/` — G71/G72/G73: a library-module variant with array fields churned by bare and qualified name (WHICH=1,2), a persistent vector replacing 64 KB elements (WHICH=4), a closure capturing 1 MB (WHICH=5); run with `/usr/bin/time -l`
+

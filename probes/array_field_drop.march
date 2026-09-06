@@ -1,0 +1,26 @@
+-- G71: a boxed variant whose fields are native arrays is freed shallowly.
+-- Replacing such a cell in a loop leaks every array it held. Run with
+-- /usr/bin/time -l: 2,000 iterations of a 1 MB array should stay near the
+-- size of one array; a leak shows as ~2 GB resident.
+mod ArrayFieldDrop do
+  type Cell = Cell(NativeU8Arr, Int)
+  type Wrap = Wrap(Cell, Int)
+
+  pfn tag(c : Cell) : Int do match c do Cell(_, n) -> n end end
+
+  -- replace the cell each step: the old one dies by a bare dec_rc
+  pfn go(c : Cell, i : Int) : Int do
+    if i == 0 do tag(c)
+    else go(Cell(NativeArray.make_u8(1048576, 0), i), i - 1) end
+  end
+
+  -- the same through a wrapping variant, the shape Scene -> Field has
+  pfn go2(w : Wrap, i : Int) : Int do
+    if i == 0 do match w do Wrap(c, _) -> tag(c) end
+    else go2(Wrap(Cell(NativeArray.make_u8(1048576, 0), i), i), i - 1) end
+  end
+
+  fn main() : Int do
+    go(Cell(NativeArray.make_u8(16, 0), 0), 2000) + go2(Wrap(Cell(NativeArray.make_u8(16, 0), 0), 0), 2000)
+  end
+end
