@@ -453,13 +453,13 @@ mod CubeForge.Test.Flow do
   describe "Loading a sim from a save slot" do
     test "the sim holds the file's water and finds its spring" do
       let c = write_lake_slot(2)
-      let sim = Test.assert_ok(Water.load_sim_from_slot(0, 0, 1, slot_dir(), 2), "load")
+      let sim = Test.assert_ok(Water.load_sim_from_slot(0, 0, 1, 7, slot_dir(), 2), "load")
       Test.assert_eq_int(Water.volume(sim), Water.volume(Water.new_sim(c, Water.empty_edges())), "same volume as the chunk")
       Test.assert_eq_int(Water.spring_count(sim), 1, "one spring above sea level")
     end
     test "a missing slot is an error" do
       let _ = Dir.rm_rf(Save.slot_dir(slot_dir(), 4))
-      let _ = Test.assert_err(Water.load_sim_from_slot(0, 0, 1, slot_dir(), 4), "no such slot")
+      let _ = Test.assert_err(Water.load_sim_from_slot(0, 0, 1, 7, slot_dir(), 4), "no such slot")
       ()
     end
   end

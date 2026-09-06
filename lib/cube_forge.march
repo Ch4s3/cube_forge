@@ -72,7 +72,7 @@ mod CubeForge do
     end
   end
   -- A slot read from disk before the session is built, or nothing (generate from the seed).
-  type Loaded = Loaded(CubeForge.Save.Header, Array.PVec(CubeForge.Chunk.Chunk)) | NoLoad
+  type Loaded = Loaded(CubeForge.Save.Header, Array.PVec(CubeForge.Chunk.Chunk), List(CubeForge.World.Evicted)) | NoLoad
   pfn is_loaded(l : Loaded) : Bool do
     match l do
       NoLoad -> false
@@ -1716,7 +1716,7 @@ mod CubeForge do
       Err(_) -> Weather.phase_to_floats(Weather.start())
     end
     let h = Save.header_new(seed, DateTime.now(), Player.to_floats(p), Inv.to_ints(inv), day, wx)
-    match Save.write_with_fields(Save.dir(), slot, World.chunks(w), World.side(w), h, fields_blob(w, bio, myc)) do
+    match Save.write_world(Save.dir(), slot, World.chunks(w), World.side(w), World.origin_x(w), World.origin_z(w), World.cache(w), h, fields_blob(w, bio, myc)) do
       Ok(_) ->
         println("saved slot " ++ int_to_string(slot) ++ " in " ++ ms(Win.time() -. ts0) ++ ", world hash " ++ int_to_string(World.state_hash(w)))
         true
@@ -1746,13 +1746,13 @@ mod CubeForge do
         println("load slot " ++ int_to_string(slot) ++ " failed: " ++ e ++ "; generating instead")
         NoLoad
       Ok(h) ->
-        match Save.read_chunks(Save.dir(), slot, CubeForge.Noise.size_of(Save.h_seed(h))) do
+        match Save.read_window(Save.dir(), slot, World.size(), Save.h_origin_x(h), Save.h_origin_z(h)) do
           Err(e) ->
             println("load slot " ++ int_to_string(slot) ++ " failed: " ++ e ++ "; generating instead")
             NoLoad
           Ok(cs) ->
             println("loaded slot " ++ int_to_string(slot) ++ " (seed " ++ int_to_string(Save.h_seed(h)) ++ ") in " ++ int_to_string(System.monotonic_time() - tl0) ++ " ms, world hash " ++ int_to_string(World.state_hash(World.from_chunks(cs, CubeForge.Noise.size_of(Save.h_seed(h))))))
-            Loaded(h, cs)
+            Loaded(h, cs, Save.read_cache(Save.dir(), slot, Save.h_cached(h)))
         end
     end
   end
@@ -2725,11 +2725,12 @@ mod CubeForge do
   -- Reseed every water actor for a new world. The pool is created once, in
   -- `main`, and reused across sessions.
   -- The slot variant: each actor reads its own chunk file (see Water.load_sim_from_slot).
-  pfn reload_water_slot(pids, i : Int, n : Int, seed : Int, d : String, slot : Int) : Unit do
+  pfn reload_water_slot(pids, i : Int, n : Int, seed : Int, d : String, slot : Int, ox : Int, oz : Int) : Unit do
     if i < 0 do ()
     else
-      Water.send_load_slot(Array.get(pids, i), i % n, i / n, n, seed, d, slot)
-      reload_water_slot(pids, i - 1, n, seed, d, slot)
+      -- the actor's chunk by WORLD coordinates: the slot's files are named by them
+      Water.send_load_slot(Array.get(pids, i), ox + i % n, oz + i / n, n, seed, d, slot)
+      reload_water_slot(pids, i - 1, n, seed, d, slot, ox, oz)
     end
   end
   pfn reload_water(pids, i : Int, n : Int, seed : Int) : Unit do
@@ -2748,7 +2749,7 @@ mod CubeForge do
   """
   pfn loaded_seed(loaded : Loaded, start : Start) : Int do
     match loaded do
-      Loaded(h, _) -> Save.h_seed(h)
+      Loaded(h, _, _) -> Save.h_seed(h)
       NoLoad -> match start do
         FromSeed(s) -> s
         _ -> 0
@@ -2775,7 +2776,7 @@ mod CubeForge do
     end
     let t1 = System.monotonic_time()
     let world_dark = match loaded do
-      Loaded(_, cs) -> World.from_chunks(cs, n)
+      Loaded(h, cs, ca) -> World.with_cache(World.with_origin(World.from_chunks(cs, n), Save.h_origin_x(h), Save.h_origin_z(h)), ca, NativeArray.make_u8(n * n, 1))
       NoLoad -> World.generate(n, seed, workers)
     end
     -- stage 1a: the climate and the wild fungus. The biome field is pure over
@@ -2787,7 +2788,7 @@ mod CubeForge do
     -- A save carries the two fields and the shown species; a slot without them
     -- (or a new world) builds the climate from the terrain and seeds wild fungus.
     let fields = match loaded do
-      Loaded(_, _) -> read_fields_or_empty(start_slot(start), n)
+      Loaded(_, _, _) -> read_fields_or_empty(start_slot(start), n)
       NoLoad -> NativeArray.make_u8(0, 0)
     end
     let have_fields = NativeArray.length_u8(fields) > 0
@@ -2867,11 +2868,11 @@ mod CubeForge do
         Player.with_pitch(Player.new(int_to_float(spawn_x) +. 0.5, y0, int_to_float(spawn_z) +. 0.5), int_to_float(Env.get_int("CF_PITCH", -25)) /. 100.0)   -- CF_PITCH: spawn pitch in hundredths of a radian, for headless looks at the ground
       end
       let player = match loaded do
-        Loaded(h, _) -> Player.of_floats(Save.h_player(h))
+        Loaded(h, _, _) -> Player.of_floats(Save.h_player(h))
         NoLoad -> fresh_player
       end
       let inv0 = match loaded do
-        Loaded(h, _) -> Inv.of_ints(Save.h_inventory(h))
+        Loaded(h, _, _) -> Inv.of_ints(Save.h_inventory(h))
         NoLoad -> Inv.new()
       end
       if Env.get_int("CF_ALLOC_PROBE", 0) == 1 do alloc_probe(world, proj) else () end
@@ -2881,7 +2882,7 @@ mod CubeForge do
       -- so this is a cost choice (64 messages, not 64 kills + 64 spawns + 64
       -- loads) and not a workaround.
       let tw0 = Win.time()
-      if is_loaded(loaded) do reload_water_slot(pids, n * n - 1, n, seed, Save.dir(), start_slot(start))
+      if is_loaded(loaded) do reload_water_slot(pids, n * n - 1, n, seed, Save.dir(), start_slot(start), World.origin_x(world), World.origin_z(world))
       else reload_water(pids, n * n - 1, n, seed) end
       println("reloaded " ++ int_to_string(n * n) ++ " water actors in " ++ ms(Win.time() -. tw0) ++ " (loads run asynchronously)")
       let scene = Scene(world, counts, F32Buf.new(256), Ray.miss(), Ui(inv0, F32Buf.new(2048), F32Buf.new(256), -1, F32Buf.new(2048), "", Effects.new(), "", -1, ""), pids, spring_flags(world, biome0, 0, n, NativeArray.make_int(n * n, 0), true), Array.from_list(meshes), biome0, CubeForge.Light.marks_new(), myc0)
@@ -2889,13 +2890,13 @@ mod CubeForge do
       -- Seed first, then the saved phase, so a fresh phase never overwrites it.
       Weather.send_seed(wxpid, seed)
       match loaded do
-        Loaded(h, _) -> Weather.send_restore(wxpid, Weather.phase_of_floats(Save.h_weather(h)))
+        Loaded(h, _, _) -> Weather.send_restore(wxpid, Weather.phase_of_floats(Save.h_weather(h)))
         NoLoad -> ()
       end
       -- The sun: a new game keeps the process clock (as it always did), a load
       -- continues from the saved seconds-into-the-day.
       let day0 = match loaded do
-        Loaded(h, _) -> Save.h_day(h)
+        Loaded(h, _, _) -> Save.h_day(h)
         NoLoad -> t4
       end
       let menu0 = if first && Env.get_int("CF_AUTOSTART", 0) == 0 do Menu.new_start(seed, settings0) else Menu.new(seed, settings0) end
