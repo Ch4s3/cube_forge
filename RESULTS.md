@@ -2051,3 +2051,38 @@ the stack only: the rest of a `get` -- `trie_get`, `get` itself, the tail
 length walk, and the cache misses a 50-hop list walk means -- did not show
 under one name. A structure change the profile rated at 2% took a third off
 the worst frame. 438 tests.
+
+## The relight reads opacity from the occupancy field (2026-09-05)
+
+The sweep's remaining cost was `World.block_at` per neighbour, to learn
+whether the neighbour is air, water (opacity 2), leaves (6) or opaque. The
+occupancy field already held a byte per voxel for the shadow texture; it now
+holds `Light.occ_value`: 255 where the block is opaque (what the shader, the
+AO and the coarse counts read as solid, unchanged), else the block's opacity.
+The sweep reads that byte and never fetches the block.
+
+What made it correct: the field has to be complete. Two attempts said so.
+The first wrote the finer byte only where `set_occupied` was called and read
+water as air wherever the water actors had applied cells or leaf decay had
+run -- the relight-equals-full-flood tests failed and the mesh hash moved. The
+second used the byte only for solid neighbours and gained nothing: the reads
+are on air and water. So every block write now keeps the byte -- there are
+exactly two writers, `World.set_block` and `World.set_cells`, and
+`set_occupied` is gone -- and every World constructor builds the field, so a
+relight never runs against a stale one.
+
+| | before | after |
+|---|---|---|
+| tree edit, relight | 1.8-3.4 ms | **1.3-2.2 ms** |
+| frame budget, worst frame | 5.7-6.6 ms | **5.75 ms** |
+| mesh hash at frame 30 | 380281180 | 380281180 |
+
+A side effect worth knowing: a bush edit now pays ~0.3 ms it did not before.
+Its leaves were written with `set_block` alone and never touched the
+occupancy field; now every edit's first write to that shared 4 MB field is a
+copy-on-write. Trees paid it already through `set_occupied`.
+
+Not kept from this stretch: a VAO per mesh slot (six alternating runs were
+noise, so 192 attribute-pointer sets a frame are not where a quiet frame's
+time is on this driver). Kept: the shim's `getenv("CF_DEBUG")` on every draw
+call is now read once.

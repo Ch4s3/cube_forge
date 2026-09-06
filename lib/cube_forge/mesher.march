@@ -188,7 +188,7 @@ mod CubeForge.Mesher do
     let wx = oxi + x
     let wz = ozi + z
     if wx < 0 || wx >= 128 || y < 0 || y >= 256 || wz < 0 || wz >= 128 do false
-    else NativeArray.get_u8(occ, CubeForge.Light.occ_index(wx, y, wz)) != 0 end
+    else NativeArray.get_u8(occ, CubeForge.Light.occ_index(wx, y, wz)) == CubeForge.Light.occ_solid() end
   end
 
   pfn corner_pack(la : NativeU8Arr, lb : NativeU8Arr, sps : NativeU8Arr, occ : NativeU8Arr, oxi : Int, ozi : Int, nx : Int, ny : Int, nz : Int, aux : Int, auz : Int, avy : Int, avz : Int) : Int do

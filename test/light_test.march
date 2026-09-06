@@ -58,7 +58,7 @@ mod CubeForge.Test.Light do
       let lx = i % 16
       let ly = i / 256
       let lz = (i / 16) % 16
-      let want = if L.is_opaque(C.get_idx(c, i)) do L.occ_solid() else 0 end
+      let want = L.occ_value(C.get_idx(c, i))
       if NativeArray.get_u8(o, L.occ_index(16 * cx + lx, ly, 16 * cz + lz)) != want do i
       else occ_mismatch(o, c, cx, cz, i + 1) end
     end
@@ -361,7 +361,7 @@ mod CubeForge.Test.Light do
       -- water is transparent to light, so it must not cast a shadow
       let ww = CubeForge.World.set_block(slab_world(8), 40, 20, 40, C.water())
       let wo = L.occupancy(ww)
-      Test.assert_eq_int(NativeArray.get_u8(wo, L.occ_index(40, 20, 40)), 0, "water does not occlude")
+      Test.assert_true(NativeArray.get_u8(wo, L.occ_index(40, 20, 40)) != L.occ_solid(), "water does not occlude: its byte is its opacity, not solid")
       Test.assert_true(NativeArray.get_u8(o, L.occ_index(64, 0, 64)) == L.occ_solid(), "bedrock depth of real terrain occludes")
     end
 

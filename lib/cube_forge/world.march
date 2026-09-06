@@ -33,12 +33,13 @@ mod CubeForge.World do
   doc "Build the occupancy field from the current blocks."
   fn rebuild_occupancy(w : World) : World do set_occupancy(w, CubeForge.Light.occupancy(w)) end
 
-  doc "Update one voxel of the occupancy field after a block edit."
-  fn set_occupied(w : World, x : Int, y : Int, z : Int, solid : Bool) : World do
-    if x < 0 || x >= 128 || y < 0 || y >= 256 || z < 0 || z >= 128 do w
-    else match w do World(cs, la, lb, o, sh, n, mo) ->
-      World(cs, la, lb, NativeArray.set_u8(o, CubeForge.Light.occ_index(x, y, z), if solid do CubeForge.Light.occ_solid() else 0 end), sh, n, mo) end
-    end
+  -- The occupancy byte of one voxel, kept by set_block and set_cells: every
+  -- block write in the world goes through one of those two, so the field is
+  -- always the blocks' opacity (Light.occ_value) and the light sweep can read
+  -- a neighbour's opacity from it instead of fetching the block (GAPS G71).
+  pfn occ_write(o : NativeU8Arr, x : Int, y : Int, z : Int, id : Int) : NativeU8Arr do
+    if x < 0 || x >= 128 || y < 0 || y >= 256 || z < 0 || z >= 128 do o
+    else NativeArray.set_u8(o, CubeForge.Light.occ_index(x, y, z), CubeForge.Light.occ_value(id)) end
   end
 
   doc "Replace the world's skylight field."
@@ -143,8 +144,20 @@ mod CubeForge.World do
       Cons(v, rest) -> apply_cells(C.set_idx(c, v / 256, v % 256), rest)
     end
   end
+  -- The same cells into the occupancy field: a chunk index is lx + 16 * (lz + 16 * ly).
+  pfn occ_cells(o : NativeU8Arr, cx : Int, cz : Int, cells : List(Int)) : NativeU8Arr do
+    match cells do
+      Nil -> o
+      Cons(v, rest) ->
+        let i = v / 256
+        occ_cells(occ_write(o, 16 * cx + i % 16, i / 256, 16 * cz + (i / 16) % 16, v % 256), cx, cz, rest)
+    end
+  end
   fn set_cells(w : World, cx : Int, cz : Int, cells : List(Int)) : World do
-    if in_bounds(w, cx, cz) do set_chunk(w, cx, cz, apply_cells(chunk_at(w, cx, cz), cells)) else w end
+    if !in_bounds(w, cx, cz) do w
+    else match w do World(cs, la, lb, o, sh, n, mo) ->
+      World(CubeForge.Tree.set(cs, cx + n * cz, apply_cells(CubeForge.Tree.get(cs, cx + n * cz), cells)), la, lb, occ_cells(o, cx, cz, cells), sh, n, mo) end
+    end
   end
 
   -- First column (x + 4096 * z) holding water at sea level, or -1. Used by the scripted swim test.
@@ -210,7 +223,8 @@ mod CubeForge.World do
     let cx = floor_div16(x)
     let cz = floor_div16(z)
     if y < 0 || y >= 256 || !in_bounds(w, cx, cz) do w
-    else set_chunk(w, cx, cz, C.set(chunk_at(w, cx, cz), mod16(x), y, mod16(z), id)) end
+    else match w do World(cs, la, lb, o, sh, n, mo) ->
+      World(CubeForge.Tree.set(cs, cx + n * cz, C.set(CubeForge.Tree.get(cs, cx + n * cz), mod16(x), y, mod16(z), id)), la, lb, occ_write(o, x, y, z, id), sh, n, mo) end end
   end
 
   -- Grid coordinates in row-major order, as (cx, cz) packed into one Int: cx + n * cz.
@@ -224,23 +238,23 @@ mod CubeForge.World do
     -- the lake table once, read by every chunk (a read only: no copy -- GAPS G68)
     let lk = CubeForge.Lakes.levels(seed, n)
     let chunks = List.pmap_n(coords(n), fn i -> C.generate_lakes(16 * (i % n), 16 * (i / n), seed, lk, n), workers)
-    World(CubeForge.Tree.from_list(chunks), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), shown_new(), n, default_models())
+    rebuild_occupancy(World(CubeForge.Tree.from_list(chunks), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), shown_new(), n, default_models()))
   end
 
-  doc "A world over chunks read from a save, with empty light and occupancy fields (rebuilt by the caller)."
+  doc "A world over chunks read from a save, with empty light fields (rebuilt by the caller); the occupancy field is built here, as every constructor does."
   fn from_chunks(chunks : Array.PVec(CubeForge.Chunk.Chunk), n : Int) : World do
-    World(CubeForge.Tree.from_list(Array.to_list(chunks)), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), shown_new(), n, default_models())
+    rebuild_occupancy(World(CubeForge.Tree.from_list(Array.to_list(chunks)), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), shown_new(), n, default_models()))
   end
   doc "The chunk array, in grid order, as a PVec for the save format and tests. The World itself keeps a Tree (GAPS G71); this converts."
   fn chunks(w : World) : Array.PVec(CubeForge.Chunk.Chunk) do match w do World(cs, _, _, _, _, _, _) -> Array.from_list(CubeForge.Tree.to_list(cs)) end end
   doc "The world over a list of chunks in grid order: the constructor tests use."
   fn of_chunk_list(chunks : List(CubeForge.Chunk.Chunk), n : Int) : World do
-    World(CubeForge.Tree.from_list(chunks), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), shown_new(), n, default_models())
+    rebuild_occupancy(World(CubeForge.Tree.from_list(chunks), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), shown_new(), n, default_models()))
   end
 
   fn generate_scalar(n : Int, seed : Int, workers : Int) : World do
     let chunks = List.pmap_n(coords(n), fn i -> C.generate_scalar(16 * (i % n), 16 * (i / n), seed), workers)
-    World(CubeForge.Tree.from_list(chunks), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), shown_new(), n, default_models())
+    rebuild_occupancy(World(CubeForge.Tree.from_list(chunks), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), shown_new(), n, default_models()))
   end
 
   -- A rolling hash over every voxel of every chunk. Four million reads, so this

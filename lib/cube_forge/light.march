@@ -417,16 +417,22 @@ mod CubeForge.Light do
   @[no_alloc]
   -- The value voxel (x, y, z) should take from a neighbour at [lv], or 0 for
   -- nothing to do: outside the world, already as bright, opaque, or too dim.
-  pfn give_level(la : NativeU8Arr, w : CubeForge.World.World, x : Int, y : Int, z : Int, lv : Int) : Int do
+  -- [occ] is the world's occupancy field: occ_solid() where the voxel blocks
+  -- light. A solid neighbour is answered from that byte without fetching its
+  -- block -- a chunk lookup per neighbour (GAPS G71) was the sweep's largest
+  -- cost, and the ground under a lit region is most of the solid answers. Air,
+  -- water and leaves still read the block for their opacity: only opaque is
+  -- tracked in the field (see occ_value).
+  pfn give_level(la : NativeU8Arr, occ : NativeU8Arr, x : Int, y : Int, z : Int, lv : Int) : Int do
     if x < 0 || x >= 128 || y < 0 || y >= 256 || z < 0 || z >= 128 do 0
     else
       let cur = NativeArray.get_u8(la, index(x, y, z))
       if lv - 1 <= cur do 0
       else
-        let id = CubeForge.World.block_at(w, x, y, z)
-        if is_opaque(id) do 0
+        let v = NativeArray.get_u8(occ, occ_index(x, y, z))
+        if v == occ_solid() do 0
         else
-          let nl = lv - 1 - opacity(id)
+          let nl = lv - 1 - v
           if nl <= cur do 0 else nl end
         end
       end
@@ -447,39 +453,39 @@ mod CubeForge.Light do
   -- meanwhile land on lower levels' lists, so following `next` here is safe.
   -- At the end of a list the walk steps down a level; after an overflow it
   -- finishes with full in-place scans.
-  pfn list_go(la : NativeU8Arr, wl : NativeIntArr, w : CubeForge.World.World, lv : Int, e : Int,
+  pfn list_go(la : NativeU8Arr, wl : NativeIntArr, occ : NativeU8Arr, lv : Int, e : Int,
               x0 : Int, x1 : Int, y0 : Int, y1 : Int, z0 : Int, z1 : Int) : Sweep do
     if lv <= 1 do Sweep(la, wl)
     else if e == 0 do
-      if wl_overflowed(wl) do Sweep(full_sweep_ip(la, w, lv - 1, x0, x1, y0, y1, z0, z1), wl)
-      else list_go(la, wl, w, lv - 1, wl_head(wl, lv - 1), x0, x1, y0, y1, z0, z1) end
+      if wl_overflowed(wl) do Sweep(full_sweep_ip(la, occ, lv - 1, x0, x1, y0, y1, z0, z1), wl)
+      else list_go(la, wl, occ, lv - 1, wl_head(wl, lv - 1), x0, x1, y0, y1, z0, z1) end
     else
       let i = wl_entry_index(wl, e)
       let nxt = wl_entry_next(wl, e)
-      if !at_level(la, i, lv) do list_go(la, wl, w, lv, nxt, x0, x1, y0, y1, z0, z1)
+      if !at_level(la, i, lv) do list_go(la, wl, occ, lv, nxt, x0, x1, y0, y1, z0, z1)
       else
         let x = i % 128
         let y = i / 16384
         let z = (i / 128) % 128
-        let n1 = give_level(la, w, x + 1, y, z, lv)
+        let n1 = give_level(la, occ, x + 1, y, z, lv)
         let a1 = if n1 > 0 do NativeArray.set_u8(la, flat(x + 1, y, z), n1) else la end
         let l1 = if n1 >= 2 do wl_push(wl, n1, flat(x + 1, y, z)) else wl end
-        let n2 = give_level(a1, w, x - 1, y, z, lv)
+        let n2 = give_level(a1, occ, x - 1, y, z, lv)
         let a2 = if n2 > 0 do NativeArray.set_u8(a1, flat(x - 1, y, z), n2) else a1 end
         let l2 = if n2 >= 2 do wl_push(l1, n2, flat(x - 1, y, z)) else l1 end
-        let n3 = give_level(a2, w, x, y + 1, z, lv)
+        let n3 = give_level(a2, occ, x, y + 1, z, lv)
         let a3 = if n3 > 0 do NativeArray.set_u8(a2, flat(x, y + 1, z), n3) else a2 end
         let l3 = if n3 >= 2 do wl_push(l2, n3, flat(x, y + 1, z)) else l2 end
-        let n4 = give_level(a3, w, x, y - 1, z, lv)
+        let n4 = give_level(a3, occ, x, y - 1, z, lv)
         let a4 = if n4 > 0 do NativeArray.set_u8(a3, flat(x, y - 1, z), n4) else a3 end
         let l4 = if n4 >= 2 do wl_push(l3, n4, flat(x, y - 1, z)) else l3 end
-        let n5 = give_level(a4, w, x, y, z + 1, lv)
+        let n5 = give_level(a4, occ, x, y, z + 1, lv)
         let a5 = if n5 > 0 do NativeArray.set_u8(a4, flat(x, y, z + 1), n5) else a4 end
         let l5 = if n5 >= 2 do wl_push(l4, n5, flat(x, y, z + 1)) else l4 end
-        let n6 = give_level(a5, w, x, y, z - 1, lv)
+        let n6 = give_level(a5, occ, x, y, z - 1, lv)
         let a6 = if n6 > 0 do NativeArray.set_u8(a5, flat(x, y, z - 1), n6) else a5 end
         let l6 = if n6 >= 2 do wl_push(l5, n6, flat(x, y, z - 1)) else l5 end
-        list_go(a6, l6, w, lv, nxt, x0, x1, y0, y1, z0, z1)
+        list_go(a6, l6, occ, lv, nxt, x0, x1, y0, y1, z0, z1)
       end
     end end
   end
@@ -488,39 +494,39 @@ mod CubeForge.Light do
   -- level. A write at [lv] produces a value below [lv], so a voxel written
   -- earlier in the same scan is never processed by it -- the same order the
   -- two-buffer sweep had.
-  pfn full_row_ip(la : NativeU8Arr, w : CubeForge.World.World, lv : Int, x : Int, x1 : Int, y : Int, z : Int) : NativeU8Arr do
+  pfn full_row_ip(la : NativeU8Arr, occ : NativeU8Arr, lv : Int, x : Int, x1 : Int, y : Int, z : Int) : NativeU8Arr do
     if x > x1 do la
-    else if !at_level(la, flat(x, y, z), lv) do full_row_ip(la, w, lv, x + 1, x1, y, z)
+    else if !at_level(la, flat(x, y, z), lv) do full_row_ip(la, occ, lv, x + 1, x1, y, z)
     else
-      let n1 = give_level(la, w, x + 1, y, z, lv)
+      let n1 = give_level(la, occ, x + 1, y, z, lv)
       let a1 = if n1 > 0 do NativeArray.set_u8(la, flat(x + 1, y, z), n1) else la end
-      let n2 = give_level(a1, w, x - 1, y, z, lv)
+      let n2 = give_level(a1, occ, x - 1, y, z, lv)
       let a2 = if n2 > 0 do NativeArray.set_u8(a1, flat(x - 1, y, z), n2) else a1 end
-      let n3 = give_level(a2, w, x, y + 1, z, lv)
+      let n3 = give_level(a2, occ, x, y + 1, z, lv)
       let a3 = if n3 > 0 do NativeArray.set_u8(a2, flat(x, y + 1, z), n3) else a2 end
-      let n4 = give_level(a3, w, x, y - 1, z, lv)
+      let n4 = give_level(a3, occ, x, y - 1, z, lv)
       let a4 = if n4 > 0 do NativeArray.set_u8(a3, flat(x, y - 1, z), n4) else a3 end
-      let n5 = give_level(a4, w, x, y, z + 1, lv)
+      let n5 = give_level(a4, occ, x, y, z + 1, lv)
       let a5 = if n5 > 0 do NativeArray.set_u8(a4, flat(x, y, z + 1), n5) else a4 end
-      let n6 = give_level(a5, w, x, y, z - 1, lv)
-      full_row_ip(if n6 > 0 do NativeArray.set_u8(a5, flat(x, y, z - 1), n6) else a5 end, w, lv, x + 1, x1, y, z)
+      let n6 = give_level(a5, occ, x, y, z - 1, lv)
+      full_row_ip(if n6 > 0 do NativeArray.set_u8(a5, flat(x, y, z - 1), n6) else a5 end, occ, lv, x + 1, x1, y, z)
     end end
   end
-  pfn full_plane_ip(la : NativeU8Arr, w : CubeForge.World.World, lv : Int, x0 : Int, x1 : Int, y : Int, z : Int, z1 : Int) : NativeU8Arr do
-    if z > z1 do la else full_plane_ip(full_row_ip(la, w, lv, x0, x1, y, z), w, lv, x0, x1, y, z + 1, z1) end
+  pfn full_plane_ip(la : NativeU8Arr, occ : NativeU8Arr, lv : Int, x0 : Int, x1 : Int, y : Int, z : Int, z1 : Int) : NativeU8Arr do
+    if z > z1 do la else full_plane_ip(full_row_ip(la, occ, lv, x0, x1, y, z), occ, lv, x0, x1, y, z + 1, z1) end
   end
-  pfn full_level_ip(la : NativeU8Arr, w : CubeForge.World.World, lv : Int, x0 : Int, x1 : Int, y : Int, y1 : Int, z0 : Int, z1 : Int) : NativeU8Arr do
-    if y > y1 do la else full_level_ip(full_plane_ip(la, w, lv, x0, x1, y, z0, z1), w, lv, x0, x1, y + 1, y1, z0, z1) end
+  pfn full_level_ip(la : NativeU8Arr, occ : NativeU8Arr, lv : Int, x0 : Int, x1 : Int, y : Int, y1 : Int, z0 : Int, z1 : Int) : NativeU8Arr do
+    if y > y1 do la else full_level_ip(full_plane_ip(la, occ, lv, x0, x1, y, z0, z1), occ, lv, x0, x1, y + 1, y1, z0, z1) end
   end
-  pfn full_sweep_ip(la : NativeU8Arr, w : CubeForge.World.World, lv : Int, x0 : Int, x1 : Int, y0 : Int, y1 : Int, z0 : Int, z1 : Int) : NativeU8Arr do
-    if lv <= 1 do la else full_sweep_ip(full_level_ip(la, w, lv, x0, x1, y0, y1, z0, z1), w, lv - 1, x0, x1, y0, y1, z0, z1) end
+  pfn full_sweep_ip(la : NativeU8Arr, occ : NativeU8Arr, lv : Int, x0 : Int, x1 : Int, y0 : Int, y1 : Int, z0 : Int, z1 : Int) : NativeU8Arr do
+    if lv <= 1 do la else full_sweep_ip(full_level_ip(la, occ, lv, x0, x1, y0, y1, z0, z1), occ, lv - 1, x0, x1, y0, y1, z0, z1) end
   end
 
   doc "Sweep the scan box to a fixed point in place, by per-level worklists. [la] must be uniquely owned. Equivalent to box_sweep_go2 on copies, without the copies or the fourteen box scans."
   fn sweep_box_lists(la : NativeU8Arr, w : CubeForge.World.World, x0 : Int, x1 : Int, y0 : Int, y1 : Int, z0 : Int, z1 : Int) : NativeU8Arr do
     let vol = (x1 - x0 + 1) * (y1 - y0 + 1) * (z1 - z0 + 1)
     let wl = gather_box(la, wl_new(4 * vol + 64), x0, x1, y0, y1, z0, z1)
-    sweep_field(list_go(la, wl, w, max_level(), wl_head(wl, max_level()), x0, x1, y0, y1, z0, z1))
+    sweep_field(list_go(la, wl, CubeForge.World.occupancy(w), max_level(), wl_head(wl, max_level()), x0, x1, y0, y1, z0, z1))
   end
 
   -- Lowest y light can reach descending from (x, y, z): the first opaque block
@@ -773,7 +779,7 @@ mod CubeForge.Light do
       let lx = i % 16
       let ly = i / chunk_layer()
       let lz = (i / 16) % 16
-      let v = if occludes(C.get_idx(c, i)) do occ_solid() else 0 end
+      let v = occ_value(C.get_idx(c, i))
       occ_chunk_go(NativeArray.set_u8(o, occ_index(16 * cx + lx, ly, 16 * cz + lz), v), c, cx, cz, i + 1, stop)
     end
   end
@@ -786,8 +792,10 @@ mod CubeForge.Light do
 
   doc "Byte stored for an occluding voxel. 255, not 1: the GPU side is a normalized GL_R8 texture, where a stored 1 samples back as 1/255 and would never register as solid."
   fn occ_solid() : Int do 255 end
+  doc "The occupancy byte for a block: occ_solid() when it blocks light, else its opacity (0 air, 2 water, 6 leaves). The shadow shader, the coarse counts and the AO read 255 alone as solid; the light sweep reads the byte as the neighbour's opacity. World.set_block and World.set_cells -- the only two block writers -- keep it, and every World constructor builds it."
+  fn occ_value(id : Int) : Int do if is_opaque(id) do occ_solid() else opacity(id) end end
 
-  doc "The world's occupancy field: occ_solid() where a voxel blocks light, 0 elsewhere. Built for upload, not retained."
+  doc "The world's occupancy field: occ_value of every voxel -- occ_solid() where it blocks light, its opacity elsewhere. Built for upload, kept in the World for the shadow texture, the AO and the light sweep."
   fn occupancy(w : CubeForge.World.World) : NativeU8Arr do
     -- A chunk's flat index is ordered by y, so stopping past the highest non-air
     -- layer skips the empty sky. The buffer starts zeroed, which is exactly the

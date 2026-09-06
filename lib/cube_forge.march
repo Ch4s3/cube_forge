@@ -704,7 +704,7 @@ mod CubeForge do
     match sc do
       Scene(world, counts, outline, hit, ui, pids, flags, meshes, bio, pend, myc) ->
         let t0 = Win.time()
-        let w0 = World.set_occupied(World.set_block(world, x, y, z, id), x, y, z, CubeForge.Light.occludes(id))
+        let w0 = World.set_block(world, x, y, z, id)
         let bio1 = Biome.note_edit(bio, w0, x, y, z, id)
         let was_spring = is_world_spring(world, x, y, z)
         let is_spring = is_world_spring(w0, x, y, z)
@@ -878,7 +878,7 @@ mod CubeForge do
   end
 
   -- The shadow occupancy texture is per-voxel on the GPU; push the tree's box.
-  -- One box upload from the world's own occupancy array (set_occupied keeps it
+  -- One box upload from the world's own occupancy array (set_block keeps it
   -- current), not 729 single-texel calls: 0.6 ms of a tree edit, and the
   -- coarse cells are recounted exactly rather than bumped per call.
   pfn sync_occupancy(w : CubeForge.World.World, x : Int, z : Int, y0 : Int, y1 : Int) : Unit do

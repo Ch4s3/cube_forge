@@ -512,6 +512,9 @@ static GLuint g_vbo_b[CF_MAX_MESHES];
 static unsigned char g_vbo_cur[CF_MAX_MESHES];
 static int64_t g_vbo_cap[2][CF_MAX_MESHES];   /* floats allocated per buffer; grown, never shrunk */
 static inline GLuint vbo_of(int64_t slot) { return g_vbo_cur[slot] ? g_vbo_b[slot] : g_vbo[slot]; }
+/* A VAO per mesh slot was tried (2026-09-05 perf pass): 192 chunk draws a frame as one bind and one draw each. A/B over six alternating runs was noise, so the shared VAO stays. */
+static int g_debug = -1;
+static inline int cf_debug(void) { if (g_debug < 0) g_debug = getenv("CF_DEBUG") != NULL; return g_debug; }
 static GLint  g_u_use_tex = -1;
 static GLint  g_u_cutout = -1;
 static GLint  g_u_sun = -1, g_u_eye = -1, g_u_dir = -1, g_u_flash = -1;
@@ -563,7 +566,7 @@ int64_t cf_gfx_init(void) {
     g_u_overcast = glGetUniformLocation(g_prog, "u_overcast");
     g_u_bolt = glGetUniformLocation(g_prog, "u_bolt");
     g_u_time = glGetUniformLocation(g_prog, "u_time");
-    if (getenv("CF_DEBUG")) fprintf(stderr, "cf: uniforms occ=%d shadow=%d sundir=%d unlit=%d\n", g_u_occ, g_u_shadow, g_u_sundir, g_u_unlit);
+    if (cf_debug()) fprintf(stderr, "cf: uniforms occ=%d shadow=%d sundir=%d unlit=%d\n", g_u_occ, g_u_shadow, g_u_sundir, g_u_unlit);
     glGenVertexArrays(1, &g_vao);
     glGenBuffers(CF_MAX_MESHES, g_vbo);
     glGenBuffers(CF_MAX_MESHES, g_vbo_b);
@@ -581,7 +584,7 @@ void cf_gfx_upload(int64_t slot, void *arr, int64_t nfloats) {
     g_vbo_cur[slot] ^= 1;
     glBindBuffer(GL_ARRAY_BUFFER, vbo_of(slot));
     glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(nfloats * 4), narr_data(arr), GL_STATIC_DRAW);
-    if (getenv("CF_DEBUG")) { const float *f = narr_data(arr); fprintf(stderr, "cf: upload slot=%lld nfloats=%lld arrlen=%lld first=%g %g %g %g %g %g %g glerr=%d\n", (long long)slot, (long long)nfloats, (long long)narr_len(arr), f[0],f[1],f[2],f[3],f[4],f[5],f[6], (int)glGetError()); }
+    if (cf_debug()) { const float *f = narr_data(arr); fprintf(stderr, "cf: upload slot=%lld nfloats=%lld arrlen=%lld first=%g %g %g %g %g %g %g glerr=%d\n", (long long)slot, (long long)nfloats, (long long)narr_len(arr), f[0],f[1],f[2],f[3],f[4],f[5],f[6], (int)glGetError()); }
 }
 
 /* The parts of one upload are staged in a scratch buffer and sent with ONE
@@ -643,7 +646,7 @@ void cf_gfx_begin_frame(double r, double g, double b) {
 void cf_gfx_set_view_proj(void *arr) {
     if (narr_len(arr) < 16) return;
     glUniformMatrix4fv(g_u_vp, 1, GL_FALSE, (const float *)narr_data(arr));
-    if (getenv("CF_DEBUG")) { const float *f = narr_data(arr); fprintf(stderr, "cf: vp loc=%d diag=%g %g %g %g glerr=%d\n", g_u_vp, f[0], f[5], f[10], f[15], (int)glGetError()); }
+    if (cf_debug()) { const float *f = narr_data(arr); fprintf(stderr, "cf: vp loc=%d diag=%g %g %g %g glerr=%d\n", g_u_vp, f[0], f[5], f[10], f[15], (int)glGetError()); }
 }
 
 void cf_gfx_draw(int64_t slot, int64_t nverts) {
@@ -657,7 +660,7 @@ void cf_gfx_draw(int64_t slot, int64_t nverts) {
     glEnableVertexAttribArray(4); glVertexAttribPointer(4, 1, GL_FLOAT, GL_FALSE, stride, (void *)(7 * 4));
     glEnableVertexAttribArray(5); glVertexAttribPointer(5, 1, GL_FLOAT, GL_FALSE, stride, (void *)(8 * 4));
     glDrawArrays(GL_TRIANGLES, 0, (GLsizei)nverts);
-    if (getenv("CF_DEBUG")) { fprintf(stderr, "cf: draw slot=%lld nverts=%lld glerr=%d prog=%u vao=%u\n", (long long)slot, (long long)nverts, (int)glGetError(), g_prog, g_vao); }
+    if (cf_debug()) { fprintf(stderr, "cf: draw slot=%lld nverts=%lld glerr=%d prog=%u vao=%u\n", (long long)slot, (long long)nverts, (int)glGetError(), g_prog, g_vao); }
 }
 
 /* Upload an RGBA8 texture array (layer-major, row-major, 4 bytes/texel) from a
@@ -720,7 +723,7 @@ void cf_gfx_upload_occupancy(void *arr, int64_t w, int64_t h, int64_t d) {
     for (int64_t z = 0; z < d; z++)
         for (int64_t y = 0; y < h; y++)
             for (int64_t x = 0; x < w; x++)
-                if (fine[x + w * (y + h * z)]) {
+                if (fine[x + w * (y + h * z)] == 255) {   /* the byte is the light opacity; 255 alone is solid */
                     size_t ci = (size_t)(x / CF_OCC_CS)
                               + (size_t)g_occ_cw * ((size_t)(y / CF_OCC_CS)
                               + (size_t)g_occ_ch * (size_t)(z / CF_OCC_CS));
@@ -797,7 +800,7 @@ void cf_gfx_sync_box(void *arr, int64_t x0, int64_t y0, int64_t z0, int64_t x1, 
     for (int64_t z = z0; z <= z1; z++)
         for (int64_t y = y0; y <= y1; y++)
             for (int64_t x = x0; x <= x1; x++)
-                stage[(x - x0) + bw * ((y - y0) + bh * (z - z0))] = a[x + g_occ_w * (y + g_occ_h * z)] ? 255 : 0;
+                stage[(x - x0) + bw * ((y - y0) + bh * (z - z0))] = a[x + g_occ_w * (y + g_occ_h * z)] == 255 ? 255 : 0;
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_3D, g_occ);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
@@ -813,7 +816,7 @@ void cf_gfx_sync_box(void *arr, int64_t x0, int64_t y0, int64_t z0, int64_t x1, 
                     for (int64_t z = cz * CF_OCC_CS; z < (cz + 1) * CF_OCC_CS && z < g_occ_d; z++)
                         for (int64_t y = cy * CF_OCC_CS; y < (cy + 1) * CF_OCC_CS && y < g_occ_h; y++)
                             for (int64_t x = cx * CF_OCC_CS; x < (cx + 1) * CF_OCC_CS && x < g_occ_w; x++)
-                                if (a[x + g_occ_w * (y + g_occ_h * z)]) n++;
+                                if (a[x + g_occ_w * (y + g_occ_h * z)] == 255) n++;
                     size_t ci = (size_t)cx + (size_t)g_occ_cw * ((size_t)cy + (size_t)g_occ_ch * (size_t)cz);
                     uint16_t before = g_occ_count[ci];
                     g_occ_count[ci] = n;

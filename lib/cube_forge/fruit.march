@@ -92,7 +92,7 @@ mod CubeForge.Fruit do
       let z = bz - 4 + (i / 9) % 9
       let y = base + 1 + i / 81
       let id = block_of_body(sp, bx, base, bz, seed, x, y, z)
-      let w1 = if id != 0 && y < 256 && W.block_at(w, x, y, z) == 0 do W.set_occupied(W.set_block(w, x, y, z, id), x, y, z, CubeForge.Light.occludes(id)) else w end
+      let w1 = if id != 0 && y < 256 && W.block_at(w, x, y, z) == 0 do W.set_block(w, x, y, z, id) else w end
       stamp_go(w1, sp, bx, base, bz, seed, i + 1, rows)
     end
   end
@@ -116,7 +116,7 @@ mod CubeForge.Fruit do
       let there = if want != 0 && y < 256 do W.block_at(w, x, y, z) == want else false end
       if !there do fell_go(w, sp, bx, base, bz, seed, i + 1, rows, stems, caps)
       else
-        let w1 = W.set_occupied(W.set_block(w, x, y, z, 0), x, y, z, false)
+        let w1 = W.set_block(w, x, y, z, 0)
         fell_go(w1, sp, bx, base, bz, seed, i + 1, rows, if C.is_fruit_stem(want) do stems + 1 else stems end, if C.is_fruit_cap(want) do caps + 1 else caps end)
       end
     end
