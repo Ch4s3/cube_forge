@@ -2871,3 +2871,65 @@ reproduces the occlusion-aware average instead of filtering.
 The engines that genuinely move voxel lighting to the GPU do it by abandoning
 meshed geometry: voxel cone tracing and voxel ray tracing march the volume
 directly. That is a different renderer, not a change to this one.
+
+
+## Frustum culling (2026-09-06)
+
+`draw_chunks` submitted every chunk slot every frame, the ones behind the camera
+included: 144 chunks x 3 passes, unconditionally. Backface culling was on, but
+nothing rejected a chunk outside the view.
+
+The six planes come out of the view-projection matrix (Gribb-Hartmann): with
+clip = M * v, the left plane is row 3 + row 0, the right row 3 - row 0, and so
+down the rows. `vp` is column-major, GL's order, so component c of row r is
+`vp[r + 4c]`. A chunk is tested as its 16 x 16 columns over the world's full
+height, by the box corner furthest along each plane's normal.
+
+Never applied in map view -- that camera is the overhead one, not `render_vp`.
+`CF_CULL=0` restores the old behaviour for the A/B; `CF_CULL_LOG=1` prints how
+many of the 144 were drawn.
+
+### How much it culls
+
+Depends entirely on where the camera looks, which is the point:
+
+| camera pitch | chunks drawn | culled |
+|---|---|---|
+| -0.10 rad (ahead, the normal angle) | 54 of 144 | **62%** |
+| -0.25 rad | 66 of 144 | 54% |
+| -0.70 rad (steeply down) | 99 of 144 | 31% |
+
+### What it saves
+
+GPU time by `GL_TIME_ELAPSED` query, standing still at pitch -0.70 -- the
+*least* favourable of the three angles:
+
+| framebuffer | all chunks | culled | |
+|---|---|---|---|
+| 3456x2234 | 4.770 ms | **4.047 ms** | -15% |
+| 5120x2880 | 4.839 ms | **4.152 ms** | -14% |
+
+And end to end, the walking benchmark at 3456x2234, uncapped:
+
+| | fps |
+|---|---|
+| all chunks | 95.7 |
+| culled | **104.4** |
+
+**+9%**, for a plane test. The CPU saving is negligible -- draw submission was
+only 0.58 ms of the frame -- so this is almost entirely vertex work the GPU no
+longer does.
+
+### A note on frame dumps as an oracle
+
+The obvious check -- dump a frame with culling on and off and compare -- does not
+work in this project, and it is worth writing down. Two runs of the SAME build
+with the same seed, `CF_NOMOUSE`, `CF_TIME` pinned and `CF_WEATHER` pinned differ
+by 1.6 M pixels at frame 400, and still differ at frame 5. The water actors load
+and tick asynchronously, so the world state at a given frame is not reproducible
+run to run; the player's position is (it settles), but what the water has done is
+not. `todos.md` already records `CF_NOMOUSE` being needed for this reason; the
+asynchrony is a second, larger one.
+
+So culling was checked by eye instead (no holes, no missing chunks) and measured
+with the GPU timer, which does not care about determinism.

@@ -2663,9 +2663,14 @@ mod CubeForge do
           Win.gfx_set_light(sun, V.x(eye), V.y(eye), V.z(eye), V.x(look), V.y(look), V.z(look), flash_now)
           Win.gfx_set_time(if time_pin >= 0 do int_to_float(time_pin) else now end)
           Win.gfx_set_view_proj(render_vp)
-          draw_chunks(scene_counts(sc1), 0, nchunks)
-          draw_foliage(scene_counts(sc1), 0, nchunks)
-          draw_water(scene_counts(sc1), 0, nchunks)
+          -- CF_CULL=0 draws every slot, as this did before, for the A/B.
+          -- Never in map view: that camera is the overhead one, not render_vp's.
+          let cull = Env.get_int("CF_CULL", 1) == 1 && !map_mode1
+          let cside = World.side(scene_world(sc1))
+          let ndrawn = draw_chunks(scene_counts(sc1), 0, nchunks, render_vp, cull, cside, 0)
+          draw_foliage(scene_counts(sc1), 0, nchunks, render_vp, cull, cside)
+          draw_water(scene_counts(sc1), 0, nchunks, render_vp, cull, cside)
+          if Env.get_int("CF_CULL_LOG", 0) == 1 && frame > 200 do println("C " ++ int_to_string(ndrawn) ++ " " ++ int_to_string(nchunks)) else () end
           if live > 0 do Win.gfx_draw_precip(Precip.slot(), Precip.vertex_count(live)) else () end
           let spray_verts = Win.spray_frame(pdt, frame)
           if spray_verts > 0 do Win.gfx_draw_precip(spray_slot(), spray_verts) else () end
@@ -2910,31 +2915,74 @@ mod CubeForge do
     measure("view_proj (in place)", fn _ -> NativeArray.get_f32(repeat_view_inplace(proj, Player.new(8.0, 70.0, 8.0), NativeArray.make_float(16, 0.0), NativeArray.make_f32(16, 0.0), 100), 0))
   end
 
+  -- ── Frustum culling ────────────────────────────────────────────────────
+  -- Every chunk slot used to be drawn every frame, the ones behind the camera
+  -- included. The six planes come out of the view-projection matrix
+  -- (Gribb-Hartmann): with clip = M * v, the left plane is row 3 + row 0, the
+  -- right row 3 - row 0, and so on down the rows. [vp] is column-major, GL's
+  -- order, so component c of row r is vp[r + 4c].
+  --
+  -- A chunk's box is its 16 x 16 columns over the world's full height. Using
+  -- the real height would reject more, but it would have to be kept per chunk
+  -- and the win is mostly horizontal anyway.
+  @[no_alloc]
+  pfn vp_at(vp : NativeF32Arr, r : Int, c : Int) : Float do NativeArray.get_f32(vp, r + 4 * c) end
+  -- Is the box entirely behind the plane row3 + [s] * row[r]? Tests the corner
+  -- furthest along the plane's normal: if even that one is behind, all eight are.
+  @[no_alloc]
+  pfn plane_rejects(vp : NativeF32Arr, r : Int, s : Float, x0 : Float, x1 : Float, z0 : Float, z1 : Float) : Bool do
+    let a = vp_at(vp, 3, 0) +. s *. vp_at(vp, r, 0)
+    let b = vp_at(vp, 3, 1) +. s *. vp_at(vp, r, 1)
+    let c = vp_at(vp, 3, 2) +. s *. vp_at(vp, r, 2)
+    let d = vp_at(vp, 3, 3) +. s *. vp_at(vp, r, 3)
+    let px = if a > 0.0 do x1 else x0 end
+    let py = if b > 0.0 do 256.0 else 0.0 end
+    let pz = if c > 0.0 do z1 else z0 end
+    a *. px +. b *. py +. c *. pz +. d < 0.0
+  end
+  doc "Does chunk (cx, cz) touch the view frustum of [vp]."
+  @[no_alloc]
+  fn chunk_visible(vp : NativeF32Arr, cx : Int, cz : Int) : Bool do
+    let x0 = int_to_float(16 * cx)
+    let z0 = int_to_float(16 * cz)
+    let x1 = x0 +. 16.0
+    let z1 = z0 +. 16.0
+    if plane_rejects(vp, 0, 1.0, x0, x1, z0, z1) do false
+    else if plane_rejects(vp, 0, 0.0 -. 1.0, x0, x1, z0, z1) do false
+    else if plane_rejects(vp, 1, 1.0, x0, x1, z0, z1) do false
+    else if plane_rejects(vp, 1, 0.0 -. 1.0, x0, x1, z0, z1) do false
+    else if plane_rejects(vp, 2, 1.0, x0, x1, z0, z1) do false
+    else !plane_rejects(vp, 2, 0.0 -. 1.0, x0, x1, z0, z1) end end end end end
+  end
+
   -- Draw every chunk slot; counts holds the vertex count per slot.
   @[no_alloc(assume)]
-  pfn draw_chunks(counts : NativeIntArr, i : Int, n : Int) : Unit do
-    if i >= n do ()
+  pfn draw_chunks(counts : NativeIntArr, i : Int, n : Int, vp : NativeF32Arr, cull : Bool, side : Int, drawn : Int) : Int do
+    if i >= n do drawn
+    else if cull && !chunk_visible(vp, i % side, i / side) do draw_chunks(counts, i + 1, n, vp, cull, side, drawn)
     else
       Win.gfx_draw(i, NativeArray.get_int(counts, i))
-      draw_chunks(counts, i + 1, n)
-    end
+      draw_chunks(counts, i + 1, n, vp, cull, side, drawn + 1)
+    end end
   end
 
   -- Foliage is alpha-cutout, not blended, so it can be drawn before water.
-  pfn draw_foliage(counts : NativeIntArr, i : Int, n : Int) : Unit do
+  pfn draw_foliage(counts : NativeIntArr, i : Int, n : Int, vp : NativeF32Arr, cull : Bool, side : Int) : Unit do
     if i >= n do ()
+    else if cull && !chunk_visible(vp, i % side, i / side) do draw_foliage(counts, i + 1, n, vp, cull, side)
     else
       Win.gfx_draw_cutout(foliage_slot_base() + i, NativeArray.get_int(counts, foliage_slot_base() + i))
-      draw_foliage(counts, i + 1, n)
-    end
+      draw_foliage(counts, i + 1, n, vp, cull, side)
+    end end
   end
 
-  pfn draw_water(counts : NativeIntArr, i : Int, n : Int) : Unit do
+  pfn draw_water(counts : NativeIntArr, i : Int, n : Int, vp : NativeF32Arr, cull : Bool, side : Int) : Unit do
     if i >= n do ()
+    else if cull && !chunk_visible(vp, i % side, i / side) do draw_water(counts, i + 1, n, vp, cull, side)
     else
       Win.gfx_draw_translucent(water_slot_base() + i, NativeArray.get_int(counts, water_slot_base() + i))
-      draw_water(counts, i + 1, n)
-    end
+      draw_water(counts, i + 1, n, vp, cull, side)
+    end end
   end
 
   -- Full-screen quad in NDC for the underwater tint: layer 1 (water), shade 0.6. Built once.
