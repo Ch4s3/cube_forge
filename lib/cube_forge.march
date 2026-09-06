@@ -2826,7 +2826,7 @@ mod CubeForge do
       -- Session-invariant GL state: uploaded once and reused by every session.
       if !headless do
         Win.spray_init(Env.get_int("CF_SPRAY", 512))
-        Win.gfx_upload_texture(Texture.checkerboard(), Texture.size(), Texture.size(), Texture.layers())
+        Win.gfx_upload_texture(Texture.checkerboard_tinted(Env.get_int("CF_MYC_TINT", Texture.myc_tint())), Texture.size(), Texture.size(), Texture.layers())
         let uq = underwater_quad()
         Win.gfx_upload(253, F32Buf.storage(uq), F32Buf.len(uq))
       else () end

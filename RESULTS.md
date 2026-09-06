@@ -2240,3 +2240,42 @@ back.
 A new test plants a tree and checks the region relight against a full flood.
 441 tests. The oracle stays in the dump: a non-zero block count, or a sky
 count whose first voxels are not the 15/13 water pattern, is a relight bug.
+
+
+## The mycelium skin, dialled back (2026-09-06)
+
+Mycelium showed too strongly: on grassland the ground read as a change of
+biome rather than a skin over one. `Texture.myc_tint()` is one dial over both
+halves of the texel formula -- how many texels are threads, and how far a
+texel is pulled toward the species colour -- as twelfths, so 100 is exactly
+the old fractions (a third of texels, two-thirds species colour on a thread,
+a sixth elsewhere) and 0 is the bare surface, byte for byte. **The default is
+now 60.** `CF_MYC_TINT` overrides it, which is how the comparison below was
+rendered from one build.
+
+Judged on a mature patch on open grassland (seed 11, `CF_PITCH=-115`), at 100,
+60, 35 and 18, against a control with no fungus: `docs/fungus-tint.png`. At 60
+the ground keeps its own green with a warm cast; at 35 it is nearly plain
+grass; 18 is indistinguishable at a glance.
+
+Two things the comparison settled that guessing would not have:
+
+- **A glowing species' loudness is mostly its light, not its texture.** The
+  first ladder used Lanterncap, whose surface mycelium emits 6, and the
+  panels differed as much in banding as in colour. Repeating it with
+  Meadowbell, which does not glow, isolated the dial. The glow is deliberately
+  untouched: lit ground at night is what glowing fungus is for.
+- **The first scene was worthless and looked fine.** Planting at the seed-7
+  spawn now lands in a grove, where the surface is bush leaves: leaves carry
+  no mycelium, so `wanted 4 shown 0` and four tint settings rendered four
+  identical frames. The readout line at the dumped column is what caught it.
+
+Verification note: a raw `cmp` of two frame dumps always differs, because the
+FPS counter is drawn into the frame. `scratch/cmpframe.py` masks it, and by
+that measure two identical runs match exactly (0 differing pixels) and the
+shipped default matches an explicit `CF_MYC_TINT=60` (0), against 1.79M
+pixels differing from 100. Chunk streaming did not cost reproducibility.
+
+458 tests (three new ones pin the dial: 0 is the bare base, the default shows
+but less than 100, and the thread count thins as it comes down), lint clean,
+budget 6.44 ms.
