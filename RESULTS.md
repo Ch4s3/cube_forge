@@ -2403,3 +2403,61 @@ Cost is under the noise floor. Wild world, 600 frames: 284 fps with, 267
 without. Standing in a patch that fills the screen: 269 with, 259 without --
 the "with" runs measured faster both times, which is how much of a difference
 there is to find. Budget 6.32 ms, 460 tests, lint clean.
+
+## Animals: bodies that read as animals
+
+Slice 1 of the fauna work: a transform stamp, body-plan generators, and the
+first two species.
+
+**The stamp.** `cf_f32_stamp` translates a greedy-meshed template into a cell;
+an animal also needs to turn and to come in sizes. Baking yaws was the obvious
+move — palm fronds already bake eight directions — and it is the wrong one
+twice over: eight steps snap under a banking bird, and `species x poses x yaws`
+multiplies the template table by an order of magnitude. `cf_f32_stamp_xf` adds
+a yaw and a uniform scale to the same copy loop: two multiply-adds per vertex
+on a loop that is already memory-bound. The scale term is what makes "fish of
+multiple sizes" a column in a table rather than a second set of grids.
+
+Face indices rotate with the body, by the nearest quarter turn. Without that a
+turned animal keeps the lighting it had facing east.
+
+**Bodies are generated, not drawn.** A species gets a row — how long, how tall,
+how far the wings reach, whether it flies — and one of two generators builds
+every pose from it, placing each part against the body's own extent. The first
+hand-built bird had its wings two cells clear of its flank, touching nothing,
+and rendered as a bird with two slabs floating beside it.
+
+The invariant is a test, not a hope: a flood fill from one cell must reach every
+filled cell of every pose. Adjacency alone would not do — the broken wing was a
+solid slab whose own cells touched each other perfectly well; only reaching
+every cell from a single seed catches a part that is whole and in the wrong
+place. It has caught three real defects since: a wing tip stepping in z and y at
+once (meeting the wing along an edge, no shared face), a fin hung off the row
+the body-rounding shave removes, and a tail-sweep connector whose z bounds
+arrived descending, which `box_n` counts as an empty range and silently skips.
+
+**16 cells a side, not 8.** Every animal at 8 read as a stack of slabs, and the
+reason is structural: an eighth of a block is the thinnest thing that exists, so
+a wing, a fin and a beak all weigh as much as the body. `Model`'s greedy pass is
+now parameterised on the grid side; the 8-cube path is unchanged and the world
+mesh hash is byte-identical across the refactor (413448066).
+
+**What it costs.** Interleaved A/B, three runs each, 150 bodies stamped and
+uploaded every frame:
+
+| bodies | worst frame | frame rate |
+|---|---|---|
+| none | 5.4-6.6 ms | 214-225 fps |
+| 150 at 8 a side | 6.7-7.0 ms | 207-218 fps |
+| 150 at 16 a side | 6.6-8.0 ms | 189-208 fps |
+
+At 8 the bodies are lost in the noise; at 16 they cost about a millisecond and a
+tenth of the frame rate. Worth paying, and worth knowing: the visible cap is now
+a real budget rather than a formality. This is also the first system whose cost
+is per FRAME rather than per tick, so none of the phase-slot spreading that
+carried the world tick from 55 ms to 11 applies to it.
+
+`CF_FAUNA_DEMO=1` circles a flock and a school on the clock; `=2` stands every
+species in every pose, still and broadside, which is the only way the bodies
+themselves are actually inspectable — at their real size, 0.35 of a block, an
+animal is a few pixels and a screenshot proves only that something was drawn.

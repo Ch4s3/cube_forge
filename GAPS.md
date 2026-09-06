@@ -1480,3 +1480,22 @@ pattern-bound value, bind it `_`.
   (RESULTS). The mesher already took its five chunks as arguments.
 - **Would need:** array-backed leaves and a stored tail length in the stdlib
   `PVec`, or a fixed-size object array.
+
+### G83. A module alias is shadowed by a deeper module of the same initial, and it fails at LINK time
+
+`alias CubeForge.Model as M` followed by `M.box(...)` does not call
+`CubeForge.Model.box`. It compiles, typechecks and lints clean, and then the
+linker asks for `_CubeForge.Math.Mat4.box`, which does not exist. The alias was
+silently outranked by `CubeForge.Math.Mat4` — a module the file never mentions
+and does not import.
+
+- **Cost:** two full test-compile cycles, and the error names a module you have
+  never heard of in this file. There is no diagnostic at the point of the
+  alias, at the point of use, or anywhere in `forge build` — only a list of
+  undefined symbols after clang runs.
+- **Done instead:** aliases in `fauna.march` and `fauna_test.march` are
+  `Mdl`, not `M`. Multi-letter aliases seem not to collide.
+- **Would need:** the alias to win over an unimported module, or — failing
+  that — an error at the use site saying which module a qualified name
+  actually resolved to. A name that resolves to something the file never
+  imported should not be silent.

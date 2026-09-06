@@ -54,6 +54,17 @@ mod CubeForge.Model do
   fn c_bush() : Int do 20 end
   fn c_bush_light() : Int do 21 end
   fn c_bush_stem() : Int do 22 end
+  -- Fauna. Animals are Model templates too (CubeForge.Fauna builds them with
+  -- `template`), so their colours live in the same palette layer: the texture
+  -- loop already writes all 256 texels, so a row here needs no texture work.
+  fn c_pipit() : Int do 23 end
+  fn c_pipit_dark() : Int do 24 end
+  fn c_pipit_pale() : Int do 25 end
+  fn c_beak() : Int do 26 end
+  fn c_sunfin() : Int do 27 end
+  fn c_sunfin_fin() : Int do 28 end
+  fn c_sunfin_pale() : Int do 29 end
+  fn c_eye() : Int do 30 end
 
   doc "Palette colour k, red channel."
   fn colour_r(k : Int) : Int do
@@ -61,32 +72,72 @@ mod CubeForge.Model do
     else if k >= 7 && k <= 12 do S.colour_r(k - 6) * 6 / 10
     else if k == 13 do 235 else if k == 14 do 200 else if k == 15 do 70 else if k == 16 do 100
     else if k == 17 do 84 else if k == 18 do 60 else if k == 19 do 130
-    else if k == 20 do 62 else if k == 21 do 90 else if k == 22 do 90 else 0 end end end end end end end end end end end end
+    else if k == 20 do 62 else if k == 21 do 90 else if k == 22 do 90
+    else if k == 23 do 150 else if k == 24 do 118 else if k == 25 do 226 else if k == 26 do 54
+    else if k == 27 do 226 else if k == 28 do 236 else if k == 29 do 240 else if k == 30 do 24
+    else 0 end end end end end end end end end end end end end end end end end end end end
   end
   fn colour_g(k : Int) : Int do
     if k >= 1 && k <= 6 do S.colour_g(k)
     else if k >= 7 && k <= 12 do S.colour_g(k - 6) * 6 / 10
     else if k == 13 do 225 else if k == 14 do 190 else if k == 15 do 48 else if k == 16 do 72
     else if k == 17 do 150 else if k == 18 do 115 else if k == 19 do 190
-    else if k == 20 do 128 else if k == 21 do 160 else if k == 22 do 64 else 0 end end end end end end end end end end end end
+    else if k == 20 do 128 else if k == 21 do 160 else if k == 22 do 64
+    else if k == 23 do 112 else if k == 24 do 86 else if k == 25 do 214 else if k == 26 do 44
+    else if k == 27 do 134 else if k == 28 do 146 else if k == 29 do 236 else if k == 30 do 20
+    else 0 end end end end end end end end end end end end end end end end end end end end
   end
   fn colour_b(k : Int) : Int do
     if k >= 1 && k <= 6 do S.colour_b(k)
     else if k >= 7 && k <= 12 do S.colour_b(k - 6) * 6 / 10
     else if k == 13 do 200 else if k == 14 do 165 else if k == 15 do 38 else if k == 16 do 50
     else if k == 17 do 62 else if k == 18 do 45 else if k == 19 do 90
-    else if k == 20 do 54 else if k == 21 do 70 else if k == 22 do 40 else 0 end end end end end end end end end end end end
+    else if k == 20 do 54 else if k == 21 do 70 else if k == 22 do 40
+    else if k == 23 do 72 else if k == 24 do 56 else if k == 25 do 196 else if k == 26 do 36
+    else if k == 27 do 62 else if k == 28 do 52 else if k == 29 do 226 else if k == 30 do 18
+    else 0 end end end end end end end end end end end end end end end end end end end end
+  end
+
+  -- ── Grids of any side ─────────────────────────────────────────────────────
+  -- Block models are 8 sub-cubes a side; that is a good size for a mushroom
+  -- sitting in a cell and too coarse for an animal, where an eighth of a block
+  -- is the thinnest a wing can be and everything reads as a slab. So the grid
+  -- builders and the greedy pass below take a side, and the 8-cube versions are
+  -- the special case the block models use. See CubeForge.Fauna.grid.
+  doc "Flat index of a sub-cube in a grid [n] a side."
+  fn idx_n(n : Int, x : Int, y : Int, z : Int) : Int do x + n * (z + n * y) end
+  doc "An empty grid [n] a side."
+  fn empty_n(n : Int) : NativeU8Arr do NativeArray.make_u8(n * n * n, 0) end
+  doc "Set one sub-cube of a grid [n] a side, ignoring anything outside it."
+  fn put_n(g : NativeU8Arr, n : Int, x : Int, y : Int, z : Int, k : Int) : NativeU8Arr do
+    if x < 0 || y < 0 || z < 0 || x >= n || y >= n || z >= n do g else NativeArray.set_u8(g, idx_n(n, x, y, z), k) end
+  end
+  doc "Read one sub-cube of a grid [n] a side; outside it reads empty."
+  fn cell_n(g : NativeU8Arr, n : Int, x : Int, y : Int, z : Int) : Int do
+    if x < 0 || y < 0 || z < 0 || x >= n || y >= n || z >= n do 0 else NativeArray.get_u8(g, idx_n(n, x, y, z)) end
+  end
+  doc "Fill the box [x0, x1] x [y0, y1] x [z0, z1] of a grid [n] a side."
+  fn box_n(g : NativeU8Arr, n : Int, x0 : Int, y0 : Int, z0 : Int, x1 : Int, y1 : Int, z1 : Int, k : Int) : NativeU8Arr do
+    box_n_go(g, n, x0, y0, z0, x1, y1, z1, k, 0, (x1 - x0 + 1) * (y1 - y0 + 1) * (z1 - z0 + 1))
+  end
+  pfn box_n_go(g : NativeU8Arr, n : Int, x0 : Int, y0 : Int, z0 : Int, x1 : Int, y1 : Int, z1 : Int, k : Int, i : Int, cnt : Int) : NativeU8Arr do
+    if i >= cnt do g
+    else
+      let w = x1 - x0 + 1
+      let d = z1 - z0 + 1
+      box_n_go(put_n(g, n, x0 + i % w, y0 + i / (w * d), z0 + (i / w) % d, k), n, x0, y0, z0, x1, y1, z1, k, i + 1, cnt)
+    end
   end
 
   -- ── Shapes ────────────────────────────────────────────────────────────────
   fn empty() : NativeU8Arr do NativeArray.make_u8(512, 0) end
 
-  -- Set one sub-cube, ignoring anything outside the grid.
-  pfn put(g : NativeU8Arr, x : Int, y : Int, z : Int, k : Int) : NativeU8Arr do
+  doc "Set one sub-cube, ignoring anything outside the grid. Public because CubeForge.Fauna builds its bodies from the same primitives."
+  fn put(g : NativeU8Arr, x : Int, y : Int, z : Int, k : Int) : NativeU8Arr do
     if x < 0 || y < 0 || z < 0 || x >= 8 || y >= 8 || z >= 8 do g else NativeArray.set_u8(g, idx(x, y, z), k) end
   end
-  -- Fill the box [x0, x1] x [y0, y1] x [z0, z1].
-  pfn box(g : NativeU8Arr, x0 : Int, y0 : Int, z0 : Int, x1 : Int, y1 : Int, z1 : Int, k : Int) : NativeU8Arr do
+  doc "Fill the box [x0, x1] x [y0, y1] x [z0, z1]."
+  fn box(g : NativeU8Arr, x0 : Int, y0 : Int, z0 : Int, x1 : Int, y1 : Int, z1 : Int, k : Int) : NativeU8Arr do
     box_go(g, x0, y0, z0, x1, y1, z1, k, 0, (x1 - x0 + 1) * (y1 - y0 + 1) * (z1 - z0 + 1))
   end
   pfn box_go(g : NativeU8Arr, x0 : Int, y0 : Int, z0 : Int, x1 : Int, y1 : Int, z1 : Int, k : Int, i : Int, n : Int) : NativeU8Arr do
@@ -210,32 +261,32 @@ mod CubeForge.Model do
   pfn gy(d : Int, a : Int, u : Int, v : Int) : Int do if d <= 1 do a else v end end
   pfn gz(d : Int, a : Int, u : Int, v : Int) : Int do if d <= 1 do v else if d <= 3 do u else a end end end
   -- The colour of the face at (u, v) in the slice, or 0 when there is none.
-  pfn face_at(g : NativeU8Arr, d : Int, a : Int, u : Int, v : Int) : Int do
+  pfn face_at(g : NativeU8Arr, n : Int, d : Int, a : Int, u : Int, v : Int) : Int do
     let x = gx(d, a, u, v)
     let y = gy(d, a, u, v)
     let z = gz(d, a, u, v)
-    let k = cell(g, x, y, z)
+    let k = cell_n(g, n, x, y, z)
     if k == 0 do 0
-    else if cell(g, x + dox(d), y + doy(d), z + doz(d)) != 0 do 0
+    else if cell_n(g, n, x + dox(d), y + doy(d), z + doz(d)) != 0 do 0
     else k end end
   end
-  pfn fill_go(g : NativeU8Arr, d : Int, a : Int, i : Int, mask : NativeIntArr) : NativeIntArr do
-    if i >= 64 do mask else fill_go(g, d, a, i + 1, NativeArray.set_int(mask, i, face_at(g, d, a, i % 8, i / 8))) end
+  pfn fill_go(g : NativeU8Arr, n : Int, d : Int, a : Int, i : Int, mask : NativeIntArr) : NativeIntArr do
+    if i >= n * n do mask else fill_go(g, n, d, a, i + 1, NativeArray.set_int(mask, i, face_at(g, n, d, a, i % n, i / n))) end
   end
-  pfn run_w(mask : NativeIntArr, u : Int, v : Int, k : Int, wd : Int) : Int do
-    if u + wd >= 8 do wd
-    else if NativeArray.get_int(mask, u + wd + 8 * v) == k do run_w(mask, u, v, k, wd + 1) else wd end end
+  pfn run_w(mask : NativeIntArr, n : Int, u : Int, v : Int, k : Int, wd : Int) : Int do
+    if u + wd >= n do wd
+    else if NativeArray.get_int(mask, u + wd + n * v) == k do run_w(mask, n, u, v, k, wd + 1) else wd end end
   end
-  pfn row_ok(mask : NativeIntArr, u : Int, v : Int, k : Int, wd : Int, j : Int) : Bool do
+  pfn row_ok(mask : NativeIntArr, n : Int, u : Int, v : Int, k : Int, wd : Int, j : Int) : Bool do
     if j >= wd do true
-    else if NativeArray.get_int(mask, u + j + 8 * v) == k do row_ok(mask, u, v, k, wd, j + 1) else false end end
+    else if NativeArray.get_int(mask, u + j + n * v) == k do row_ok(mask, n, u, v, k, wd, j + 1) else false end end
   end
-  pfn run_h(mask : NativeIntArr, u : Int, v : Int, k : Int, wd : Int, h : Int) : Int do
-    if v + h >= 8 do h
-    else if row_ok(mask, u, v + h, k, wd, 0) do run_h(mask, u, v, k, wd, h + 1) else h end end
+  pfn run_h(mask : NativeIntArr, n : Int, u : Int, v : Int, k : Int, wd : Int, h : Int) : Int do
+    if v + h >= n do h
+    else if row_ok(mask, n, u, v + h, k, wd, 0) do run_h(mask, n, u, v, k, wd, h + 1) else h end end
   end
-  pfn clear_go(mask : NativeIntArr, u : Int, v : Int, wd : Int, h : Int, j : Int) : NativeIntArr do
-    if j >= wd * h do mask else clear_go(NativeArray.set_int(mask, u + j % wd + 8 * (v + j / wd), 0), u, v, wd, h, j + 1) end
+  pfn clear_go(mask : NativeIntArr, n : Int, u : Int, v : Int, wd : Int, h : Int, j : Int) : NativeIntArr do
+    if j >= wd * h do mask else clear_go(NativeArray.set_int(mask, u + j % wd + n * (v + j / wd), 0), n, u, v, wd, h, j + 1) end
   end
 
   fn face_float(d : Int) : Float do int_to_float(d) end
@@ -248,8 +299,8 @@ mod CubeForge.Model do
       |> vert(x0, y0, z0, k, d) |> vert(x2, y2, z2, k, d) |> vert(x3, y3, z3, k, d)
   end
   -- One merged rectangle, wound as Mesher.emit_rect winds each direction, at 1/8 scale.
-  pfn emit(b : CubeForge.F32Buf.F32Buf, d : Int, a : Int, u : Int, v : Int, wd : Int, h : Int, k : Int) : CubeForge.F32Buf.F32Buf do
-    let s = 0.125
+  pfn emit(b : CubeForge.F32Buf.F32Buf, n : Int, d : Int, a : Int, u : Int, v : Int, wd : Int, h : Int, k : Int) : CubeForge.F32Buf.F32Buf do
+    let s = 1.0 /. int_to_float(n)
     let fa = int_to_float(a) *. s
     let fa1 = fa +. s
     let fu = int_to_float(u) *. s
@@ -267,40 +318,42 @@ mod CubeForge.Model do
   end
 
   type Greedy = Greedy(CubeForge.F32Buf.F32Buf, NativeIntArr)
-  pfn greedy_go(g : Greedy, d : Int, a : Int, i : Int) : Greedy do
-    if i >= 64 do g
+  pfn greedy_go(g : Greedy, n : Int, d : Int, a : Int, i : Int) : Greedy do
+    if i >= n * n do g
     else
       match g do
         Greedy(b, mask) ->
           let k = NativeArray.get_int(mask, i)
-          if k == 0 do greedy_go(Greedy(b, mask), d, a, i + 1)
+          if k == 0 do greedy_go(Greedy(b, mask), n, d, a, i + 1)
           else
-            let u = i % 8
-            let v = i / 8
-            let wd = run_w(mask, u, v, k, 1)
-            let h = run_h(mask, u, v, k, wd, 1)
-            greedy_go(Greedy(emit(b, d, a, u, v, wd, h, k), clear_go(mask, u, v, wd, h, 0)), d, a, i + 1)
+            let u = i % n
+            let v = i / n
+            let wd = run_w(mask, n, u, v, k, 1)
+            let h = run_h(mask, n, u, v, k, wd, 1)
+            greedy_go(Greedy(emit(b, n, d, a, u, v, wd, h, k), clear_go(mask, n, u, v, wd, h, 0)), n, d, a, i + 1)
           end
       end
     end
   end
-  pfn slices_go(g : Greedy, grid : NativeU8Arr, d : Int, a : Int) : Greedy do
-    if a >= 8 do g
+  pfn slices_go(g : Greedy, grid : NativeU8Arr, n : Int, d : Int, a : Int) : Greedy do
+    if a >= n do g
     else
       match g do
-        Greedy(b, mask) -> slices_go(greedy_go(Greedy(b, fill_go(grid, d, a, 0, mask)), d, a, 0), grid, d, a + 1)
+        Greedy(b, mask) -> slices_go(greedy_go(Greedy(b, fill_go(grid, n, d, a, 0, mask)), n, d, a, 0), grid, n, d, a + 1)
       end
     end
   end
-  pfn dirs_go(g : Greedy, grid : NativeU8Arr, d : Int) : Greedy do
-    if d >= 6 do g else dirs_go(slices_go(g, grid, d, 0), grid, d + 1) end
+  pfn dirs_go(g : Greedy, grid : NativeU8Arr, n : Int, d : Int) : Greedy do
+    if d >= 6 do g else dirs_go(slices_go(g, grid, n, d, 0), grid, n, d + 1) end
   end
-  doc "Greedy-mesh a grid into a template: vertices in the 9-float layout, positions in [0, 1], shade 1."
-  fn template(grid : NativeU8Arr) : CubeForge.F32Buf.F32Buf do
-    match dirs_go(Greedy(B.new(1024), NativeArray.make_int(64, 0)), grid, 0) do
+  doc "Greedy-mesh a grid [n] a side into a template: vertices in the 10-float layout, positions in [0, 1], shade 1."
+  fn template_n(grid : NativeU8Arr, n : Int) : CubeForge.F32Buf.F32Buf do
+    match dirs_go(Greedy(B.new(1024), NativeArray.make_int(n * n, 0)), grid, n, 0) do
       Greedy(b, _) -> b
     end
   end
+  doc "Greedy-mesh an 8-cube grid: the block models' size."
+  fn template(grid : NativeU8Arr) : CubeForge.F32Buf.F32Buf do template_n(grid, size()) end
 
   -- ── The set: every template in one blob ─────────────────────────────────
   -- All templates: a float blob and count() + 1 offsets into it.

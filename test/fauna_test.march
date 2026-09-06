@@ -1,0 +1,221 @@
+-- Fauna: the bodies mesh, and the transform stamp does what its name says.
+--
+-- The stamp is the piece everything else rests on, and it is written in C, so
+-- it is checked here against arithmetic done in March rather than trusted.
+mod CubeForge.Test.Fauna do
+
+  import Test
+  alias CubeForge.Fauna as F
+  alias CubeForge.F32Buf as B
+  alias CubeForge.Vertex as Vx
+  alias CubeForge.Model as Mdl
+
+  -- Float [j] of vertex [v] of a buffer.
+  pfn at(b : CubeForge.F32Buf.F32Buf, v : Int, j : Int) : Float do
+    NativeArray.get_f32(B.storage(b), v * Vx.floats() + j)
+  end
+  pfn close(a : Float, b : Float) : Bool do Math.abs(a -. b) < 0.0005 end
+
+  pfn cap_go(s : CubeForge.Fauna.Poses, k : Int) : Bool do
+    if k >= F.template_count() do true
+    else if F.faces(s, k) > F.face_cap() do false
+    else cap_go(s, k + 1) end end
+  end
+  pfn nonempty_go(s : CubeForge.Fauna.Poses, k : Int) : Bool do
+    if k >= F.template_count() do true
+    else if F.floats(s, k) <= 0 do false
+    else nonempty_go(s, k + 1) end end
+  end
+
+  describe "Fauna bodies" do
+    test "every pose of every species meshes to something, and stays under the face cap" do
+      let s = F.build()
+      Test.assert_eq_int(F.template_count(), 6, "two species, three poses each")
+      Test.assert_true(nonempty_go(s, 0), "no empty body")
+      Test.assert_true(cap_go(s, 0), "every body under the face cap")
+    end
+
+    test "the poses of one species differ" do
+      let s = F.build()
+      -- wings down and wings up cannot greedy-mesh to the same float count and
+      -- the same first vertex; if they do, the pose argument is being ignored.
+      let down = F.template_of(F.sp_grasspipit(), 0)
+      let up = F.template_of(F.sp_grasspipit(), 2)
+      Test.assert_true(F.offset(s, down) != F.offset(s, up), "different places in the blob")
+      let b0 = B.stamp_xf(B.new(4096), F.blob(s), F.offset(s, down), F.floats(s, down), 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0)
+      let b1 = B.stamp_xf(B.new(4096), F.blob(s), F.offset(s, up), F.floats(s, up), 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0)
+      Test.assert_true(B.len(b0) != B.len(b1) || at(b0, 0, 1) != at(b1, 0, 1), "the wings are not in the same place")
+    end
+  end
+
+
+  -- ── Connectivity ─────────────────────────────────────────────────────────
+  -- A body must be ONE piece. This is the invariant the body-plan generators
+  -- exist to guarantee, and it is the bug that motivated them: the first
+  -- hand-built bird had its wings two cells clear of its flank, touching
+  -- nothing, and flew apart.
+  --
+  -- Note what this is not. Checking that every filled cell touches another
+  -- filled cell would have PASSED that bird: the wing was a solid slab, so its
+  -- own cells touched each other perfectly well. Only reaching every cell from
+  -- one seed catches a part that is whole and in the wrong place.
+  pfn marked(m : NativeU8Arr, x : Int, y : Int, z : Int) : Bool do
+    if x < 0 || y < 0 || z < 0 || x >= F.grid() || y >= F.grid() || z >= F.grid() do false
+    else NativeArray.get_u8(m, Mdl.idx_n(F.grid(), x, y, z)) != 0 end
+  end
+  pfn nb_marked(m : NativeU8Arr, x : Int, y : Int, z : Int) : Bool do
+    marked(m, x + 1, y, z) || marked(m, x - 1, y, z) || marked(m, x, y + 1, z)
+      || marked(m, x, y - 1, z) || marked(m, x, y, z + 1) || marked(m, x, y, z - 1)
+  end
+  pfn flood_sweep(g : NativeU8Arr, m : NativeU8Arr, i : Int) : NativeU8Arr do
+    if i >= F.grid() * F.grid() * F.grid() do m
+    else
+      let n = F.grid()
+      let x = i % n
+      let z = (i / n) % n
+      let y = i / (n * n)
+      -- nested rather than &&: the guards must be checked in order (GAPS G33)
+      if Mdl.cell_n(g, F.grid(), x, y, z) == 0 do flood_sweep(g, m, i + 1)
+      else if NativeArray.get_u8(m, i) != 0 do flood_sweep(g, m, i + 1)
+      else if nb_marked(m, x, y, z) do flood_sweep(g, NativeArray.set_u8(m, i, 1), i + 1)
+      else flood_sweep(g, m, i + 1) end end end
+    end
+  end
+  pfn count_u8(a : NativeU8Arr, i : Int, acc : Int) : Int do
+    if i >= F.grid() * F.grid() * F.grid() do acc else count_u8(a, i + 1, if NativeArray.get_u8(a, i) != 0 do acc + 1 else acc end) end
+  end
+  pfn count_filled(g : NativeU8Arr, i : Int, acc : Int) : Int do
+    if i >= F.grid() * F.grid() * F.grid() do acc else count_filled(g, i + 1, if NativeArray.get_u8(g, i) != 0 do acc + 1 else acc end) end
+  end
+  pfn first_filled(g : NativeU8Arr, i : Int) : Int do
+    if i >= F.grid() * F.grid() * F.grid() do 0 - 1
+    else if NativeArray.get_u8(g, i) != 0 do i
+    else first_filled(g, i + 1) end end
+  end
+  -- Grow the marked set to a fixpoint. Capped: a shape that somehow needed more
+  -- rounds than it has cells would otherwise not terminate.
+  pfn flood(g : NativeU8Arr, m : NativeU8Arr, prev : Int, rounds : Int) : NativeU8Arr do
+    if rounds <= 0 do m
+    else
+      let m1 = flood_sweep(g, m, 0)
+      let n = count_u8(m1, 0, 0)
+      if n == prev do m1 else flood(g, m1, n, rounds - 1) end
+    end
+  end
+  pfn one_piece(g : NativeU8Arr) : Bool do
+    let seed = first_filled(g, 0)
+    if seed < 0 do false
+    else count_u8(flood(g, NativeArray.set_u8(NativeArray.make_u8(F.grid() * F.grid() * F.grid(), 0), seed, 1), 0, 96), 0, 0) == count_filled(g, 0, 0) end
+  end
+  pfn all_one_piece(k : Int) : Bool do
+    if k >= F.template_count() do true
+    else if !one_piece(F.shape(k)) do false
+    else all_one_piece(k + 1) end end
+  end
+
+  describe "body plans" do
+    test "every body is a single connected piece" do
+      Test.assert_true(all_one_piece(0), "no template has a part floating clear of the rest")
+    end
+
+    test "the flood fill can actually fail" do
+      -- A negative control. Without this, "every body is connected" might only
+      -- mean the checker says yes to everything.
+      let apart = Mdl.box_n(Mdl.box_n(Mdl.empty_n(F.grid()), F.grid(), 5, 5, 5, 6, 6, 6, 1), F.grid(), 0, 0, 0, 1, 1, 1, 1)
+      Test.assert_true(!one_piece(apart), "two separated blocks are not one piece")
+      Test.assert_true(one_piece(Mdl.box_n(Mdl.empty_n(F.grid()), F.grid(), 5, 5, 5, 6, 6, 6, 1)), "one block is")
+    end
+  end
+
+  describe "the transform stamp" do
+    test "yaw 0 at scale 1 is the template, recentred on the given point" do
+      let s = F.build()
+      let k = F.template_of(F.sp_sunfin(), 0)
+      let n = F.floats(s, k)
+      -- The template's own coordinates are in [0, 1]; the stamp treats (0.5,
+      -- 0.5, 0.5) as the body centre, so placing the centre at (0.5, 0.5, 0.5)
+      -- with no rotation and no scale must reproduce them exactly.
+      let b = B.stamp_xf(B.new(4096), F.blob(s), F.offset(s, k), n, 0.5, 0.5, 0.5, 1.0, 1.0, 0.0, 1.0)
+      Test.assert_eq_int(B.len(b), n, "same float count")
+      Test.assert_true(close(at(b, 0, 0), NativeArray.get_f32(F.blob(s), F.offset(s, k) + 0)), "x survives")
+      Test.assert_true(close(at(b, 0, 1), NativeArray.get_f32(F.blob(s), F.offset(s, k) + 1)), "y survives")
+      Test.assert_true(close(at(b, 0, 2), NativeArray.get_f32(F.blob(s), F.offset(s, k) + 2)), "z survives")
+    end
+
+    test "a quarter turn sends +x to +z, in the geometry and in the face" do
+      let s = F.build()
+      let k = F.template_of(F.sp_sunfin(), 0)
+      let n = F.floats(s, k)
+      -- One sub-cube forward of centre (+x) must land one sub-cube toward +z.
+      let b = B.stamp_xf(B.new(4096), F.blob(s), F.offset(s, k), n, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0)
+      let src = F.blob(s)
+      let o = F.offset(s, k)
+      let px = NativeArray.get_f32(src, o + 0) -. 0.5
+      let pz = NativeArray.get_f32(src, o + 2) -. 0.5
+      Test.assert_true(close(at(b, 0, 0), 0.0 -. pz), "x' = -z")
+      Test.assert_true(close(at(b, 0, 2), px), "z' = x")
+      Test.assert_true(close(at(b, 0, 1), NativeArray.get_f32(src, o + 1) -. 0.5), "y is untouched by yaw")
+      -- The face index turns with the body: +x (2) becomes +z (4), and the
+      -- cycle is 2 -> 4 -> 3 -> 5. A face that did not move would light a
+      -- turned animal as though it still faced east.
+      let f0 = float_to_int(NativeArray.get_f32(src, o + 7) +. 0.5)
+      let f1 = float_to_int(at(b, 0, 7) +. 0.5)
+      let want = if f0 == 2 do 4 else if f0 == 4 do 3 else if f0 == 3 do 5 else if f0 == 5 do 2 else f0 end end end end
+      Test.assert_eq_int(f1, want, "the face turned with the body")
+    end
+
+    test "scale multiplies the offset from the centre, not the position" do
+      let s = F.build()
+      let k = F.template_of(F.sp_grasspipit(), 1)
+      let n = F.floats(s, k)
+      let b1 = B.stamp_xf(B.new(4096), F.blob(s), F.offset(s, k), n, 10.0, 5.0, 3.0, 1.0, 1.0, 0.0, 1.0)
+      let b2 = B.stamp_xf(B.new(4096), F.blob(s), F.offset(s, k), n, 10.0, 5.0, 3.0, 1.0, 1.0, 0.0, 2.0)
+      -- The centre is where it was asked for at either size; the vertex moves
+      -- twice as far from it.
+      let d1 = at(b1, 0, 0) -. 10.0
+      let d2 = at(b2, 0, 0) -. 10.0
+      Test.assert_true(close(d2, 2.0 *. d1), "twice the scale, twice the offset from the centre")
+    end
+
+    test "a body is drawn where it is put" do
+      let s = F.build()
+      let k = F.template_of(F.sp_sunfin(), 0)
+      let n = F.floats(s, k)
+      let b = B.stamp_xf(B.new(4096), F.blob(s), F.offset(s, k), n, 100.5, 64.25, 12.75, 1.0, 1.0, 0.0, 0.5)
+      -- every vertex within half a scale of the centre it was given
+      Test.assert_true(Math.abs(at(b, 0, 0) -. 100.5) <= 0.25001, "x near the centre")
+      Test.assert_true(Math.abs(at(b, 0, 1) -. 64.25) <= 0.25001, "y near the centre")
+      Test.assert_true(Math.abs(at(b, 0, 2) -. 12.75) <= 0.25001, "z near the centre")
+    end
+  end
+
+  describe "the demo flock" do
+    test "it builds the bodies it says it will, and clearing is not cumulative" do
+      let s = F.build()
+      let b1 = F.demo_build(B.new(8192), s, 64.0, 70.0, 64.0, 1.0, 0.0, 0.0)
+      -- Read everything wanted from b1 BEFORE handing it on: the buffer is
+      -- rewritten in place, so a live second reference makes it shared and the
+      -- shim refuses to write (GAPS G68, and cf_f32_stamp_xf's rc check).
+      let n1 = B.len(b1)
+      let v1 = F.vertex_count(b1)
+      let b2 = F.demo_build(b1, s, 64.0, 70.0, 64.0, 1.0, 0.0, 1.0)
+      Test.assert_true(n1 > 0, "something was built")
+      -- NOT an equality: the poses differ between the two moments and a raised
+      -- wing greedy-meshes to a different number of quads than a lowered one,
+      -- so the buffer legitimately changes size frame to frame. What must hold
+      -- is that clear() actually cleared -- a second build that appended would
+      -- be about double.
+      Test.assert_true(B.len(b2) < 2 * n1, "the second build replaced the first rather than appending to it")
+      Test.assert_eq_int(v1 % 6, 0, "whole quads")
+    end
+
+    test "the flock moves with the clock" do
+      let s = F.build()
+      let b1 = F.demo_build(B.new(8192), s, 64.0, 70.0, 64.0, 1.0, 0.0, 0.0)
+      let x0 = at(b1, 0, 0)
+      let b2 = F.demo_build(B.new(8192), s, 64.0, 70.0, 64.0, 1.0, 0.0, 2.0)
+      Test.assert_true(!close(x0, at(b2, 0, 0)), "two seconds later, somewhere else")
+    end
+  end
+
+end

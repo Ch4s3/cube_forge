@@ -59,6 +59,7 @@ mod CubeForge.Ffi.Window do
     fn x_u8_zero_box(consume a: NativeU8Arr, x0: Int, x1: Int, y0: Int, y1: Int, z0: Int, z1: Int): NativeU8Arr = "cf_u8_zero_box"
     fn x_mark_box(consume marks: NativeIntArr, a: NativeU8Arr, b: NativeU8Arr, x0: Int, x1: Int, y0: Int, y1: Int, z0: Int, z1: Int): NativeIntArr = "cf_mark_box"
     fn x_f32_stamp(consume dst: NativeF32Arr, di: Int, src: NativeF32Arr, si: Int, n: Int, dx: Float, dy: Float, dz: Float, shade: Float): NativeF32Arr = "cf_f32_stamp"
+    fn x_f32_stamp_xf(consume dst: NativeF32Arr, di: Int, src: NativeF32Arr, si: Int, n: Int, dx: Float, dy: Float, dz: Float, shade: Float, cosv: Float, sinv: Float, scale: Float): NativeF32Arr = "cf_f32_stamp_xf"
     fn x_mesh_slice(consume dst: NativeF32Arr, at: Int, mask: NativeIntArr, base: Int, d: Int, sy: Int, a: Int, ox: Float, oz: Float, layers: NativeF32Arr): NativeF32Arr = "cf_mesh_slice"
     fn x_mesh_quad(consume dst: NativeF32Arr, at: Int, d: Int, sy: Int, a: Int, u: Int, v: Int, wd: Int, h: Int, key: Int, ox: Float, oz: Float, layers: NativeF32Arr): NativeF32Arr = "cf_mesh_quad"
     fn x_gfx_draw_lines(slot: Int, nverts: Int): Unit = "cf_gfx_draw_lines"
@@ -173,6 +174,10 @@ mod CubeForge.Ffi.Window do
   fn mark_box(marks : NativeIntArr, a : NativeU8Arr, b : NativeU8Arr, x0 : Int, x1 : Int, y0 : Int, y1 : Int, z0 : Int, z1 : Int) : NativeIntArr do x_mark_box(marks, a, b, x0, x1, y0, y1, z0, z1) end
   doc "Copy [n] floats of 9-float vertices from src[si..] to dst[di..], adding (dx, dy, dz) to each position and writing [shade]: a model template stamped into a cell."
   fn f32_stamp(dst : NativeF32Arr, di : Int, src : NativeF32Arr, si : Int, n : Int, dx : Float, dy : Float, dz : Float, shade : Float) : NativeF32Arr do x_f32_stamp(dst, di, src, si, n, dx, dy, dz, shade) end
+  doc "f32_stamp with a yaw and a uniform scale: the template's unit cell is a body centred on (0.5, 0.5, 0.5), scaled, turned about +y by the angle with cosine [cosv] and sine [sinv], and placed with its centre at (dx, dy, dz). Face indices move by the nearest quarter turn so a turned body is lit as it faces. See cf_f32_stamp_xf."
+  fn f32_stamp_xf(dst : NativeF32Arr, di : Int, src : NativeF32Arr, si : Int, n : Int, dx : Float, dy : Float, dz : Float, shade : Float, cosv : Float, sinv : Float, scale : Float) : NativeF32Arr do
+    x_f32_stamp_xf(dst, di, src, si, n, dx, dy, dz, shade, cosv, sinv, scale)
+  end
   doc "Greedy-merge one 256-key slice of the mesher's mask (read only) into quads at dst[at..], which must have 256 * 54 + 1 floats of room; the floats written come back in dst[at + 256 * 54]. See cf_mesh_slice."
   fn mesh_slice(dst : NativeF32Arr, at : Int, mask : NativeIntArr, base : Int, d : Int, sy : Int, a : Int, ox : Float, oz : Float, layers : NativeF32Arr) : NativeF32Arr do
     x_mesh_slice(dst, at, mask, base, d, sy, a, ox, oz, layers)
