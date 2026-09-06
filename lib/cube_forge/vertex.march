@@ -22,6 +22,19 @@ mod CubeForge.Vertex do
   fn fx_still() : Int do 10 end
   doc "Effect 11: falling water — full foam."
   fn fx_fall() : Int do 11 end
+  doc """
+  Effect 12: SELF-LIT. An emissive block's own faces take their glow colour from
+  their own texture instead of the one warm constant every emitter shares.
+
+  Block light is a single channel, so a crystal lit by it came out the same
+  orange as a glowing mushroom, and a near-white selenite beam rendered beige.
+  Three block-light fields would fix that properly and are far out of scope;
+  this fixes the nine tenths of it that is the emitter's own faces. The light it
+  CASTS on the rock around it stays warm.
+  """
+  fn fx_selflit() : Int do 12 end
+  doc "The fx word of a self-lit face."
+  fn selflit() : Float do int_to_float(fx_selflit() * 256 + 255) end
   doc "Pack a water effect with a speed 0..7 in the alpha byte."
   fn pack_flow(effect : Int, speed : Int) : Float do pack(effect, int_to_float(speed) /. 7.0) end
 

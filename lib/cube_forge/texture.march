@@ -54,8 +54,8 @@ mod CubeForge.Texture do
 
   -- Bedded rock: horizontal laminae [every] pixels apart, a shade darker, over
   -- a speckle -- sandstone's thick pale beds, shale's thin grey-blue ones.
-  -- Layer 92: crystal. Angular facets in a cold blue-green, bright enough that
-  -- it reads as lit even before the block-light channel gets to it.
+  -- Layer 92: the crystal item's cube face (blocks draw the model, not this).
+  -- Selenite cream, like the beams it belongs with.
   pfn crystal_go(a : NativeU8Arr, i : Int) : NativeU8Arr do
     if i >= 256 do a
     else
@@ -64,21 +64,32 @@ mod CubeForge.Texture do
       -- two crossing diagonal families make facets rather than a speckle
       let f = ((x + y) / 3 + (x - y + 32) / 4) % 4
       let d = f * 26 - 32
-      crystal_go(put_rgba(a, 92 * 1024 + i * 4, 70 + d, 190 + d, 200 + d, 255), i + 1)
+      crystal_go(put_rgba(a, 92 * 1024 + i * 4, 236 + d, 238 + d, 232 + d, 255), i + 1)
     end
   end
 
-  -- Layer 93: a selenite beam's face. Long pale prisms, so a shaft of these
-  -- greedy-meshed into one big quad still reads as crystal rather than as a
-  -- painted slab: the stripes run one way and the facets break across them.
+  -- Layer 93: a selenite beam's face. Naica's crystals are MILKY CREAM, not
+  -- mint: gypsum with a faint warm cast, almost white where the light hits a
+  -- face and grey-beige in the shade. The first version was a saturated
+  -- blue-green, and no amount of tuning the beams' size fixed the fact that
+  -- they did not look like the reference because they were the wrong colour.
+  --
+  -- Long, low-contrast bands along the face rather than a speckle, so a shaft
+  -- greedy-meshed into one big quad still reads as a grown prism.
+  --
+  -- Near-white, not cream: the rock it grows in is sandstone as often as not,
+  -- and a cream crystal in a sandstone chamber is one beige mass. What separates
+  -- selenite from its host in every photograph is that it is PALER than
+  -- anything around it.
   pfn beam_go(a : NativeU8Arr, i : Int) : NativeU8Arr do
     if i >= 256 do a
     else
       let x = i % 16
       let y = i / 16
-      let prism = (x + y / 5) % 5
-      let d = prism * 16 - 32 + ((x * 5 + y * 3) % 3) * 6
-      beam_go(put_rgba(a, 93 * 1024 + i * 4, 176 + d, 232 + d, 240 + d, 255), i + 1)
+      let band = ((y + x / 7) % 6) * 5 - 12
+      let grain = ((x * 5 + y * 3) % 4) * 3
+      let d = band + grain
+      beam_go(put_rgba(a, 93 * 1024 + i * 4, 240 + d, 242 + d, 236 + d, 255), i + 1)
     end
   end
 
@@ -220,11 +231,23 @@ mod CubeForge.Texture do
 
   -- ── The layer table for the shim's quad emitter ─────────────────────────
   pfn layer_tab_go(t : NativeF32Arr, i : Int) : NativeF32Arr do
-    if i >= 1536 do t else layer_tab_go(NativeArray.set_f32(t, i, layer_for_face(i / 6, i % 6)), i + 1) end
+    if i >= 1536 do t
+    else layer_tab_go(NativeArray.set_f32(t, i, layer_for_face(i / 6, i % 6) +. (if is_selflit(i / 6) do selflit_bias() else 0.0 end)), i + 1) end
   end
   pfn myc_tab_go(t : NativeF32Arr, j : Int) : NativeF32Arr do
     if j >= 42 do t else myc_tab_go(NativeArray.set_f32(t, 1536 + j, myc_layer(j / 6, j % 6 + 1)), j + 1) end
   end
+  doc """
+  Added to a face's layer in the table the shim reads to mark it SELF-LIT
+  (Vertex.fx_selflit): the greedy quad writer takes everything it knows from
+  the key and this table, so this is where a per-block flag can travel without
+  a second array through the FFI. Only `layer_table` carries the bias; every
+  March path reads `layer_for` and is unaffected.
+  """
+  fn selflit_bias() : Float do 1000.0 end
+  doc "Does block [id] light its own faces with its own colour."
+  fn is_selflit(id : Int) : Bool do id == CubeForge.Chunk.crystal_beam() || id == CubeForge.Chunk.crystal() end
+
   doc "Every block face's texture layer in one array: layer_for_face(id, d) at id * 6 + d for ids 0..255, then myc_layer(k, sp) at 1536 + k * 6 + (sp - 1). cf_mesh_quad reads it instead of calling back into layer_for per rectangle, which was a chain of boxed-Float returns."
   fn layer_table() : NativeF32Arr do myc_tab_go(layer_tab_go(NativeArray.make_f32(1536 + 42, 0.0), 0), 0) end
   fn water_layer() : Float do 1.0 end

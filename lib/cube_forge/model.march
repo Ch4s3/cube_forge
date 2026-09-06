@@ -56,6 +56,7 @@ mod CubeForge.Model do
   fn c_bush() : Int do 20 end
   fn c_bush_light() : Int do 21 end
   fn c_bush_stem() : Int do 22 end
+  doc "Selenite: milky cream, and its brighter tip. Naica's crystals are gypsum with a warm cast, not the blue-green a crystal is usually drawn as."
   fn c_crystal() : Int do 23 end
   fn c_crystal_pale() : Int do 24 end
 
@@ -66,7 +67,7 @@ mod CubeForge.Model do
     else if k == 13 do 235 else if k == 14 do 200 else if k == 15 do 70 else if k == 16 do 100
     else if k == 17 do 84 else if k == 18 do 60 else if k == 19 do 130
     else if k == 20 do 62 else if k == 21 do 90 else if k == 22 do 90
-    else if k == 23 do 120 else if k == 24 do 186 else 0 end end end end end end end end end end end end end end
+    else if k == 23 do 228 else if k == 24 do 248 else 0 end end end end end end end end end end end end end end
   end
   fn colour_g(k : Int) : Int do
     if k >= 1 && k <= 6 do S.colour_g(k)
@@ -74,7 +75,7 @@ mod CubeForge.Model do
     else if k == 13 do 225 else if k == 14 do 190 else if k == 15 do 48 else if k == 16 do 72
     else if k == 17 do 150 else if k == 18 do 115 else if k == 19 do 190
     else if k == 20 do 128 else if k == 21 do 160 else if k == 22 do 64
-    else if k == 23 do 216 else if k == 24 do 240 else 0 end end end end end end end end end end end end end end
+    else if k == 23 do 230 else if k == 24 do 250 else 0 end end end end end end end end end end end end end end
   end
   fn colour_b(k : Int) : Int do
     if k >= 1 && k <= 6 do S.colour_b(k)
@@ -82,7 +83,7 @@ mod CubeForge.Model do
     else if k == 13 do 200 else if k == 14 do 165 else if k == 15 do 38 else if k == 16 do 50
     else if k == 17 do 62 else if k == 18 do 45 else if k == 19 do 90
     else if k == 20 do 54 else if k == 21 do 70 else if k == 22 do 40
-    else if k == 23 do 222 else if k == 24 do 246 else 0 end end end end end end end end end end end end end end
+    else if k == 23 do 222 else if k == 24 do 244 else 0 end end end end end end end end end end end end end end
   end
 
   -- ── Shapes ────────────────────────────────────────────────────────────────
@@ -276,7 +277,8 @@ mod CubeForge.Model do
 
   fn face_float(d : Int) : Float do int_to_float(d) end
   pfn vert(b : CubeForge.F32Buf.F32Buf, x : Float, y : Float, z : Float, k : Int, d : Int) : CubeForge.F32Buf.F32Buf do
-    B.push_vertex(b, x, y, z, palette_u(k), palette_v(k), palette_layer(), 1.0, face_float(d), Vx.plain())
+    -- a crystal blade lights its own faces with its own colour (Vertex.fx_selflit)
+    B.push_vertex(b, x, y, z, palette_u(k), palette_v(k), palette_layer(), 1.0, face_float(d), if k == c_crystal() || k == c_crystal_pale() do Vx.selflit() else Vx.plain() end)
   end
   pfn quad(b : CubeForge.F32Buf.F32Buf, x0 : Float, y0 : Float, z0 : Float, x1 : Float, y1 : Float, z1 : Float,
            x2 : Float, y2 : Float, z2 : Float, x3 : Float, y3 : Float, z3 : Float, k : Int, d : Int) : CubeForge.F32Buf.F32Buf do

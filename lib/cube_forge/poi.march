@@ -373,6 +373,42 @@ mod CubeForge.Poi do
     if len2 <= 0.0001 do 0.0 else N.clamp01(((px -. ax) *. dx +. (py -. ay) *. dy +. (pz -. az) *. dz) /. len2) end
   end
 
+  doc """
+  Distance from (px, py, pz) to the axis (ax, ay, az)-(ex, ey, ez), measured in
+  a PRISM's norm rather than a circle's: an octagonal cross-section, so a beam
+  has flat faces and hard edges.
+
+  This is the thing that was wrong with the crystals, and no amount of tuning
+  their length or count was going to fix it. A radial distance gives a cylinder,
+  and a voxelised cylinder is a staircase — round in principle, lumpy in fact.
+  A selenite beam is a prism: big flat planes meeting at sharp edges, which is
+  most of what makes one read as a crystal rather than as a pale rock.
+
+  The cross-section basis is free: for an axis `d`, `e1 = (dz, 0, -dx)` is
+  perpendicular to it by inspection, and the second component follows from
+  Pythagoras against the full perpendicular offset, so no second basis vector
+  and no cross product are needed.
+  """
+  pfn prism_d(px : Float, py : Float, pz : Float, ax : Float, ay : Float, az : Float, ex : Float, ey : Float, ez : Float) : Float do
+    let dx = ex -. ax
+    let dy = ey -. ay
+    let dz = ez -. az
+    let t = seg_t(px, py, pz, ax, ay, az, ex, ey, ez)
+    -- offset from the nearest point on the axis
+    let ox = px -. (ax +. dx *. t)
+    let oy = py -. (ay +. dy *. t)
+    let oz = pz -. (az +. dz *. t)
+    let r2 = ox *. ox +. oy *. oy +. oz *. oz
+    let h = Math.sqrt(dx *. dx +. dz *. dz)
+    -- a near-vertical beam has no horizontal component to build e1 from
+    let a = if h < 0.0001 do ox else (ox *. dz -. oz *. dx) /. h end
+    let b2 = r2 -. a *. a
+    let b = if b2 <= 0.0 do 0.0 else Math.sqrt(b2) end
+    let fa = Math.abs(a)
+    -- an octagon, not a square: four faces read as a crate, eight as a crystal
+    Math.max_float(Math.max_float(fa, b), (fa +. b) *. 0.7071)
+  end
+
   -- Squared distance from (px, py, pz) to the segment (ax, ay, az)-(ex, ey, ez).
   -- The end point is `e`, not `b`: `by` is a keyword, and a parameter named
   -- that is a parse error on the signature line with no hint as to why.
@@ -508,7 +544,7 @@ mod CubeForge.Poi do
       let dy = beam_dy(k, cx, cz, seed, j, b) *. l
       let dz = beam_dz(k, cx, cz, seed, j, b) *. l
       let t = seg_t(u, y, v, ou -. dx, oy -. dy, ov -. dz, ou +. dx, oy +. dy, ov +. dz)
-      let d = Math.sqrt(seg_d2(u, y, v, ou -. dx, oy -. dy, ov -. dz, ou +. dx, oy +. dy, ov +. dz))
+      let d = prism_d(u, y, v, ou -. dx, oy -. dy, ov -. dz, ou +. dx, oy +. dy, ov +. dz)
               /. (beam_rad(k, cx, cz, seed, j, b) *. beam_taper(t))
       beam_d(k, cx, cz, seed, u, v, y, g, j, b + 1, Math.min_float(best, d))
     end

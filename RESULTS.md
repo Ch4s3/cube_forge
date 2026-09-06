@@ -2493,3 +2493,43 @@ behind the `d < 1.45` chamber test.
 So the crystals are both things, and each is the mechanism that fits it: the
 fine growth is micro-voxel blades, because a cube read as a box; the shafts are
 geometry, because a model cannot leave its cell.
+
+
+## The crystals, actually looked at (2026-09-06)
+
+Four rounds of tuning the beams' length, thickness, count and angle each made
+them a bit better and none of them made them look like Naica. The two things
+that were wrong were not numbers.
+
+**They were cylinders.** `beam_d` measured a radial distance from the axis, and
+a voxelised cylinder is a staircase — round in principle and lumpy in fact. A
+selenite beam is a **prism**: big flat planes meeting at hard edges, and that is
+most of what makes one read as a crystal rather than as a pale rock. `prism_d`
+measures an **octagonal** cross-section instead (four faces read as a crate,
+eight as a crystal). The basis is free: for an axis `d`, `e1 = (dz, 0, -dx)` is
+perpendicular by inspection and the second component follows from Pythagoras
+against the full perpendicular offset, so there is no cross product and no
+second basis vector.
+
+**They were the wrong colour, and the texture was not why.** Block light is one
+channel and `GLOW` is warm, so every emitter in the game glows the same orange —
+a near-white selenite beam rendered beige, and repainting the texture whiter
+just made it a paler beige. What fixed it is **effect 12, self-lit** (task 6 of
+the phase 1 plan, built early because this is what needed it): an emissive
+block's own faces take their glow colour from their own texture,
+`glow = (fe == 12) ? t.rgb * 1.15 : GLOW`. Selenite now reads white against
+brown rock.
+
+The flag reaches the shim without a second FFI array by riding the **layer
+table**: `Texture.selflit_bias()` adds 1000 to a self-lit face's layer and
+`cf_vert` strips it and sets the effect. Only `layer_table` carries the bias, so
+every March path reads `layer_for` and is unaffected. The water bob had to grow
+an upper bound — it fires on `fe >= 2`, which effect 12 would have joined, and
+crystals would have wobbled.
+
+The limitation is real and worth stating: this fixes the emitter's **own faces**.
+The light it casts on the rock around it is still warm, and making that cold
+needs three block-light fields rather than one.
+
+478 tests. `CF_POI=0` and `CF_POI=1` still agree at seed 7 (mesh 484802240) --
+the bias touches no block that world contains. Worst frame 7.18 ms against 16.

@@ -224,7 +224,7 @@ static const char *VS =
     "  int fe = int(a_fx + 0.5) >> 8;\n"
     "  vec3 p = a_pos;\n"
     "  p.xz += u_off;\n"
-    "  if (fe >= 2) p.y += 0.03 * sin(u_time * 1.7 + p.x * 1.3 + p.z * 0.9);\n"
+    "  if (fe >= 2 && fe <= 11) p.y += 0.03 * sin(u_time * 1.7 + p.x * 1.3 + p.z * 0.9);\n"
     "  gl_Position = u_vp * vec4(p,1.0);\n"
     "  v_uv=a_uv; v_layer=a_layer;\n"
     /* v_shade is the packed shade word (see Vertex.pack_shade): sky x AO in
@@ -491,7 +491,13 @@ static const char *FS =
     /* Block light is its own source: independent of the sun, so it is what
      * you see at midnight. max, not +, so a glowing patch at noon is not
      * brighter than the noon around it. */
-    "  vec3  world = max(baked, bl * GLOW) + vec3(flash);\n"
+    /* A self-lit block glows in its OWN colour: block light is one channel and
+     * GLOW is warm, so a near-white selenite beam came out the same orange as a
+     * glowing mushroom. This fixes the emitter's own faces; the light it casts
+     * on the rock around it is still warm, and fixing that needs three
+     * block-light fields. */
+    "  vec3  glow = (fe == 12) ? t.rgb * 1.15 : GLOW;\n"
+    "  vec3  world = max(baked, bl * glow) + vec3(flash);\n"
     /* Overlays (HUD, outline, map marker) share this program but are not part of
      * the world: they keep their own vertex shade and skip lighting entirely. */
     "  vec3 lit = t.rgb * ((u_unlit == 1) ? vec3(sk) : world);\n"
@@ -1408,9 +1414,14 @@ static double cf_corner_blk(int64_t p) { return ((double)(p / 64) / 15.0) * cf_c
 static double cf_clamp01(double v) { return v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v); }
 static double cf_pack_shade(double sky, double blk) { return 2.0 * (double)(int64_t)(cf_clamp01(blk) * 255.0 + 0.5) + cf_clamp01(sky); }
 static double cf_brightness(double p) { double h = floor(p / 2.0); return (p - 2.0 * h) + h / 255.0; }
+/* A layer of 1000 or more is Texture.selflit_bias: the block lights its own
+ * faces with its own colour, and the bias is how that one bit reaches here
+ * without a second array through the FFI. Strip it and set effect 12. */
 static void cf_vert(float *o, double x, double y, double z, double u, double v, double layer, double shade, double face) {
+    double fx = 255.0;
+    if (layer >= 1000.0) { layer -= 1000.0; fx = 12.0 * 256.0 + 255.0; }
     o[0] = (float)x; o[1] = (float)y; o[2] = (float)z; o[3] = (float)u; o[4] = (float)v;
-    o[5] = (float)layer; o[6] = (float)shade; o[7] = (float)face; o[8] = 255.0f;
+    o[5] = (float)layer; o[6] = (float)shade; o[7] = (float)face; o[8] = (float)fx;
 }
 static void cf_quad_into(float *o, int64_t d, int64_t sy, int64_t a, int64_t u, int64_t v, int64_t wd, int64_t h,
                          int64_t key, double ox, double oz, const float *tab, int64_t ntab);
