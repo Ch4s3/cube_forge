@@ -35,10 +35,13 @@ mod CubeForge.Test.Terrain do
       let wx = i * 3
       let wz = i * 5 + 1
       let hs = N.height_x4(wx, wz, 11)
-      let l0 = float_to_int(Simd.extract_f32x4(hs, 0)) == N.height(wx, wz, 11)
-      let l1 = float_to_int(Simd.extract_f32x4(hs, 1)) == N.height(wx + 1, wz, 11)
-      let l2 = float_to_int(Simd.extract_f32x4(hs, 2)) == N.height(wx + 2, wz, 11)
-      let l3 = float_to_int(Simd.extract_f32x4(hs, 3)) == N.height(wx + 3, wz, 11)
+      -- against height_base, not height: the 4-wide path is the benchmark and
+      -- the reference for the FIELD terrain, and deliberately carries no
+      -- point-of-interest term (POI design, section 3).
+      let l0 = float_to_int(Simd.extract_f32x4(hs, 0)) == N.height_base(wx, wz, 11)
+      let l1 = float_to_int(Simd.extract_f32x4(hs, 1)) == N.height_base(wx + 1, wz, 11)
+      let l2 = float_to_int(Simd.extract_f32x4(hs, 2)) == N.height_base(wx + 2, wz, 11)
+      let l3 = float_to_int(Simd.extract_f32x4(hs, 3)) == N.height_base(wx + 3, wz, 11)
       if l0 && l1 && l2 && l3 do lanes_match(i + 1) else false end
     end
   end

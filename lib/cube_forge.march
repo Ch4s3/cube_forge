@@ -2704,6 +2704,49 @@ mod CubeForge do
     end
   end
 
+  -- CF_TERRAIN_STATS: the points of interest in the world span -- butte columns
+  -- (a landform term inside Noise.height) and arch sites (a structure Poi
+  -- stamps). Both are rare by design, so a world with none of either is the
+  -- normal case and the line says so.
+  -- count in the high half, the first column found in the low half (1-based, so
+  -- 0 means none), packed count * 1000000 + first
+  pfn poi_butte_go(n : Int, i : Int, seed : Int, acc : Int, first : Int) : Int do
+    let span = 16 * n
+    if i >= span * span do acc * 1000000 + first
+    else
+      let wx = i % span
+      let wz = i / span
+      if CubeForge.Noise.height(wx, wz, seed) > CubeForge.Noise.height_base(wx, wz, seed) do
+        poi_butte_go(n, i + 1, seed, acc + 1, if first == 0 do wx * 1000 + wz + 1 else first end)
+      else poi_butte_go(n, i + 1, seed, acc, first) end
+    end
+  end
+  pfn poi_arch_go(n : Int, i : Int, seed : Int, scale : Float, acc : Int, first : Int) : Int do
+    let cells = 16 * n / CubeForge.Poi.arch_cell() + 1
+    if i >= cells * cells do acc * 1000000 + first
+    else
+      let cx = i % cells
+      let cz = i / cells
+      let p = CubeForge.Poi.arch_at(cx, cz, seed, scale)
+      if p < 0 do poi_arch_go(n, i + 1, seed, scale, acc, first)
+      else
+        let off = CubeForge.Poi.arch_offset_of(p)
+        let wx = cx * CubeForge.Poi.arch_cell() + off % CubeForge.Poi.arch_cell()
+        let wz = cz * CubeForge.Poi.arch_cell() + off / CubeForge.Poi.arch_cell()
+        -- first is 1-based so 0 means none; the world span is 0..127 in both axes
+        poi_arch_go(n, i + 1, seed, scale, acc + 1, if first == 0 do wx * 1000 + wz + 1 else first end)
+      end
+    end
+  end
+  pfn poi_report(n : Int, seed : Int) : Unit do
+    let b = poi_butte_go(n, 0, seed, 0, 0)
+    let a = poi_arch_go(n, 0, seed, CubeForge.Noise.poi_scale(), 0, 0)
+    println("  poi: " ++ int_to_string(b / 1000000) ++ " butte columns"
+            ++ (if b % 1000000 == 0 do "" else " (first at " ++ int_to_string((b % 1000000 - 1) / 1000) ++ ", " ++ int_to_string((b % 1000000 - 1) % 1000) ++ ")" end)
+            ++ ", " ++ int_to_string(a / 1000000) ++ " arches"
+            ++ (if a % 1000000 == 0 do "" else " (first at " ++ int_to_string((a % 1000000 - 1) / 1000) ++ ", " ++ int_to_string((a % 1000000 - 1) % 1000) ++ ")" end))
+  end
+
   -- CF_TERRAIN_MAP=1 (alongside CF_TERRAIN_STATS): the world as a character map, one
   -- character per 2x2 columns, so plateaus, valleys and rivers can be seen, not inferred.
   --   ~ underwater   . sand   # granite (cliff)   * snow
@@ -3004,6 +3047,7 @@ mod CubeForge do
     if Env.get_int("CF_TERRAIN_STATS", 0) == 1 do
       stats_go(n, 0, seed, 999, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
       springs_go(n, 0, seed, 0, 0)
+      poi_report(n, seed)
       println("  caves: " ++ int_to_string(cave_air_go(world, n, 0, 0, seed)) ++ " air voxels below the surface, " ++ int_to_string(worm_cells_go(n, seed, 0, 0)) ++ " worm cells")
       let tl0 = System.monotonic_time()
       let lk = CubeForge.Lakes.levels(seed, n)

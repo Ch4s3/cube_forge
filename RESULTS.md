@@ -2281,3 +2281,99 @@ oracle and frame budget unmoved (380281180, sky 18 block 0, 6.42 ms).
 The one thing not covered headless is the mouse itself: the scripted knob
 supplies the slot, so the click-to-slot rule is tested through `eat_slot`
 rather than through a real right-click over a real cursor position.
+
+## Points of interest, phase 1: buttes and the arch (2026-09-06)
+
+Design `docs/superpowers/specs/2026-09-06-points-of-interest-design.md`, plan
+`docs/superpowers/plans/2026-09-06-poi-phase1.md`.
+
+**The design changed while the plan was being written, and that was the whole
+value of writing it.** The first draft gave every point of interest a hashed
+*site*, resolved once per lake tile into a `Poi.Field` threaded beside
+`Lakes.Tile`. Resolving a site means probing the terrain at its centre, and for
+a landform that probe runs inside `Noise.height` -- called for every column of
+every chunk heightmap, every apron column, every column of a 128x128 lake pour,
+and once per tree and worm placement. It would have had to call `height`
+recursively or pay a second full noise stack per candidate cell per column, and
+the field that hid the cost needed threading through twenty call sites, a seam
+apron, and its own agreement test. None of that was written.
+
+What landed instead is two mechanisms, each already in the codebase:
+
+- **Landforms are masked fields**, the way dunes and glaciers are: a rarity mask
+  times a shape, evaluated per column inside `height`, probing nothing. Nothing
+  threaded, no seam, `height` still a pure function of the column.
+- **Structures are resolved sites**, `Trees.tree_at_cell` exactly, stamped once
+  per chunk. Their suitability *is* free to probe `height`, because height
+  carries no structure term. `CubeForge.Poi.stamp` is one call at the end of
+  `Chunk.generate_lakes` and no signature anywhere changed.
+
+**The regression gate.** `CF_POI=0` zeroes every mask and density, and the
+pinned scenario's frame-30 mesh hash is still **380281180** -- the same number
+this file has been quoting since the greedy mesher. Worst frame 6.50 ms best of
+3 against a 16 ms budget (6.42 before). 473 tests (463 before).
+
+**Cost.** `height` gains one `value2` -- but only after the dune mask is already
+up, which is a few percent of columns, and `CF_POI` is not read at all until
+then. Best of six, whole-world scalar heightmap: seed 7, 38 ms off / 39 ms on;
+seed 15, which has buttes in the window, 37 ms off / 35 ms on. Not measurable.
+
+**Buttes.** The mesa's rise is an **absolute top level** hashed per cell, not a
+height added to the ground: a constant rise gives a top that tilts with the
+slope under it, and no butte does that. A cell whose ground is already within 8
+of its top holds nothing, which is why buttes read as remnants of a former
+surface. The radial step is hard, not eased -- an eased rim left a half-height
+shelf instead of a cliff -- and the blend that keeps the world from snapping is
+the *density* thinning with the country mask, not the mesa shrinking.
+
+Tuning, measured over a 1024-block square at seed 4242 (samples at 8 blocks):
+
+| | desert | country | both | on a mesa |
+|---|---|---|---|---|
+| threshold 0.70, density scaled by cty x dmask | 411 | 3186 | 151 | 5 |
+| threshold 0.62, density `clamp01(2 cty dmask)` | 411 | 4701 | 194 | 13 |
+
+The first is one or two mesas per million blocks -- a lump, not butte country.
+The second is 6.7% coverage inside desert-and-country, which is a field. Tallest
+mesa in that square: 20 blocks. Buttes turn up in the spawn window of 4 seeds in
+40.
+
+**The arch, and two things that were wrong.**
+
+*The span was hashed.* A hashed half-span lands in a real gorge about once in a
+thousand cells: **no arch in 160 cells across 40 seeds.** The span is now read
+off the terrain -- walk out from the channel until the ground stands
+`arch_bank_rise()` above it, both ways, and give up past `arch_max_span()`. An
+arch is the span of a gorge, so the gorge should say how wide it is.
+
+*One candidate column per cell.* A channel is a couple of percent of columns, so
+a single hashed draw in a 96-block cell finds one about once in forty cells, and
+the bank test then throws most of those away. Sixteen hashed candidates per cell
+took it to **6 arches in 160 cells** -- roughly one per 230,000 blocks, one seed
+in eight with an arch in its spawn window. The extra cost is sixteen `river_at`
+evaluations per arch cell and at most four such cells per chunk, about 3% of a
+chunk's noise work, and only for cells that pass the density draw.
+
+*A hole at the crown.* The first arch generated had a one-block gap in it. The
+underside is an ellipse and an ellipse's slope runs away near the feet -- several
+blocks per column, more than the band is thick -- so a band of constant thickness
+does not overlap its own neighbours. Each column's band is now taken against its
+two neighbours' undersides as well as its own. Found by printing a vertical
+cross-section through the arch, which is also how the fix was confirmed:
+
+```
+71 .......##..###..          71 ........#...#...
+70 ......##########          70 .......#########
+69 ....############    <--   69 .....###########
+68 ....############          68 .....#######.###   <- the gap
+67 ....#####.......          67 .....###........
+```
+
+**What is not verified.** Neither shape was confirmed visually. Four rounds of
+yaw sweeps at seeds with a POI in the window landed on a peak, in a lake and
+under water; the spawn column is chosen by the generator and there is no knob to
+put the camera somewhere. The evidence that they are real and right is the
+cross-section above, the `poi:` diagnostic line under `CF_TERRAIN_STATS`, the
+world and mesh hashes moving at a seed with an arch (seed 1: world 79424082 ->
+590784810) and not moving at one without, and the tests. A spawn-position knob
+would pay for itself the next time a rare feature needs looking at.

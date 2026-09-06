@@ -1,0 +1,207 @@
+-- Points of interest: the butte landform inside Noise.height, and the arch
+-- structure stamped by Poi. Helpers are module-level: `pfn` is not allowed
+-- inside `describe`/`test` (GAPS.md G59).
+--
+-- Both shapes are deliberately rare, so the tests HUNT for one rather than
+-- pinning a column: a scan that finds nothing still passes, and says so, but
+-- the scans are wide enough that the seed below finds both.
+mod CubeForge.Test.Poi do
+
+  needs IO.Spawn
+  import Test
+  alias CubeForge.Noise as N
+  alias CubeForge.Poi as Pi
+  alias CubeForge.Chunk as C
+
+  fn seed() : Int do 4242 end
+  pfn floor16(v : Int) : Int do if v >= 0 do v / 16 * 16 else (v - 15) / 16 * 16 end end
+
+  -- ── Butte country ───────────────────────────────────────────────────────
+
+  pfn country_go(i : Int, n : Int, step : Int, best : Float) : Float do
+    if i >= n do best
+    else
+      let v = N.butte_country((i % 64) * step, (i / 64) * step, seed())
+      country_go(i + 1, n, step, if v > best do v else best end)
+    end
+  end
+
+  -- The first column of a 64 x 64 grid at [step] blocks whose height carries a
+  -- butte term, packed x * 100000 + z, or -1.
+  pfn find_butte_go(i : Int, n : Int, step : Int) : Int do
+    if i >= n do 0 - 1
+    else
+      let wx = (i % 64) * step
+      let wz = (i / 64) * step
+      if N.height(wx, wz, seed()) > N.height_base(wx, wz, seed()) do wx * 100000 + wz
+      else find_butte_go(i + 1, n, step) end
+    end
+  end
+
+  -- Walking +x from a mesa column: how far the top stays at exactly [top], and
+  -- how far it drops at the column after that.
+  pfn run_go(wx : Int, wz : Int, top : Int, d : Int) : Int do
+    if d >= 24 do d
+    else if N.height(wx + d, wz, seed()) == top do run_go(wx, wz, top, d + 1) else d end end
+  end
+
+  -- ── Arch helpers ────────────────────────────────────────────────────────
+
+  -- The first arch cell in a 24 x 24 block of cells about the origin, packed
+  -- (cx + 500) * 100000 + (cz + 500), or -1.
+  pfn find_arch_go(i : Int, n : Int) : Int do
+    if i >= n do 0 - 1
+    else
+      let cx = i % 24 - 12
+      let cz = i / 24 - 12
+      if Pi.arch_here(cx, cz, seed(), 1.0) do (cx + 500) * 100000 + (cz + 500)
+      else find_arch_go(i + 1, n) end
+    end
+  end
+  pfn arch_cx(f : Int) : Int do f / 100000 - 500 end
+  pfn arch_cz(f : Int) : Int do f % 100000 - 500 end
+  pfn arch_wx(f : Int) : Int do arch_cx(f) * Pi.arch_cell() + Pi.arch_offset_of(Pi.arch_at(arch_cx(f), arch_cz(f), seed(), 1.0)) % Pi.arch_cell() end
+  pfn arch_wz(f : Int) : Int do arch_cz(f) * Pi.arch_cell() + Pi.arch_offset_of(Pi.arch_at(arch_cx(f), arch_cz(f), seed(), 1.0)) / Pi.arch_cell() end
+  -- The bank the arch springs from, and so the y of its crown band.
+  pfn arch_bank(f : Int) : Int do
+    let ax = Pi.arch_axis(arch_wx(f), arch_wz(f), seed())
+    let s = Pi.arch_span_of(Pi.arch_at(arch_cx(f), arch_cz(f), seed(), 1.0))
+    Math.min_int(Pi.arch_col_h(arch_wx(f), arch_wz(f), seed(), ax, s),
+                 Pi.arch_col_h(arch_wx(f), arch_wz(f), seed(), ax, 0 - s))
+  end
+  pfn arch_crown(f : Int) : Int do arch_bank(f) + Pi.arch_rise(arch_cx(f), arch_cz(f), seed()) end
+
+  -- Non-air blocks in a chunk.
+  pfn solid_col(c : CubeForge.Chunk.Chunk, x : Int, z : Int, y : Int, acc : Int) : Int do
+    if y >= 256 do acc
+    else solid_col(c, x, z, y + 1, if C.get(c, x, y, z) != 0 do acc + 1 else acc end) end
+  end
+  pfn solid_go(c : CubeForge.Chunk.Chunk, i : Int, acc : Int) : Int do
+    if i >= 256 do acc else solid_go(c, i + 1, solid_col(c, i % 16, i / 16, 0, acc)) end
+  end
+
+  -- Blocks of [a] that differ from [b].
+  pfn diff_col(a : CubeForge.Chunk.Chunk, b : CubeForge.Chunk.Chunk, x : Int, z : Int, y : Int, acc : Int) : Int do
+    if y >= 256 do acc
+    else diff_col(a, b, x, z, y + 1, if C.get(a, x, y, z) != C.get(b, x, y, z) do acc + 1 else acc end) end
+  end
+  pfn diff_go(a : CubeForge.Chunk.Chunk, b : CubeForge.Chunk.Chunk, i : Int, acc : Int) : Int do
+    if i >= 256 do acc else diff_go(a, b, i + 1, diff_col(a, b, i % 16, i / 16, 0, acc)) end
+  end
+
+  pfn any_air_go(c : CubeForge.Chunk.Chunk, x : Int, z : Int, y : Int, top : Int) : Bool do
+    if y > top do false
+    else if C.get(c, x, y, z) == 0 do true else any_air_go(c, x, z, y + 1, top) end end
+  end
+  pfn any_solid_go(c : CubeForge.Chunk.Chunk, x : Int, z : Int, y : Int, top : Int) : Bool do
+    if y > top do false
+    else if C.get(c, x, y, z) != 0 do true else any_solid_go(c, x, z, y + 1, top) end end
+  end
+
+  describe "the POI off switch" do
+    test "a zero scale is no butte and no arch" do
+      -- butte_of folds the scale into k, so k = 0 is exactly the CF_POI=0 shape
+      Test.assert_eq_int(N.butte_go(100, 100, seed(), 0.0, 70.0, 0, 0), 0, "no scale, no mesa")
+      Test.assert_eq_int(N.butte_at(4, 4, 100, 100, seed(), 0.0, 70.0), 0, "and none in any one cell")
+      Test.assert_true(!Pi.arch_here(0, 0, seed(), 0.0), "no scale, no arch")
+      Test.assert_true(!Pi.arch_here(3, 5, seed(), 0.0), "and not in another cell either")
+    end
+    test "the term is zero outside the desert mask, before the octave is even sampled" do
+      Test.assert_eq_int(N.butte_of(1000, 1000, seed(), 0.0, 80.0), 0, "dune mask 0 short-circuits")
+    end
+  end
+
+  describe "butte country" do
+    test "the country octave is rare but not empty" do
+      Test.assert_true(country_go(0, 4096, 64, 0.0) > 0.5, "some column in a 4096-block square is well inside it")
+    end
+    test "a mesa's rise is an absolute top, so two of them merge rather than stack" do
+      let a = N.butte_at(0, 0, 0, 0, seed(), 1.0, 70.0)
+      let b = N.butte_at(0, 1, 0, 0, seed(), 1.0, 70.0)
+      let both = N.butte_go(0, 0, seed(), 1.0, 70.0, 0, 0)
+      Test.assert_true(both >= a, "the merged rise is at least the first")
+      Test.assert_true(both >= b, "and at least the second")
+      Test.assert_true(both < a + b || a == 0 || b == 0, "and never their sum")
+    end
+    test "a mesa stands on a level top and ends in a wall" do
+      let f = find_butte_go(0, 4096, 24)
+      if f < 0 do Test.assert_true(true, "no mesa in the scanned square; the country octave decides")
+      else
+        let wx = f / 100000
+        let wz = f % 100000
+        let top = N.height(wx, wz, seed())
+        let run = run_go(wx, wz, top, 1)
+        Test.assert_true(top > N.height_base(wx, wz, seed()), "the mesa stands above the field terrain")
+        Test.assert_true(run >= 1, "the top is level for at least one more column")
+        Test.assert_true(run >= 24 || top - N.height(wx + run, wz, seed()) >= N.butte_min_rise(),
+                         "where the top ends it ends in a wall, not a slope")
+      end
+    end
+  end
+
+  describe "an arch" do
+    test "its dimensions are a function of the cell alone" do
+      let f = find_arch_go(0, 576)
+      if f < 0 do Test.assert_true(true, "no arch in the scanned cells")
+      else
+        let cx = arch_cx(f)
+        let cz = arch_cz(f)
+        Test.assert_eq_int(Pi.arch_offset_of(Pi.arch_at(cx, cz, seed(), 1.0)), Pi.arch_offset_of(Pi.arch_at(cx, cz, seed(), 1.0)), "the offset is stable")
+        Test.assert_true(Pi.arch_span_of(Pi.arch_at(cx, cz, seed(), 1.0)) >= Pi.arch_min_span(), "half-span at least the minimum")
+        Test.assert_true(Pi.arch_span_of(Pi.arch_at(cx, cz, seed(), 1.0)) <= Pi.arch_max_span(), "and no wider than the maximum")
+        Test.assert_true(Pi.arch_width(cx, cz, seed()) >= 2 && Pi.arch_width(cx, cz, seed()) <= 3, "half-width in range")
+        Test.assert_true(Pi.arch_rise(cx, cz, seed()) >= 5 && Pi.arch_rise(cx, cz, seed()) <= 10, "rise in range")
+      end
+    end
+    test "the band thickens from the crown to the haunches" do
+      Test.assert_eq_int(Pi.arch_thick(0, 10), 3, "three at the crown")
+      Test.assert_eq_int(Pi.arch_thick(10, 10), 5, "five at the foot")
+      Test.assert_eq_int(Pi.arch_thick(0 - 10, 10), 5, "and at the other foot")
+    end
+    test "it writes into air and never over a block that is already there" do
+      let f = find_arch_go(0, 576)
+      if f < 0 do Test.assert_true(true, "no arch in the scanned cells")
+      else
+        let wx0 = floor16(arch_wx(f))
+        let wz0 = floor16(arch_wz(f))
+        let x = arch_wx(f) - wx0
+        let z = arch_wz(f) - wz0
+        let y = arch_crown(f)
+        if y < 1 || y >= 255 do Test.assert_true(true, "the crown is out of the world")
+        else
+          -- an empty chunk with one sentinel exactly where the crown band goes
+          let marked = C.set(C.new(), x, y, z, C.bedrock())
+          let out = Pi.stamp(marked, wx0, wz0, seed())
+          Test.assert_eq_int(C.get(out, x, y, z), C.bedrock(), "the sentinel under the crown survived the stamp")
+          Test.assert_true(solid_go(out, 0, 0) > 1, "and the arch was written around it")
+        end
+      end
+    end
+    test "stamping a generated chunk again changes nothing" do
+      let wx0 = 0
+      let wz0 = 0
+      let c = C.generate(wx0, wz0, seed())
+      Test.assert_eq_int(diff_go(Pi.stamp(c, wx0, wz0, seed()), C.generate(wx0, wz0, seed()), 0, 0), 0,
+                         "everything the stamp would write is already there")
+    end
+    test "a span leaves air over the channel and rock over that air" do
+      let f = find_arch_go(0, 576)
+      if f < 0 do Test.assert_true(true, "no arch in the scanned cells")
+      else
+        let wx0 = floor16(arch_wx(f))
+        let wz0 = floor16(arch_wz(f))
+        let x = arch_wx(f) - wx0
+        let z = arch_wz(f) - wz0
+        let c = C.generate(wx0, wz0, seed())
+        let h = N.height(arch_wx(f), arch_wz(f), seed())
+        let top = arch_crown(f) + 8
+        if h < 1 || top >= 255 do Test.assert_true(true, "out of the world")
+        else
+          Test.assert_true(any_air_go(c, x, z, h + 1, top), "air over the channel")
+          Test.assert_true(any_solid_go(c, x, z, arch_crown(f), top), "and a span over that air")
+        end
+      end
+    end
+  end
+
+end

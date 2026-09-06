@@ -6,6 +6,8 @@
 -- as scalars and vectorizes the smoothstep + bilinear blend across 4 columns.
 mod CubeForge.Noise do
 
+  needs IO.Process   -- CF_POI, CF_POI_DENSITY
+
   -- ── The seed carries the world's age ────────────────────────────────────
   -- A world is a seed and an age. The age rides in the seed's high bits, above
   -- the 30-bit seed the menu and CF_SEED produce, so it travels everywhere the
@@ -305,8 +307,96 @@ mod CubeForge.Noise do
     glacier_at(wx, wz, seed) && temperature(wx, wz, seed, h) >= glacier_temp(age_frac(seed)) -. moraine_band()
   end
 
-  doc "Terrain height for a world column."
-  fn height(wx : Int, wz : Int, seed : Int) : Int do
+  -- ── Buttes: the first landform point of interest ────────────────────────
+  -- A landform POI is a rarity mask times a shape, the way dunes and glaciers
+  -- are, not a resolved site: it is evaluated inside `height`, the hottest
+  -- function in generation, so it may not probe another column and may not ask
+  -- for a height it has not already got. See the POI design, section 2.
+  --
+  -- Buttes sit in DESERT country -- the dune mask, already computed for the
+  -- dunes -- inside a broad, hard-thresholded octave that makes them rare. The
+  -- mesa itself comes from a 24-block cell grid: one hashed centre, radius and
+  -- ABSOLUTE top level per cell. Absolute, because a rise added to the ground
+  -- gives a mesa that tilts with the slope under it, and no butte does that; a
+  -- fixed top makes them what they really are, remnants of a former surface.
+
+  doc "Side of a butte cell in blocks: one mesa at most per cell."
+  fn butte_cell() : Int do 24 end
+  doc "Fraction of cells in full butte country holding a mesa."
+  fn butte_density() : Float do 0.35 end
+  doc "The least a mesa may stand above its ground; a cell whose ground is already near its top level holds nothing."
+  fn butte_min_rise() : Int do 8 end
+
+  doc "Are points of interest on at all: CF_POI=0 turns every one of them off, and the world is then bit-identical to the world before they existed."
+  fn poi_on() : Bool do Env.get_int("CF_POI", 1) != 0 end
+  doc "Every POI density is scaled by this: CF_POI_DENSITY percent, 100 by default. Zero with CF_POI=0."
+  fn poi_scale() : Float do
+    if !poi_on() do 0.0 else int_to_float(Env.get_int("CF_POI_DENSITY", 100)) /. 100.0 end
+  end
+
+  pfn poi_floor_div(a : Int, b : Int) : Int do if a >= 0 do a / b else (a - b + 1) / b end end
+  pfn poi_cell_hash(cx : Int, cz : Int, seed : Int, salt : Int) : Float do
+    hash2(cx * 7919 + salt * 104729, cz * 6271 + salt * 15485863, seed + 2100)
+  end
+
+  doc "1 in butte country, 0 elsewhere: one broad octave over a high threshold, so only a few percent of the world qualifies before the desert test narrows it further."
+  fn butte_country(wx : Int, wz : Int, seed : Int) : Float do
+    smooth(clamp01((value2(int_to_float(wx) *. 0.0075, int_to_float(wz) *. 0.0075, seed + 2101) -. 0.62) /. 0.10))
+  end
+
+  doc "Blocks cell (cx, cz)'s mesa adds at column (wx, wz), whose height with dunes is [hd]; [k] is the country times the desert mask times the POI scale. 0 for no mesa here."
+  fn butte_at(cx : Int, cz : Int, wx : Int, wz : Int, seed : Int, k : Float, hd : Float) : Int do
+    if poi_cell_hash(cx, cz, seed, 1) > butte_density() *. k do 0
+    else
+      let side = int_to_float(butte_cell())
+      let ox = cx * butte_cell() + float_to_int(poi_cell_hash(cx, cz, seed, 2) *. side)
+      let oz = cz * butte_cell() + float_to_int(poi_cell_hash(cx, cz, seed, 3) *. side)
+      let r = 5.0 +. poi_cell_hash(cx, cz, seed, 4) *. 6.0
+      let dx = int_to_float(wx - ox)
+      let dz = int_to_float(wz - oz)
+      -- A HARD radial step, not an eased one: the wall of a butte is a cliff,
+      -- and a one-block ramp at the rim would leave a half-height shelf rather
+      -- than an edge. The blend that keeps this from snapping is the density
+      -- fading with the country mask, not the mesa fading in height.
+      if dx *. dx +. dz *. dz >= r *. r do 0
+      else
+        let top = 74.0 +. poi_cell_hash(cx, cz, seed, 5) *. 26.0
+        let rise = float_to_int(top) - float_to_int(hd)
+        if rise < butte_min_rise() do 0 else rise end
+      end
+    end
+  end
+
+  fn butte_go(wx : Int, wz : Int, seed : Int, k : Float, hd : Float, i : Int, best : Int) : Int do
+    if i >= 9 do best
+    else
+      let cx = poi_floor_div(wx, butte_cell()) - 1 + i % 3
+      let cz = poi_floor_div(wz, butte_cell()) - 1 + i / 3
+      -- max, not sum: two overlapping mesas are one bench at the taller top,
+      -- not a tower of both their rises.
+      butte_go(wx, wz, seed, k, hd, i + 1, Math.max_int(best, butte_at(cx, cz, wx, wz, seed, k, hd)))
+    end
+  end
+
+  doc """
+  Blocks the butte term adds at (wx, wz), whose dune mask is [dmask] and whose
+  height with dunes is [hd]. Zero outside the desert, which is the common case
+  and costs nothing: the country octave is not sampled and CF_POI is not read
+  until the dune mask is already up.
+  """
+  fn butte_of(wx : Int, wz : Int, seed : Int, dmask : Float, hd : Float) : Int do
+    if dmask <= 0.0 do 0
+    else
+      let cty = butte_country(wx, wz, seed)
+      -- The density is doubled before clamping so the inside of a field is at
+      -- full density and only its fringe thins out; a field that faded
+      -- linearly from its centre never reads as a field at all.
+      if cty <= 0.0 do 0 else butte_go(wx, wz, seed, clamp01(2.0 *. cty *. dmask) *. poi_scale(), hd, 0, 0) end
+    end
+  end
+
+  doc "Terrain height for a world column, without any point-of-interest term: what the POI masks are read against, and the SIMD lanes test's reference."
+  fn height_base(wx : Int, wz : Int, seed : Int) : Int do
     let x = int_to_float(wx)
     let z = int_to_float(wz)
     let a = age_frac(seed)
@@ -338,6 +428,36 @@ mod CubeForge.Noise do
     -- Dunes where it is hot and dry, read against the height without them.
     let dune = dune_mask_of(temp_from_base(value2(x *. 0.018, z *. 0.018, seed + 1700), hf), hf, river) *. dune_of(xw, zw, seed) *. dune_amp()
     let h = float_to_int(hf +. dune)
+    if h < 1 do 1 else if h > 200 do 200 else h end end
+  end
+
+  doc "Terrain height for a world column: height_base plus the landform points of interest (see CubeForge.Poi and the POI design)."
+  fn height(wx : Int, wz : Int, seed : Int) : Int do
+    let x = int_to_float(wx)
+    let z = int_to_float(wz)
+    let a = age_frac(seed)
+    let xw = warp_x(x, z, seed)
+    let zw = warp_z(x, z, seed)
+    let cont = value2(xw *. 0.022, zw *. 0.022, seed)
+    let detail = fbm(xw *. 0.050 +. 5.1, zw *. 0.050 +. 2.6, seed + 2)
+    let dw = detail_weight(a)
+    let base = 37.0 +. (cont *. (1.0 -. dw) +. detail *. dw) *. 64.0
+    let rug = ruggedness(wx, wz, seed)
+    let roll = fbm(xw *. 0.030 +. 3.7, zw *. 0.030 +. 8.2, seed + 5)
+    let hills = (roll -. 0.5) *. hill_amp() *. (1.0 -. 0.6 *. rug)
+    let land = base +. hills
+    let land2 = lerp(land, terrace(land, terrace_sharpness(a)), plateau_mask(xw, zw, seed))
+    let mountains = ridged_fbm(xw *. 0.028, zw *. 0.028, seed + 13) *. rug *. mountain_amp(a)
+    let river = river_mask(xw, zw, seed)
+    let depth = river_depth(a) *. (1.0 -. 0.5 *. rug)
+    let raw = land2 +. mountains -. river *. depth
+    let floor = land2 +. mountains -. depth
+    let hf = lerp(raw, floor, plain_mask(river, a) *. plain_strength(a))
+    -- The desert mask is shared: the dunes ride on it, and it is what keeps
+    -- buttes out of the grasslands. Computed once, read twice.
+    let dmask = dune_mask_of(temp_from_base(value2(x *. 0.018, z *. 0.018, seed + 1700), hf), hf, river)
+    let hd = hf +. dmask *. dune_of(xw, zw, seed) *. dune_amp()
+    let h = float_to_int(hd) + butte_of(wx, wz, seed, dmask, hd)
     if h < 1 do 1 else if h > 200 do 200 else h end end
   end
 
