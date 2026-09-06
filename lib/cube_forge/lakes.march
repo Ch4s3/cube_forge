@@ -250,6 +250,12 @@ mod CubeForge.Lakes do
 
   doc "The tile world chunk (cx, cz) lies in."
   fn tile_of_chunk(seed : Int, cx : Int, cz : Int) : Tile do tile(seed, floor_div(cx, 8), floor_div(cz, 8)) end
+  doc "Does tile [t] cover world chunk (cx, cz)."
+  fn tile_holds(t : Tile, cx : Int, cz : Int) : Bool do
+    match t do
+      Tile(ox, oz, side, _) -> side > 0 && 16 * cx >= ox && 16 * cx < ox + side && 16 * cz >= oz && 16 * cz < oz + side
+    end
+  end
   doc "Are world chunks (ax, az) and (bx, bz) in the same tile: whether one pour serves both."
   fn same_tile(ax : Int, az : Int, bx : Int, bz : Int) : Bool do floor_div(ax, 8) == floor_div(bx, 8) && floor_div(az, 8) == floor_div(bz, 8) end
 

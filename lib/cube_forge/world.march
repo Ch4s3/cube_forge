@@ -8,7 +8,7 @@ mod CubeForge.World do
 
   alias CubeForge.Chunk as C
 
-  type World = World(Array.PVec(CubeForge.Chunk.Chunk), NativeU8Arr, NativeU8Arr, NativeU8Arr, NativeU8Arr, Int, CubeForge.Model.Templates)   -- chunks, skylight field, block-light field, occupancy field, shown species per column, side length in chunks, the model templates the mesher stamps
+  type World = World(Array.PVec(CubeForge.Chunk.Chunk), NativeU8Arr, NativeU8Arr, NativeU8Arr, NativeU8Arr, Int, CubeForge.Model.Templates, Int, Int)   -- chunks, skylight field, block-light field, occupancy field, shown species per column, side length in chunks, the model templates the mesher stamps, the window origin in chunks (x, z)
 
   doc "The LARGEST world side in chunks: what the fixed-width fields (light, occupancy, the shader) are written for. A world's own side is World.side(w), from Noise.size_of its seed, 4..8."
   fn size() : Int do 8 end
@@ -16,19 +16,25 @@ mod CubeForge.World do
   doc "Columns per side: size() chunks of 16."
   fn cols() : Int do 16 * size() end
 
-  fn side(w : World) : Int do match w do World(_, _, _, _, _, n, _) -> n end end
+  fn side(w : World) : Int do match w do World(_, _, _, _, _, n, _, _, _) -> n end end
+  doc "The window's origin in chunks: world chunk (origin_x, origin_z) is local chunk (0, 0). Every coordinate the engine holds is window-local; the origin is what makes it a world coordinate, and the shift moves it."
+  fn origin_x(w : World) : Int do match w do World(_, _, _, _, _, _, _, ox, _) -> ox end end
+  fn origin_z(w : World) : Int do match w do World(_, _, _, _, _, _, _, _, oz) -> oz end end
+  doc "World block x of local block x."
+  fn world_x(w : World, x : Int) : Int do x + 16 * origin_x(w) end
+  fn world_z(w : World, z : Int) : Int do z + 16 * origin_z(w) end
 
   doc "The world's skylight field (see CubeForge.Light)."
-  fn light(w : World) : NativeU8Arr do match w do World(_, la, _, _, _, _, _) -> la end end
+  fn light(w : World) : NativeU8Arr do match w do World(_, la, _, _, _, _, _, _, _) -> la end end
 
   doc "The world's block-light field: light emitted by blocks, independent of the sky (see CubeForge.Light.emission)."
-  fn block_light(w : World) : NativeU8Arr do match w do World(_, _, lb, _, _, _, _) -> lb end end
+  fn block_light(w : World) : NativeU8Arr do match w do World(_, _, lb, _, _, _, _, _, _) -> lb end end
 
   doc "The world's occupancy field: non-zero where a voxel blocks light. Used for ambient occlusion and uploaded to the shadow ray-marcher."
-  fn occupancy(w : World) : NativeU8Arr do match w do World(_, _, _, o, _, _, _) -> o end end
+  fn occupancy(w : World) : NativeU8Arr do match w do World(_, _, _, o, _, _, _, _, _) -> o end end
 
   doc "Replace the occupancy field."
-  fn set_occupancy(w : World, o : NativeU8Arr) : World do match w do World(cs, la, lb, _, sh, n, mo) -> World(cs, la, lb, o, sh, n, mo) end end
+  fn set_occupancy(w : World, o : NativeU8Arr) : World do match w do World(cs, la, lb, _, sh, n, mo, ox, oz) -> World(cs, la, lb, o, sh, n, mo, ox, oz) end end
 
   doc "Build the occupancy field from the current blocks."
   fn rebuild_occupancy(w : World) : World do set_occupancy(w, CubeForge.Light.occupancy(w)) end
@@ -36,46 +42,46 @@ mod CubeForge.World do
   doc "Update one voxel of the occupancy field after a block edit."
   fn set_occupied(w : World, x : Int, y : Int, z : Int, solid : Bool) : World do
     if x < 0 || x >= 128 || y < 0 || y >= 256 || z < 0 || z >= 128 do w
-    else match w do World(cs, la, lb, o, sh, n, mo) ->
-      World(cs, la, lb, NativeArray.set_u8(o, CubeForge.Light.occ_index(x, y, z), if solid do CubeForge.Light.occ_solid() else 0 end), sh, n, mo) end
+    else match w do World(cs, la, lb, o, sh, n, mo, ox, oz) ->
+      World(cs, la, lb, NativeArray.set_u8(o, CubeForge.Light.occ_index(x, y, z), if solid do CubeForge.Light.occ_solid() else 0 end), sh, n, mo, ox, oz) end
     end
   end
 
   doc "Replace the world's skylight field."
-  fn set_light(w : World, la : NativeU8Arr) : World do match w do World(cs, _, lb, o, sh, n, mo) -> World(cs, la, lb, o, sh, n, mo) end end
+  fn set_light(w : World, la : NativeU8Arr) : World do match w do World(cs, _, lb, o, sh, n, mo, ox, oz) -> World(cs, la, lb, o, sh, n, mo, ox, oz) end end
 
   doc "Replace the world's block-light field."
-  fn set_block_light(w : World, lb : NativeU8Arr) : World do match w do World(cs, la, _, o, sh, n, mo) -> World(cs, la, lb, o, sh, n, mo) end end
+  fn set_block_light(w : World, lb : NativeU8Arr) : World do match w do World(cs, la, _, o, sh, n, mo, ox, oz) -> World(cs, la, lb, o, sh, n, mo, ox, oz) end end
 
   @[no_alloc]
   -- Skylight at a world coordinate; 0 outside the world.
   fn light_at(w : World, x : Int, y : Int, z : Int) : Int do
-    match w do World(_, la, _, _, _, _, _) -> CubeForge.Light.get(la, x, y, z) end
+    match w do World(_, la, _, _, _, _, _, _, _) -> CubeForge.Light.get(la, x, y, z) end
   end
 
   @[no_alloc]
   -- Block light at a world coordinate; 0 outside the world.
   fn block_light_at(w : World, x : Int, y : Int, z : Int) : Int do
-    match w do World(_, _, lb, _, _, _, _) -> CubeForge.Light.get(lb, x, y, z) end
+    match w do World(_, _, lb, _, _, _, _, _, _) -> CubeForge.Light.get(lb, x, y, z) end
   end
 
   doc "A fresh, empty shown-species array: one byte per column of a world [n] chunks a side, strided by its width like the biome and mycelium fields."
   fn shown_new(n : Int) : NativeU8Arr do NativeArray.make_u8(16 * n * 16 * n, 0) end
   doc "The species each column's surface currently displays (0 = none). The mesher reads it to pick mycelium textures; the fungus migration writes it in step with the block."
-  fn shown(w : World) : NativeU8Arr do match w do World(_, _, _, _, sh, _, _) -> sh end end
+  fn shown(w : World) : NativeU8Arr do match w do World(_, _, _, _, sh, _, _, _, _) -> sh end end
   doc "The model templates the mesher stamps for small mushrooms, fronds and bushes: built once with the world, constant after."
-  fn models(w : World) : CubeForge.Model.Templates do match w do World(_, _, _, _, _, _, mo) -> mo end end
+  fn models(w : World) : CubeForge.Model.Templates do match w do World(_, _, _, _, _, _, mo, _, _) -> mo end end
   fn shown_at(w : World, x : Int, z : Int) : Int do
     let c = 16 * side(w)
     if x < 0 || z < 0 || x >= c || z >= c do 0
-    else match w do World(_, _, _, _, sh, _, _) -> NativeArray.get_u8(sh, x + c * z) end end
+    else match w do World(_, _, _, _, sh, _, _, _, _) -> NativeArray.get_u8(sh, x + c * z) end end
   end
   doc "Replace the shown-species array whole (a load)."
-  fn with_shown(w : World, sh : NativeU8Arr) : World do match w do World(cs, la, lb, o, _, n, mo) -> World(cs, la, lb, o, sh, n, mo) end end
+  fn with_shown(w : World, sh : NativeU8Arr) : World do match w do World(cs, la, lb, o, _, n, mo, ox, oz) -> World(cs, la, lb, o, sh, n, mo, ox, oz) end end
   fn set_shown(w : World, x : Int, z : Int, sp : Int) : World do
     let c = 16 * side(w)
     if x < 0 || z < 0 || x >= c || z >= c do w
-    else match w do World(cs, la, lb, o, sh, n, mo) -> World(cs, la, lb, o, NativeArray.set_u8(sh, x + c * z, sp), n, mo) end end
+    else match w do World(cs, la, lb, o, sh, n, mo, ox, oz) -> World(cs, la, lb, o, NativeArray.set_u8(sh, x + c * z, sp), n, mo, ox, oz) end end
   end
 
   doc "Recompute both light fields from scratch."
@@ -106,12 +112,12 @@ mod CubeForge.World do
 
   doc "The chunk at grid (cx, cz); panics if out of bounds."
   fn chunk_at(w : World, cx : Int, cz : Int) : CubeForge.Chunk.Chunk do
-    match w do World(cs, _, _, _, _, n, _) -> Array.get(cs, cx + n * cz) end
+    match w do World(cs, _, _, _, _, n, _, _, _) -> Array.get(cs, cx + n * cz) end
   end
 
   doc "Replace the chunk at grid (cx, cz)."
   fn set_chunk(w : World, cx : Int, cz : Int, c : CubeForge.Chunk.Chunk) : World do
-    match w do World(cs, la, lb, o, sh, n, mo) -> World(Array.set(cs, cx + n * cz, c), la, lb, o, sh, n, mo) end
+    match w do World(cs, la, lb, o, sh, n, mo, ox, oz) -> World(Array.set(cs, cx + n * cz, c), la, lb, o, sh, n, mo, ox, oz) end
   end
 
   fn floor_div16(v : Int) : Int do if v >= 0 do v / 16 else (v - 15) / 16 end end
@@ -224,19 +230,78 @@ mod CubeForge.World do
     -- the lake table once, read by every chunk (a read only: no copy -- GAPS G68)
     let lk = CubeForge.Lakes.levels(seed, n)
     let chunks = List.pmap_n(coords(n), fn i -> C.generate_lakes(16 * (i % n), 16 * (i / n), seed, lk), workers)
-    World(Array.from_list(chunks), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), shown_new(n), n, CubeForge.Model.build())
+    World(Array.from_list(chunks), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), shown_new(n), n, CubeForge.Model.build(), 0, 0)
+  end
+
+  -- ── The shift ─────────────────────────────────────────────────────────────
+  -- The window slides one chunk toward the player. Local chunk (lx, lz) after
+  -- the shift is what was at (lx + dx, lz + dz); the band that came in is
+  -- generated (world coordinates from the new origin, against its lake tile)
+  -- or, later, restored from the evicted cache. The light, block-light and
+  -- occupancy fields slide by blits and the band is lit and filled; the shown
+  -- array slides. Nothing the player holds moves: every coordinate is
+  -- window-local, and the caller translates the player by 16 blocks.
+  pfn shifted_chunk(cs : Array.PVec(CubeForge.Chunk.Chunk), n : Int, i : Int, dx : Int, dz : Int, ox1 : Int, oz1 : Int, seed : Int,
+                    ta : CubeForge.Lakes.Tile, tb : CubeForge.Lakes.Tile) : CubeForge.Chunk.Chunk do
+    let lx = i % n
+    let lz = i / n
+    let sx = lx + dx
+    let sz = lz + dz
+    if sx >= 0 && sx < n && sz >= 0 && sz < n do Array.get(cs, sx + n * sz)
+    else
+      let cx = ox1 + lx
+      let cz = oz1 + lz
+      let t = if CubeForge.Lakes.tile_holds(ta, cx, cz) do ta else tb end
+      C.generate_lakes(16 * cx, 16 * cz, seed, t)
+    end
+  end
+  pfn shift_shown_go(src : NativeU8Arr, dst : NativeU8Arr, c : Int, s : Int, dzc : Int, z : Int) : NativeU8Arr do
+    -- per row z of the destination: columns [xd0, xd0 + len) from the source row z + dzc
+    let len = c - (if s < 0 do 0 - s else s end)
+    let xs0 = if s > 0 do s else 0 end
+    let xd0 = if s > 0 do 0 else 0 - s end
+    if z >= c do dst
+    else
+      let sz = z + dzc
+      if sz < 0 || sz >= c do shift_shown_go(src, dst, c, s, dzc, z + 1)
+      else shift_shown_go(src, CubeForge.Ffi.Window.u8_blit(dst, z * c + xd0, src, sz * c + xs0, len), c, s, dzc, z + 1) end
+    end
+  end
+  doc "Slide the window by ([dx], [dz]) chunks, one of them zero and the other -1 or 1: see the section comment."
+  fn shift(w : World, dx : Int, dz : Int, seed : Int, workers : Int) : World do
+    match w do
+      World(cs, la, lb, o, sh, n, mo, ox, oz) ->
+        let ox1 = ox + dx
+        let oz1 = oz + dz
+        -- the band that comes in, in local chunk coordinates
+        let bx0 = if dx > 0 do n - 1 else 0 end
+        let bx1 = if dx < 0 do 0 else n - 1 end
+        let bz0 = if dz > 0 do n - 1 else 0 end
+        let bz1 = if dz < 0 do 0 else n - 1 end
+        -- its lake tiles: a band of eight chunks spans at most two
+        let ta = CubeForge.Lakes.tile_of_chunk(seed, ox1 + bx0, oz1 + bz0)
+        let tb = if CubeForge.Lakes.tile_holds(ta, ox1 + bx1, oz1 + bz1) do ta else CubeForge.Lakes.tile_of_chunk(seed, ox1 + bx1, oz1 + bz1) end
+        let cs1 = Array.from_list(List.pmap_n(coords(n), fn i -> shifted_chunk(cs, n, i, dx, dz, ox1, oz1, seed, ta, tb), workers))
+        let c = 16 * n
+        let sh1 = shift_shown_go(sh, NativeArray.make_u8(c * c, 0), c, 16 * dx, 16 * dz, 0)
+        let w1 = World(cs1, CubeForge.Light.shift_field(la, dx, dz), CubeForge.Light.shift_field(lb, dx, dz), CubeForge.Light.shift_occ(o, dx, dz), sh1, n, mo, ox1, oz1)
+        let la2 = CubeForge.Light.light_band(light(w1), w1, bx0, bx1, bz0, bz1)
+        let lb2 = CubeForge.Light.light_band_block(block_light(w1), w1, bx0, bx1, bz0, bz1)
+        let o2 = CubeForge.Light.occ_band(occupancy(w1), w1, bx0, bx1, bz0, bz1)
+        World(cs1, la2, lb2, o2, sh1, n, mo, ox1, oz1)
+    end
   end
 
   doc "A world over chunks read from a save, with empty light and occupancy fields (rebuilt by the caller)."
   fn from_chunks(chunks : Array.PVec(CubeForge.Chunk.Chunk), n : Int) : World do
-    World(chunks, CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), shown_new(n), n, CubeForge.Model.build())
+    World(chunks, CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), shown_new(n), n, CubeForge.Model.build(), 0, 0)
   end
   doc "The chunk array, in grid order."
-  fn chunks(w : World) : Array.PVec(CubeForge.Chunk.Chunk) do match w do World(cs, _, _, _, _, _, _) -> cs end end
+  fn chunks(w : World) : Array.PVec(CubeForge.Chunk.Chunk) do match w do World(cs, _, _, _, _, _, _, _, _) -> cs end end
 
   fn generate_scalar(n : Int, seed : Int, workers : Int) : World do
     let chunks = List.pmap_n(coords(n), fn i -> C.generate_scalar(16 * (i % n), 16 * (i / n), seed), workers)
-    World(Array.from_list(chunks), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), shown_new(n), n, CubeForge.Model.build())
+    World(Array.from_list(chunks), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), shown_new(n), n, CubeForge.Model.build(), 0, 0)
   end
 
   -- A rolling hash over every voxel of every chunk. Four million reads, so this

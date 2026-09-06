@@ -93,6 +93,52 @@ mod CubeForge.Myc do
   fn field_species(f : Field) : NativeU8Arr do match f do Field(sps, _, _, _, _, _, cs, pl, pr) -> sps end end
   fn field_vigour(f : Field) : NativeF32Arr do match f do Field(_, vg, _, _, _, _, cs, pl, pr) -> vg end end
 
+  -- ── Shifting the window ────────────────────────────────────────────────
+  -- The window slid by (dx, dz) chunks: column (x, z) is what was at
+  -- (x + 16dx, z + 16dz). Columns that came in are empty (the evicted cache
+  -- restores them later); every column is marked dirty and every row too, so
+  -- the next tick looks at all of them once, as the first tick does.
+  pfn shift_u8_go(src : NativeU8Arr, dst : NativeU8Arr, n : Int, sx : Int, sz : Int, i : Int) : NativeU8Arr do
+    if i >= n * n do dst
+    else
+      let x = i % n + sx
+      let z = i / n + sz
+      if x < 0 || x >= n || z < 0 || z >= n do shift_u8_go(src, dst, n, sx, sz, i + 1)
+      else shift_u8_go(src, NativeArray.set_u8(dst, i, NativeArray.get_u8(src, x + n * z)), n, sx, sz, i + 1) end
+    end
+  end
+  pfn shift_f32_go(src : NativeF32Arr, dst : NativeF32Arr, n : Int, sx : Int, sz : Int, k : Int, i : Int) : NativeF32Arr do
+    if i >= n * n do dst
+    else
+      let x = i % n + sx
+      let z = i / n + sz
+      if x < 0 || x >= n || z < 0 || z >= n do shift_f32_go(src, dst, n, sx, sz, k, i + 1)
+      else
+        let j = x + n * z
+        let d1 = NativeArray.set_f32(dst, k * i, NativeArray.get_f32(src, k * j))
+        shift_f32_go(src, if k == 2 do NativeArray.set_f32(d1, 2 * i + 1, NativeArray.get_f32(src, 2 * j + 1)) else d1 end, n, sx, sz, k, i + 1)
+      end
+    end
+  end
+  doc "The field moved by ([dx], [dz]) chunks over an n-column window; the band that came in is empty and everything is marked for the next tick."
+  fn shift(f : Field, n : Int, dx : Int, dz : Int) : Field do
+    let sx = 16 * dx
+    let sz = 16 * dz
+    match f do
+      Field(sps, vg, rc, hd, cl, _, cs, _, _) ->
+        let sps1 = shift_u8_go(sps, NativeArray.make_u8(n * n, 0), n, sx, sz, 0)
+        Field(sps1,
+              shift_f32_go(vg, NativeArray.make_f32(n * n, 0.0), n, sx, sz, 1, 0),
+              shift_u8_go(rc, NativeArray.make_u8(n * n, 0), n, sx, sz, 0),
+              shift_u8_go(hd, NativeArray.make_u8(n * n, 0), n, sx, sz, 0),
+              shift_u8_go(cl, NativeArray.make_u8(n * n, 0), n, sx, sz, 0),
+              NativeArray.make_u8(n * n, 1),
+              shift_f32_go(cs, NativeArray.make_f32(2 * n * n, -1.0), n, sx, sz, 2, 0),
+              repull_box(sps1, NativeArray.make_f32(2 * n * n, 0.0), n, 0, 0, n - 1, n - 1),
+              NativeArray.make_u8(n, 1))
+    end
+  end
+
   doc "Is column (x, z) marked for the next tick?"
   fn is_dirty(f : Field, n : Int, x : Int, z : Int) : Bool do
     match f do Field(_, _, _, _, _, dt, cs, pl, pr) -> NativeArray.get_u8(dt, x + n * z) != 0 end
