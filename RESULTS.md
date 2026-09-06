@@ -1687,6 +1687,125 @@ spawn pitch in hundredths of a radian), the reticle is a warm cream against
 the white it keeps over sky and water. Budget 11.26 ms best of 3 on a machine
 still carrying other sessions' benchmarks.
 
+## The world tick, part two: the fungus era (2026-09-05)
+
+The tick work recorded above was measured against a world without the fungus
+system. When that landed, main measured ~11% slower than the day before --
+252-259 fps to 224-228 at 1920x1200, interleaved against a rebuild of the
+previous tree on the same machine at the same moment. The gap was identical at
+320x240 and with shadows off, so it was CPU, not fragments.
+
+It was not a regression. It was new features doing real work, and they were
+already routed through the machinery this branch had built: the mycelium
+migrations, fruit growth and glow relights all stage into the remesh queue
+without ever having been told it exists. What had grown was the climate tick.
+
+### The dirty set's assumption expired
+
+`Biome.tick` eases only awake columns, and it was built on the observation that
+almost everything settles. The fungus climate feedback moves a row's target by
+more than one ease step, so a column chasing it is never on it: **about four
+thousand of the sixteen thousand columns are permanently awake** where before
+almost none were. The dirty set still earns its keep -- four thousand beats
+sixteen -- but the sweep it guards had grown back into the biggest phase in the
+tick, 1.9 ms before the fungus work and 2.8 ms after, all on one frame.
+
+Split in two. `tick_begin` keeps the whole-map half -- rescan the water flags,
+recompute the distance field, wake what moved -- on one frame, because that is
+O(map) whatever is awake. `tick_slice` sweeps the awake columns of one slice,
+and a slice runs every frame, covering the map once per period. Each column is
+still visited exactly once per period, so the ease rate and the hold counter are
+unchanged.
+
+`Myc.tick` had to move with it: the two fields alternate -- the biome reads the
+network's pulls, the network reads the climate the biome eased -- so the sweep
+must be COMPLETE before it looks. It runs on the frame the last slice lands.
+
+| | fps | worst frame |
+|---|---|---|
+| before | 230-235 | 10.2-19.2 ms |
+| after  | 247-250 | 9.7-10.7 ms |
+
+The field slot fell from 4.6-5.2 ms to 1.57 ms. **The mechanics are proved
+rather than argued: with nothing easing (`CF_BIOME_RATE=0 CF_MYC_RATE=0`) the
+sharded and unsharded builds produce identical hashes on all four fields**,
+which is what says the slices cover every column exactly once, none missed and
+none twice.
+
+### Mining, the last synchronous thing
+
+Everything else had been bounded by the queue and a block edit had not, so it
+became the tallest thing in the game: 11.5 ms mean, 16 ms worst. Measured, it
+split 1.4-2.3 ms of block and occupancy writes, 5.7-6.9 ms of relight, 1.4-5.9
+ms of remesh -- and the relight had doubled when the fungus work gave the world
+a second light field.
+
+- **The block-light pass is a provable no-op in the dark.** With no block light
+  anywhere in the scan box there is nothing to clear, nothing to seed (an
+  emissive block inside the box would have lit its own cell), and nothing
+  outside can reach in without lighting the ring, which the scan box contains.
+  The edit's own block is the one thing that can add light without being in the
+  field yet, so it is tested separately. Where it fires: **1.76-2.57 ms ->
+  0.15-0.23**, the cost of the box scan that proves it.
+- **The remesh splits.** The edited section is rebuilt in the frame the click
+  landed, so the block still vanishes under the cursor with no delay; its
+  neighbours go through the queue. Verified where it matters: with
+  `CF_AUTOBREAK` mining throughout, the drained mesh equals a full rebuild
+  (935674909), so what an edit defers converges on what doing it synchronously
+  produced.
+- **Starting the bounded sweep at the box's brightest voxel** was worth 0.6 ms
+  and did NOT survive: the worklist sweep landed on main the same day and
+  supersedes it outright, since a worklist never visits an empty level at all.
+  The measurement is kept for the reason it was small, which still applies to
+  anything bounding that box: it reaches fifteen blocks ABOVE the edit, so it
+  holds lit sky until the player is more than fifteen deep, and a descent spends
+  most of its time with a full-brightness box.
+
+  block edit   mean 11.5 -> 9.4 ms, worst 16.1 -> 10.8 ms
+
+### Four things measured and NOT done
+
+Each of these looks alarming in the source and is not worth touching. They are
+recorded so the next reader does not spend the day finding out again.
+
+- **Budgeting the water tick.** Planned off a 7.9 ms figure that predated the
+  remesh queue. Re-measured after it: **calls 0.7-1.6 ms, apply 0.07 ms**. The
+  7.9 was the remesh, and the queue had already taken it.
+- **Per-chunk biome field storage.** A whole-array copy per edit looks like the
+  obvious cost -- `note_edits` and `rescan_box` each copy 16,384 entries. They
+  cost **0.28-0.33 ms and 0.14-0.15 ms**, about 0.067 ms a frame. Per-chunk
+  storage would remove nearly all of it and buy nothing at this world size. It
+  is a tidiness change, not a performance one.
+- **A settle tolerance on the climate offsets.** Meant to cut the four thousand
+  awake columns. At 0.002 it does nothing (3213 -> 3288). There is a knee, and
+  it is in the wrong place: 0.02 gives 2338, 0.1 gives 165 -- and 0.1 is a THIRD
+  of the gap between classification thresholds, so a column could settle that
+  far from its target and land in the wrong biome. The deeper reason not to
+  bother: once the sweep is sharded the awake set costs **0.13-0.16 ms a
+  frame**, so cutting it by a third saves 0.04. The 2.8 ms that motivated the
+  work was already stale when the work was proposed.
+- **Parameterizing the world size.** See the world_size_test commit: refinement
+  predicates cannot reference a constant function, and deriving the bounds took
+  the build from 85 unverified obligations to 100.
+
+### On measuring at all
+
+Two things cost more time than any optimization here.
+
+**This machine's background load swings results by 1.5-2x.** The same binary
+measured 95 fps and 198 fps on the same day. Every number in this section is an
+A/B pair taken back to back, interleaved, because nothing else is trustworthy.
+A report of "perf issues on main" was chased to a load average of 72 from three
+other sessions compiling; current main and the pre-merge build measured
+identically.
+
+**A budget test that straddles its threshold is worse than none.** At 12 ms
+`scratch/frame_budget.sh` gave 11.52, 11.88, 11.94, 12.07, 12.17, 12.23 and
+12.82 across one day, on code whose only measured change was elsewhere;
+best-of-6 did not settle it. It now asserts 16 ms -- a frame at 60 Hz, the
+property that survives a busy machine -- and the sharper number lives here,
+where it cannot rot into a false alarm. For the 120 Hz frame run
+`frame_budget.sh 8.3` on an idle box and read it as a measurement, not a gate.
 
 ## Oasis and fungal grove (2026-09-05)
 

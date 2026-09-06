@@ -1,33 +1,43 @@
--- Settings — the graphics options a player can change from the menu.
+-- Settings — the graphics and sound options a player can change from the menu.
 --
--- Five fields, each an index into a fixed list of choices, so stepping is one
+-- Eight fields, each an index into a fixed list of choices, so stepping is one
 -- operation for every row. `value` turns the index into the number the game
--- uses (blocks of shadow reach, a particle cap, a 0/1 flag); the file stores
--- those numbers rather than indices so a later change to a choice list does
--- not reinterpret an old file.
+-- uses (blocks of shadow reach, a particle cap, a 0/1 flag, a volume in
+-- percent); the file stores those numbers rather than indices so a later
+-- change to a choice list does not reinterpret an old file.
 --
 -- The file is lenient on purpose. The save header refuses a missing key so a
 -- truncated header cannot half-load a world; here the worst outcome is a
 -- default value, so missing keys default, unknown keys are ignored, and a
 -- missing or unreadable file is just the defaults.
 --
--- See docs/superpowers/specs/2026-09-05-settings-menu-design.md.
+-- See docs/superpowers/specs/2026-09-05-settings-menu-design.md and
+-- docs/superpowers/specs/2026-09-05-sound-settings-design.md.
 mod CubeForge.Settings do
 
   needs IO.FileRead
   needs IO.FileWrite
 
-  -- fullscreen, vsync, shadow distance, soft shadows, precipitation: one choice index each
-  type Settings = Settings(Int, Int, Int, Int, Int)
+  -- fullscreen, vsync, shadow distance, soft shadows, precipitation,
+  -- master, ambience, music: one choice index each
+  type Settings = Settings(Int, Int, Int, Int, Int, Int, Int, Int)
 
-  fn fields() : Int do 5 end
+  fn fields() : Int do 8 end
   fn field_fullscreen() : Int do 0 end
   fn field_vsync() : Int do 1 end
   fn field_shadow_dist() : Int do 2 end
   fn field_soft_shadows() : Int do 3 end
   fn field_precip() : Int do 4 end
+  fn field_master() : Int do 5 end
+  fn field_ambience() : Int do 6 end
+  fn field_music() : Int do 7 end
+  doc "The graphics fields are 0..4, the sound fields 5..7."
+  fn graphics_fields() : Int do 5 end
+  fn sound_fields() : Int do 3 end
 
   fn version() : Int do 1 end
+
+  pfn is_volume(f : Int) : Bool do f >= field_master() end
 
   doc "The row's name as drawn."
   fn name(f : Int) : String do
@@ -35,7 +45,10 @@ mod CubeForge.Settings do
     else if f == field_vsync() do "VSYNC"
     else if f == field_shadow_dist() do "SHADOWS"
     else if f == field_soft_shadows() do "SOFT SHADOWS"
-    else "PRECIPITATION" end end end end
+    else if f == field_precip() do "PRECIPITATION"
+    else if f == field_master() do "MASTER"
+    else if f == field_ambience() do "AMBIENCE"
+    else "MUSIC" end end end end end end end
   end
 
   doc "The file key of a field."
@@ -44,55 +57,65 @@ mod CubeForge.Settings do
     else if f == field_vsync() do "vsync"
     else if f == field_shadow_dist() do "shadow_dist"
     else if f == field_soft_shadows() do "soft_shadows"
-    else "precip" end end end end
+    else if f == field_precip() do "precip"
+    else if f == field_master() do "master"
+    else if f == field_ambience() do "ambience"
+    else "music" end end end end end end end
   end
 
   doc "How many choices a field has."
   fn choices(f : Int) : Int do
-    if f == field_shadow_dist() do 5
+    if f == field_shadow_dist() || is_volume(f) do 5
     else if f == field_precip() do 4
     else 2 end end
   end
 
   doc "The label of choice [i] of field [f]."
   fn choice_label(f : Int, i : Int) : String do
-    if f == field_shadow_dist() do
+    if f == field_shadow_dist() || is_volume(f) do
       (if i == 0 do "OFF" else int_to_string(choice_value(f, i)) end)
     else if f == field_precip() do
       (if i == 0 do "OFF" else if i == 1 do "LOW" else if i == 2 do "MEDIUM" else "HIGH" end end end)
     else (if i == 0 do "OFF" else "ON" end) end end
   end
 
-  doc "The game-facing number of choice [i]: blocks, particles, or a 0/1 flag."
+  doc "The game-facing number of choice [i]: blocks, particles, a percent, or a 0/1 flag."
   fn choice_value(f : Int, i : Int) : Int do
     if f == field_shadow_dist() do
       (if i == 0 do 0 else if i == 1 do 16 else if i == 2 do 32 else if i == 3 do 64 else 128 end end end end)
     else if f == field_precip() do
       (if i == 0 do 0 else if i == 1 do 1000 else if i == 2 do 2500 else 4000 end end end)
-    else i end end
+    else if is_volume(f) do i * 25
+    else i end end end
   end
 
-  doc "Windowed, vsync on, shadows 64 and soft, full precipitation: what the environment knobs defaulted to."
-  fn defaults() : Settings do Settings(0, 1, 3, 1, 3) end
+  doc "Windowed, vsync on, shadows 64 and soft, full precipitation, every volume at 100: what the game did before it had settings."
+  fn defaults() : Settings do Settings(0, 1, 3, 1, 3, 4, 4, 4) end
 
   fn index(s : Settings, f : Int) : Int do
     match s do
-      Settings(a, b, c, d, e) ->
-        if f == 0 do a else if f == 1 do b else if f == 2 do c else if f == 3 do d else e end end end end
+      Settings(a, b, c, d, e, g, h, i) ->
+        if f == 0 do a else if f == 1 do b else if f == 2 do c else if f == 3 do d
+        else if f == 4 do e else if f == 5 do g else if f == 6 do h else i end end end end end end end
     end
   end
-  fn set_index(s : Settings, f : Int, i : Int) : Settings do
+  fn set_index(s : Settings, f : Int, v : Int) : Settings do
     match s do
-      Settings(a, b, c, d, e) ->
-        if f == 0 do Settings(i, b, c, d, e)
-        else if f == 1 do Settings(a, i, c, d, e)
-        else if f == 2 do Settings(a, b, i, d, e)
-        else if f == 3 do Settings(a, b, c, i, e)
-        else Settings(a, b, c, d, i) end end end end
+      Settings(a, b, c, d, e, g, h, i) ->
+        if f == 0 do Settings(v, b, c, d, e, g, h, i)
+        else if f == 1 do Settings(a, v, c, d, e, g, h, i)
+        else if f == 2 do Settings(a, b, v, d, e, g, h, i)
+        else if f == 3 do Settings(a, b, c, v, e, g, h, i)
+        else if f == 4 do Settings(a, b, c, d, v, g, h, i)
+        else if f == 5 do Settings(a, b, c, d, e, v, h, i)
+        else if f == 6 do Settings(a, b, c, d, e, g, v, i)
+        else Settings(a, b, c, d, e, g, h, v) end end end end end end end
     end
   end
   fn value(s : Settings, f : Int) : Int do choice_value(f, index(s, f)) end
   fn label(s : Settings, f : Int) : String do choice_label(f, index(s, f)) end
+  doc "A volume field as a gain 0..1."
+  fn fraction(s : Settings, f : Int) : Float do int_to_float(value(s, f)) /. 100.0 end
 
   doc "Move field [f] one choice in [dir] (+1 or -1), wrapping at either end."
   fn step(s : Settings, f : Int, dir : Int) : Settings do

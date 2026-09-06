@@ -328,7 +328,7 @@ mod CubeForge.Hud do
       let w = Menu.item_w(m, i)
       let hot = Menu.focused(m) == i
       -- A settings body is not a button: it never lights up.
-      let body = Menu.page(m) == Menu.page_settings() && i < Menu.item_back(m) && Menu.settings_part(i) == Menu.part_body()
+      let body = Menu.is_row_page(Menu.page(m)) && i < Menu.item_back(m) && Menu.settings_part(i) == Menu.part_body()
       let lit = hot && !body
       let b1 = arect(b, x0, y0, x0 +. w, y0 +. h,
                      if lit do 0.30 else 0.15 end, if lit do 0.35 else 0.17 end,
@@ -339,7 +339,7 @@ mod CubeForge.Hud do
       -- The sub-pages are set smaller: SLOT 5 SEED plus ten digits must fit a
       -- slot row, PRECIPITATION MEDIUM plus two arrows a settings row.
       let px = if Menu.page(m) == Menu.page_slots() do slot_px()
-               else if Menu.page(m) == Menu.page_settings() do settings_px()
+               else if Menu.is_row_page(Menu.page(m)) do settings_px()
                else menu_px() end end
       let py = px *. 1.4
       let tw = text_width(lbl, px)
