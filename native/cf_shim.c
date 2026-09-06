@@ -209,6 +209,9 @@ static const char *VS =
     "layout(location=5) in float a_fx;\n"
     "uniform mat4 u_vp;\n"
     "uniform float u_time;\n"
+    /* The slot's offset: a chunk mesh is baked at the window-local origin it
+     * had when meshed, and the window has since slid (cf_gfx_shift). */
+    "uniform vec2 u_off;\n"
     "out vec2 v_uv; out float v_layer; out float v_shade;\n"
     "out vec3 v_world; out vec3 v_normal; out float v_fx;\n"
     "const vec3 NORMALS[6] = vec3[6](vec3(0,1,0), vec3(0,-1,0), vec3(1,0,0), vec3(-1,0,0), vec3(0,0,1), vec3(0,0,-1));\n"
@@ -219,7 +222,8 @@ static const char *VS =
      * fog see the block the game logic sees. */
     "  int fe = int(a_fx + 0.5) >> 8;\n"
     "  vec3 p = a_pos;\n"
-    "  if (fe >= 2) p.y += 0.03 * sin(u_time * 1.7 + a_pos.x * 1.3 + a_pos.z * 0.9);\n"
+    "  p.xz += u_off;\n"
+    "  if (fe >= 2) p.y += 0.03 * sin(u_time * 1.7 + p.x * 1.3 + p.z * 0.9);\n"
     "  gl_Position = u_vp * vec4(p,1.0);\n"
     "  v_uv=a_uv; v_layer=a_layer;\n"
     /* v_shade is the packed shade word (see Vertex.pack_shade): sky x AO in
@@ -228,7 +232,7 @@ static const char *VS =
      * used to be folded in here is replaced by a real N.L against a sun that
      * moves, computed per fragment. */
     "  v_shade = a_shade;\n"
-    "  v_world = a_pos; v_normal = NORMALS[f];\n"
+    "  v_world = a_pos + vec3(u_off.x, 0.0, u_off.y); v_normal = NORMALS[f];\n"
     "  v_fx = a_fx;\n"
     "}\n";
 static const char *FS =
@@ -511,6 +515,10 @@ static GLint  g_u_sun = -1, g_u_eye = -1, g_u_dir = -1, g_u_flash = -1;
 static GLint  g_u_sundir = -1, g_u_moondir = -1, g_u_unlit = -1;
 static GLint  g_u_time = -1;
 static GLint  g_u_fog_density = -1, g_u_fog_color = -1, g_u_overcast = -1, g_u_bolt = -1;
+static GLint  g_u_off = -1;
+/* Per-slot window offset (blocks, x and z): zero for a slot uploaded since the
+ * last shift, -16 per chunk the window has slid since for one that was not. */
+static float  g_off[CF_MAX_MESHES][2];
 /* The clear colour, kept so the fog can reuse it: fog colour IS sky colour,
  * so distant geometry dissolves into the horizon instead of popping at the
  * far plane, and the two can never drift apart. */
@@ -556,6 +564,7 @@ int64_t cf_gfx_init(void) {
     g_u_overcast = glGetUniformLocation(g_prog, "u_overcast");
     g_u_bolt = glGetUniformLocation(g_prog, "u_bolt");
     g_u_time = glGetUniformLocation(g_prog, "u_time");
+    g_u_off = glGetUniformLocation(g_prog, "u_off");
     if (getenv("CF_DEBUG")) fprintf(stderr, "cf: uniforms occ=%d shadow=%d sundir=%d unlit=%d\n", g_u_occ, g_u_shadow, g_u_sundir, g_u_unlit);
     glGenVertexArrays(1, &g_vao);
     glGenBuffers(CF_MAX_MESHES, g_vbo);
@@ -569,6 +578,7 @@ int64_t cf_gfx_init(void) {
 /* Upload the first `nfloats` floats of a March NativeF32Arr into mesh slot `slot`. */
 void cf_gfx_upload(int64_t slot, void *arr, int64_t nfloats) {
     if (slot < 0 || slot >= CF_MAX_MESHES) return;
+    g_off[slot][0] = g_off[slot][1] = 0.0f;   /* baked at the current local origin */
     if (nfloats > narr_len(arr)) nfloats = narr_len(arr);
     glBindBuffer(GL_ARRAY_BUFFER, g_vbo[slot]);
     glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(nfloats * 4), narr_data(arr), GL_STATIC_DRAW);
@@ -580,6 +590,7 @@ void cf_gfx_upload(int64_t slot, void *arr, int64_t nfloats) {
  * glBufferSubData. */
 void cf_gfx_upload_begin(int64_t slot, int64_t nfloats) {
     if (slot < 0 || slot >= CF_MAX_MESHES) return;
+    g_off[slot][0] = g_off[slot][1] = 0.0f;
     glBindBuffer(GL_ARRAY_BUFFER, g_vbo[slot]);
     glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(nfloats * 4), NULL, GL_STATIC_DRAW);
 }
@@ -607,6 +618,7 @@ void cf_gfx_set_view_proj(void *arr) {
 
 void cf_gfx_draw(int64_t slot, int64_t nverts) {
     if (slot < 0 || slot >= CF_MAX_MESHES || nverts <= 0) return;
+    glUniform2f(g_u_off, g_off[slot][0], g_off[slot][1]);
     glBindBuffer(GL_ARRAY_BUFFER, g_vbo[slot]);
     GLsizei stride = CF_VERT_FLOATS * sizeof(float);
     glEnableVertexAttribArray(0); glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void *)0);
@@ -617,6 +629,45 @@ void cf_gfx_draw(int64_t slot, int64_t nverts) {
     glEnableVertexAttribArray(5); glVertexAttribPointer(5, 1, GL_FLOAT, GL_FALSE, stride, (void *)(8 * 4));
     glDrawArrays(GL_TRIANGLES, 0, (GLsizei)nverts);
     if (getenv("CF_DEBUG")) { fprintf(stderr, "cf: draw slot=%lld nverts=%lld glerr=%d prog=%u vao=%u\n", (long long)slot, (long long)nverts, (int)glGetError(), g_prog, g_vao); }
+}
+
+/* ── The window slid ──────────────────────────────────────────────────────
+ * The world's window moved by (dx, dz) chunks (CubeForge.World.shift). The
+ * chunk mesh slots -- three ranges of 64: opaque, water, foliage -- move
+ * with their chunks: local slot d after the shift is what was at d + dx +
+ * 8 dz, and its offset gains -16 dx, -16 dz because its vertices are still
+ * baked where the chunk used to be. The handles of the slots that left are
+ * handed to the slots that came in (their contents are stale until March
+ * uploads a mesh, and March zeroes those slots' vertex counts). Every
+ * particle, spray emitter and spring the shim holds is in window
+ * coordinates too, so it moves 16 blocks the other way; a spring that left
+ * the window is dropped. */
+static void cf_shift_particles(int64_t dx, int64_t dz);   /* defined with the particle state, below */
+void cf_gfx_shift(int64_t dx, int64_t dz) {
+    for (int base = 0; base < 192; base += 64) {
+        GLuint old[64]; float oldoff[64][2]; int used[64];
+        for (int i = 0; i < 64; i++) { old[i] = g_vbo[base + i]; oldoff[i][0] = g_off[base + i][0]; oldoff[i][1] = g_off[base + i][1]; used[i] = 0; }
+        int has[64];
+        for (int d = 0; d < 64; d++) {
+            int64_t sx = d % 8 + dx, sz = d / 8 + dz;
+            has[d] = 0;
+            if (sx >= 0 && sx < 8 && sz >= 0 && sz < 8) {
+                int s = (int)(sx + 8 * sz);
+                g_vbo[base + d] = old[s]; used[s] = 1; has[d] = 1;
+                g_off[base + d][0] = oldoff[s][0] - 16.0f * (float)dx;
+                g_off[base + d][1] = oldoff[s][1] - 16.0f * (float)dz;
+            }
+        }
+        int u = 0;
+        for (int d = 0; d < 64; d++) {
+            if (has[d]) continue;
+            while (u < 64 && used[u]) u++;
+            if (u >= 64) break;
+            g_vbo[base + d] = old[u]; used[u] = 1;
+            g_off[base + d][0] = g_off[base + d][1] = 0.0f;
+        }
+    }
+    cf_shift_particles(dx, dz);
 }
 
 /* Upload an RGBA8 texture array (layer-major, row-major, 4 bytes/texel) from a
@@ -1306,4 +1357,21 @@ double  cf_in_mouse_dy(void)          { return g_in.mouse_dy; }
 double  cf_in_scroll_dy(void)         { return g_in.scroll_dy; }
 void    cf_in_capture_cursor(int64_t on) {
     if (g_win) glfwSetInputMode(g_win, GLFW_CURSOR, on ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_NORMAL);
+}
+
+/* The particle half of cf_gfx_shift: precipitation, spray and its emitters,
+ * and the springs move 16 blocks per chunk the window slid; a spring that
+ * left the window is dropped. */
+static void cf_shift_particles(int64_t dx, int64_t dz) {
+    float bx = 16.0f * (float)dx, bz = 16.0f * (float)dz;
+    for (int64_t i = 0; i < g_pcl_cap; i++) { g_pcl[i * 4 + 0] -= bx; g_pcl[i * 4 + 2] -= bz; }
+    for (int64_t i = 0; i < g_spray_live; i++) { g_spray[i * 7 + 0] -= bx; g_spray[i * 7 + 2] -= bz; }
+    for (int64_t i = 0; i < g_nemit; i++) { g_emit[i][0] -= (int32_t)(16 * dx); g_emit[i][2] -= (int32_t)(16 * dz); }
+    for (int64_t i = 0; i < g_nsprings; ) {
+        g_springs[i][0] -= (int32_t)(16 * dx); g_springs[i][2] -= (int32_t)(16 * dz);
+        if (g_springs[i][0] < 0 || g_springs[i][0] >= 128 || g_springs[i][2] < 0 || g_springs[i][2] >= 128) {
+            g_springs[i][0] = g_springs[g_nsprings - 1][0]; g_springs[i][1] = g_springs[g_nsprings - 1][1]; g_springs[i][2] = g_springs[g_nsprings - 1][2];
+            g_nsprings--;
+        } else i++;
+    }
 }

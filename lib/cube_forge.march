@@ -1042,6 +1042,105 @@ mod CubeForge do
   -- Water on the surface at (px+3, pz+dz) for dz in [k, 4]: nine columns east of the player.
   -- Every source above sea level: told to the shim, and its chunk flagged so the
   -- water actor ticks from the first frame (a chunk with a spring is always live).
+  -- ── Streaming: the window follows the player ───────────────────────────
+  -- Every coordinate the engine holds is window-local (see World.origin_x).
+  -- When the player's chunk leaves the window's central 2x2 the window slides
+  -- one chunk toward them: the world, the fields, the mesh slots, the actor
+  -- pool and the pending marks slide with it, the band that came in is
+  -- generated, lit, meshed and given actors, and the player moves 16 blocks
+  -- the other way, so nothing they see moves.
+  pfn shift_dx(p : CubeForge.Player.Player) : Int do
+    let lx = World.floor_div16(float_to_int(Math.floor(V.x(Player.position(p)))))
+    if lx < 3 do -1 else if lx > 4 do 1 else 0 end end
+  end
+  pfn shift_dz(p : CubeForge.Player.Player) : Int do
+    let lz = World.floor_div16(float_to_int(Math.floor(V.z(Player.position(p)))))
+    if lz < 3 do -1 else if lz > 4 do 1 else 0 end end
+  end
+  -- Local chunk index [d]'s source index after a shift, or -1 when it came in.
+  pfn shift_src(d : Int, n : Int, dx : Int, dz : Int) : Int do
+    let sx = d % n + dx
+    let sz = d / n + dz
+    if sx >= 0 && sx < n && sz >= 0 && sz < n do sx + n * sz else -1 end
+  end
+  -- Slide one block of [count] per-chunk slots at [base]: a slot that came in takes [fill].
+  pfn remap_ints_go(old : NativeIntArr, out : NativeIntArr, n : Int, dx : Int, dz : Int, base : Int, fill : Int, d : Int) : NativeIntArr do
+    if d >= n * n do out
+    else
+      let s = shift_src(d, n, dx, dz)
+      remap_ints_go(old, NativeArray.set_int(out, base + d, if s < 0 do fill else NativeArray.get_int(old, base + s) end), n, dx, dz, base, fill, d + 1)
+    end
+  end
+  pfn remap_bases_go(old : NativeIntArr, out : NativeIntArr, n : Int, dx : Int, dz : Int, stride : Int, bases : Int, fill : Int, b : Int) : NativeIntArr do
+    if b >= bases do out else remap_bases_go(old, remap_ints_go(old, out, n, dx, dz, b * stride, fill, 0), n, dx, dz, stride, bases, fill, b + 1) end
+  end
+  -- The meshes after a shift, built from local index n*n-1 down to 0: a moved chunk
+  -- keeps its mesh (the shim moved its slot and offsets it), a chunk that came
+  -- in is meshed now and uploaded. Returns the list and threads the counts.
+  type ShiftMeshes = ShiftMeshes(List(CubeForge.ChunkMesh.ChunkMesh), NativeIntArr)
+  pfn remap_meshes_go(old, w1 : CubeForge.World.World, n : Int, dx : Int, dz : Int, d : Int, counts : NativeIntArr, empty : CubeForge.Chunk.Chunk, acc : List(CubeForge.ChunkMesh.ChunkMesh)) : ShiftMeshes do
+    if d < 0 do ShiftMeshes(acc, counts)
+    else
+      let s = shift_src(d, n, dx, dz)
+      if s >= 0 do remap_meshes_go(old, w1, n, dx, dz, d - 1, counts, empty, Cons(Array.get(old, s), acc))
+      else
+        let m = CM.build(w1, d % n, d / n, empty)
+        remap_meshes_go(old, w1, n, dx, dz, d - 1, upload_chunk(m, d, counts), empty, Cons(m, acc))
+      end
+    end
+  end
+  -- The actor pool after a shift: a moved chunk keeps its actor; the actors of
+  -- the chunks that left are handed to the chunks that came in, in order, and
+  -- sent WLoad for them (world chunk coordinates: the new origin plus local).
+  pfn freed_pids_go(old, n : Int, dx : Int, dz : Int, s : Int, acc) do
+    if s < 0 do acc
+    else
+      -- source s is kept when some destination maps to it: d = s - dx - n*dz in range
+      let dxx = s % n - dx
+      let dzz = s / n - dz
+      let kept = dxx >= 0 && dxx < n && dzz >= 0 && dzz < n
+      freed_pids_go(old, n, dx, dz, s - 1, if kept do acc else Cons(Array.get(old, s), acc) end)
+    end
+  end
+  pfn remap_pids_go(old, w1 : CubeForge.World.World, n : Int, dx : Int, dz : Int, d : Int, freed, seed : Int, acc) do
+    if d < 0 do acc
+    else
+      let s = shift_src(d, n, dx, dz)
+      if s >= 0 do remap_pids_go(old, w1, n, dx, dz, d - 1, freed, seed, Cons(Array.get(old, s), acc))
+      else
+        match freed do
+          Cons(pid, rest) ->
+            Water.send_load(pid, World.origin_x(w1) + d % n, World.origin_z(w1) + d / n, n, seed)
+            remap_pids_go(old, w1, n, dx, dz, d - 1, rest, seed, Cons(pid, acc))
+          Nil -> acc
+        end
+      end
+    end
+  end
+  pfn shift_scene(sc, dx : Int, dz : Int, seed : Int, workers : Int) do
+    match sc do
+      Scene(w, counts, outline, hit, ui, pids, flags, meshes, bio, pend, myc) ->
+        let n = World.side(w)
+        let t0 = Win.time()
+        let w1 = World.shift(w, dx, dz, seed, workers)
+        let bio1 = Biome.shift(bio, w1, dx, dz, seed)
+        let myc1 = Myc.shift(myc, 16 * n, dx, dz)
+        Win.gfx_shift(dx, dz)
+        Win.gfx_upload_occupancy(World.occupancy(w1), 128, 256, 128)
+        let counts1 = remap_bases_go(counts, NativeArray.make_int(3 * water_slot_base(), 0), n, dx, dz, water_slot_base(), 3, 0, 0)
+        let pend1 = remap_bases_go(pend, NativeArray.make_int(1024, 0), n, dx, dz, 64, 16, 0, 0)
+        let flags1 = remap_ints_go(flags, NativeArray.make_int(n * n, 0), n, dx, dz, 0, 1, 0)
+        let rm = remap_meshes_go(meshes, w1, n, dx, dz, n * n - 1, counts1, Chunk.new(), Nil)
+        let pids1 = Array.from_list(remap_pids_go(pids, w1, n, dx, dz, n * n - 1, freed_pids_go(pids, n, dx, dz, n * n - 1, Nil), seed, Nil))
+        let flags2 = spring_flags(w1, bio1, 0, n, flags1, false)
+        match rm do
+          ShiftMeshes(mlist, counts2) ->
+            println("window shift (" ++ int_to_string(dx) ++ "," ++ int_to_string(dz) ++ ") -> origin (" ++ int_to_string(World.origin_x(w1)) ++ "," ++ int_to_string(World.origin_z(w1)) ++ ") in " ++ ms(Win.time() -. t0))
+            Scene(w1, counts2, outline, hit, ui, pids1, flags2, Array.from_list(mlist), bio1, pend1, myc1)
+        end
+    end
+  end
+
   -- A source above sea level with somewhere to give (Water.is_spring_at, over
   -- the world): the interior of an upland lake is not one, its outlet is.
   pfn is_world_spring(w : CubeForge.World.World, x : Int, y : Int, z : Int) : Bool do
@@ -1050,9 +1149,9 @@ mod CubeForge do
           || Chunk.open_for_spring(World.block_at(w, x, y, z + 1)) || Chunk.open_for_spring(World.block_at(w, x, y, z - 1))
           || Chunk.open_for_spring(World.block_at(w, x, y - 1, z)))
   end
-  pfn spring_flags(w : CubeForge.World.World, f : CubeForge.Biome.Field, i : Int, n : Int, flags : NativeIntArr) : NativeIntArr do
+  pfn spring_flags(w : CubeForge.World.World, f : CubeForge.Biome.Field, i : Int, n : Int, flags : NativeIntArr, log : Bool) : NativeIntArr do
     if i >= n * n * 256 do
-      println("springs: " ++ int_to_string(Win.spring_count()))
+      if log do println("springs: " ++ int_to_string(Win.spring_count())) else () end
       flags
     else
       let x = i % (n * 16)
@@ -1060,9 +1159,9 @@ mod CubeForge do
       let h = Biome.height_of(f, x, z)
       if is_world_spring(w, x, h, z) do
         Win.spring_set(x, h, z, true)
-        println("  spring at " ++ int_to_string(x) ++ "," ++ int_to_string(h) ++ "," ++ int_to_string(z))
-        spring_flags(w, f, i + 1, n, NativeArray.set_int(flags, World.floor_div16(x) + n * World.floor_div16(z), 1))
-      else spring_flags(w, f, i + 1, n, flags) end
+        if log do println("  spring at " ++ int_to_string(x) ++ "," ++ int_to_string(h) ++ "," ++ int_to_string(z)) else () end
+        spring_flags(w, f, i + 1, n, NativeArray.set_int(flags, World.floor_div16(x) + n * World.floor_div16(z), 1), log)
+      else spring_flags(w, f, i + 1, n, flags, log) end
     end
   end
 
@@ -1641,15 +1740,21 @@ mod CubeForge do
 
   -- [first]: the process's first session (the only one that shows the start screen or honours CF_AUTOLOAD).
   -- [t0]: the clock at session start; [day0]: seconds into the day at that moment, so the sun continues from a save.
-  fn frame_loop(f : Frame, k : Knobs, sc, nchunks : Int, proj : NativeFloatArr, map_proj : NativeFloatArr, fps : Fps, wxpid, seed : Int, first : Bool, t0 : Float, day0 : Float) : Frame do
+  fn frame_loop(f : Frame, k : Knobs, sc_in, nchunks : Int, proj : NativeFloatArr, map_proj : NativeFloatArr, fps : Fps, wxpid, seed : Int, first : Bool, t0 : Float, day0 : Float) : Frame do
     match f do
-      Frame(frame, last_t, player, sample, view, vp, map_mode, marker, flash, wcache, bcache, inv_open, drag_from, menu, menubuf, next_seed, worst, worst_at, sched) ->
+      Frame(frame, last_t, player_in, sample, view, vp, map_mode, marker, flash, wcache, bcache, inv_open, drag_from, menu, menubuf, next_seed, worst, worst_at, sched) ->
         match k do
         Knobs(max_frames, dump_frame, dump_path, autowalk, autospin, autoedit, autoswim, autoflow, workers, automap, day_len, sun_deg, autoinv, autobreak, weather_pin, precip_cap, biome_rate, biome_map, autocanal, biome_budget, veg_budget, time_pin, remesh_all_at, automenu, audio_mode, audio_log, autodive, autoglow, myc_rate, myc_map, autoplant, myc_budget, autoplant_species, autospore, fruit_budget, fruit_rate, autostart, autosave, autosave_slot, autoload, autoload_slot, autoslots, myc_feedback, autosettings, settings_disk, settings_mask) ->
         if Win.should_close() || (max_frames >= 0 && frame >= max_frames) || !is_no_start(next_seed) do
-          Frame(frame, last_t, player, sample, view, vp, map_mode, marker, flash, wcache, bcache, inv_open, drag_from, menu, menubuf, next_seed, worst, worst_at, sched)
+          Frame(frame, last_t, player_in, sample, view, vp, map_mode, marker, flash, wcache, bcache, inv_open, drag_from, menu, menubuf, next_seed, worst, worst_at, sched)
         else
           In.poll()
+          -- Streaming: one chunk of shift a frame, toward the player, while
+          -- their chunk is off the window's centre (see shift_scene).
+          let sdx = shift_dx(player_in)
+          let sdz = if sdx != 0 do 0 else shift_dz(player_in) end
+          let sc = if sdx != 0 || sdz != 0 do shift_scene(sc_in, sdx, sdz, seed, workers) else sc_in end
+          let player = if sdx != 0 || sdz != 0 do Player.translate(player_in, int_to_float(0 - 16 * sdx), int_to_float(0 - 16 * sdz)) else player_in end
           -- I toggles the inventory. While it is open the cursor is released and no
           -- input reaches the player; the world keeps ticking, as in the map view.
           -- I is ignored while the menu is up, so the two panels can never be open together.
@@ -2760,7 +2865,7 @@ mod CubeForge do
       if is_loaded(loaded) do reload_water_slot(pids, n * n - 1, n, seed, Save.dir(), start_slot(start))
       else reload_water(pids, n * n - 1, n, seed) end
       println("reloaded " ++ int_to_string(n * n) ++ " water actors in " ++ ms(Win.time() -. tw0) ++ " (loads run asynchronously)")
-      let scene = Scene(world, counts, F32Buf.new(256), Ray.miss(), Ui(inv0, F32Buf.new(2048), F32Buf.new(256), -1, F32Buf.new(2048), "", Effects.new(), "", -1, ""), pids, spring_flags(world, biome0, 0, n, NativeArray.make_int(n * n, 0)), Array.from_list(meshes), biome0, CubeForge.Light.marks_new(), myc0)
+      let scene = Scene(world, counts, F32Buf.new(256), Ray.miss(), Ui(inv0, F32Buf.new(2048), F32Buf.new(256), -1, F32Buf.new(2048), "", Effects.new(), "", -1, ""), pids, spring_flags(world, biome0, 0, n, NativeArray.make_int(n * n, 0), true), Array.from_list(meshes), biome0, CubeForge.Light.marks_new(), myc0)
       let fps0 = Fps(t4, 0, 0, F32Buf.new(4096))
       -- Seed first, then the saved phase, so a fresh phase never overwrites it.
       Weather.send_seed(wxpid, seed)

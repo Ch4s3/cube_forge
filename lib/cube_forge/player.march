@@ -39,6 +39,10 @@ mod CubeForge.Player do
     match p do Player(pos, vel, yaw, _, g) -> Player(pos, vel, yaw, pitch, g) end
   end
   fn position(p : Player) : CubeForge.Math.Vec3.Vec3 do match p do Player(pos, _, _, _, _) -> pos end end
+  doc "The player moved by ([dx], [dz]) blocks: what a window shift does, so the player stays where they are in the world."
+  fn translate(p : Player, dx : Float, dz : Float) : Player do
+    match p do Player(pos, vel, yaw, pitch, g) -> Player(V.new(V.x(pos) +. dx, V.y(pos), V.z(pos) +. dz), vel, yaw, pitch, g) end
+  end
   fn velocity(p : Player) : CubeForge.Math.Vec3.Vec3 do match p do Player(_, vel, _, _, _) -> vel end end
 
   doc "The eight floats a save stores: position, velocity, yaw, pitch."
