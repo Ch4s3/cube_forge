@@ -270,9 +270,21 @@ Each slice is independently verifiable and independently useful.
 1. **Bodies on screen.** `cf_f32_stamp_xf`, the pose templates for two species,
    the mesh slot, and a hardcoded circling flock. Verifies rendering and yaw
    alone. Oracle: a vertex-count and position hash for a pinned transform.
-2. **The flock actor.** Steering, the height-sample message, ground avoidance,
-   interpolation between ticks. Two species, spawned by hand. Oracle: a
-   deterministic position hash after N ticks from a fixed seed.
+2. **The flock actor.** *(done)* Steering, the height-sample message, ground
+   avoidance, interpolation between ticks. Two species, spawned by hand.
+   Oracle: a deterministic position hash after N ticks from a fixed seed, plus
+   behaviour tests (cruise height, home, separation, flee, roost, fish stay
+   wet, nothing ends a tick inside terrain) — each shown to fail when the
+   behaviour it names is disabled.
+
+   Two things the plan got wrong and the build corrected. The flock's inputs
+   cannot ride on the `Actor.call` request: arguments there arrive as zeros
+   (GAPS G84), so they go by `send` and the call is nullary, as every other
+   actor here already does. And "ground" is two different questions —
+   `Biome.height_of` is the surface *including water*, right for a bird and
+   exactly wrong for a fish, whose floor would sit above its own ceiling and
+   push it out of the lake. Fish get the bed from a bounded `surface_y` walk
+   instead.
 3. **The species table and the full roster.** All sixteen, poses and colours.
 4. **Populations.** Capacity from habitat, the ease, the sparse registry,
    save/load. Oracle: dig a pond headlessly (`CF_AUTOCANAL`'s trick) and assert

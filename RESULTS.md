@@ -2461,3 +2461,61 @@ carried the world tick from 55 ms to 11 applies to it.
 species in every pose, still and broadside, which is the only way the bodies
 themselves are actually inspectable — at their real size, 0.35 of a block, an
 animal is a few pixels and a screenshot proves only that something was drawn.
+
+## Flocks: a group as one unit of state
+
+Slice 2: the flock actor, its steering, and the interpolation that lets it
+think six times a second and still move smoothly.
+
+**One actor per flock, not per animal.** The literal reading of "animals are
+actors" costs a call/reply pair per animal per tick against a 16 ms frame, and
+then needs actors talking to each other to do what one shared state does for
+free. A `FlockActor` owns 5-20 animals; `Flock.step` is an ordinary function
+over them and the actor is a shell, which is the division `Water` already uses
+between `tick` and `WaterChunk` — and it is why every behaviour here is tested
+without a running actor.
+
+**The flock is told the terrain; it does not regenerate it.** `WaterChunk`
+answers the no-arrays-in-messages rule (G44) by rebuilding its chunk from
+`(cx, cz, seed)`. Copying that would have broken the feature outright:
+regenerated terrain is terrain as it was *generated*, and the point of the
+fauna design is that the player has changed it. A flock gets a 5x5 patch of
+ground heights packed a byte at a time into four Ints, and is therefore correct
+against edits by construction.
+
+**Two corrections the build made to the plan.**
+
+The inputs cannot ride on the call request. `Actor.call(pid, Req(a, b, c))`
+delivers zeros — silently, with no error anywhere (GAPS G84). The flocks read a
+ground of 0 and a water surface of 0, so the fish sank to y 0.5 (its floor,
+ground + 0.5) and the birds set off toward y 9. It was caught only because
+y 0.5 under a lake at y 81 is too specific a number to be anything but
+arithmetic on a zero. Inputs now go by `send`; the call is nullary.
+
+"Ground" turned out to be two questions. `Biome.height_of` is the surface
+*including* water — a sea column reads 62, the water top — which is right for a
+bird and exactly wrong for a fish, whose floor would then sit above its own
+ceiling and push it out through the surface. Fish read the bed via `surface_y`
+instead. Bounding that walk to start at the field's height rather than at y 255
+matters: unbounded, the flock slot was the most frequent slow frame in a
+400-frame run (12 occurrences, more than the vegetation or climate ticks);
+bounded, it left the list entirely.
+
+**What it costs.** Interleaved A/B, three runs each, four flocks and 29 animals:
+
+| | worst frame | frame rate |
+|---|---|---|
+| no flocks | 6.5-7.2 ms | 217-218 fps |
+| four flocks, 29 animals | 6.5-8.1 ms | 205-218 fps |
+
+Within noise once the bed walk is bounded. The AI runs on its own phase slot,
+once per world tick, and the renderer blends the last two ticks — so the
+steering runs at a sixth of the frame rate and the animals still move smoothly.
+That is the trade the biome sweep already makes, and here it is the only one
+available: unlike every other tick in this program, the DRAW cannot be spread
+across frames.
+
+`CF_FAUNA_DEMO=3` puts three flocks of pipits around the player and a school of
+sunfin in the nearest water — which for seed 7 is an upland lake at y 81, not
+the sea, and so a decent test of the case the sea-level assumption would have
+got wrong.

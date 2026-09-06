@@ -38,6 +38,9 @@ mod CubeForge.Fauna do
   doc "Fish hold a depth band; birds hold a biome. The axis a species is keyed on."
   fn is_fish(sp : Int) : Bool do sp == 2 end
 
+  doc "Feeds by night and roosts by day. The forest owl to the forest finch: what makes the day cycle read as a shift change rather than as a dimmer."
+  fn nocturnal(sp : Int) : Bool do false end
+
   doc "Body length in blocks: the uniform scale the stamp applies. A grid is one block across at scale 1."
   fn body_scale(sp : Int) : Float do
     if sp == 1 do 0.4 else if sp == 2 do 0.35 else 1.0 end end
