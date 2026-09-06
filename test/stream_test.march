@@ -60,7 +60,7 @@ mod CubeForge.Test.Stream do
   describe "the window shifts" do
     test "a shift by one chunk in x moves every chunk over and generates the far column" do
       let w0 = W.generate(8, seed(), 1)
-      let w1 = W.shift(w0, 1, 0, seed(), 1)
+      let w1 = W.shift(w0, 1, 0, seed(), 1, Nil)
       Test.assert_eq_int(W.origin_x(w1), 1, "origin moved")
       Test.assert_eq_int(W.origin_z(w1), 0, "only in x")
       Test.assert_eq_int(chunk_hash(W.chunk_at(w1, 0, 0), 0, 7), chunk_hash(W.chunk_at(w0, 1, 0), 0, 7), "local 0 is the old local 1")
@@ -72,7 +72,7 @@ mod CubeForge.Test.Stream do
     test "the light and occupancy fields slide with the chunks and the band is lit and filled" do
       let w0 = W.generate(8, seed(), 1)
       let w0l = W.relight_all(w0)
-      let w1 = W.shift(w0l, 1, 0, seed(), 1)
+      let w1 = W.shift(w0l, 1, 0, seed(), 1, Nil)
       Test.assert_true(light_agrees(W.light(w1), W.light(w0l), 0), "skylight slid")
       Test.assert_true(occ_agrees(W.occupancy(w1), W.occupancy(w0l), 0), "occupancy slid")
       Test.assert_eq_int(band_lit(w1, W.light(w1), 120, 0), -1, "the new column has sky above every surface (z * 100000 + y * 100 + light)")
@@ -80,14 +80,14 @@ mod CubeForge.Test.Stream do
     end
     test "shifting back regenerates what was dropped, identically" do
       let w0 = W.generate(8, seed(), 1)
-      let w2 = W.shift(W.shift(w0, 1, 0, seed(), 1), -1, 0, seed(), 1)
+      let w2 = W.shift(W.shift(w0, 1, 0, seed(), 1, Nil), -1, 0, seed(), 1, Nil)
       Test.assert_eq_int(W.origin_x(w2), 0, "back at the origin")
       Test.assert_eq_int(chunk_hash(W.chunk_at(w2, 0, 4), 0, 7), chunk_hash(W.chunk_at(w0, 0, 4), 0, 7), "the regenerated column is the original")
       Test.assert_eq_int(W.state_hash(w2), W.state_hash(w0), "the whole window is the original")
     end
     test "a shift in z slides the other way" do
       let w0 = W.generate(8, seed(), 1)
-      let w1 = W.shift(w0, 0, -1, seed(), 1)
+      let w1 = W.shift(w0, 0, -1, seed(), 1, Nil)
       Test.assert_eq_int(W.origin_z(w1), -1, "origin moved in z")
       Test.assert_eq_int(chunk_hash(W.chunk_at(w1, 2, 1), 0, 7), chunk_hash(W.chunk_at(w0, 2, 0), 0, 7), "local z 1 is the old z 0")
       let fresh = C.generate_lakes(16 * 2, 16 * -1, seed(), CubeForge.Lakes.tile_of_chunk(seed(), 2, -1))
@@ -95,11 +95,35 @@ mod CubeForge.Test.Stream do
     end
   end
 
+  describe "the evicted cache" do
+    test "an edited chunk that leaves the window comes back with its edit; a clean one is regenerated" do
+      let w0 = W.set_block(W.generate(8, seed(), 1), 5, 200, 5, 3)   -- a stone block in the air of local chunk (0, 0)
+      Test.assert_true(W.is_dirty(w0, 0, 0), "the write marked the chunk")
+      Test.assert_true(!W.is_dirty(w0, 1, 0), "and only that chunk")
+      let w1 = W.shift(w0, 1, 0, seed(), 1, Nil)
+      Test.assert_eq_int(List.length(W.cache(w1)), 1, "one dirty chunk was cached")
+      Test.assert_eq_int(W.block_at(w1, 5 + 16 * 7, 200, 5), 0, "the band that came in is fresh")
+      let w2 = W.shift(w1, -1, 0, seed(), 1, Nil)
+      Test.assert_eq_int(W.block_at(w2, 5, 200, 5), 3, "the edit is back")
+      Test.assert_true(W.is_dirty(w2, 0, 0), "and the chunk is dirty again")
+      Test.assert_eq_int(List.length(W.cache(w2)), 0, "the cache gave it back")
+      Test.assert_eq_int(List.length(W.restored(w2)), 1, "the shift reports it")
+    end
+    test "a column blob carries fungus and shown species across an eviction" do
+      let n = 128
+      let m0 = CubeForge.Myc.plant(CubeForge.Myc.build(n), n, 5, 5, 2)
+      let b = CubeForge.Myc.chunk_bytes(m0, n, 0, 0)
+      let m1 = CubeForge.Myc.restore_chunk(CubeForge.Myc.build(n), n, 3, 2, b)
+      Test.assert_eq_int(CubeForge.Myc.species_of(m1, n, 48 + 5, 32 + 5), 2, "the planting landed in chunk (3, 2)")
+      Test.assert_eq_int(CubeForge.Myc.species_of(m1, n, 5, 5), 0, "and nowhere else")
+    end
+  end
+
   describe "the fields shift" do
     test "the biome field slides and scans the band" do
       let w0 = W.generate(8, seed(), 1)
       let f0 = CubeForge.Biome.build(w0, seed())
-      let w1 = W.shift(w0, 1, 0, seed(), 1)
+      let w1 = W.shift(w0, 1, 0, seed(), 1, Nil)
       let f1 = CubeForge.Biome.shift(f0, w1, 1, 0, seed())
       Test.assert_eq_int(CubeForge.Biome.height_of(f1, 0, 5), CubeForge.Biome.height_of(f0, 16, 5), "a height slid")
       Test.assert_eq_int(CubeForge.Biome.height_of(f1, 120, 9), W.surface_y(w1, 120, 9), "the band was scanned")

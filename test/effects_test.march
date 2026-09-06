@@ -14,7 +14,7 @@ mod CubeForge.Test.Effects do
     if i >= 256 * 71 do c else flat_cells(Ce.set(c, i % 16, i / 256, (i / 16) % 16, 3), i + 1) end
   end
   pfn flat_world() : CubeForge.World.World do
-    CubeForge.World.World(Array.from_list([flat_cells(Ce.new(), 0)]), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.World.shown_new(1), 1, CubeForge.Model.build(), 0, 0)
+    CubeForge.World.World(Array.from_list([flat_cells(Ce.new(), 0)]), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.World.shown_new(1), 1, CubeForge.Model.build(), 0, 0, NativeArray.make_u8(64, 0), Nil, Nil)
   end
 
   describe "Effects" do

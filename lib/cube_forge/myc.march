@@ -426,6 +426,48 @@ mod CubeForge.Myc do
                 NativeArray.set_u8(rc, i, NativeArray.get_u8(b, off + 2 * n2 + i)))
     end
   end
+  -- ── One chunk's columns, for the evicted cache ─────────────────────────
+  -- 768 bytes: species, vigour (quantized as to_bytes does) and reach, one
+  -- byte per column of the 16x16 chunk at local chunk (cx, cz); the world
+  -- appends the 256 shown bytes to make a 1024-byte column blob.
+  pfn chunk_bytes_go(sps : NativeU8Arr, vg : NativeF32Arr, rc : NativeU8Arr, n : Int, x0 : Int, z0 : Int, i : Int, out : NativeU8Arr) : NativeU8Arr do
+    if i >= 256 do out
+    else
+      let j = (x0 + i % 16) + n * (z0 + i / 16)
+      let o1 = NativeArray.set_u8(out, i, NativeArray.get_u8(sps, j))
+      let o2 = NativeArray.set_u8(o1, 256 + i, float_to_int(NativeArray.get_f32(vg, j) *. 255.0 +. 0.5))
+      chunk_bytes_go(sps, vg, rc, n, x0, z0, i + 1, NativeArray.set_u8(o2, 512 + i, NativeArray.get_u8(rc, j)))
+    end
+  end
+  doc "The 768 column bytes of local chunk (cx, cz), followed by 256 zero bytes for the caller's shown species."
+  fn chunk_bytes(f : Field, n : Int, cx : Int, cz : Int) : NativeU8Arr do
+    match f do Field(sps, vg, rc, _, _, _, _, _, _) -> chunk_bytes_go(sps, vg, rc, n, 16 * cx, 16 * cz, 0, NativeArray.make_u8(1024, 0)) end
+  end
+  pfn restore_go(b : NativeU8Arr, n : Int, x0 : Int, z0 : Int, i : Int, sps : NativeU8Arr, vg : NativeF32Arr, rc : NativeU8Arr, dt : NativeU8Arr) : Field do
+    if i >= 256 do Field(sps, vg, rc, NativeArray.make_u8(0, 0), NativeArray.make_u8(0, 0), dt, NativeArray.make_f32(0, 0.0), NativeArray.make_f32(0, 0.0), NativeArray.make_u8(0, 0))
+    else
+      let j = (x0 + i % 16) + n * (z0 + i / 16)
+      restore_go(b, n, x0, z0, i + 1,
+                 NativeArray.set_u8(sps, j, NativeArray.get_u8(b, i)),
+                 NativeArray.set_f32(vg, j, int_to_float(NativeArray.get_u8(b, 256 + i)) /. 255.0),
+                 NativeArray.set_u8(rc, j, NativeArray.get_u8(b, 512 + i)),
+                 NativeArray.set_u8(dt, j, 1))
+    end
+  end
+  doc "The field with local chunk (cx, cz)'s columns taken from a chunk_bytes blob: species, vigour and reach, the columns marked, the pulls redone around them."
+  fn restore_chunk(f : Field, n : Int, cx : Int, cz : Int, b : NativeU8Arr) : Field do
+    if NativeArray.length_u8(b) < 768 do f
+    else
+      match f do
+        Field(sps, vg, rc, hd, cl, dt, cs, pl, pr) ->
+          match restore_go(b, n, 16 * cx, 16 * cz, 0, copy_u8(sps, n * n), copy_f(vg, n * n), copy_u8(rc, n * n), copy_u8(dt, n * n)) do
+            Field(s1, v1, r1, _, _, d1, _, _, _) ->
+              Field(s1, v1, r1, hd, cl, d1, cs, repull_box(s1, copy_f(pl, 2 * n * n), n, 16 * cx - 1, 16 * cz - 1, 16 * cx + 16, 16 * cz + 16), mark_rows(copy_u8(pr, n), n, 16 * cz - 1, 16 * cz + 16))
+          end
+      end
+    end
+  end
+
   doc "A field from the bytes `export` wrote at [off]: everything dirty, the pulls recomputed."
   fn of_bytes(b : NativeU8Arr, off : Int, n : Int) : Field do
     match import_go(b, off, n * n, 0, NativeArray.make_u8(n * n, 0), NativeArray.make_f32(n * n, 0.0), NativeArray.make_u8(n * n, 0)) do

@@ -1117,14 +1117,33 @@ mod CubeForge do
       end
     end
   end
+  -- The column blobs of the dirty chunks about to leave: the fungus columns
+  -- and the shown species, 1024 bytes each, keyed by local index.
+  pfn leaving_blobs(w : CubeForge.World.World, myc : CubeForge.Myc.Field, n : Int, dx : Int, dz : Int, i : Int, acc : List(CubeForge.World.Blob)) : List(CubeForge.World.Blob) do
+    if i < 0 do acc
+    else
+      let dxx = i % n - dx
+      let dzz = i / n - dz
+      let stays = dxx >= 0 && dxx < n && dzz >= 0 && dzz < n
+      if stays || !World.is_dirty(w, i % n, i / n) do leaving_blobs(w, myc, n, dx, dz, i - 1, acc)
+      else leaving_blobs(w, myc, n, dx, dz, i - 1, Cons(CubeForge.World.Blob(i, World.with_shown_bytes(w, i % n, i / n, Myc.chunk_bytes(myc, 16 * n, i % n, i / n))), acc)) end
+    end
+  end
+  -- The fungus columns of the chunks the shift restored from the cache.
+  pfn restore_myc(myc : CubeForge.Myc.Field, w1 : CubeForge.World.World, n : Int, rs : List(CubeForge.World.Evicted)) : CubeForge.Myc.Field do
+    match rs do
+      Nil -> myc
+      Cons(e, rest) -> restore_myc(Myc.restore_chunk(myc, 16 * n, World.ev_cx(e) - World.origin_x(w1), World.ev_cz(e) - World.origin_z(w1), World.ev_cols(e)), w1, n, rest)
+    end
+  end
   pfn shift_scene(sc, dx : Int, dz : Int, seed : Int, workers : Int) do
     match sc do
       Scene(w, counts, outline, hit, ui, pids, flags, meshes, bio, pend, myc) ->
         let n = World.side(w)
         let t0 = Win.time()
-        let w1 = World.shift(w, dx, dz, seed, workers)
+        let w1 = World.shift(w, dx, dz, seed, workers, leaving_blobs(w, myc, n, dx, dz, n * n - 1, Nil))
         let bio1 = Biome.shift(bio, w1, dx, dz, seed)
-        let myc1 = Myc.shift(myc, 16 * n, dx, dz)
+        let myc1 = restore_myc(Myc.shift(myc, 16 * n, dx, dz), w1, n, World.restored(w1))
         Win.gfx_shift(dx, dz)
         Win.gfx_upload_occupancy(World.occupancy(w1), 128, 256, 128)
         let counts1 = remap_bases_go(counts, NativeArray.make_int(3 * water_slot_base(), 0), n, dx, dz, water_slot_base(), 3, 0, 0)
@@ -1893,7 +1912,7 @@ mod CubeForge do
           let player1 = if ui_open do player
                         else
                       let ef = ui_effects(scene_ui(sc_drag))
-                      Player.update_with(player, read_input(autowalk, autospin, autoswim && frame >= 320, autodive && frame >= 320), scene_world(sc_drag), dt,
+                      Player.update_with(player, read_input(autowalk, autospin, (autoswim && frame >= 320) || Env.get_int("CF_AUTOJUMP", 0) == 1, autodive && frame >= 320), scene_world(sc_drag), dt,
                                          Effects.speed_mult(ef, now), Effects.jump_mult(ef, now), Effects.swim_mult(ef, now))
                     end
           let view1 = write_view(player1, view)
