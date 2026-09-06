@@ -2179,6 +2179,16 @@ the diagnostic in place.
 Hash at frame 30 unchanged through all of it (103332325 since main's
 relight-box merge). 440 tests.
 
+
+## Pinned to March main 7eb8d76a (2026-09-05)
+
+`watch-7eb8d76a`: March main after the two fixes from the leak work (GAPS G79
+and G81) were merged, built with `make install PREFIX=...` plus the `stdlib`
+symlink, March's own 706 tests green. On this project: 440 tests, budget
+6.47 ms best of 3, the allocation gauge **139 -> 86 objects a frame**. What
+remains is G80, closure captures never released, open in March.
+
+
 ## The light oracle: what the mesh hash was saying (2026-09-05)
 
 The frame-30 mesh hash moved on main's relight-box commit (380281180 ->
