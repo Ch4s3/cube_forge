@@ -2571,3 +2571,63 @@ neighbours — and the suite runs in about 90 s.
 **What it costs.** Live flocks against no flocks, interleaved, three runs each:
 worst frame 7.4-8.0 ms against 6.5-7.3, frame rate within noise. The frame
 budget gate is 6.71 ms against 16.
+
+## Detail, not resolution — and then resolution where it shows
+
+The question was whether to spend polygons on detail or take the voxels down
+another size. Measured first, because the intuition is unreliable:
+
+| grid | quads over 54 bodies | largest body |
+|---|---|---|
+| 32 | 7,253 | 183 |
+| 64 | 10,131 | 301 |
+
+Resolution does add some quads -- features pinned at one cell (a wing's
+thickness, an eye) get relatively finer -- but the number that decided it was
+**301 quads for the largest body**, about 600 triangles. An order of magnitude
+under what the frame carries. The bodies read as boxes because the generator
+only knew how to draw boxes.
+
+So the detail went in first: a body built a SLICE at a time with a taper along
+its length, a head built the same way, a notched tail fan, feet. Then the change
+that mattered most -- a **rounded cross-section**. The taper narrows a body along
+its length and does nothing at all for the angle you actually meet an animal
+from; head on, a stack of boxes is a rectangle. Rows taken from an ellipse fixed
+that, and it is the single biggest visual change in the whole feature.
+
+Then resolution, but **per species**. A template is normalised to a unit cube
+whatever grid built it, so different species can be built on different grids at
+no downstream cost: 128 for the five big ones, 64 for the middling, 32 for the
+small. That is not a compromise, it is the measurement -- a Cinderfinch is 0.22
+blocks, so one of its 64 cells is already about a screen pixel at five blocks,
+and halving it again buys a subdivision nobody can resolve while paying for it
+on the commonest animal in the world. A Mossmoa is four blocks and one of its
+cells is seventeen pixels.
+
+| | |
+|---|---|
+| quads over 54 bodies | 43,869 |
+| largest body | 2,524 (Deepmaw, on its 128 grid) |
+| startup | 3.5 s, against 1.7-2.1 s with no fauna |
+| frame budget gate | 10.5 ms against 16 |
+
+The startup cost is the honest price of the 128 grids: about 1.4 s, and worth
+knowing before it grows. Bounding-box culling in the greedy pass is already
+carrying most of it -- without that, 64 alone cost 2.4 s.
+
+**The connectivity oracle found six more defects in this pass**, every one of
+which built and linted clean:
+
+- eyes stuck to the head's side while the head had tapered in past them
+- a wing whose taper crossed itself on a short body (three birds, no wings)
+- a wing reading the body's surface at ITS OWN row, so when the flap's ramp
+  stepped to a new row two neighbouring columns referenced different surface
+  positions and the tip came off
+- a neck starting at `body_y1` while the nose had tapered down below it
+- legs set out to a stance, past the narrow bottom row of a rounded body
+- a penguin's legs stopping where a belly would have bridged them
+
+The lesson worth keeping is not any of those. It is that the oracle was made to
+NAME what broke -- species, pose, the stray piece's size and its first cell --
+after bisecting by hand cost three ninety-second runs. The diagnostic paid for
+itself twice over in the same session.
