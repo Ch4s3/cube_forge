@@ -347,3 +347,20 @@ long shafts are **geometry** — `crystal_beam`, id 70, laid down as segments
 through the chamber, because a model can never be longer than the cell it is
 drawn in. Two beams per chamber, three to five blocks across, driven into the
 rock at both ends.
+
+## 12. As built, phase 3a: canyon and atoll (2026-09-07)
+
+- A third class, **field**: no cells, no site. Evaluated per column from the
+  river mask, its raw crease and the ruggedness, which `height` now hands to
+  `height_at`. The canyon is a field; so will the delta be.
+- `kind_go` and `height_at` combined kinds with `max`, which silently discards
+  any cut. `pick` lets a nonzero beat zero. The atoll was the first kind to go
+  negative and the first to find this.
+- The atoll is the first kind with a ground **ceiling**: `max_ground` and
+  `cover_hi`. It only has to start under water; its levels are absolute. An
+  apron cut to sea - 6 gives the ring water on a shelf. In this terrain it is
+  rare (two seeds in 140) and reads as a crater lake as often as a reef,
+  because the world has shelf rather than ocean.
+- `CF_POI_TRANSECT=<z>` reads a landform across the world in one line, and
+  `CF_POI_GATE=1` says which placement rule refuses a kind. Both found bugs
+  that screenshots had not.

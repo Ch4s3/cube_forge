@@ -2568,3 +2568,69 @@ it settled at sea + 18 with the density raised to 0.65.
 
 478 tests. `CF_POI=0` and `CF_POI=1` agree at seed 7 (mesh 484802240). Worst
 frame 6.48 ms.
+
+## Points of interest, phase 3a: the canyon and the atoll (2026-09-07)
+
+**A third class: the field.** A canyon is not a thing placed in a valley, it is
+what the valley becomes where canyon country is -- so it has no cells and no
+site. `cls_field` kinds are evaluated at every column from what `height`
+already has in hand (the river mask, its raw crease, the ruggedness, now passed
+into `height_at`), gated by a country mask, and they skip every cell rule. The
+per-column cost stays where it was: the canyon's octave sits behind the same
+cheap gates as the cut itself (above sea + 20, in a valley, in rugged country),
+so open lowland never samples it.
+
+**The canyon.** The river mask sharpened into a slot, dropped by
+`canyon_depth` (40 young, 60 ancient), quantised to six-block benches so the
+walls step, and never cut below the brook's floor. Confirmed by transect before
+any camera found it: at seed 24, z 44..60, a slot 10-17 columns wide and up to
+five benches deep with stepped edges (`345555531`). `CF_POI_TRANSECT=<z>` is the
+new knob -- one character per column across the world, a digit for benches cut,
+`+` for raised -- and it is the right instrument for a slot, which is a thing
+you read across, not from a camera on the rim that happens to be behind a hill.
+`docs/poi-canyon.png`, looking along it.
+
+Canyon country at a threshold of 0.60 put canyons in 20 of 40 seeds, which is
+not a landmark; 0.66 now.
+
+**The atoll, and what it found.** A landmark with a CEILING on its ground
+(`max_ground`, `cover_hi`), the first kind to want one. Its ring is raised to an
+absolute reef flat and its lagoon cut to an absolute floor (rule 3), with one
+gap forced below sea level so the lagoon fills by the sea rule and not by the
+lake pour, which a tile seam would cut.
+
+Three things went wrong, in order:
+
+1. *No atoll in 140 seeds.* `CF_POI_GATE=1` prints each placement gate's value
+   for the atoll's cell, and it said why at once: the ground at hashed sites
+   was 49..105 over thirty seeds, the shallowest barely wet. This terrain has
+   shelf, not ocean, and "eight under the sea across the ring" never held. The
+   lagoon is cut to an absolute floor anyway, so the atoll now only has to
+   START under water: `max_ground` sea - 2, probed at half the ring's radius.
+   Two of 140 seeds have one.
+2. *Placed, but drawing nothing.* `shape_at` at the site said -12 and
+   `height_at` said 0. `kind_go` took `max` against a best of zero, which is
+   right for mesas and throws away every cut; the atoll is the first kind whose
+   shape goes negative. `pick` now lets a nonzero beat zero and only then takes
+   the max -- exact, because an instance never overlaps its own kind. The same
+   `max` in `height_at`'s combination had the same bug.
+3. *A thirty-block wall at the gap.* The gap only suppressed the ring, so the
+   lagoon floor met the shelf in a cliff exactly where the channel should be.
+   In the gap the ring band is the channel at moat depth and the inner foot
+   ramps floor -> moat.
+
+An **apron** -- a moat cut to sea - 6 easing back to the bed over 18 blocks --
+gives the ring water to stand in on a shelf. Even so, in this terrain the atoll
+reads as a crater lake ringed by hills about as often as a reef in open sea
+(`docs/poi-atoll.png`): the surrounding shelf is land a few blocks further out.
+That is a property of the world's oceans, not of the kind, and it is left as is
+rather than tuned again.
+
+**A shell trap that cost an hour.** Four screenshots from four spawn points came
+out identical, twice. `set -- $pos` does not word-split in zsh, so every run got
+`CF_SPAWN_X="98 84 270"`, which parses as -1 and falls back to the default
+spawn. `${=pos}`.
+
+483 tests. `CF_POI=0` is bit-identical (mesh 484802240). Seed 7 now has a
+canyon, so the pinned scenario's mesh with POIs on is **839500821** -- the
+baseline moves once, deliberately. Worst frame 6.69 ms.

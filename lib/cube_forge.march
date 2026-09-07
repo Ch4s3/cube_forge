@@ -2714,7 +2714,8 @@ mod CubeForge do
     else
       let wx = i % span
       let wz = i / span
-      if CubeForge.Noise.height(wx, wz, seed) > CubeForge.Noise.height_base(wx, wz, seed) do
+      -- a landform may lower a column as well as raise it: a canyon is a cut
+      if CubeForge.Noise.height(wx, wz, seed) != CubeForge.Noise.height_base(wx, wz, seed) do
         poi_rise_go(n, i + 1, seed, acc + 1, if first == 0 do wx * 1000 + wz + 1 else first end)
       else poi_rise_go(n, i + 1, seed, acc, first) end
     end
@@ -2750,10 +2751,48 @@ mod CubeForge do
     if k >= CubeForge.Poi.kinds() do acc
     else poi_kinds_go(n, k + 1, seed, scale, acc + poi_cells_go(n, k, 0, seed, scale, 0)) end
   end
+  -- CF_POI_GATE=1: for the atoll's cell (0, 0), print each placement gate's
+  -- value, so a kind that never appears can be asked WHICH rule refuses it
+  -- instead of guessed at. A hundred and forty seeds without an atoll was the
+  -- occasion.
+  pfn poi_gate(seed : Int) : Unit do
+    let k = CubeForge.Poi.k_atoll()
+    let x = CubeForge.Poi.sx(k, 0, 0, seed)
+    let z = CubeForge.Poi.sz(k, 0, 0, seed)
+    println("  atoll gate: site " ++ int_to_string(x) ++ "," ++ int_to_string(z)
+            ++ "  country " ++ int_to_string(float_to_int(CubeForge.Poi.country(k, x, z, seed) *. 100.0))
+            ++ "  ground " ++ int_to_string(CubeForge.Noise.height_base(x, z, seed))
+            ++ "  cover_hi " ++ int_to_string(CubeForge.Poi.cover_hi(k, 0, 0, seed))
+            ++ "  max " ++ int_to_string(CubeForge.Poi.max_ground(k))
+            ++ "  here " ++ (if CubeForge.Poi.here(k, 0, 0, seed, 1.0) do "yes" else "no" end))
+    -- and the shape at the site, piece by piece, so a kind that is placed but
+    -- draws nothing can be asked which link of the chain drops it
+    let hb = int_to_float(CubeForge.Noise.height_base(x, z, seed))
+    println("  atoll shape: shape_at " ++ int_to_string(CubeForge.Poi.shape_at(k, 0, 0, x, z, seed, hb))
+            ++ "  height_at " ++ int_to_string(CubeForge.Poi.height_at(x, z, seed, 0.0, hb, 0.0, 0.0, 0.0))
+            ++ "  height " ++ int_to_string(CubeForge.Noise.height(x, z, seed)) ++ " base " ++ int_to_string(CubeForge.Noise.height_base(x, z, seed))
+            ++ "  raises " ++ (if CubeForge.Poi.raises(k) do "yes" else "no" end)
+            ++ "  scale " ++ int_to_string(float_to_int(CubeForge.Poi.poi_scale() *. 100.0)))
+  end
+  -- CF_POI_TRANSECT=<z>: one line across the world at that z, a character per
+  -- column: '.' untouched, '1'..'9' cut by that many benches of six, '+' raised.
+  -- A canyon is a slot in a valley, and a slot is a thing you read across, not
+  -- from a camera on the rim that happens to be behind a hill.
+  pfn poi_transect_go(n : Int, seed : Int, z : Int, x : Int, acc : String) : String do
+    if x >= 16 * n do acc
+    else
+      let d = CubeForge.Noise.height(x, z, seed) - CubeForge.Noise.height_base(x, z, seed)
+      let c = if d == 0 do "." else if d > 0 do "+" else int_to_string(Math.min_int(9, (0 - d + 5) / 6)) end end
+      poi_transect_go(n, seed, z, x + 1, acc ++ c)
+    end
+  end
   pfn poi_report(n : Int, seed : Int) : Unit do
+    if Env.get_int("CF_POI_GATE", 0) == 1 do poi_gate(seed) else () end
+    let tz = Env.get_int("CF_POI_TRANSECT", -1)
+    if tz >= 0 do println("  transect z=" ++ int_to_string(tz) ++ ": " ++ poi_transect_go(n, seed, tz, 0, "")) else () end
     let r = poi_rise_go(n, 0, seed, 0, 0)
     let a = poi_kinds_go(n, 1, seed, CubeForge.Poi.poi_scale(), 0)
-    println("  poi: " ++ int_to_string(r / 1000000) ++ " columns raised by a landform"
+    println("  poi: " ++ int_to_string(r / 1000000) ++ " columns moved by a landform"
             ++ (if r % 1000000 == 0 do "" else " (first at " ++ int_to_string((r % 1000000 - 1) / 1000) ++ ", " ++ int_to_string((r % 1000000 - 1) % 1000) ++ ")" end)
             ++ ", " ++ int_to_string(a) ++ " landmarks")
   end

@@ -118,7 +118,7 @@ mod CubeForge.Test.Poi do
       Test.assert_true(!Pi.here(Pi.k_butte(), 4, 4, seed(), 0.0), "no scale, no mesa")
       Test.assert_true(!Pi.here(Pi.k_arch(), 0, 0, seed(), 0.0), "no scale, no arch")
       Test.assert_true(!Pi.here(Pi.k_arch(), 3, 5, seed(), 0.0), "nor in another cell")
-      Test.assert_eq_int(Pi.height_at(1000, 1000, seed(), 0.0, 80.0), 0, "and a column outside the desert raises nothing")
+      Test.assert_eq_int(Pi.height_at(1000, 1000, seed(), 0.0, 80.0, 0.0, 0.0, 0.0), 0, "and a column outside the desert raises nothing")
     end
   end
 
@@ -131,6 +131,54 @@ mod CubeForge.Test.Poi do
     test "the country octave is rare but not empty" do
       Test.assert_true(Pi.country(Pi.k_butte(), 1704, 936, seed()) >= 0.0, "a mask is a mask")
       Test.assert_true(find_rise_go(0, 4096, 24) >= 0, "some column in a 1536-block square is raised by a landform")
+    end
+  end
+
+  describe "a canyon" do
+    test "is a field: no cells, no site, and it only cuts" do
+      Test.assert_eq_int(Pi.class_of(Pi.k_canyon()), Pi.cls_field(), "field")
+      Test.assert_true(Pi.raises(Pi.k_canyon()), "it is a height term")
+      Test.assert_eq_int(Pi.vol_of(Pi.k_canyon()), Pi.vol_none(), "and never writes volume")
+    end
+    test "cuts a slot in a valley, in benches, and never to the sea" do
+      let hd = int_to_float(CubeForge.Noise.sea_level() + 60)
+      let mid = Pi.canyon_at(seed(), hd, 1.0, 0.8, 1.0)
+      Test.assert_true(mid < 0, "the centreline is cut")
+      Test.assert_eq_int((0 - mid) % Pi.canyon_bench(), 0, "in whole benches")
+      Test.assert_true(0 - mid <= 60 + Pi.canyon_rise_above() - 4, "not below the brook")
+      Test.assert_eq_int(Pi.canyon_at(seed(), hd, 0.0, 0.8, 1.0), 0, "the valley's lip is untouched")
+      Test.assert_eq_int(Pi.canyon_at(seed(), hd, 1.0, 0.1, 1.0), 0, "flat country has no canyons")
+      Test.assert_eq_int(Pi.canyon_at(seed(), int_to_float(CubeForge.Noise.sea_level() + 10), 1.0, 0.8, 1.0), 0, "nor does low ground")
+      Test.assert_eq_int(Pi.canyon_at(seed(), hd, 1.0, 0.8, 0.0), 0, "nor a column outside canyon country")
+    end
+    test "the lip is shallower than the floor: the walls step" do
+      let hd = int_to_float(CubeForge.Noise.sea_level() + 60)
+      Test.assert_true(Pi.canyon_at(seed(), hd, 0.3, 0.8, 1.0) >= Pi.canyon_at(seed(), hd, 1.0, 0.8, 1.0), "less cut toward the lip")
+    end
+  end
+
+  describe "an atoll" do
+    test "is a landmark with a ceiling on its ground, and absolute levels" do
+      Test.assert_eq_int(Pi.class_of(Pi.k_atoll()), Pi.cls_landmark(), "landmark")
+      Test.assert_true(Pi.max_ground(Pi.k_atoll()) < CubeForge.Noise.sea_level(), "it wants open water")
+      Test.assert_true(Pi.plo(Pi.k_atoll(), Pi.p_top()) > CubeForge.Noise.sea_level(), "the reef flat stands above the sea (rule 3)")
+      Test.assert_eq_int(Pi.vol_of(Pi.k_atoll()), Pi.vol_none(), "and it carves nothing")
+    end
+    test "raises a ring above the sea, sinks a lagoon inside it, and leaves the sea bed beyond" do
+      let k = Pi.k_atoll()
+      let cx = 3
+      let cz = 5
+      let x = Pi.sx(k, cx, cz, seed())
+      let z = Pi.sz(k, cx, cz, seed())
+      let sea = int_to_float(CubeForge.Noise.sea_level())
+      let bed = sea -. 12.0
+      let r = Pi.param(k, cx, cz, seed(), Pi.p_len())
+      -- the lagoon: at the centre, cut to the floor
+      let centre = Pi.shape_at(k, cx, cz, x, z, seed(), bed)
+      Test.assert_true(centre < 0, "the lagoon is deeper than the sea bed")
+      Test.assert_eq_int(float_to_int(bed) + centre, CubeForge.Noise.sea_level() - Pi.param(k, cx, cz, seed(), Pi.p_depth()), "to its absolute floor")
+      -- well outside the ring: nothing
+      Test.assert_eq_int(Pi.shape_at(k, cx, cz, x + r + 40, z, seed(), bed), 0, "the sea bed beyond is untouched")
     end
   end
 
@@ -158,8 +206,8 @@ mod CubeForge.Test.Poi do
         Test.assert_true(mid > 0, "the fin stands above the field terrain at its site")
         Test.assert_true(mid >= Pi.param(Pi.k_arch(), cx, cz, seed(), Pi.p_rise()) / 2, "and it stands most of its rise")
         let far = Pi.param(Pi.k_arch(), cx, cz, seed(), Pi.p_len()) + 12
-        Test.assert_eq_int(Pi.height_at(sx + far, sz, seed(), 0.0, 80.0), 0, "nothing that far along x")
-        Test.assert_eq_int(Pi.height_at(sx, sz + far, seed(), 0.0, 80.0), 0, "nor that far along z")
+        Test.assert_eq_int(Pi.height_at(sx + far, sz, seed(), 0.0, 80.0, 0.0, 0.0, 0.0), 0, "nothing that far along x")
+        Test.assert_eq_int(Pi.height_at(sx, sz + far, seed(), 0.0, 80.0, 0.0, 0.0, 0.0), 0, "nor that far along z")
       end
     end
     test "has a hole through it: air over its floor, and fin over the air" do

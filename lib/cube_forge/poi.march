@@ -68,10 +68,13 @@ mod CubeForge.Poi do
   fn k_arch() : Int do 1 end
   fn k_cavern() : Int do 2 end
   fn k_tree() : Int do 3 end
+  fn k_canyon() : Int do 4 end
+  fn k_atoll() : Int do 5 end
   doc "How many kinds there are: the rules test walks 0 .. kinds() - 1."
-  fn kinds() : Int do 4 end
+  fn kinds() : Int do 6 end
   fn kind_name(k : Int) : String do
-    if k == k_butte() do "butte" else if k == k_arch() do "arch" else if k == k_cavern() do "cavern" else "giant tree" end end end
+    if k == k_butte() do "butte" else if k == k_arch() do "arch" else if k == k_cavern() do "cavern"
+    else if k == k_tree() do "giant tree" else if k == k_canyon() do "canyon" else "atoll" end end end end end
   end
 
   -- ── What a kind does to the world ────────────────────────────────────────
@@ -86,7 +89,7 @@ mod CubeForge.Poi do
   fn vol_stamp() : Int do 2 end
   doc "What kind [k] does to the volume."
   fn vol_of(k : Int) : Int do
-    if k == k_butte() do vol_none()
+    if k == k_butte() || k == k_atoll() || k == k_canyon() do vol_none()
     else if k == k_tree() do vol_stamp()
     else vol_carve() end end
   end
@@ -96,12 +99,24 @@ mod CubeForge.Poi do
   feature that is not terrain (a cavern in the rock, a tree standing on it)
   must not, and is kept out of the per-column scan entirely.
   """
-  fn raises(k : Int) : Bool do k == k_butte() || k == k_arch() end
+  fn raises(k : Int) : Bool do k == k_butte() || k == k_arch() || k == k_canyon() || k == k_atoll() end
 
   fn cls_scatter() : Int do 0 end
   fn cls_landmark() : Int do 1 end
-  doc "Scatter or landmark: see the module header. This decides where a kind's rules are read and whether it may be carved."
-  fn class_of(k : Int) : Int do if k == k_butte() do cls_scatter() else cls_landmark() end end
+  doc """
+  A FIELD has no cells and no site at all: it is a term evaluated at every
+  column from what `height` already has in hand -- the river, its crease, the
+  ruggedness -- gated by a country mask. A canyon is not a thing placed in a
+  valley, it is what the valley becomes where canyon country is; so it is a
+  field. Fields skip every cell rule and cannot be carved.
+  """
+  fn cls_field() : Int do 2 end
+  doc "Scatter, landmark or field: see the module header. This decides where a kind's rules are read and whether it may be carved."
+  fn class_of(k : Int) : Int do
+    if k == k_butte() do cls_scatter()
+    else if k == k_canyon() do cls_field()
+    else cls_landmark() end end
+  end
 
   doc "The least rock a carved opening keeps over it. Rule 2."
   fn roof() : Int do 8 end
@@ -110,25 +125,30 @@ mod CubeForge.Poi do
 
   doc "Side of the kind's cell in blocks: one instance at most per cell."
   fn cell(k : Int) : Int do
-    if k == k_butte() do 24 else if k == k_cavern() do 128 else 160 end end
+    if k == k_butte() do 24 else if k == k_cavern() do 128 else if k == k_atoll() do 256 else if k == k_canyon() do 1 else 160 end end end end
   end
   doc "Fraction of cells in full country holding one."
   fn density(k : Int) : Float do
-    if k == k_butte() do 0.35 else if k == k_arch() do 0.5 else if k == k_cavern() do 0.65 else 0.4 end end end
+    if k == k_butte() do 0.35 else if k == k_arch() do 0.5 else if k == k_cavern() do 0.65
+    else if k == k_atoll() do 0.85 else if k == k_canyon() do 1.0 else 0.4 end end end end end
   end
   doc "Frequency of the kind's country octave: how wide a region of them is."
   fn cty_freq(k : Int) : Float do
-    if k == k_butte() do 0.0075 else if k == k_arch() do 0.0035 else if k == k_cavern() do 0.0040 else 0.0060 end end end
+    if k == k_butte() do 0.0075 else if k == k_arch() do 0.0035 else if k == k_cavern() do 0.0040
+    -- a canyon SYSTEM runs for hundreds of blocks, so its country is the broadest octave here
+    else if k == k_canyon() do 0.0025 else if k == k_atoll() do 0.0030 else 0.0060 end end end end end
   end
   doc "Where the country octave has to reach before the kind appears at all: its rarity."
   fn cty_lo(k : Int) : Float do
-    if k == k_butte() do 0.62 else if k == k_arch() do 0.56 else if k == k_cavern() do 0.52 else 0.60 end end end
+    if k == k_butte() do 0.62 else if k == k_arch() do 0.56 else if k == k_cavern() do 0.52
+    else if k == k_canyon() do 0.66 else if k == k_atoll() do 0.38 else 0.60 end end end end end
   end
   doc "How wide the country's edge band is."
   fn cty_band(k : Int) : Float do 0.10 end
   doc "How far outside a chunk an instance may sit and still write into it."
   fn reach(k : Int) : Int do
-    if k == k_butte() do 12 else if k == k_arch() do 26 else if k == k_cavern() do 54 else 58 end end end
+    if k == k_butte() do 12 else if k == k_arch() do 26 else if k == k_cavern() do 54
+    else if k == k_atoll() do 90 else if k == k_canyon() do 0 else 58 end end end end end
   end
   doc "The least a landmark's ground must stand above sea level."
   fn min_ground(k : Int) : Int do
@@ -139,8 +159,21 @@ mod CubeForge.Poi do
     -- looks: at sea + 26 it held over a fifty-block cross and no world in forty
     -- seeds had a cavern at all.
     else if k == k_cavern() do N.sea_level() + 18
-    else N.sea_level() + 3 end end end
+    -- an atoll's ground rule is a CEILING, not a floor: see max_ground
+    else if k == k_atoll() do 0
+    else if k == k_canyon() do 0
+    else N.sea_level() + 3 end end end end end
   end
+  doc """
+  The most the ground may stand over a landmark's footprint. An atoll wants to
+  START under water, and no more than that: its lagoon is cut to an absolute
+  floor and its ring raised to an absolute top, so a shallow shelf serves as
+  well as a deep sea. It had asked for eight under the sea across the ring, and
+  this terrain has shelf rather than ocean -- the placement gate print showed
+  the ground at hashed sites at 49..105 over thirty seeds, the shallowest
+  barely wet. Every other kind has no ceiling.
+  """
+  fn max_ground(k : Int) : Int do if k == k_atoll() do N.sea_level() - 2 else 9999 end end
 
   -- ── The parameter table ──────────────────────────────────────────────────
   -- Six numbers per kind. A kind that does not use one leaves it zero.
@@ -166,14 +199,19 @@ mod CubeForge.Poi do
     else if k == k_arch() do (if i == p_len() do 24 else if i == p_wide() do 5 else if i == p_rise() do 26 else 0 end end end)
     -- cavern: len is how far its chambers spread, wide is a chamber's radius
     else if k == k_cavern() do (if i == p_len() do 16 else if i == p_wide() do 12 else if i == p_depth() do 30 else 0 end end end)
+    -- atoll: len is the ring's radius, wide half its width, top the reef flat, depth the lagoon floor below the sea
+    else if k == k_atoll() do (if i == p_len() do 26 else if i == p_wide() do 5 else if i == p_top() do N.sea_level() + 1 else if i == p_depth() do 22 else 0 end end end end)
+    else if k == k_canyon() do 0
     -- tree: len is the crown's radius, wide the trunk's, rise the trunk's height
-    else (if i == p_len() do 26 else if i == p_wide() do 4 else if i == p_rise() do 14 else 0 end end end) end end end
+    else (if i == p_len() do 26 else if i == p_wide() do 4 else if i == p_rise() do 14 else 0 end end end) end end end end end
   end
   fn phi(k : Int, i : Int) : Int do
     if k == k_butte() do (if i == p_len() do 11 else if i == p_wide() do 11 else if i == p_top() do 100 else 0 end end end)
     else if k == k_arch() do (if i == p_len() do 36 else if i == p_wide() do 8 else if i == p_rise() do 40 else 0 end end end)
     else if k == k_cavern() do (if i == p_len() do 26 else if i == p_wide() do 20 else if i == p_depth() do 44 else 0 end end end)
-    else (if i == p_len() do 38 else if i == p_wide() do 6 else if i == p_rise() do 22 else 0 end end end) end end end
+    else if k == k_atoll() do (if i == p_len() do 44 else if i == p_wide() do 9 else if i == p_top() do N.sea_level() + 3 else if i == p_depth() do 30 else 0 end end end end)
+    else if k == k_canyon() do 0
+    else (if i == p_len() do 38 else if i == p_wide() do 6 else if i == p_rise() do 22 else 0 end end end) end end end end end
   end
 
   pfn hash(k : Int, cx : Int, cz : Int, seed : Int, salt : Int) : Float do
@@ -253,7 +291,23 @@ mod CubeForge.Poi do
     if class_of(k) == cls_scatter() do hash(k, cx, cz, seed, 1) <= density(k) *. scale
     else
       if hash(k, cx, cz, seed, 1) > density(k) *. scale *. country(k, sx(k, cx, cz, seed), sz(k, cx, cz, seed), seed) do false
-      else cover(k, cx, cz, seed) >= min_ground(k) end
+      else cover(k, cx, cz, seed) >= min_ground(k) && cover_hi(k, cx, cz, seed) <= max_ground(k) end
+    end
+  end
+
+  doc "The HIGHEST ground over the instance's footprint: what an atoll is checked against, because its ring must lie in open water all the way round. Only the atoll probes; everything else asks its own column."
+  fn cover_hi(k : Int, cx : Int, cz : Int, seed : Int) : Int do
+    let x = sx(k, cx, cz, seed)
+    let z = sz(k, cx, cz, seed)
+    let at = N.height_base(x, z, seed)
+    if k != k_atoll() do at
+    else
+      -- probed a little inside the ring's radius: it is the ring and the lagoon
+      -- that must lie in water, and the outer foot may climb onto a shelf.
+      -- At the full radius no seed in a hundred and forty had an atoll.
+      let r = param(k, cx, cz, seed, p_len()) / 2
+      Math.max_int(Math.max_int(at, Math.max_int(N.height_base(x + r, z, seed), N.height_base(x - r, z, seed))),
+                   Math.max_int(N.height_base(x, z + r, seed), N.height_base(x, z - r, seed)))
     end
   end
 
@@ -298,6 +352,7 @@ mod CubeForge.Poi do
   """
   fn shape_at(k : Int, cx : Int, cz : Int, wx : Int, wz : Int, seed : Int, hd : Float) : Int do
     if !raises(k) do 0
+    else if class_of(k) == cls_field() do 0
     else if k == k_butte() do
       -- a mesa: a hard rim (rule 4) and an ABSOLUTE top (rule 3), so its top is
       -- level whatever the ground under it does, and a cell whose ground is
@@ -310,12 +365,82 @@ mod CubeForge.Poi do
         let rise = param(k, cx, cz, seed, p_top()) - float_to_int(hd)
         if rise < roof() do 0 else rise end
       end
+    else if k == k_atoll() do atoll_at(k, cx, cz, wx, wz, seed, hd)
     else
       -- a fin: flat-topped along its length, rounded across it
       let fu = prof_flat(Math.abs(u_of(k, cx, cz, seed, wx, wz)), int_to_float(param(k, cx, cz, seed, p_len())), 0.5)
       let fv = prof_round(Math.abs(v_of(k, cx, cz, seed, wx, wz)), int_to_float(param(k, cx, cz, seed, p_wide())))
       float_to_int(int_to_float(param(k, cx, cz, seed, p_rise())) *. fu *. fv)
-    end end
+    end end end end
+  end
+
+  -- ── The atoll ────────────────────────────────────────────────────────────
+  -- A reef ring in open ocean round a deep lagoon. Both the ring's top and the
+  -- lagoon's floor are ABSOLUTE levels (rule 3): the sea bed under an atoll is
+  -- whatever it is, and a reef flat that followed it would not be flat.
+  --
+  -- One gap in the ring is forced below sea level, so the lagoon is always
+  -- connected to the sea and fills by the sea rule rather than by the lake
+  -- pour -- which is cut at tile seams and would leave a dry lagoon on one.
+
+  doc "Half the angular width of the gap in the ring, radians."
+  fn atoll_gap() : Float do 0.32 end
+  doc "Over how many blocks the lagoon floor eases up to the ring's inner foot, and the ring's outer foot eases down to the moat."
+  fn atoll_ease() : Float do 7.0 end
+  doc "How far under the sea the water outside the ring is cut to, so the reef stands in water whatever the shelf was."
+  fn atoll_moat() : Int do 6 end
+  doc "Over how many blocks the moat eases back up to the bed it was cut from."
+  fn atoll_apron() : Float do 18.0 end
+
+  -- The ring's radius at bearing [ang]: the hashed radius wobbled by a low
+  -- octave, so it is not a compass circle.
+  pfn atoll_r(k : Int, cx : Int, cz : Int, seed : Int, wx : Int, wz : Int) : Float do
+    int_to_float(param(k, cx, cz, seed, p_len()))
+      *. (1.0 +. 0.16 *. (N.value2(int_to_float(wx) *. 0.03, int_to_float(wz) *. 0.03, seed + 2500 + cx * 7 + cz * 13) -. 0.5) *. 2.0)
+  end
+
+  pfn atoll_at(k : Int, cx : Int, cz : Int, wx : Int, wz : Int, seed : Int, hd : Float) : Int do
+    let dx = int_to_float(wx - sx(k, cx, cz, seed))
+    let dz = int_to_float(wz - sz(k, cx, cz, seed))
+    let d = Math.sqrt(dx *. dx +. dz *. dz)
+    let r = atoll_r(k, cx, cz, seed, wx, wz)
+    let w = int_to_float(param(k, cx, cz, seed, p_wide()))
+    let top = int_to_float(param(k, cx, cz, seed, p_top()))
+    let floor = int_to_float(N.sea_level() - param(k, cx, cz, seed, p_depth()))
+    let ease = atoll_ease()
+    -- the gap: the arc about the hashed bearing where the ring is not raised
+    let ang = Math.atan2(dz, dx)
+    let gap_c = bearing(k, cx, cz, seed)
+    let da0 = Math.abs(ang -. gap_c)
+    let da = if da0 > 3.14159 do 6.2831853 -. da0 else da0 end
+    let in_gap = da < atoll_gap()
+    -- the apron: a moat cut to atoll_moat() round the outside of the ring,
+    -- easing back to the bed over atoll_apron(). This terrain has shelf, not
+    -- ocean: without it the ring stood in two blocks of water and read as a
+    -- sandbar round a pit, not as a reef in the sea.
+    let moat = int_to_float(N.sea_level() - atoll_moat())
+    if d > r +. w +. ease +. atoll_apron() do 0
+    else if d > r +. w +. ease do
+      let t = N.smooth((d -. (r +. w +. ease)) /. atoll_apron())
+      let want = moat +. (hd -. moat) *. t
+      if want < hd do float_to_int(want -. hd) else 0 end
+    else if d > r +. w do
+      -- the outer foot: from the ring's top down to the moat
+      let t = N.smooth((d -. r -. w) /. ease)
+      let want = if in_gap do (if moat < hd do moat else hd end) else top +. (moat -. top) *. t end
+      float_to_int(want -. hd)
+    else if d >= r -. w do
+      -- the ring itself, a little higher in the middle; in the gap, the channel
+      if in_gap do (if moat < hd do float_to_int(moat -. hd) else 0 end)
+      else float_to_int(top +. (if Math.abs(d -. r) < w *. 0.4 do 1.0 else 0.0 end) -. hd) end
+    else if d >= r -. w -. ease do
+      -- the inner foot: from the lagoon floor up to the ring -- or, in the
+      -- gap, up to the moat, so the channel out to sea is a ramp a boat could
+      -- take and not a thirty-block wall where the lagoon meets the shelf
+      let t = N.smooth((d -. (r -. w -. ease)) /. ease)
+      let want = if in_gap do floor +. (moat -. floor) *. t else floor +. (top -. floor) *. t end
+      float_to_int(want -. hd)
+    else float_to_int(floor -. hd) end end end end end
   end
 
   -- The shape, once placement has agreed there is one here.
@@ -330,27 +455,71 @@ mod CubeForge.Poi do
     else shape_at(k, cx, cz, wx, wz, seed, hd) end end
   end
 
+  -- ── The canyon: a field ──────────────────────────────────────────────────
+  -- Where canyon country is, the river valley is re-cut as a SLOT: the river
+  -- mask is sharpened so the walls stand near-vertical instead of a V, the cut
+  -- is dropped by canyon_depth, and it is quantised to benches so the walls
+  -- step down. The floor keeps clear of the sea, so the channel is a brook and
+  -- not an arm of the ocean, and the existing valley-spring rule waters it.
+
+  doc "How deep a canyon is cut below the valley it replaces: 40 young, 60 ancient."
+  fn canyon_depth(a : Float) : Float do 40.0 +. 20.0 *. a end
+  doc "Bench height, blocks: the walls step down in these."
+  fn canyon_bench() : Int do 6 end
+  doc "The least a column must stand above the sea before canyon country cuts it."
+  fn canyon_rise_above() : Int do 20 end
+
+  doc "Blocks the canyon term removes at a column: a negative number, or 0. [cty] is the canyon country there -- the caller reads it, so the preview can hand in 1 and draw the shape without a placement in it."
+  fn canyon_at(seed : Int, hd : Float, river : Float, rug : Float, cty : Float) : Int do
+    let above = hd -. int_to_float(N.sea_level() + canyon_rise_above())
+    if above <= 0.0 do 0
+    else if river <= 0.05 do 0
+    else if rug < 0.3 do 0
+    else
+      if cty <= 0.0 do 0
+      else
+        -- the slot: 0 at the valley's lip, 1 across most of its floor
+        let slot = N.smooth(N.clamp01((river -. 0.15) /. 0.45))
+        let want = canyon_depth(N.age_frac(seed)) *. slot *. cty *. N.smooth(N.clamp01((rug -. 0.3) /. 0.3)) *. poi_scale()
+        -- benches, and never below the brook's floor
+        let cut = float_to_int(want) / canyon_bench() * canyon_bench()
+        let most = float_to_int(above) + canyon_rise_above() - 4
+        0 - (if cut > most do most else cut end)
+      end
+    end end end
+  end
+
+  pfn pick(best : Int, cand : Int) : Int do
+    if best == 0 do cand else if cand == 0 do best else Math.max_int(best, cand) end end
+  end
+
   pfn kind_go(k : Int, wx : Int, wz : Int, seed : Int, scale : Float, hd : Float, i : Int, best : Int) : Int do
     if i >= 9 do best
     else
       let cx = floor_div(wx, cell(k)) - 1 + i % 3
       let cz = floor_div(wz, cell(k)) - 1 + i / 3
       -- max, not sum: two overlapping instances are one mass at the taller of
-      -- them, never a tower of both their rises
-      kind_go(k, wx, wz, seed, scale, hd, i + 1, Math.max_int(best, rise_at(k, cx, cz, wx, wz, seed, scale, hd)))
+      -- them, never a tower of both their rises. But a CUT must beat nothing:
+      -- an atoll's lagoon is negative, and against a best of zero `max` threw
+      -- it away -- the site said -12 and the world said 0. An instance never
+      -- overlaps another of its kind (reach <= cell), so "nonzero beats zero,
+      -- then max" is exact.
+      kind_go(k, wx, wz, seed, scale, hd, i + 1, pick(best, rise_at(k, cx, cz, wx, wz, seed, scale, hd)))
     end
   end
 
   doc """
-  Blocks every landform point of interest adds at (wx, wz). [dmask] is the dune
-  mask, already computed by `height` for the dunes, and it is what keeps buttes
-  in the desert; [hd] is the column's height with dunes.
+  Blocks every landform point of interest adds at (wx, wz) -- or removes, for a
+  canyon. [dmask] is the dune mask, [hd] the column's height with dunes,
+  [river] and [rv] the river mask and its raw crease, [rug] the ruggedness: all
+  already computed by `height` for its own purposes, so a field costs nothing
+  to gate.
 
   Outside a kind's country this is zero and costs one broad octave -- the nine
   cell hashes and the CF_POI read are both behind that gate, so a column in open
   country pays almost nothing.
   """
-  fn height_at(wx : Int, wz : Int, seed : Int, dmask : Float, hd : Float) : Int do
+  fn height_at(wx : Int, wz : Int, seed : Int, dmask : Float, hd : Float, river : Float, rv : Float, rug : Float) : Int do
     -- the butte: a scatter, so its country and its desert mask are read here,
     -- at the column, and folded into the density
     let b = if dmask <= 0.0 do 0
@@ -366,9 +535,25 @@ mod CubeForge.Poi do
     -- where the gate cuts, the fin has already faded to nothing
     let cty = country(k_arch(), wx, wz, seed)
     let a = if cty <= 0.0 do 0 else float_to_int(int_to_float(kind_go(k_arch(), wx, wz, seed, poi_scale(), hd, 0, 0)) *. cty) end
-    -- the cavern and the giant tree do not raise anything (`raises`), so the
-    -- per-column scan stays exactly two kinds wide however many kinds exist
-    Math.max_int(b, a)
+    -- the atoll: a landmark in the sea, so the scan is gated on the column
+    -- being no higher than its reef flat -- the ring's outer parts stand on
+    -- shelf that may be nearly dry
+    let at = if hd > int_to_float(N.sea_level() + 3) do 0
+             else
+               let cty2 = country(k_atoll(), wx, wz, seed)
+               if cty2 <= 0.0 do 0 else kind_go(k_atoll(), wx, wz, seed, poi_scale(), hd, 0, 0) end
+             end
+    -- the raised kinds take the max; the canyon is a cut and adds to that
+    -- (a canyon through a butte field cuts the mesas too, which is right)
+    -- the canyon is a field: its country is read here and the cut is added
+    -- to whatever was raised (a canyon through a butte field cuts the mesas
+    -- too, which is right). The octave is behind the same cheap gates as the
+    -- cut itself, so open lowland never samples it.
+    let cut = if hd < int_to_float(N.sea_level() + canyon_rise_above()) || river <= 0.05 || rug < 0.3 do 0
+              else canyon_at(seed, hd, river, rug, country(k_canyon(), wx, wz, seed)) end
+    -- the atoll lowers as well as raises, and nothing else raises under the
+    -- sea, so where it speaks it is the answer
+    (if at != 0 do at else Math.max_int(b, a) end) + cut
   end
 
   -- ── The volume pass ────────────────────────────────────────────────────
@@ -812,8 +997,10 @@ mod CubeForge.Poi do
     let hw = param(k, cx, cz, seed, p_hole_w())
     let hh = param(k, cx, cz, seed, p_hole_h())
     let rise = param(k, cx, cz, seed, p_rise())
+    -- a field has no cells: only the rules about what it is apply
+    if class_of(k) == cls_field() do raises(k) && vol_of(k) == vol_none()
     -- 1: an instance never leaves its own cell's reach
-    if reach(k) > cell(k) do false
+    else if reach(k) > cell(k) do false
     -- 1: the widest shape fits in the 3x3 a column looks at
     else if phi(k, p_len()) > cell(k) do false
     -- 2: an opening sits strictly inside the mass over it
@@ -827,15 +1014,17 @@ mod CubeForge.Poi do
     else if k == k_cavern() && min_ground(k) < plo(k, p_depth()) + phi(k, p_wide()) do false
     -- 3: a kind with a level top declares an absolute one
     else if k == k_butte() && phi(k, p_top()) <= 0 do false
-    -- 5: a landmark resolves at its site, a scatter does not probe at all
-    else if class_of(k) == cls_landmark() && min_ground(k) <= 0 do false
+    -- 3: an atoll's reef flat is an absolute level too
+    else if k == k_atoll() && phi(k, p_top()) <= 0 do false
+    -- 5: a landmark resolves at its site -- against a floor or a ceiling
+    else if class_of(k) == cls_landmark() && min_ground(k) <= 0 && max_ground(k) >= 9999 do false
     -- a stamp is not terrain: it must not also raise the ground, or a tree
     -- would grow its own hill and get grass on the branches
     else if vol_of(k) == vol_stamp() && raises(k) do false
     else if vol_of(k) == vol_stamp() && phi(k, p_rise()) <= 0 do false
     -- a kind that neither raises nor writes volume does nothing at all
     else if !raises(k) && vol_of(k) == vol_none() do false
-    else true end end end end end end end end end end end
+    else true end end end end end end end end end end end end end
   end
 
   -- ── The preview ──────────────────────────────────────────────────────────
@@ -844,7 +1033,19 @@ mod CubeForge.Poi do
   -- functions the generator uses -- so what it shows is what gets built.
 
   doc "Flat ground the preview stands kind [k] on: deep enough that an underground kind has rock over it."
-  fn preview_ground(k : Int) : Int do if k == k_cavern() do min_ground(k) + 6 else 70 end end
+  fn preview_ground(k : Int) : Int do
+    if k == k_cavern() do min_ground(k) + 6
+    else if k == k_atoll() do N.sea_level() - 12
+    else if k == k_canyon() do N.sea_level() + 34
+    else 70 end end end
+  end
+
+  -- A field has no shape of its own to draw, so the preview hands it a valley:
+  -- a river crease running along u, 22 blocks wide, in rugged country.
+  pfn pv_field(k : Int, v : Int, g : Int) : Int do
+    let river = N.smooth(N.clamp01(1.0 -. Math.abs(int_to_float(v)) /. 22.0))
+    if k == k_canyon() do canyon_at(1, int_to_float(g), river, 0.7, 1.0) else 0 end
+  end
 
   -- World column of frame offset (u, v).
   pfn pv_wx(k : Int, cx : Int, cz : Int, seed : Int, u : Int, v : Int) : Int do
@@ -861,12 +1062,12 @@ mod CubeForge.Poi do
     let g = preview_ground(k)
     let wx = pv_wx(k, cx, cz, seed, u, v)
     let wz = pv_wz(k, cx, cz, seed, u, v)
-    let raised = shape_at(k, cx, cz, wx, wz, seed, int_to_float(g))
+    let raised = if class_of(k) == cls_field() do pv_field(k, v, g) else shape_at(k, cx, cz, wx, wz, seed, int_to_float(g)) end
     let b = vol_block(k, cx, cz, seed, wx, wz, y, g)
     if b > 0 do (if b == C.crystal() do "*" else if b == C.crystal_beam() do "X" else if b == C.oak_log() do "T" else "o" end end end)
     else if b == 0 do (if y <= g + raised do "." else " " end)
-    else if y <= g do "#"
-    else if y <= g + raised do ":"
+    else if y <= g + raised do (if raised < 0 do "#" else if y <= g do "#" else ":" end end)
+    else if y <= g do "."
     else " " end end end end
   end
 
@@ -892,8 +1093,12 @@ mod CubeForge.Poi do
     let cx = 3
     let cz = 5
     let g = preview_ground(k)
-    let lo = Math.min_int(g - 2, vol_y0(k, cx, cz, seed, g) - 2)
-    let hi = Math.max_int(g + shape_at(k, cx, cz, sx(k, cx, cz, seed), sz(k, cx, cz, seed), seed, int_to_float(g)) + 2, vol_y1(k, cx, cz, seed, g) + 2)
+    let lo = Math.min_int(Math.min_int(g - 2, vol_y0(k, cx, cz, seed, g) - 2), g - 64)
+    -- the top of the drawing: the site's own rise, the volume's top, or an
+    -- absolute top level -- the site of an atoll is its lagoon, and asking it
+    -- how high the ring is gets a negative number
+    let hi = Math.max_int(Math.max_int(g + shape_at(k, cx, cz, sx(k, cx, cz, seed), sz(k, cx, cz, seed), seed, int_to_float(g)) + 2, vol_y1(k, cx, cz, seed, g) + 2),
+                          param(k, cx, cz, seed, p_top()) + 4)
     println("poi preview: " ++ kind_name(k) ++ "  (" ++ (if class_of(k) == cls_scatter() do "scatter" else "landmark" end)
             ++ ", " ++ (if raises(k) do "raises" else "no height" end)
             ++ ", " ++ (if vol_of(k) == vol_none() do "no volume" else if vol_of(k) == vol_carve() do "carves" else "stamps" end end) ++ ")")
