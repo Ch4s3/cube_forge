@@ -211,8 +211,8 @@ mod CubeForge do
   end
   -- Up to two known species this chunk would hold.
   pfn viable_go(pr : CubeForge.Pop.Profile, bio : CubeForge.Biome.Field, cx : Int, cz : Int, kfauna : Int, year : Float, sp : Int, acc : String, n : Int) : String do
-    if sp > Fauna.count() do (if acc == "" do "" else "WOULD LIVE HERE  " ++ acc end)
-    else if n >= 2 do "WOULD LIVE HERE  " ++ acc
+    if sp > Fauna.count() do (if acc == "" do "" else "THIS CHUNK WOULD HOLD  " ++ acc end)
+    else if n >= 2 do "THIS CHUNK WOULD HOLD  " ++ acc
     else if !fauna_known(kfauna, sp) do viable_go(pr, bio, cx, cz, kfauna, year, sp + 1, acc, n)
     else if Pop.capacity_of(pr, bio, cx, cz, sp, year) <= 0 do viable_go(pr, bio, cx, cz, kfauna, year, sp + 1, acc, n)
     else viable_go(pr, bio, cx, cz, kfauna, year, sp + 1, (if acc == "" do "" else acc ++ "  " end) ++ Fauna.upper_name(sp), n + 1) end end end end

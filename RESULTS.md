@@ -2818,3 +2818,19 @@ one -- and every generated edit here is now checked in the same command that
 makes it.
 
 505 tests, frame budget 8.23 ms against 16.
+
+## The spec is built
+
+The last line of it: fish read the clock. A twilight species (Reedcarp) holds
+under a block of water at dawn and dusk and three times its ordinary depth at
+midday; a night species (Glasseel, Deepmaw) comes up in the dark; a day species
+does not care what time it is. One function, `fish_hold`, folded into the
+height a fish wants -- and a test that a Reedcarp at dusk sits two blocks above
+one at noon while a Sunfin at either hour sits within a block of itself.
+
+And the habitat line now says what it is: `THIS CHUNK WOULD HOLD  GRASSPIPIT
+CINDERFINCH`, because the report is per chunk where the rest of the panel is
+per column, and a Cinderfinch reported on a grassland column was a desert
+corner of the same chunk.
+
+Frame budget 6.72 ms against 16.

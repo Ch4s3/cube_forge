@@ -139,10 +139,18 @@ mod CubeForge.Flock do
     else (if sun > dusk() do m_feed() else m_roost() end) end end end
   end
 
+  doc "How far below the surface a fish holds at [sun]: its ordinary depth by day; a twilight species comes up toward the surface at dawn and dusk and goes deep at midday, a night species comes up in the dark. The day cycle read from under water."
+  fn fish_hold(sp : Int, sun : Float) : Float do
+    let act = Fa.activity(sp)
+    if act == Fa.act_twilight() do
+      (if sun > 0.05 && sun < 0.45 do 0.8 else if sun >= 0.7 do fish_depth() *. 3.0 else fish_depth() end end)
+    else if act == Fa.act_night() do (if sun < 0.1 do 0.8 else fish_depth() *. 3.0 end)
+    else fish_depth() end end
+  end
   doc "The height this animal wants, from the ground under it. A fish is never asked to leave the water, however hard it is fleeing."
-  fn want_y(sp : Int, mode : Int, ground : Int, water_y : Float) : Float do
+  fn want_y(sp : Int, mode : Int, ground : Int, water_y : Float, sun : Float) : Float do
     let g = int_to_float(ground)
-    if Fa.is_fish(sp) do clampf(water_y -. fish_depth(), g +. 0.6, water_y -. 0.6)
+    if Fa.is_fish(sp) do clampf(water_y -. fish_hold(sp, sun), g +. 0.6, water_y -. 0.6)
     else if mode == m_roost() do g +. roost_y()
     else if mode == m_flee() do g +. cruise() +. 4.0
     else if mode == m_depart() do g +. cruise() +. depart_climb()
@@ -211,7 +219,7 @@ mod CubeForge.Flock do
     let near = pdx *. pdx +. pdy *. pdy +. pdz *. pdz < flee_radius() *. flee_radius()
     let mode = mode_of(f_sp, sun, near, in_season)
     let ground = ground_at(patch, hx, hz, x, z)
-    let ty = want_y(f_sp, mode, ground, water_y)
+    let ty = want_y(f_sp, mode, ground, water_y, sun)
 
     let ahx = (cx -. x) *. 0.35
     let ahz = (cz -. z) *. 0.35

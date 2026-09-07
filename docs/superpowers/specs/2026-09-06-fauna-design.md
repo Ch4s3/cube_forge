@@ -327,7 +327,11 @@ Each slice is independently verifiable and independently useful.
    a still animal whenever its flock's mode is roost (a bird put up by the
    player flaps like any other). A fish's fourth pose is its first. With it,
    feathered trailing edges on the inner wing and a hock on the ratites.
-   Crepuscular depth changes for fish are not built.
+   Fish read the clock too: a twilight species comes up toward the surface at
+   dawn and dusk and goes deep at midday, a night species comes up in the
+   dark, a day species holds its depth. The day cycle, seen from under water.
+
+The spec is built. Everything in the build order above is on `main`.
 
 ## Seasons, and the migrants to come
 
