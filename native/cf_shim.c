@@ -1110,6 +1110,12 @@ void cf_gfx_set_gpulight(int64_t on) { if (g_u_gpulight >= 0) glUniform1i(g_u_gp
  * once before drawing, the way the mesh drain batches its work. */
 static int64_t g_ld[6];
 static int     g_ld_any = 0;
+/* Passes the flood still owes. A dirty box sets it to a full convergence and
+ * the frame spends a few passes at a time: sixteen at once is 7.55 ms, four is
+ * under two, and light changes gradually enough that a frame or two of partial
+ * convergence cannot be seen. The same trade the mesh drain makes. */
+static int64_t g_lf_todo = 0;
+int64_t cf_light_flood(int64_t passes);
 void cf_gfx_light_dirty(int64_t x0, int64_t y0, int64_t z0, int64_t x1, int64_t y1, int64_t z1) {
     if (x1 < x0 || y1 < y0 || z1 < z0) return;
     if (!g_ld_any) { g_ld[0] = x0; g_ld[1] = y0; g_ld[2] = z0; g_ld[3] = x1; g_ld[4] = y1; g_ld[5] = z1; g_ld_any = 1; return; }
@@ -1120,11 +1126,20 @@ void cf_gfx_light_dirty(int64_t x0, int64_t y0, int64_t z0, int64_t x1, int64_t 
     if (y1 > g_ld[4]) g_ld[4] = y1;
     if (z1 > g_ld[5]) g_ld[5] = z1;
 }
+/* Passes per frame while the flood is converging. */
+#define CF_LIGHT_STEP 4
 void cf_gfx_sync_light_box(void *la, void *lb, int64_t x0, int64_t y0, int64_t z0, int64_t x1, int64_t y1, int64_t z1);
 void cf_gfx_flush_light(void *la, void *lb) {
-    if (!g_ld_any) return;
-    g_ld_any = 0;
-    cf_gfx_sync_light_box(la, lb, g_ld[0], g_ld[1], g_ld[2], g_ld[3], g_ld[4], g_ld[5]);
+    if (g_ld_any) {
+        g_ld_any = 0;
+        cf_gfx_sync_light_box(la, lb, g_ld[0], g_ld[1], g_ld[2], g_ld[3], g_ld[4], g_ld[5]);
+        g_lf_todo = 16;   /* the seed moved: converge again from here */
+    }
+    if (g_lf_todo > 0) {
+        int64_t n = g_lf_todo < CF_LIGHT_STEP ? g_lf_todo : CF_LIGHT_STEP;
+        g_lf_todo -= cf_light_flood(n);
+        if (g_lf_todo < 0) g_lf_todo = 0;
+    }
 }
 
 void cf_gfx_sync_light_box(void *la, void *lb, int64_t x0, int64_t y0, int64_t z0, int64_t x1, int64_t y1, int64_t z1) {

@@ -3621,3 +3621,57 @@ to be marked dirty and flooded ONCE, with the sixteen passes amortised across
 frames -- four a frame is ~1.9 ms and converges in four. Light changes are
 gradual enough that a frame or two of partial convergence is invisible, which is
 the same trade the mesh drain already makes.
+
+
+## The light switch: the CPU stops sweeping (2026-09-07)
+
+The fields `World` keeps are SEED fields now -- sky columns and emitters, with
+nothing spread. The spreading is `cf_light_flood`'s, four passes a frame while
+it converges. `Light.flood` and the whole incremental relight stay in the file
+as the CPU implementation, and the light tests hold them to the same answer the
+GPU has to reach; the game calls neither.
+
+| | before | after |
+|---|---|---|
+| startup light | 312 ms | **43 ms** |
+| shift `light` stage | 16.7 ms | **7.1 ms** (under budget) |
+| fps, fixed camera, pitch -0.10 | 97.3 | **109.4** (+13%) |
+| fps, fixed camera, pitch -0.70 | 88.7 | 88.1 (-1%) |
+| worst frame, median of 5 | 35 ms | 36 ms |
+
+Seeding is the cheap half and always was: it is a walk down each column with no
+BFS in it, which is why the startup number falls sevenfold.
+
+### Two things the switch needed that the proof did not
+
+**A re-seed has to be GROWN, an upload has to be SENT.** The seed of a column is
+local, so computing it needs no radius. Clearing it does: the flood only ever
+raises a value, so light that should now be dimmer -- a roof built over open
+ground -- has to be zeroed before the flood re-derives it, and stale brightness
+reaches as far as the old sweep did. Re-seeding only the edited column left a
+lit halo nothing could put out.
+
+The shift's band is the case where the two come apart, and it is worth 6 ms: the
+columns either side of the seam still hold the right seed and do not need
+re-seeding, but they do need re-SENDING, because the texture there holds spread
+light from the band that left. `reseed_exact` seeds the band, and the commit
+uploads the band grown by the radius.
+
+**`relight_all` had to keep its meaning.** Making it seed instead of flood broke
+six light tests, correctly: they assert the incremental relight matches a full
+re-flood, which is a statement about the CPU implementation and still true. The
+game calls `seed_all_fields` instead. Changing what a tested function means, to
+avoid adding one, is how a test suite stops meaning anything.
+
+### The measurement trap, for the third time
+
+The first measurement of this change said mean frame 8.6 -> 15.65 ms and 7 339
+frames over budget, and I nearly reverted on it. It was the scripted walk again:
+`dt` differs between builds, so the camera goes somewhere else, and a 20 000
+frame mean is mostly a statement about what the camera happened to look at. The
+per-segment timers said the flood cost 0.21 ms and the phases 3.1, which
+accounts for none of it.
+
+**Fixed camera, uncapped, both builds, same seed** is the only frame-rate
+comparison in this project that means anything. The walking benchmark is for
+worst-frame and for oracles, not for means.

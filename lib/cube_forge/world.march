@@ -163,7 +163,49 @@ mod CubeForge.World do
     else match w do World(cs, la, lb, o, sh, n, mo, ox, oz, dt, ca, rs, tl, gh) -> World(cs, la, lb, o, NativeArray.set_u8(sh, x + c * z, sp), n, mo, ox, oz, dt, ca, rs, tl, gh) end end
   end
 
-  doc "Recompute both light fields from scratch."
+  doc """
+  Re-seed both light fields over the columns [x0..x1] x [z0..z1], GROWN by the
+  relight radius.
+
+  The seed of a column is local, so the grown margin is not needed to compute
+  it. It is needed to CLEAR it: the flood only ever raises a value, so light
+  that should now be dimmer -- a roof built over open ground -- has to be zeroed
+  before the flood re-derives it, and stale brightness reaches as far as the old
+  sweep did. Zeroing only the edited column left a lit halo the flood could not
+  put out.
+  """
+  fn reseed_region(w : World, rx0 : Int, rx1 : Int, rz0 : Int, rz1 : Int) : World do
+    reseed_exact(w, rx0 - CubeForge.Light.relight_radius(), rx1 + CubeForge.Light.relight_radius(),
+                    rz0 - CubeForge.Light.relight_radius(), rz1 + CubeForge.Light.relight_radius())
+  end
+
+  doc """
+  Re-seed exactly the columns given, without the relight radius.
+
+  For a shift's band that is all that is needed: the seed is local, so the
+  columns either side of the seam still hold the right seed and only the band's
+  own changed. The margin exists to clear stale SPREAD light out of the texture,
+  and the caller uploads the grown box for that -- it does not have to be
+  re-seeded, only re-sent.
+  """
+  fn reseed_exact(w : World, x0 : Int, x1 : Int, z0 : Int, z1 : Int) : World do
+    set_block_light(set_light(w, CubeForge.Light.reseed_sky(light(w), w, x0, x1, z0, z1)),
+                    CubeForge.Light.reseed_block(block_light(w), w, x0, x1, z0, z1))
+  end
+
+  doc """
+  Seed both light fields for the whole world: sky columns and emitters, with
+  nothing spread. This is what the game uses at session start, because the
+  spreading is the GPU's (cf_light_flood) and it derives exactly what the CPU
+  sweep derives -- proved voxel for voxel on the dump frame. It is the cheap
+  half of relight_all: no BFS in it at all.
+  """
+  fn seed_all_fields(w : World) : World do
+    set_block_light(set_light(w, CubeForge.Light.seed_all(CubeForge.Light.new(), w)),
+                    CubeForge.Light.seed_emitters(CubeForge.Light.new(), w))
+  end
+
+  doc "Recompute both light fields from scratch, spread and all. The CPU implementation of the flood: the game no longer uses it, and the light tests hold it to the same answer the GPU has to reach."
   fn relight_all(w : World) : World do
     set_block_light(set_light(w, CubeForge.Light.flood(w)), CubeForge.Light.flood_block(w))
   end
@@ -639,21 +681,12 @@ mod CubeForge.World do
     shift_fields(shift_chunks(w, dx, dz, seed, workers, blobs), dx, dz, workers)
   end
 
-  doc "Stage two of a shift: light the band that [shift_blocks] brought in, for the same ([dx], [dz]). The two fields are independent once the occupancy is in, so they are swept as a pair."
+  doc "Stage two of a shift: re-seed the band that [shift_chunks] brought in. Only the seed -- sky columns and emitters -- because the GPU does the spreading (cf_light_flood), and it derives what the CPU sweep derived, proved voxel for voxel on the dump frame."
   fn shift_light(w : World, dx : Int, dz : Int) : World do
     match w do
-      World(cs, _, _, o, sh, n, mo, ox, oz, dt, ca, rs, tl, gh) ->
-        let bx0 = band_x0(n, dx)
-        let bx1 = band_x1(n, dx)
-        let bz0 = band_z0(n, dz)
-        let bz1 = band_z1(n, dz)
-        let bands = List.pmap_n(Cons(0, Cons(1, Nil)),
-                                fn i -> if i == 0 do CubeForge.Light.light_band(light(w), w, bx0, bx1, bz0, bz1)
-                                        else CubeForge.Light.light_band_block(block_light(w), w, bx0, bx1, bz0, bz1) end, 2)
-        match bands do
-          Cons(la2, Cons(lb2, _)) -> World(cs, la2, lb2, o, sh, n, mo, ox, oz, dt, ca, rs, tl, gh)
-          _ -> w
-        end
+      World(_, _, _, _, _, n, _, _, _, _, _, _, _, _) ->
+        reseed_exact(w, 16 * band_x0(n, dx), 16 * band_x1(n, dx) + 15,
+                        16 * band_z0(n, dz), 16 * band_z1(n, dz) + 15)
     end
   end
 

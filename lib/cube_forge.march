@@ -636,7 +636,7 @@ mod CubeForge do
     let lo = cells_y_lo(cells, 0 - 1)
     if lo < 0 do w
     else
-      Win.gfx_sync_box(World.occupancy(w), 16 * cx, lo, 16 * cz, 16 * cx + 15, cells_y_hi(cells, lo), 16 * cz + 15)
+      Win.gfx_sync_box(World.occupancy(w), 16 * cx, 0, 16 * cz, 16 * cx + 15, 255, 16 * cz + 15)
       w
     end
   end
@@ -1132,9 +1132,9 @@ mod CubeForge do
         Win.gfx_set_voxel(x, y, z, CubeForge.Light.occ_value(id))
         let n = World.side(w0)
         -- accessors, not a match: a dotted constructor pattern does not parse (GAPS.md G24/G25)
-        let relit = World.relight_marked(w0, x, y, z)
-        let world1 = World.relit_world(relit)
-        sync_light_marks(world1, World.relit_marks(relit))
+        -- Re-seed the edited column; the GPU spreads it (cf_light_flood).
+        let world1 = World.reseed_region(w0, x, x, z, z)
+        Win.gfx_light_dirty(x - 16, 0, z - 16, x + 16, 255, z + 16)
         -- A relight no longer marks anything for remeshing: light comes from
         -- the light texture per fragment, so a mesh cannot show stale light.
         -- Only a GEOMETRY change still needs a section rebuilt.
@@ -1190,10 +1190,8 @@ mod CubeForge do
         -- but whose mesh was not rebuilt renders stale. The relight reports
         -- exactly which sections it changed; those join the geometry marks.
         -- the whole edit's region, not its centre voxel: a canopy's shade falls four columns out
-        let relit = if bush do World.relight_region_marked(w1, x - 1, x + 1, base + 1, base + 1, z - 1, z + 1)
-                    else World.relight_region_marked(w1, x - 4, x + 4, base + 1, base + trunk + 2, z - 4, z + 4) end
-        let w2 = World.relit_world(relit)
-        sync_light_marks(w2, World.relit_marks(relit))
+        let w2 = World.reseed_region(w1, x - 4, x + 4, z - 4, z + 4)
+        Win.gfx_light_dirty(x - 20, 0, z - 20, x + 20, 255, z + 20)
         let t2 = Win.time()
         sync_occupancy(w2, x, z, base, base + trunk + 2)
         let t3 = Win.time()
@@ -1257,9 +1255,8 @@ mod CubeForge do
         else
           let top = base + Fruit.height_of(sp, x, z, seed)
           let w1 = Fruit.stamp(w, sp, x, base, z, seed)
-          let relit = World.relight_region_marked(w1, x - 4, x + 4, base + 1, top, z - 4, z + 4)
-        sync_light_marks(World.relit_world(relit), World.relit_marks(relit))
-          let w2 = World.relit_world(relit)
+          let w2 = World.reseed_region(w1, x - 4, x + 4, z - 4, z + 4)
+          Win.gfx_light_dirty(x - 20, 0, z - 20, x + 20, 255, z + 20)
           sync_occupancy(w2, x, z, base, top)
           let marks1 = mark_box(marks, x - 4, base, z - 4, x + 4, top, z + 4, n, 0)
           fruit_edits(w2, Biome.rescan_box(bio, w2, x, z, Fruit.footprint() + 1, top), myc, marks1, seed, n, rest)
@@ -1277,9 +1274,8 @@ mod CubeForge do
         let r = Fruit.fell(world, sp, x, base, z, seed)
         let w1 = Fruit.felled_world(r)
         let top = base + Fruit.height_of(sp, x, z, seed)
-        let relit = World.relight_region_marked(w1, x - 4, x + 4, base + 1, top, z - 4, z + 4)
-        sync_light_marks(World.relit_world(relit), World.relit_marks(relit))
-        let w2 = World.relit_world(relit)
+        let w2 = World.reseed_region(w1, x - 4, x + 4, z - 4, z + 4)
+        Win.gfx_light_dirty(x - 20, 0, z - 20, x + 20, 255, z + 20)
         sync_occupancy(w2, x, z, base, top)
         let marks = mark_box(CubeForge.Light.marks_new(), x - 4, base, z - 4, x + 4, top, z + 4, n, 0)
         let inv1 = Inv.give(Inv.give(Inv.give(ui_inv(ui), Species.spore_item(sp), Species.spores(sp)), Chunk.fruit_stem(sp), Fruit.felled_stems(r)), Chunk.fruit_cap(sp), Fruit.felled_caps(r))
@@ -1425,10 +1421,8 @@ mod CubeForge do
                 if ax < 0 do Scene(w1, counts, outline, hit, ui, pids, flags, meshes, bio, stage_go(pend, marks, 0, pass_solid()), myc)
                 else
                   -- the batch's window (every taken column within 4 of the anchor, bodies up to 12 tall), with the full radius
-                  let relit = CubeForge.Light.relight_block_region_marked(World.block_light(w1), w1, ax - 4, ax + 4, ah, ah + 12, az - 4, az + 4,
-                                                                          CubeForge.Light.region_reach(World.block_light(w1), w1, ax - 4, ax + 4, ah, ah + 12, az - 4, az + 4, true))
-                  let w2 = World.set_block_light(w1, CubeForge.Light.relit_field(relit))
-                  sync_light_marks(w2, CubeForge.Light.relit_marks(relit))
+                  let w2 = World.set_block_light(w1, CubeForge.Light.reseed_block(World.block_light(w1), w1, ax - 4, ax + 4, az - 4, az + 4))
+                  Win.gfx_light_dirty(ax - 20, 0, az - 20, ax + 20, 255, az + 20)
                   Scene(w2, counts, outline, hit, ui, pids, flags, meshes, bio, stage_go(pend, marks, 0, pass_solid()), myc)
                 end
             end
@@ -1769,9 +1763,14 @@ mod CubeForge do
         -- the band's light, grown by the sweep's reach: light_band sweeps into
         -- the apron either side of the seam, so those columns moved too
         if Env.get_int("CF_GPULIGHT", 1) == 1 do
-          Win.gfx_sync_light_box(World.light(w1), World.block_light(w1),
-                                 obx0 - CubeForge.Light.relight_radius(), 0, obz0 - CubeForge.Light.relight_radius(),
-                                 obx1 + CubeForge.Light.relight_radius(), 255, obz1 + CubeForge.Light.relight_radius())
+          -- just the band: the seed is local, so nothing outside it moved
+          -- The band's own columns were re-seeded; the margin either side was
+          -- not, and does not need to be. It is uploaded all the same, to clear
+          -- the spread light the old band left in the texture -- the flood only
+          -- ever raises, so anything now dimmer has to be sent again.
+          let lr = CubeForge.Light.relight_radius()
+          Win.gfx_sync_light_box(World.light(w1), World.block_light(w1), obx0 - lr, 0, obz0 - lr, obx1 + lr, 255, obz1 + lr)
+          Win.gfx_light_dirty(obx0 - lr, 0, obz0 - lr, obx1 + lr, 255, obz1 + lr)
         else () end
         let c3 = Win.time()
         let counts0 = remap_bases_go(counts, NativeArray.make_int(4 * water_slot_base(), 0), n, dx, dz, water_slot_base(), 3, 0, 0)
@@ -3226,19 +3225,24 @@ mod CubeForge do
             -- GPU, and compare against a from-scratch CPU flood of the same
             -- world. Zero means the GPU can derive the light the CPU derives,
             -- from the same starting point, and the CPU sweep is redundant.
+            -- The LIVE texture -- whatever the running game has flooded into it --
+            -- against a from-scratch CPU flood of the same world. This is the
+            -- real invariant now that the CPU no longer sweeps: the seed it
+            -- maintains, spread on the GPU, must equal what a full CPU flood of
+            -- the same blocks gives.
             let sw = scene_world(sc1)
-            Win.gfx_upload_light(CubeForge.Light.seed_all(CubeForge.Light.new(), sw),
-                                 CubeForge.Light.seed_emitters(CubeForge.Light.new(), sw), 192, 256, 192)
-            let _lf = Win.light_flood(16)
             let lpost = Win.light_check(CubeForge.Light.flood(sw), CubeForge.Light.flood_block(sw))
-            println("  gpu flood from seed vs a CPU flood: sky " ++ int_to_string(lpost / 10000000)
-                    ++ " block " ++ int_to_string(lpost % 10000000) ++ " voxels differ (both must be 0)")
+            let _fl = Win.light_flood(16)
+            let lconv = Win.light_check(CubeForge.Light.flood(sw), CubeForge.Light.flood_block(sw))
+            println("  live light texture vs a CPU flood: sky " ++ int_to_string(lpost / 10000000)
+                    ++ " block " ++ int_to_string(lpost % 10000000)
+                    ++ " | fully converged: sky " ++ int_to_string(lconv / 10000000) ++ " block " ++ int_to_string(lconv % 10000000))
             let occbad = Win.occ_check(World.occupancy(scene_world(sc1)))
             println("  occupancy oracle: fine " ++ int_to_string(occbad / 1000000) ++ " coarse " ++ int_to_string(occbad % 1000000) ++ " texels differ from the world (both must be 0)")
-            println("  light oracle: sky " ++ int_to_string(count_diff_u8(World.light(scene_world(sc1)), CubeForge.Light.flood(scene_world(sc1)), 0, CubeForge.Light.volume(), 0))
-                    ++ " block " ++ int_to_string(count_diff_u8(World.block_light(scene_world(sc1)), CubeForge.Light.flood_block(scene_world(sc1)), 0, CubeForge.Light.volume(), 0)) ++ " voxels differ;"
-                    ++ " first sky:" ++ first_diffs(World.light(scene_world(sc1)), CubeForge.Light.flood(scene_world(sc1)), 0, CubeForge.Light.volume(), 6, "")
-                    ++ " first block:" ++ first_diffs(World.block_light(scene_world(sc1)), CubeForge.Light.flood_block(scene_world(sc1)), 0, CubeForge.Light.volume(), 4, ""))
+            println("  seed oracle: sky " ++ int_to_string(count_diff_u8(World.light(scene_world(sc1)), CubeForge.Light.seed_all(CubeForge.Light.new(), scene_world(sc1)), 0, CubeForge.Light.volume(), 0))
+                    ++ " block " ++ int_to_string(count_diff_u8(World.block_light(scene_world(sc1)), CubeForge.Light.seed_emitters(CubeForge.Light.new(), scene_world(sc1)), 0, CubeForge.Light.volume(), 0)) ++ " voxels differ;"
+                    ++ " first sky:" ++ first_diffs(World.light(scene_world(sc1)), CubeForge.Light.seed_all(CubeForge.Light.new(), scene_world(sc1)), 0, CubeForge.Light.volume(), 6, "")
+                    ++ " first block:" ++ first_diffs(World.block_light(scene_world(sc1)), CubeForge.Light.seed_emitters(CubeForge.Light.new(), scene_world(sc1)), 0, CubeForge.Light.volume(), 4, ""))
             println("  fruit: small " ++ int_to_string(Fruit.count_bodies(scene_world(sc1), scene_biome(sc1), 0)) ++ " medium " ++ int_to_string(Fruit.count_bodies(scene_world(sc1), scene_biome(sc1), 1)) ++ " giant " ++ int_to_string(Fruit.count_bodies(scene_world(sc1), scene_biome(sc1), 2)) ++ " orphans " ++ int_to_string(Fruit.count_orphans(scene_world(sc1), scene_biome(sc1), World.shown(scene_world(sc1)))))
             -- the column three east of the player: where CF_AUTOPLANT plants
             let mx = pcx + 3
@@ -3850,7 +3854,7 @@ mod CubeForge do
     println("  biome field: " ++ int_to_string(tw1 - tw0) ++ " ms, wild fungus: " ++ myc_summary(myc0, cols, 1, "") ++ "in " ++ int_to_string(tw2 - tw1) ++ " ms, applied in " ++ int_to_string(System.monotonic_time() - tw2) ++ " ms")
     let t2 = System.monotonic_time()
     -- stage 1b: skylight and block light (need the finished terrain, including neighbours)
-    let world_lit = World.relight_all(world_wild)
+    let world_lit = World.seed_all_fields(world_wild)
     let t2b = System.monotonic_time()
     println("  light flood (sky + block): " ++ int_to_string(t2b - t2) ++ " ms")
     -- The shadow ray-marcher's view of the world. Built once and handed over;

@@ -561,6 +561,48 @@ mod CubeForge.Light do
   end
 
 
+  -- ── Re-seeding, for the GPU flood ────────────────────────────────────────
+  -- The seed is what the CPU still owes the light: sky columns filled and
+  -- emitters set, with everything else dark. The spread is the GPU's job
+  -- (cf_light_flood), and it derives exactly what sweep_box_lists derives --
+  -- proved voxel for voxel against Light.flood on the dump frame.
+  --
+  -- Re-seeding needs no radius, which is the whole difference from a relight. A
+  -- column's sunlight depends on that column alone and an emitter on its own
+  -- voxel, so an edit re-seeds the columns it touched and nothing further; the
+  -- sweep had to reach fifteen blocks in every direction because it was doing
+  -- the spreading as well.
+  pfn reseed_cols_go(la : NativeU8Arr, w : CubeForge.World.World, x0 : Int, x1 : Int, z0 : Int, z1 : Int, x : Int, z : Int) : NativeU8Arr do
+    if z > z1 do la
+    else if x > x1 do reseed_cols_go(la, w, x0, x1, z0, z1, x0, z + 1)
+    else reseed_cols_go(seed_column(la, w, x, z, size_y() - 1, 0, max_level()), w, x0, x1, z0, z1, x + 1, z) end end
+  end
+  doc "Re-seed the sunlight of every column in [x0..x1] x [z0..z1]: the box is cleared over the full height and each column walked down from the top."
+  fn reseed_sky(la : NativeU8Arr, w : CubeForge.World.World, x0 : Int, x1 : Int, z0 : Int, z1 : Int) : NativeU8Arr do
+    let cx0 = clampi(x0, 0, size_x() - 1)
+    let cx1 = clampi(x1, 0, size_x() - 1)
+    let cz0 = clampi(z0, 0, size_z() - 1)
+    let cz1 = clampi(z1, 0, size_z() - 1)
+    if cx1 < cx0 || cz1 < cz0 do la
+    -- copy_prefix first: the field is shared with the World it came from, and
+    -- cf_u8_zero_box refuses to write in place through a shared reference.
+    -- The same copy every relight has always paid (GAPS G54).
+    else reseed_cols_go(zero_box(copy_prefix(la, volume()), cx0, cx1, 0, size_y() - 1, cz0, cz1), w, cx0, cx1, cz0, cz1, cx0, cz0) end
+  end
+  doc "Re-seed the block light of every column in [x0..x1] x [z0..z1]: the box is cleared over the full height and every emitter in it set to its emission."
+  fn reseed_block(lb : NativeU8Arr, w : CubeForge.World.World, x0 : Int, x1 : Int, z0 : Int, z1 : Int) : NativeU8Arr do
+    let cx0 = clampi(x0, 0, size_x() - 1)
+    let cx1 = clampi(x1, 0, size_x() - 1)
+    let cz0 = clampi(z0, 0, size_z() - 1)
+    let cz1 = clampi(z1, 0, size_z() - 1)
+    if cx1 < cx0 || cz1 < cz0 do lb
+    else
+      let bw = cx1 - cx0 + 1
+      let bd = cz1 - cz0 + 1
+      seed_emit_box_go(zero_box(copy_prefix(lb, volume()), cx0, cx1, 0, size_y() - 1, cz0, cz1), w, cx0, bw, cz0, 0, size_y() - 1, 0, bw * bd)
+    end
+  end
+
   -- ── Which sections need remeshing ────────────────────────────────────────
   --
   -- Per-vertex light is baked into the mesh, so every section whose light moved
