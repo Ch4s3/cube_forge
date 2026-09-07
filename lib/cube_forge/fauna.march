@@ -146,7 +146,7 @@ mod CubeForge.Fauna do
     else if sp == 7 do 8 else if sp == 8 do 10 else if sp == 9 do 12
     else if sp == 10 do 14 else if sp == 11 do 6 else if sp == 12 do 4
     else if sp == 13 do 8 else if sp == 14 do 4 else if sp == 15 do 8
-    else if sp == 16 do 4 else if sp == 17 do 10 else if sp == 18 do 9
+    else if sp == 16 do 4 else if sp == 17 do 10 else if sp == 18 do 8
     else 6 end end end end end end end end end end end end end end end end end end 
   end
 
@@ -157,7 +157,7 @@ mod CubeForge.Fauna do
     else if sp == 7 do 7 else if sp == 8 do 7 else if sp == 9 do 9
     else if sp == 10 do 8 else if sp == 11 do 3 else if sp == 12 do 3
     else if sp == 13 do 5 else if sp == 14 do 3 else if sp == 15 do 5
-    else if sp == 16 do 3 else if sp == 17 do 7 else if sp == 18 do 5
+    else if sp == 16 do 3 else if sp == 17 do 7 else if sp == 18 do 4
     else 5 end end end end end end end end end end end end end end end end end end 
   end
 
@@ -168,7 +168,7 @@ mod CubeForge.Fauna do
     else if sp == 7 do 50 else if sp == 8 do 45 else if sp == 9 do 45
     else if sp == 10 do 50 else if sp == 11 do 35 else if sp == 12 do 35
     else if sp == 13 do 35 else if sp == 14 do 35 else if sp == 15 do 35
-    else if sp == 16 do 30 else if sp == 17 do 35 else if sp == 18 do 35
+    else if sp == 16 do 30 else if sp == 17 do 35 else if sp == 18 do 30
     else 45 end end end end end end end end end end end end end end end end end end 
   end
 
@@ -228,9 +228,9 @@ mod CubeForge.Fauna do
 
   doc "Wing depth, front to back, at the shoulder."
   fn plan_chord(sp : Int) : Int do
-    if sp == 1 do 4 else if sp == 2 do 3 else if sp == 3 do 4
-    else if sp == 4 do 4 else if sp == 5 do 4 else if sp == 6 do 5
-    else if sp == 7 do 5 else if sp == 8 do 0 else if sp == 9 do 0
+    if sp == 1 do 6 else if sp == 2 do 5 else if sp == 3 do 6
+    else if sp == 4 do 6 else if sp == 5 do 6 else if sp == 6 do 8
+    else if sp == 7 do 7 else if sp == 8 do 0 else if sp == 9 do 0
     else if sp == 10 do 8
     else 4 end end end end end end end end end end 
   end
@@ -560,28 +560,61 @@ mod CubeForge.Fauna do
     eyes(crest(g3, sp), sp)
   end
 
-  -- A wing: columns stepping out from the flank, each a thin sheet [chord]
-  -- deep, the whole bending with the pose and tapering toward the tip. The root
-  -- column is INSIDE the body, so the wing cannot come off.
+  -- A wing: columns stepping out from the flank along an ELLIPTICAL planform
+  -- -- broad at the root, rounding to the tip -- swept back a little, bending
+  -- with the pose, the outer third split into primaries. The root columns are
+  -- inside the body, so the wing cannot come off; they are also thicker, so
+  -- the wing grows out of the body rather than being pinned to it.
+  --
+  -- Chord matters more than span for reading as a bird: a wing a quarter as
+  -- deep as the body is long is a stick, whatever its reach.
+  -- A gliding wing is a shallow V, not a plank: the level pose keeps a little
+  -- dihedral, which is also what makes a wing read as one from above.
+  pfn bend_at(sp : Int, p : Int, u : Float) : Float do
+    if p == 1 do u *. u *. body_ry(sp) *. 0.35
+    else if p == 0 do 0.0 -. u *. u *. body_ry(sp) *. 1.3
+    else u *. u *. body_ry(sp) *. 1.6 end end
+  end
+  pfn wing_col(g : NativeU8Arr, sp : Int, x0 : Int, x1 : Int, ylo : Int, yhi : Int, z : Int, k : Int, fingers : Bool) : NativeU8Arr do
+    if !fingers do bx(g, sp, x0, ylo, z, x1, yhi, z, k)
+    else
+      -- primaries: the rear half of the column with every third cell cut
+      let mid = (x0 + x1) / 2
+      let g1 = bx(g, sp, mid, ylo, z, x1, yhi, z, k)
+      finger_go(g1, sp, x0, mid - 1, ylo, yhi, z, k, x0)
+    end
+  end
+  pfn finger_go(g : NativeU8Arr, sp : Int, x0 : Int, x1 : Int, ylo : Int, yhi : Int, z : Int, k : Int, x : Int) : NativeU8Arr do
+    if x > x1 do g
+    else finger_go(if (x - x0) % 3 == 2 do g else bx(g, sp, x, ylo, z, x, yhi, z, k) end, sp, x0, x1, ylo, yhi, z, k, x + 1) end
+  end
   pfn wing_go(g : NativeU8Arr, sp : Int, p : Int, out : Int, span : Int) : NativeU8Arr do
     if out > span do g
     else
-      let u = int_to_float(out) /. int_to_float(imax(span, 1))
-      let sx = shoulder_x(sp) -. body_len_f(sp) *. 0.1
-      let chord = int_to_float(cells(sp, plan_chord(sp))) *. (1.0 -. u *. 0.55)
-      -- the bend: level at the shoulder, the tip up or down by the pose
-      let bend = if p == 1 do 0.0 else if p == 0 do 0.0 -. u *. u *. body_ry(sp) *. 1.3 else u *. u *. body_ry(sp) *. 1.6 end end
-      -- and swept back a little toward the tip
-      let x0 = round_i(sx -. chord +. u *. chord *. 0.35)
-      let x1 = round_i(sx +. u *. chord *. 0.35)
-      let y = round_i(shoulder_y(sp) -. body_ry(sp) *. 0.25 +. bend)
-      let yprev = round_i(shoulder_y(sp) -. body_ry(sp) *. 0.25 +. (if p == 1 do 0.0 else if p == 0 do 0.0 -. (u -. 1.0 /. int_to_float(imax(span, 1))) *. (u -. 1.0 /. int_to_float(imax(span, 1))) *. body_ry(sp) *. 1.3 else (u -. 1.0 /. int_to_float(imax(span, 1))) *. (u -. 1.0 /. int_to_float(imax(span, 1))) *. body_ry(sp) *. 1.6 end end))
+      let n = int_to_float(imax(span, 1))
+      let u = int_to_float(out) /. n
+      let up = int_to_float(out - 1) /. n
+      -- the planform: elliptical, keeping a third of the chord at the tip
+      let plan = 0.3 +. 0.7 *. fsqrt(1.0 -. u *. u)
+      let chord = int_to_float(cells(sp, plan_chord(sp))) *. plan
+      -- the leading edge starts a little ahead of the shoulder and sweeps back
+      let lead = shoulder_x(sp) +. int_to_float(cells(sp, plan_chord(sp))) *. 0.3 -. u *. chord *. 0.45
+      let x0 = round_i(lead -. chord)
+      let x1 = round_i(lead)
+      -- wings root on the BACK, high on the body
+      let base = shoulder_y(sp) -. body_ry(sp) *. 0.1
+      let y = round_i(base +. bend_at(sp, p, u))
+      let yp = round_i(base +. bend_at(sp, p, up))
+      -- thicker through the root so it grows out of the body
+      let thick = if u < 0.2 do cells(sp, 1) else 0 end
+      let ylo = imin(y, yp) - thick
+      let yhi = imax(y, yp)
       let k = if u > 0.66 do c_dark(sp) else c_body(sp) end
       let zl = round_i(body_cz(sp) -. body_rz(sp) *. 0.5) - out
       let zr = round_i(body_cz(sp) +. body_rz(sp) *. 0.5) + out
-      -- each column spans from the last column's height to its own
-      let g1 = bx(g, sp, x0, imin(y, yprev), zl, x1, imax(y, yprev), zl, k)
-      wing_go(bx(g1, sp, x0, imin(y, yprev), zr, x1, imax(y, yprev), zr, k), sp, p, out + 1, span)
+      let fingers = u > 0.7
+      let g1 = wing_col(g, sp, x0, x1, ylo, yhi, zl, k, fingers)
+      wing_go(wing_col(g1, sp, x0, x1, ylo, yhi, zr, k, fingers), sp, p, out + 1, span)
     end
   end
 
@@ -614,7 +647,8 @@ mod CubeForge.Fauna do
       let u = int_to_float(i) /. int_to_float(imax(n, 1))
       let x = body_x0(sp) + round_i(body_rz(sp) *. 0.6) - i
       let y = round_i(body_cy_at(sp, body_x0(sp)) -. u *. int_to_float(cells(sp, plan_drop(sp))))
-      let hw = body_rz(sp) *. (0.45 +. u *. 0.5)
+      -- a fan: from the width of the rump to nearly double it at the tip
+      let hw = body_rz(sp) *. (0.5 +. u *. 1.2)
       let zl = round_i(body_cz(sp) -. hw)
       let zr = round_i(body_cz(sp) +. hw)
       -- each row spans from the last row's height to its own, so a step down
@@ -715,6 +749,39 @@ mod CubeForge.Fauna do
       tube(g1, sp, x, y, body_cz(sp) +. body_rz(sp) *. 0.5, x -. l, y -. l *. 0.4, body_cz(sp) +. body_rz(sp) +. l *. 0.5, 1.2, 0.6, c_dark(sp))
     end
   end
+  -- Under the body: paired pelvic fins at mid-length and a single anal fin
+  -- further aft, both swept back. Without them a fish is a decorated loaf.
+  pfn under_fins(g : NativeU8Arr, sp : Int) : NativeU8Arr do
+    let x0 = int_to_float(body_x0(sp))
+    let l = body_len_f(sp)
+    let pel_x = x0 +. l *. 0.5
+    let pel_y = body_cy(sp) -. body_ry(sp) *. fsqrt(profile(0.5, peak_of(sp))) *. 0.75
+    let f = l *. 0.11
+    let g1 = tube(g, sp, pel_x, pel_y, body_cz(sp) -. body_rz(sp) *. 0.35, pel_x -. f, pel_y -. f *. 0.7, body_cz(sp) -. body_rz(sp) *. 0.7, 1.0, 0.5, c_dark(sp))
+    let g2 = tube(g1, sp, pel_x, pel_y, body_cz(sp) +. body_rz(sp) *. 0.35, pel_x -. f, pel_y -. f *. 0.7, body_cz(sp) +. body_rz(sp) *. 0.7, 1.0, 0.5, c_dark(sp))
+    -- the anal fin: a swept sheet on the centre line
+    anal_go(g2, sp, 0, round_i(body_ry(sp) *. 0.45))
+  end
+  pfn anal_go(g : NativeU8Arr, sp : Int, j : Int, d : Int) : NativeU8Arr do
+    if j >= d do g
+    else
+      let u = int_to_float(j) /. int_to_float(imax(d, 1))
+      let xb = int_to_float(body_x0(sp)) +. body_len_f(sp) *. 0.22
+      let xf = int_to_float(body_x0(sp)) +. body_len_f(sp) *. (0.4 -. u *. 0.14)
+      let y = round_i(body_cy(sp) -. body_ry(sp) *. fsqrt(profile(0.3, peak_of(sp))) *. 0.8) - j
+      if xf < xb do g
+      else anal_go(bx(g, sp, round_i(xb), y, round_i(body_cz(sp)), round_i(xf), y, round_i(body_cz(sp)), c_dark(sp)), sp, j + 1, d) end
+    end
+  end
+  -- The mouth: a dark line across the snout tip, a little below centre.
+  pfn mouth(g : NativeU8Arr, sp : Int) : NativeU8Arr do
+    let x = body_x1(sp) - 1
+    let p = body_prof_at(sp, x)
+    let y = round_i(body_cy(sp) -. body_ry(sp) *. p *. 0.3)
+    let hz = fmax(body_rz(sp) *. fsqrt(p) *. 0.8, 1.0)
+    bx(g, sp, x, y, round_i(body_cz(sp) -. hz), body_x1(sp), y, round_i(body_cz(sp) +. hz), c_dark(sp))
+  end
+
   pfn fish_eyes(g : NativeU8Arr, sp : Int) : NativeU8Arr do
     let x = body_x0(sp) + round_i(body_len_f(sp) *. 0.86)
     let p = body_prof_at(sp, x)
@@ -727,8 +794,8 @@ mod CubeForge.Fauna do
   fn fish(sp : Int, p : Int) : NativeU8Arr do
     let g0 = body(Mdl.empty_n(grid_of(sp)), sp)
     let g1 = dorsal_go(g0, sp, 0, cells(sp, plan_dorsal(sp)))
-    let g2 = caudal_go(pectorals(g1, sp), sp, p, 0, cells(sp, plan_tail(sp)), 0, 0)
-    fish_eyes(g2, sp)
+    let g2 = caudal_go(pectorals(under_fins(g1, sp), sp), sp, p, 0, cells(sp, plan_tail(sp)), 0, 0)
+    fish_eyes(mouth(g2, sp), sp)
   end
 
   doc "The grid for template id [k]."
