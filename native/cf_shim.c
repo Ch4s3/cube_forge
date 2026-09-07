@@ -1306,6 +1306,124 @@ int64_t cf_occ_check(void *arr) {
     return bad * 1000000 + cbad;
 }
 
+/* ── Light flood on the GPU: a cost probe ────────────────────────────────────
+ * Not the real thing. The question is only whether the MECHANISM can beat the
+ * CPU's worklist sweep, so this runs the exact memory pattern a GPU flood would
+ * -- one relaxation pass per light level over a box of a 3D texture, each voxel
+ * reading its six neighbours and its own opacity, ping-ponged between two
+ * textures -- against dummy data, and times it with a GL query.
+ *
+ * Layered rendering: the 3D texture is attached whole and a geometry shader
+ * sends the triangle to gl_Layer = z0 + gl_InstanceID, so one instanced draw
+ * covers the box's z range. That is how a 3D texture is written without compute
+ * or image load/store, neither of which GL 4.1 has.
+ *
+ * Returns microseconds for `passes` passes, or -1 if it could not set up. */
+static GLuint g_lb_tex[2] = {0, 0}, g_lb_fbo = 0, g_lb_prog = 0, g_lb_vao = 0, g_lb_q = 0;
+static const char *LB_VS =
+    "#version 330 core\n"
+    "flat out int v_lay;\n"
+    "void main(){ vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);\n"
+    "  v_lay = gl_InstanceID;\n"
+    "  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0); }\n";
+/* One instanced draw covers every z layer: the instance id IS the layer, passed
+ * VS -> GS (gl_InstanceID is not visible in a geometry shader). Drawing a layer
+ * at a time instead cost 192 draws a pass and was entirely draw-call bound --
+ * 11.7 ms for a single pass that does 1.1 M voxels of work. */
+static const char *LB_GS =
+    "#version 330 core\n"
+    "layout(triangles) in; layout(triangle_strip, max_vertices = 3) out;\n"
+    "flat in int v_lay[]; flat out int g_lay;\n"
+    "void main(){ for (int i = 0; i < 3; i++) { gl_Layer = v_lay[0]; g_lay = v_lay[0]; gl_Position = gl_in[i].gl_Position; EmitVertex(); } EndPrimitive(); }\n";
+static const char *LB_FS =
+    "#version 330 core\n"
+    "uniform sampler3D u_src;\n"
+    "uniform sampler3D u_occ_b;\n"
+    "uniform vec3 u_dim;\n"
+    "flat in int g_lay;\n"
+    "out vec2 o_light;\n"
+    "void main(){\n"
+    "  vec3 p = vec3(gl_FragCoord.xy, float(g_lay) + 0.5);\n"
+    "  vec3 t = vec3(p.x, p.y, p.z) / u_dim;\n"
+    "  vec2 me = texture(u_src, t).rg;\n"
+    "  vec2 m = me;\n"
+    "  m = max(m, texture(u_src, t + vec3( 1.0 / u_dim.x, 0.0, 0.0)).rg);\n"
+    "  m = max(m, texture(u_src, t + vec3(-1.0 / u_dim.x, 0.0, 0.0)).rg);\n"
+    "  m = max(m, texture(u_src, t + vec3(0.0,  1.0 / u_dim.y, 0.0)).rg);\n"
+    "  m = max(m, texture(u_src, t + vec3(0.0, -1.0 / u_dim.y, 0.0)).rg);\n"
+    "  m = max(m, texture(u_src, t + vec3(0.0, 0.0,  1.0 / u_dim.z)).rg);\n"
+    "  m = max(m, texture(u_src, t + vec3(0.0, 0.0, -1.0 / u_dim.z)).rg);\n"
+    "  float op = texture(u_occ_b, t).r;\n"
+    "  o_light = max(me, (m - 1.0 / 15.0) * (1.0 - step(0.5, op)));\n"
+    "}\n";
+static GLuint lb_compile(GLenum k, const char *src) {
+    GLuint sh = glCreateShader(k); glShaderSource(sh, 1, &src, NULL); glCompileShader(sh);
+    GLint ok = 0; glGetShaderiv(sh, GL_COMPILE_STATUS, &ok);
+    if (!ok) { char log[1024]; glGetShaderInfoLog(sh, 1024, NULL, log); fprintf(stderr, "cf: light bench shader: %s\n", log); return 0; }
+    return sh;
+}
+int64_t cf_light_bench(int64_t passes, int64_t bw, int64_t bh, int64_t bd) {
+    if (bw <= 0 || bh <= 0 || bd <= 0) return -1;
+    static int64_t lb_w = 0, lb_h = 0, lb_d = 0;
+    if (!g_lb_prog) {
+        GLuint vs = lb_compile(GL_VERTEX_SHADER, LB_VS);
+        GLuint gs = lb_compile(GL_GEOMETRY_SHADER, LB_GS);
+        GLuint fs = lb_compile(GL_FRAGMENT_SHADER, LB_FS);
+        if (!vs || !gs || !fs) return -1;
+        g_lb_prog = glCreateProgram();
+        glAttachShader(g_lb_prog, vs); glAttachShader(g_lb_prog, gs); glAttachShader(g_lb_prog, fs);
+        glLinkProgram(g_lb_prog);
+        GLint ok = 0; glGetProgramiv(g_lb_prog, GL_LINK_STATUS, &ok);
+        if (!ok) { char log[1024]; glGetProgramInfoLog(g_lb_prog, 1024, NULL, log); fprintf(stderr, "cf: light bench link: %s\n", log); return -1; }
+        glGenVertexArrays(1, &g_lb_vao);
+        glGenFramebuffers(1, &g_lb_fbo);
+        glGenQueries(1, &g_lb_q);
+        glGenTextures(2, g_lb_tex);
+    }
+    if (bw != lb_w || bh != lb_h || bd != lb_d) {
+        lb_w = bw; lb_h = bh; lb_d = bd;
+        for (int i = 0; i < 2; i++) {
+            glBindTexture(GL_TEXTURE_3D, g_lb_tex[i]);
+            glTexImage3D(GL_TEXTURE_3D, 0, GL_RG8, (GLsizei)bw, (GLsizei)bh, (GLsizei)bd, 0, GL_RG, GL_UNSIGNED_BYTE, NULL);
+            glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+        }
+    }
+    glUseProgram(g_lb_prog);
+    glUniform1i(glGetUniformLocation(g_lb_prog, "u_src"), 4);
+    glUniform1i(glGetUniformLocation(g_lb_prog, "u_occ_b"), 1);
+    glUniform3f(glGetUniformLocation(g_lb_prog, "u_dim"), (float)bw, (float)bh, (float)bd);
+    glBindVertexArray(g_lb_vao);
+    glBindFramebuffer(GL_FRAMEBUFFER, g_lb_fbo);
+    glViewport(0, 0, (GLsizei)bw, (GLsizei)bh);
+    glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE); glDisable(GL_BLEND);
+    /* Eight timed repetitions, minimum reported: a single one is dominated by
+     * whatever the driver was still doing (measured 13 ms for a band and 7.6 ms
+     * for a field eight times its size, in that order, which is only warm-up). */
+    GLuint64 best = 0;
+    for (int rep = 0; rep < 8; rep++) {
+        glBeginQuery(GL_TIME_ELAPSED, g_lb_q);
+        for (int64_t k = 0; k < passes; k++) {
+            int src = (int)(k & 1), dst = 1 - src;
+            glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_3D, g_lb_tex[src]);
+            glFramebufferTexture(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, g_lb_tex[dst], 0);
+            glDrawArraysInstanced(GL_TRIANGLES, 0, 3, (GLsizei)bd);
+        }
+        glEndQuery(GL_TIME_ELAPSED);
+        GLuint64 t = 0; glGetQueryObjectui64v(g_lb_q, GL_QUERY_RESULT, &t);
+        if (rep == 0 || t < best) best = t;
+    }
+    GLuint64 ns = best;
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glEnable(GL_DEPTH_TEST); glEnable(GL_CULL_FACE);
+    glUseProgram(g_prog);
+    glActiveTexture(GL_TEXTURE0);
+    return (int64_t)(ns / 1000);
+}
+
 /* Translucent pass: blend, keep depth test, no depth writes, no culling (water
  * surface visible from below). Call after every opaque draw. */
 void cf_gfx_draw_translucent(int64_t slot, int64_t nverts) {

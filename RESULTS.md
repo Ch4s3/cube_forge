@@ -2996,3 +2996,51 @@ Within noise, and the 35% of vertices is free.
 binary, because the walk's path depends on frame timing. Every "57 -> 109 fps"
 style number in this file is a single sample of that, and only the large ones
 mean anything. Use a fixed camera, or the GPU timer, for anything smaller.
+
+
+## Is a light flood on the GPU worth it? A cost probe (2026-09-07)
+
+`CF_LIGHT_BENCH=1` runs `cf_light_bench` on frame 300: the memory pattern a GPU
+flood would have -- one relaxation pass per light level over a box of a 3D
+texture, each voxel reading its six neighbours and the occupancy, ping-ponged
+between two RG8 textures -- against dummy data, timed with a GL query. It
+measures the mechanism, not the flood: no seeding, no correctness.
+
+Written with **layered rendering**: the 3D texture is attached whole and a
+geometry shader sends the triangle to `gl_Layer`, which is how a 3D texture is
+written at all without compute or image load/store, neither of which GL 4.1 has.
+One *instanced* draw covers every z layer (the instance id is the layer, passed
+VS -> GS because `gl_InstanceID` is not visible in a geometry shader). Drawing a
+layer at a time instead was 192 draws a pass and entirely draw-call bound: 11.7
+ms for a single pass over 1.1 M voxels.
+
+Eight timed repetitions, minimum reported. One is not enough -- unrepeated, it
+measured 13 ms for a band and 7.6 ms for a field eight times its size.
+
+| box | voxels | 15 passes |
+|---|---|---|
+| band 46 x 128 x 192 (what a shift lights) | 1.13 M | **3.39 ms** |
+| edit box 48 x 48 x 48 | 0.11 M | **1.30 ms** |
+| band-tall 192 x 128 x 192 | 4.72 M | 13.06 ms |
+| full field 192 x 256 x 192 | 9.44 M | 7.15 ms |
+
+The band repeats to 2 microseconds across runs (3387, 3389). The full-field row
+is anomalous -- faster than a box half its size -- and is not explained; it does
+not bear on the decision.
+
+### The verdict
+
+**Worth it for the shift's band: 16.7 ms of CPU against 3.39 ms of GPU, ~5x**,
+and the GPU does sky and block together in one RG texture where the CPU runs two
+sweeps in parallel to get its 16.7. That would take the shift's over-budget
+stages from two to one, leaving only `chunks` at 27 ms.
+
+**Not clearly worth it per edit.** A 48-cube is 1.30 ms on the GPU against a
+tree relight's 1.7-2.9 ms on the CPU -- and the CPU's sweep is a worklist that
+stops when nothing more can change, where the GPU pays 15 passes whatever
+happens. For small edits the CPU may well stay ahead.
+
+**And nothing has to come back.** The light field is read on the CPU in exactly
+two places now, both a single voxel: `Audio.exposure` and the dump's ground
+readout. So a GPU flood writes the texture the shader already samples and the
+readback question -- the objection that made this look hard -- does not arise.

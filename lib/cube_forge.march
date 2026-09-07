@@ -2713,6 +2713,30 @@ mod CubeForge do
           Win.gfx_set_view_proj(render_vp)
           -- CF_CULL=0 draws every slot, as this did before, for the A/B.
           -- Never in map view: that camera is the overhead one, not render_vp's.
+          -- CF_LIGHT_BENCH=1: cost probe for a GPU light flood, once, on frame
+          -- 300. 15 relaxation passes over the band box a shift's light stage
+          -- covers (46 x 128 x 192), then over the whole field for reference.
+          if Env.get_int("CF_LIGHT_BENCH", 0) == 1 && frame == 300 do
+            -- each measured twice; the first call of a size compiles or resizes
+            let _w1 = Win.light_bench(15, 46, 128, 192)
+            let b1 = Win.light_bench(15, 46, 128, 192)
+            let _w2 = Win.light_bench(15, 192, 256, 192)
+            let b2 = Win.light_bench(15, 192, 256, 192)
+            let _w3 = Win.light_bench(1, 46, 128, 192)
+            let b3 = Win.light_bench(1, 46, 128, 192)
+            let _w4 = Win.light_bench(15, 192, 128, 192)
+            let b4 = Win.light_bench(15, 192, 128, 192)
+            let _w5 = Win.light_bench(15, 48, 48, 48)
+            let b5 = Win.light_bench(15, 48, 48, 48)
+            let _w6 = Win.light_bench(15, 46, 128, 192)
+            let b6 = Win.light_bench(15, 46, 128, 192)
+            println("light bench: band 46x128x192,  15 passes = " ++ int_to_string(b1) ++ " us")
+            println("light bench: band 46x128x192,   1 pass   = " ++ int_to_string(b3) ++ " us")
+            println("light bench: band-tall 192x128x192, 15   = " ++ int_to_string(b4) ++ " us")
+            println("light bench: full 192x256x192, 15 passes = " ++ int_to_string(b2) ++ " us")
+            println("light bench: edit box 48x48x48, 15 passes = " ++ int_to_string(b5) ++ " us")
+            println("light bench: band again (repeat of the first) = " ++ int_to_string(b6) ++ " us")
+          else () end
           -- Everything this frame's relights made dirty, in one upload.
           Win.gfx_flush_light(World.light(scene_world(sc1)), World.block_light(scene_world(sc1)))
           let cull = Env.get_int("CF_CULL", 1) == 1 && !map_mode1
