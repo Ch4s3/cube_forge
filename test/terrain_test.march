@@ -197,7 +197,10 @@ mod CubeForge.Test.Terrain do
   -- Climate ground: find the first column of a kind in a world, packed x + 4096 * z, or -1.
   pfn first_dune(seed : Int, i : Int) : Int do
     if i >= 16384 do -1
-    else if N.dune_mask_at(i % 128, i / 128, seed) >= C.dune_min() do i % 128 + 4096 * (i / 128)
+    -- dead flat as well as dune country: the generator gives talus precedence
+    -- over dune sand, and it reads slope off the piled heightmap this hunt
+    -- cannot see (the same trap as first_bog)
+    else if N.slope(i % 128, i / 128, seed) == 0 && N.dune_mask_at(i % 128, i / 128, seed) >= C.dune_min() do i % 128 + 4096 * (i / 128)
     else first_dune(seed, i + 1) end end
   end
   pfn first_glacier(seed : Int, i : Int) : Int do
@@ -205,13 +208,38 @@ mod CubeForge.Test.Terrain do
     else if N.glacier_at(i % 128, i / 128, seed) && !N.moraine_at(i % 128, i / 128, seed) && N.relief(i % 128, i / 128, seed) > N.height(i % 128, i / 128, seed) do i % 128 + 4096 * (i / 128)
     else first_glacier(seed, i + 1) end end
   end
-  pfn first_bog(seed : Int, i : Int) : Int do
+  -- The hunt asks the generator's own questions: dead flat (it reads slope off
+  -- the piled heightmap, and a column beside an ocean's edge can pick up talus
+  -- the unpiled slope here cannot see), and NOT under a poured lake -- open
+  -- ocean makes new closed basins at sea level whose rims pour, and a flat at
+  -- sea + 2 inside one is a lake bed to the generator and looked like bog to a
+  -- hunt that passed lake = 0.
+  -- Packed seed * 1000000 + column for the first seed in [s0, 40] with a bog
+  -- column, or -1.
+  pfn bog_seed(s0 : Int) : Int do
+    if s0 > 40 do -1
+    else
+      let seed = N.with_age(s0, 50)
+      let col = first_bog(seed, CubeForge.Lakes.levels(seed, 8), 0)
+      if col >= 0 do s0 * 1000000 + col else bog_seed(s0 + 1) end
+    end
+  end
+  -- No cliff within talus reach: the generator piles gravel at the foot of a
+  -- cliff up to three columns away, and gravel is what a bog's top becomes
+  -- there. Neither slope nor the lake table at the column itself can see it.
+  pfn no_cliff_near(seed : Int, wx : Int, wz : Int, j : Int) : Bool do
+    if j >= 49 do true
+    else if N.slope(wx - 3 + j % 7, wz - 3 + j / 7, seed) >= N.cliff_slope() do false
+    else no_cliff_near(seed, wx, wz, j + 1) end end
+  end
+  pfn first_bog(seed : Int, lk : CubeForge.Lakes.Tile, i : Int) : Int do
     if i >= 16384 do -1
     else
       let wx = i % 128
       let wz = i / 128
-      if C.is_bog(N.height(wx, wz, seed), N.slope(wx, wz, seed), N.river_at(wx, wz, seed), 0, seed) do wx + 4096 * wz
-      else first_bog(seed, i + 1) end
+      if N.slope(wx, wz, seed) == 0 && CubeForge.Lakes.level_at(lk, wx, wz) == 0 && no_cliff_near(seed, wx, wz, 0)
+         && C.is_bog(N.height(wx, wz, seed), 0, N.river_at(wx, wz, seed), 0, seed) do wx + 4096 * wz
+      else first_bog(seed, lk, i + 1) end
     end
   end
   pfn chunk_of(col : Int, seed : Int) : CubeForge.Chunk.Chunk do
@@ -251,9 +279,13 @@ mod CubeForge.Test.Terrain do
       Test.assert_eq_int(C.get(c, x, N.height(col % 4096, col / 4096, seed) + 1, z), C.ice(), "ice just above the carved floor")
     end
     test "a bog is mud and clay with pools at sea level" do
-      let seed = N.with_age(11, 50)
-      let col = first_bog(seed, 0)
-      Test.assert_true(col >= 0, "seed 11 at age 50 has bog")
+      -- the first seed from 11 up with bog in its window: open ocean turned
+      -- seed 11's flats into poured lake beds, and a pinned seed is a pinned
+      -- terrain, which is exactly what a hunt is for
+      let found = bog_seed(11)
+      Test.assert_true(found >= 0, "some seed from 11 to 40 at age 50 has bog")
+      let seed = N.with_age(found / 1000000, 50)
+      let col = found % 1000000
       let c = chunk_of(col, seed)
       let x = col % 4096 % 16
       let z = col / 4096 % 16

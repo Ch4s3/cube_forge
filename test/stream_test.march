@@ -134,7 +134,12 @@ mod CubeForge.Test.Stream do
       let w1 = W.shift(w0, 1, 0, seed(), 1, Nil)
       let f1 = CubeForge.Biome.shift(f0, w1, 1, 0, seed())
       Test.assert_eq_int(CubeForge.Biome.height_of(f1, 0, 5), CubeForge.Biome.height_of(f0, 16, 5), "a height slid")
-      Test.assert_eq_int(CubeForge.Biome.height_of(f1, 120, 9), W.surface_y(w1, 120, 9), "the band was scanned")
+      -- the biome's height is the water's surface where a column is under the
+      -- sea (its climate reads water as ground); World.surface_y is the bed.
+      -- They agree on land, which every band column was until open ocean existed.
+      let bh = CubeForge.Biome.height_of(f1, 120, 9)
+      let sy = W.surface_y(w1, 120, 9)
+      Test.assert_true(bh == sy || (sy < CubeForge.Chunk.sea_level() && bh == CubeForge.Chunk.sea_level()), "the band was scanned")
       Test.assert_true(CubeForge.Biome.temp_of(f1, 40, 40) == CubeForge.Biome.temp_of(f0, 56, 40), "temperature slid")
     end
     test "the mycelium field slides" do

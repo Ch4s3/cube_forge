@@ -2684,3 +2684,55 @@ fails on a parse error, that number is the check and it must not fall.
 486 tests. `CF_POI=0` bit-identical (484802240); the pinned scenario with POIs
 on is 839500821 (seed 7 has a canyon and no delta). Worst frame 6.20 ms. Phase 3 is complete: all seven kinds from the original request
 are in.
+
+## Open ocean (2026-09-07)
+
+The atoll had nowhere to be. The sea was wherever the land happened to dip
+under 62 -- a shelf a few blocks deep -- and "eight under the sea across the
+ring" never held; the kind was right and the world was wrong. So the world
+gained an **ocean regime**: one very broad octave (`ocean_mask`, 1/250 blocks,
+over 0.62) marks ocean country, and there `ocean_of` pulls the land down to an
+abyssal floor at sea - 22 with its own gentle relief. It is terrain, so it
+lives in `Noise` and not in `Poi`: the lake pour, the beaches, the biome's
+distance-to-water and the atoll's placement all read it for free. It is in
+`height_x4` too, or the SIMD lanes test would have said so.
+
+**Islands.** The first version pulled everything in ocean country to the floor,
+snow-line peaks included; a glacier test at seed 11 said so. The pull is now
+full up to sea + 12 and fades over the next 26, so a coast drowns and a
+mountain becomes an island. A first attempt at that fade started at the sea
+itself, and a coast at sea + 8 kept most of its height -- every atoll site went
+dry (seed 54's ground went from 41 to 70).
+
+**The atoll's country is the ocean's.** Giving it an octave of its own meant the
+two rarely coincided: a ring probed thirty blocks out from a deep site kept
+finding the coast of the ocean's own patch. One in 140 seeds, then five once
+`country(k_atoll)` became `ocean_mask` and the ring was allowed to want real
+water again (`max_ground` sea - 6, probes at three quarters of the radius).
+`docs/poi-atoll.png` is seed 116 from above: a sand-and-grass ring round a blue
+lagoon in open sea, with the gap on the bearing.
+
+**Three pinned tests broke, and none of them was a bug in what changed.** Each
+was a hunt that asked a simpler question than the generator does, and open
+ocean was the first terrain where the answers differed:
+
+- *the biome band scan* -- `Biome.height_of` reads a column's surface with
+  water counted as ground (its climate wants that); `World.surface_y` stops at
+  the first collidable block, the bed. They agree on land, and every band
+  column had been land. The assertion now allows the sea's surface under water.
+- *the dune column is sand through* -- gravel on top: the generator gives talus
+  precedence over dune sand and reads slope off the PILED heightmap, which a
+  hunt over `Noise.slope` cannot see. The hunt now wants a dead-flat column.
+- *the bog* -- twice. First the same piled-slope trap; then, with that fixed,
+  every bog-shaped flat at seed 11 was the bed of a poured lake, because open
+  ocean makes new closed basins at sea level whose rims pour. The hunt now asks
+  the lake table too, and tries seeds from 11 up until one has bog.
+
+The pattern: **a hunt must ask the generator's own questions**, or the first
+terrain that separates them will fail the test for a reason that is not a bug.
+
+486 tests. Seed 7 now sits partly in ocean country and has an atoll at (94, 11),
+so both pinned hashes move deliberately: `CF_POI=0` **1010970938**, POIs on
+**866428893**. The `CF_POI=0` world is no longer "the world before POIs" -- the
+terrain itself changed -- but it is still the world with every point of
+interest off, which is what the gate is for.

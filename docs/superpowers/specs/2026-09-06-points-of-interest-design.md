@@ -377,3 +377,13 @@ rock at both ends.
 - All seven kinds from the request are in. The census over forty seeds: buttes
   and canyons regional, arches and giant trees one in eight, caverns one in
   five, deltas nine in forty, atolls two in a hundred and forty.
+
+## 14. Open ocean (2026-09-07)
+
+The atoll was right and the world was wrong: it had shelf, not sea. `Noise`
+gained an ocean regime -- a broad octave under which the land is pulled to an
+abyssal floor, full up to sea + 12 and fading above so high ground is an island
+-- and the atoll's country became the ocean's own mask. Five seeds in 140 have
+an atoll, in open water, ring and lagoon and gap all readable from above. Three
+pinned terrain tests broke on the way, each a hunt asking a simpler question
+than the generator; RESULTS has them.

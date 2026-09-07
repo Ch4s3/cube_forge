@@ -176,7 +176,7 @@ mod CubeForge.Poi do
   the ground at hashed sites at 49..105 over thirty seeds, the shallowest
   barely wet. Every other kind has no ceiling.
   """
-  fn max_ground(k : Int) : Int do if k == k_atoll() do N.sea_level() - 2 else 9999 end end
+  fn max_ground(k : Int) : Int do if k == k_atoll() do N.sea_level() - 6 else 9999 end end
 
   -- ── The parameter table ──────────────────────────────────────────────────
   -- Six numbers per kind. A kind that does not use one leaves it zero.
@@ -263,7 +263,11 @@ mod CubeForge.Poi do
 
   doc "The kind's country mask at (wx, wz): one broad octave over a high threshold."
   fn country(k : Int, wx : Int, wz : Int, seed : Int) : Float do
-    N.smooth(N.clamp01((N.value2(int_to_float(wx) *. cty_freq(k), int_to_float(wz) *. cty_freq(k), seed + 2301 + 200 * k) -. cty_lo(k)) /. cty_band(k)))
+    -- an atoll's country IS the ocean's: giving it an octave of its own meant
+    -- the two rarely coincided, and a ring probed thirty blocks out from a deep
+    -- site kept finding the coast of the ocean's own patch. One in 140 seeds.
+    if k == k_atoll() do N.ocean_mask(int_to_float(wx), int_to_float(wz), seed)
+    else N.smooth(N.clamp01((N.value2(int_to_float(wx) *. cty_freq(k), int_to_float(wz) *. cty_freq(k), seed + 2301 + 200 * k) -. cty_lo(k)) /. cty_band(k))) end
   end
 
   -- ── Profiles ─────────────────────────────────────────────────────────────
@@ -308,7 +312,7 @@ mod CubeForge.Poi do
       -- probed a little inside the ring's radius: it is the ring and the lagoon
       -- that must lie in water, and the outer foot may climb onto a shelf.
       -- At the full radius no seed in a hundred and forty had an atoll.
-      let r = param(k, cx, cz, seed, p_len()) / 2
+      let r = param(k, cx, cz, seed, p_len()) * 3 / 4
       Math.max_int(Math.max_int(at, Math.max_int(N.height_base(x + r, z, seed), N.height_base(x - r, z, seed))),
                    Math.max_int(N.height_base(x, z + r, seed), N.height_base(x, z - r, seed)))
     end
