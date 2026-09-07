@@ -1480,3 +1480,52 @@ pattern-bound value, bind it `_`.
   (RESULTS). The mesher already took its five chunks as arguments.
 - **Would need:** array-backed leaves and a stored tail length in the stdlib
   `PVec`, or a fixed-size object array.
+
+### G83. A module alias is shadowed by a deeper module of the same initial, and it fails at LINK time
+
+`alias CubeForge.Model as M` followed by `M.box(...)` does not call
+`CubeForge.Model.box`. It compiles, typechecks and lints clean, and then the
+linker asks for `_CubeForge.Math.Mat4.box`, which does not exist. The alias was
+silently outranked by `CubeForge.Math.Mat4` — a module the file never mentions
+and does not import.
+
+- **Cost:** two full test-compile cycles, and the error names a module you have
+  never heard of in this file. There is no diagnostic at the point of the
+  alias, at the point of use, or anywhere in `forge build` — only a list of
+  undefined symbols after clang runs.
+- **Done instead:** aliases in `fauna.march` and `fauna_test.march` are
+  `Mdl`, not `M`. Multi-letter aliases seem not to collide.
+- **Would need:** the alias to win over an unimported module, or — failing
+  that — an error at the use site saying which module a qualified name
+  actually resolved to. A name that resolves to something the file never
+  imported should not be silent.
+
+### G84. A call request that carries arguments delivers zeros; only `send` carries them
+
+`Actor.call(pid, FTickReq(a, b, c), 2000)` against
+
+    type FTickReq = FTickReq(Int, Int, Int)
+    on FTick(reply_to, a : Int, b : Int, c : Int) do ... end
+
+compiles, typechecks, lints, runs, and replies. Every argument arrives as **0**.
+`send(pid, FLoad(...))` against the same actor carries its arguments correctly,
+so this is specific to the call path, not to messages.
+
+- **How it showed:** flocks were told their ground heights, the water surface
+  and the player's position through the call. They read a ground of 0 and a
+  water surface of 0, so the fish sank to y 0.5 — its floor, ground + 0.5 —
+  while the birds set off toward y 9, ground + their cruise. Nothing errored;
+  the animals were simply somewhere else, and the geometry was correct for the
+  numbers they had.
+- **Cost:** most of an afternoon, and only because a fish sitting at y 0.5
+  under a lake at y 81 was too specific a number to be anything but arithmetic
+  on a zero. A less obviously-wrong value would have been taken for a steering
+  bug.
+- **Done instead:** the inputs go by `send` (`FInputs`) and the tick is a
+  nullary call (`FTickReq`), which is what every other actor here already does
+  — `Water.call_tick` and `Weather.call_tick` are both nullary, so the codebase
+  had no case that would have caught this. Two messages a tick instead of one,
+  and no measurable cost.
+- **Would need:** the call path to marshal a request's fields, or a compile
+  error saying it cannot. Silently substituting zeros for a message's payload is
+  the worst of the three options.

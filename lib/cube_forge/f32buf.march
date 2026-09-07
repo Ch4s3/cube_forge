@@ -156,6 +156,16 @@ mod CubeForge.F32Buf do
     end
   end
 
+  doc "stamp with a yaw and a uniform scale (cf_f32_stamp_xf): the template is a body centred on (0.5, 0.5, 0.5), placed with its centre at (dx, dy, dz). For animals, which turn continuously and come in sizes."
+  fn stamp_xf(b : F32Buf, src : NativeF32Arr, si : Int, n : Int, dx : Float, dy : Float, dz : Float, shade : Float, cosv : Float, sinv : Float, scale : Float) : F32Buf do
+    match b do
+      F32Buf(d, len, cap) ->
+        let cap1 = if len + n <= cap do cap else grow_to(cap, len + n) end
+        let d1 = if len + n <= cap do d else grow(d, len, cap1) end
+        F32Buf(CubeForge.Ffi.Window.f32_stamp_xf(d1, len, src, si, n, dx, dy, dz, shade, cosv, sinv, scale), len + n, cap1)
+    end
+  end
+
   pfn grow_to(cap : Int, need : Int) : Int do
     let c = if cap < 16 do 32 else cap * 2 end
     if c >= need do c else grow_to(c, need) end

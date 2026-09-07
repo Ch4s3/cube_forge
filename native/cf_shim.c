@@ -2072,6 +2072,65 @@ void *cf_f32_stamp(void *dst, int64_t di, void *src, int64_t si, int64_t n, doub
     return dst;
 }
 
+/* Stamp a model template with a yaw rotation and a uniform scale: the same copy
+ * as cf_f32_stamp, but the template's unit cell is treated as a body centred on
+ * (0.5, 0.5, 0.5), scaled by [scale], turned about +y by the angle whose cosine
+ * and sine are [cosv] and [sinv], and placed with its CENTRE at (dx, dy, dz).
+ *
+ * Why here rather than baked variants: palm fronds bake eight directions
+ * (Model.t_frond), and that is right for a thing that never moves. An animal
+ * turns continuously, and eight steps snap; baking poses x yaws would also
+ * multiply the template table by an order of magnitude. This is two
+ * multiply-adds per vertex on a loop that is already memory-bound, and the
+ * scale term is what lets one grid serve a minnow and a deep-water fish.
+ *
+ * `face` (slot 7) is 0..5 (+y -y +x -x +z -z) and the vertex shader turns it
+ * into a normal, so a rotated body must rotate its faces too or its lighting
+ * stays fixed while its shape turns. The face is discrete, so it moves by the
+ * NEAREST quarter turn: the horizontal four cycle 2 -> 4 -> 3 -> 5 -> 2 under
+ * the rotation above (+x goes to +z at 90 degrees), and the two y faces are
+ * unmoved. Off-quarter yaws light as their nearest quarter, which at this
+ * resolution reads as a body catching the sun rather than as an error. */
+static const unsigned char cf_face_cw[6] = { 0, 1, 4, 5, 3, 2 };
+void *cf_f32_stamp_xf(void *dst, int64_t di, void *src, int64_t si, int64_t n,
+                      double dx, double dy, double dz, double shade,
+                      double cosv, double sinv, double scale) {
+    int64_t rc = *(int64_t *)dst;
+    if (rc != 1) { fprintf(stderr, "cf_f32_stamp_xf: destination is shared (rc=%lld); refusing to write in place\n", (long long)rc); abort(); }
+    if (n <= 0) return dst;
+    if (di < 0 || si < 0 || di + n > narr_len(dst) || si + n > narr_len(src) || n % CF_VERT_FLOATS != 0) {
+        fprintf(stderr, "cf_f32_stamp_xf: out of range (di=%lld si=%lld n=%lld dst=%lld src=%lld)\n",
+                (long long)di, (long long)si, (long long)n, (long long)narr_len(dst), (long long)narr_len(src));
+        abort();
+    }
+    float *d = (float *)narr_data(dst) + di;
+    const float *s = (const float *)narr_data(src) + si;
+    double blk = floor(shade * 0.5);
+    double sky = shade - 2.0 * blk;
+    double blkn = blk / 255.0;
+    /* The quarter turn nearest this yaw, as a count of clockwise steps 0..3.
+     * atan2 once per stamp, not once per vertex. */
+    double ang = atan2(sinv, cosv);                      /* -pi .. pi */
+    int64_t q = (int64_t)floor(ang / 1.5707963267948966 + 0.5) & 3;
+    for (int64_t i = 0; i < n; i += CF_VERT_FLOATS) {
+        double px = ((double)s[i + 0] - 0.5) * scale;
+        double py = ((double)s[i + 1] - 0.5) * scale;
+        double pz = ((double)s[i + 2] - 0.5) * scale;
+        d[i + 0] = (float)(px * cosv - pz * sinv + dx);
+        d[i + 1] = (float)(py + dy);
+        d[i + 2] = (float)(px * sinv + pz * cosv + dz);
+        d[i + 3] = s[i + 3]; d[i + 4] = s[i + 4]; d[i + 5] = s[i + 5];
+        d[i + 6] = (float)sky;
+        int64_t f = (int64_t)(s[i + 7] + 0.5);
+        if (f < 0 || f > 5) f = 0;
+        for (int64_t k = 0; k < q; k++) f = cf_face_cw[f];
+        d[i + 7] = (float)f;
+        d[i + 8] = s[i + 8];
+        d[i + 9] = (float)blkn;
+    }
+    return dst;
+}
+
 /* ── The greedy mesher's quad, written here ──────────────────────────────────
  * One merged rectangle of the section mesher: 6 vertices x CF_VERT_FLOATS floats at
  * dst[at..], from the integer description the greedy pass has (direction d,

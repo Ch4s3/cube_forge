@@ -105,6 +105,18 @@ mod CubeForge.Texture do
     else palette_go(put_rgba(a, 91 * 1024 + i * 4, CubeForge.Model.colour_r(i), CubeForge.Model.colour_g(i), CubeForge.Model.colour_b(i), 255), i + 1) end
   end
 
+  -- The animals' share of the same layer, written over the top: three texels a
+  -- species from its one base colour. They live here rather than in Model's
+  -- table because Fauna already depends on Model and the arrow cannot go both
+  -- ways -- and because sixteen species is a table, not forty-eight literals.
+  pfn fauna_palette_go(a : NativeU8Arr, i : Int) : NativeU8Arr do
+    if i >= CubeForge.Fauna.palette_span() do a
+    else
+      let k = CubeForge.Fauna.palette_base() + i
+      fauna_palette_go(put_rgba(a, 91 * 1024 + k * 4, CubeForge.Fauna.palette_r(i), CubeForge.Fauna.palette_g(i), CubeForge.Fauna.palette_b(i), 255), i + 1)
+    end
+  end
+
   -- Palm fronds: the leaf cutout in a yellower green, with a lighter midrib on
   -- the two middle rows so a frond reads as a blade rather than a clump.
   pfn fronds_go(a : NativeU8Arr, layer : Int, i : Int) : NativeU8Arr do
@@ -171,7 +183,7 @@ mod CubeForge.Texture do
     let a22 = fronds_go(a21, 88, 0)
     let a23 = bedded_go(a22, 89, 0, 206, 178, 128, 3)
     let a24 = bedded_go(a23, 90, 0, 96, 104, 118, 2)
-    let a25 = palette_go(a24, 0)
+    let a25 = fauna_palette_go(palette_go(a24, 0), 0)
     fruit_all_go(spore_all_go(myc_all_go(a25, tint, 0), 1), 0)
   end
 

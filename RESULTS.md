@@ -2404,6 +2404,391 @@ without. Standing in a patch that fills the screen: 269 with, 259 without --
 the "with" runs measured faster both times, which is how much of a difference
 there is to find. Budget 6.32 ms, 460 tests, lint clean.
 
+## Animals: bodies that read as animals
+
+Slice 1 of the fauna work: a transform stamp, body-plan generators, and the
+first two species.
+
+**The stamp.** `cf_f32_stamp` translates a greedy-meshed template into a cell;
+an animal also needs to turn and to come in sizes. Baking yaws was the obvious
+move — palm fronds already bake eight directions — and it is the wrong one
+twice over: eight steps snap under a banking bird, and `species x poses x yaws`
+multiplies the template table by an order of magnitude. `cf_f32_stamp_xf` adds
+a yaw and a uniform scale to the same copy loop: two multiply-adds per vertex
+on a loop that is already memory-bound. The scale term is what makes "fish of
+multiple sizes" a column in a table rather than a second set of grids.
+
+Face indices rotate with the body, by the nearest quarter turn. Without that a
+turned animal keeps the lighting it had facing east.
+
+**Bodies are generated, not drawn.** A species gets a row — how long, how tall,
+how far the wings reach, whether it flies — and one of two generators builds
+every pose from it, placing each part against the body's own extent. The first
+hand-built bird had its wings two cells clear of its flank, touching nothing,
+and rendered as a bird with two slabs floating beside it.
+
+The invariant is a test, not a hope: a flood fill from one cell must reach every
+filled cell of every pose. Adjacency alone would not do — the broken wing was a
+solid slab whose own cells touched each other perfectly well; only reaching
+every cell from a single seed catches a part that is whole and in the wrong
+place. It has caught three real defects since: a wing tip stepping in z and y at
+once (meeting the wing along an edge, no shared face), a fin hung off the row
+the body-rounding shave removes, and a tail-sweep connector whose z bounds
+arrived descending, which `box_n` counts as an empty range and silently skips.
+
+**16 cells a side, not 8.** Every animal at 8 read as a stack of slabs, and the
+reason is structural: an eighth of a block is the thinnest thing that exists, so
+a wing, a fin and a beak all weigh as much as the body. `Model`'s greedy pass is
+now parameterised on the grid side; the 8-cube path is unchanged and the world
+mesh hash is byte-identical across the refactor (413448066).
+
+**What it costs.** Interleaved A/B, three runs each, 150 bodies stamped and
+uploaded every frame:
+
+| bodies | worst frame | frame rate |
+|---|---|---|
+| none | 5.4-6.6 ms | 214-225 fps |
+| 150 at 8 a side | 6.7-7.0 ms | 207-218 fps |
+| 150 at 16 a side | 6.6-8.0 ms | 189-208 fps |
+
+At 8 the bodies are lost in the noise; at 16 they cost about a millisecond and a
+tenth of the frame rate. Worth paying, and worth knowing: the visible cap is now
+a real budget rather than a formality. This is also the first system whose cost
+is per FRAME rather than per tick, so none of the phase-slot spreading that
+carried the world tick from 55 ms to 11 applies to it.
+
+`CF_FAUNA_DEMO=1` circles a flock and a school on the clock; `=2` stands every
+species in every pose, still and broadside, which is the only way the bodies
+themselves are actually inspectable — at their real size, 0.35 of a block, an
+animal is a few pixels and a screenshot proves only that something was drawn.
+
+## Flocks: a group as one unit of state
+
+Slice 2: the flock actor, its steering, and the interpolation that lets it
+think six times a second and still move smoothly.
+
+**One actor per flock, not per animal.** The literal reading of "animals are
+actors" costs a call/reply pair per animal per tick against a 16 ms frame, and
+then needs actors talking to each other to do what one shared state does for
+free. A `FlockActor` owns 5-20 animals; `Flock.step` is an ordinary function
+over them and the actor is a shell, which is the division `Water` already uses
+between `tick` and `WaterChunk` — and it is why every behaviour here is tested
+without a running actor.
+
+**The flock is told the terrain; it does not regenerate it.** `WaterChunk`
+answers the no-arrays-in-messages rule (G44) by rebuilding its chunk from
+`(cx, cz, seed)`. Copying that would have broken the feature outright:
+regenerated terrain is terrain as it was *generated*, and the point of the
+fauna design is that the player has changed it. A flock gets a 5x5 patch of
+ground heights packed a byte at a time into four Ints, and is therefore correct
+against edits by construction.
+
+**Two corrections the build made to the plan.**
+
+The inputs cannot ride on the call request. `Actor.call(pid, Req(a, b, c))`
+delivers zeros — silently, with no error anywhere (GAPS G84). The flocks read a
+ground of 0 and a water surface of 0, so the fish sank to y 0.5 (its floor,
+ground + 0.5) and the birds set off toward y 9. It was caught only because
+y 0.5 under a lake at y 81 is too specific a number to be anything but
+arithmetic on a zero. Inputs now go by `send`; the call is nullary.
+
+"Ground" turned out to be two questions. `Biome.height_of` is the surface
+*including* water — a sea column reads 62, the water top — which is right for a
+bird and exactly wrong for a fish, whose floor would then sit above its own
+ceiling and push it out through the surface. Fish read the bed via `surface_y`
+instead. Bounding that walk to start at the field's height rather than at y 255
+matters: unbounded, the flock slot was the most frequent slow frame in a
+400-frame run (12 occurrences, more than the vegetation or climate ticks);
+bounded, it left the list entirely.
+
+**What it costs.** Interleaved A/B, three runs each, four flocks and 29 animals:
+
+| | worst frame | frame rate |
+|---|---|---|
+| no flocks | 6.5-7.2 ms | 217-218 fps |
+| four flocks, 29 animals | 6.5-8.1 ms | 205-218 fps |
+
+Within noise once the bed walk is bounded. The AI runs on its own phase slot,
+once per world tick, and the renderer blends the last two ticks — so the
+steering runs at a sixth of the frame rate and the animals still move smoothly.
+That is the trade the biome sweep already makes, and here it is the only one
+available: unlike every other tick in this program, the DRAW cannot be spread
+across frames.
+
+`CF_FAUNA_DEMO=3` puts three flocks of pipits around the player and a school of
+sunfin in the nearest water — which for seed 7 is an upland lake at y 81, not
+the sea, and so a decent test of the case the sea-level assumption would have
+got wrong.
+
+## The roster: eighteen species from a table
+
+Slice 3. The species table is now *generated* from a data file rather than
+hand-written: eighteen rows produce the March if-chains for names, activity,
+size, niche, six plan numbers and a colour. Hand-editing a dozen chains to
+insert a species in the middle is how off-by-one `end` counts get in, and one
+extra `end` silently closes the module — the parse error points at whatever
+follows, not at the chain.
+
+**Finer voxels, and what they cost.** 16 cells a side fixed the slabs; 32 gave
+a head enough cells to round; 64 is what makes a wing one cell against a body of
+sixty. Naively that is 8x the greedy work of 32, and it showed: startup went
+from 1.7 s to 4.2 s.
+
+The fix is that a body fills a fraction of its grid. The greedy pass sweeps 6n
+slices of n x n mask cells, and at 64 most of those slices are past the animal's
+nose or beyond its wingtips. Finding the bounding box once and keeping both the
+fill and the walk inside it took the fauna templates from 2.4 s to ~0.3 s —
+startup 2.3 s against a 1.7-2.1 s baseline. The block models go through the same
+parameterised code and their mesh hash is byte-identical (413448066), which is
+the only reason a refactor of the mesher was safe to make at all.
+
+**Size range.** 0.22 blocks (Cinderfinch) to 4.20 (Mossmoa), about twenty to
+one. The small end has to stay small for the large end to mean anything.
+
+**Three shapes that are branches, not new code.** A penguin is `plan_upright`:
+the head goes on top of the body instead of in front of it, and the pale
+underside becomes a pale front. It already had short wings, legs and a dark back
+from ordinary rows. A shark is `plan_dorsal` at 8 with a swept leading edge — a
+rectangle of the same height reads as a sail. An eel is `plan_pectorals` false,
+which is most of why an eel reads as an eel.
+
+**The connectivity oracle earned its keep twice more.** A penguin's legs stopped
+at `body_y0 - cells(2)`, relying on the belly to bridge to the body — and an
+upright bird has a front instead of a belly, so its legs hung in the air. And
+the wing taper's two ends crossed on a short body with a long span, which
+`box_n` treated as an empty range and silently skipped: three birds lost their
+wings entirely and still built clean.
+
+That was the third time an inverted range vanished, so `box_n` now **sorts** its
+bounds. A caller handing over a reversed range means the box between the two,
+and gets it.
+
+The test itself had to change twice as the grid grew: repeated sweeps until the
+marked count settles is O(cells x rounds), which is fine at 16 and hopeless at
+64 x 54 templates. It is a worklist flood now — pop, mark, push the six
+neighbours — and the suite runs in about 90 s.
+
+**What it costs.** Live flocks against no flocks, interleaved, three runs each:
+worst frame 7.4-8.0 ms against 6.5-7.3, frame rate within noise. The frame
+budget gate is 6.71 ms against 16.
+
+## Detail, not resolution — and then resolution where it shows
+
+The question was whether to spend polygons on detail or take the voxels down
+another size. Measured first, because the intuition is unreliable:
+
+| grid | quads over 54 bodies | largest body |
+|---|---|---|
+| 32 | 7,253 | 183 |
+| 64 | 10,131 | 301 |
+
+Resolution does add some quads -- features pinned at one cell (a wing's
+thickness, an eye) get relatively finer -- but the number that decided it was
+**301 quads for the largest body**, about 600 triangles. An order of magnitude
+under what the frame carries. The bodies read as boxes because the generator
+only knew how to draw boxes.
+
+So the detail went in first: a body built a SLICE at a time with a taper along
+its length, a head built the same way, a notched tail fan, feet. Then the change
+that mattered most -- a **rounded cross-section**. The taper narrows a body along
+its length and does nothing at all for the angle you actually meet an animal
+from; head on, a stack of boxes is a rectangle. Rows taken from an ellipse fixed
+that, and it is the single biggest visual change in the whole feature.
+
+Then resolution, but **per species**. A template is normalised to a unit cube
+whatever grid built it, so different species can be built on different grids at
+no downstream cost: 128 for the five big ones, 64 for the middling, 32 for the
+small. That is not a compromise, it is the measurement -- a Cinderfinch is 0.22
+blocks, so one of its 64 cells is already about a screen pixel at five blocks,
+and halving it again buys a subdivision nobody can resolve while paying for it
+on the commonest animal in the world. A Mossmoa is four blocks and one of its
+cells is seventeen pixels.
+
+| | |
+|---|---|
+| quads over 54 bodies | 43,869 |
+| largest body | 2,524 (Deepmaw, on its 128 grid) |
+| startup | 3.5 s, against 1.7-2.1 s with no fauna |
+| frame budget gate | 10.5 ms against 16 |
+
+The startup cost is the honest price of the 128 grids: about 1.4 s, and worth
+knowing before it grows. Bounding-box culling in the greedy pass is already
+carrying most of it -- without that, 64 alone cost 2.4 s.
+
+**The connectivity oracle found six more defects in this pass**, every one of
+which built and linted clean:
+
+- eyes stuck to the head's side while the head had tapered in past them
+- a wing whose taper crossed itself on a short body (three birds, no wings)
+- a wing reading the body's surface at ITS OWN row, so when the flap's ramp
+  stepped to a new row two neighbouring columns referenced different surface
+  positions and the tip came off
+- a neck starting at `body_y1` while the nose had tapered down below it
+- legs set out to a stance, past the narrow bottom row of a rounded body
+- a penguin's legs stopping where a belly would have bridged them
+
+The lesson worth keeping is not any of those. It is that the oracle was made to
+NAME what broke -- species, pose, the stray piece's size and its first cell --
+after bisecting by hand cost three ninety-second runs. The diagnostic paid for
+itself twice over in the same session.
+
+## Birds and fish, redesigned from the ground up
+
+The previous builder was a box with parts attached, and every improvement to
+it -- rounding, tapering, feet -- made better parts on the wrong skeleton. The
+moa that came out of it had a head the size of a fist glued to a beach ball, a
+plank for a tail, and no neck at all. A bird is a SMALL HEAD ON A THIN NECK over
+a teardrop; a fish is a laterally compressed loft that tapers to a peduncle.
+Neither is a box, and no amount of refining a box gets there.
+
+**Two primitives.** A LOFT is an ellipse swept along a path with its radii
+following a profile: the body, the neck, the beak, a leg. A SHEET is a thin
+plate: a wing, a tail fan, a fin. That is the whole vocabulary. Consecutive loft
+slices overlap by construction, so a loft is connected without anyone checking;
+a sheet's root is buried inside the loft it hangs off, so it cannot detach. The
+connectivity oracle still runs, but on this builder it is a guard rather than a
+bug-finder -- it caught two, both a notch or a sweep stepping in two axes at
+once on a 32-cell grid, the same class as before.
+
+**One profile curve.** Two half-ellipses meeting at a peak: a smooth egg, fat
+where the row says and drawn to a point at both ends. With the peak at 45% it is
+a bird's chest, at 35% a fish's shoulder, at 50% a penguin's belly. A fish's
+width follows the square root of it, which keeps the body deep further aft --
+the peduncle is most of what makes a fish look like it swims.
+
+**The neck is a tube from the shoulder to a small ball.** Head size and neck
+thickness are rows of their own now. A neck as wide as the head is not a neck;
+a head sized to the body makes every bird a duck.
+
+| | before | after |
+|---|---|---|
+| quads over 54 bodies | 43,869 | 83,723 |
+| largest body | 2,524 | 7,160 (Mossmoa, 128 grid) |
+| startup | 3.5 s | 2.8-2.9 s |
+| live flocks, frame rate | within noise | -4% (132-134 vs 138-141) |
+| live flocks, worst frame | +1 ms | +0.5 ms |
+| frame budget gate | 10.5 ms | 5.5 ms |
+
+The quads doubled and the startup FELL: a loft fills fewer cells than the boxes
+it replaces, and the bounding-box greedy pass scales with what is filled. The
+frame budget number is mostly a quieter machine, and is reported as measured.
+
+## Populations: what lives where, and why
+
+Slice 4, the rule that closes the terraforming loop. One count per chunk per
+species, 0..15, eased one step a visit toward a CARRYING CAPACITY read off the
+world: for a fish, how many of the chunk's columns are water of the depth it
+wants (and of the body size -- a Sunfin wants a pond, and the field's own
+`small_body` of 48 columns is what says whether it has one); for a bird, how
+many columns are its biome. Both are numbers the world already maintains and
+the player already changes. Dig a 6x6 pond three deep in grassland and two
+Sunfin arrive over a few visits; fill it in and they go, one a tick. That is the
+whole mechanism, and it is a test.
+
+**Flocks are the visible sample of populations.** The registry counts every
+chunk of the window; a flock is placed only for a species with at least two
+animals in a chunk within two of the player, retired when the count goes or the
+player does, and resized in place when the count moves -- a school grows with
+its pond without every fish jumping back to where it began. Eight slots. In a
+400-frame run on seed 7 that is 792 animals counted and 34 drawn, spanning
+Pinecrest, Duskowl and Mossmoa in the forest chunk and Frostgull, Brinewaddle,
+Shoalback, Kelpjaw and a Bladefin on the coast: the habitat rule doing real
+work, with no species placed by hand.
+
+**Two bugs, both instructive.** The first was `slot >= 0 && have !=
+List.length(Array.get(cur, slot))` -- `&&` does not short-circuit (GAPS G33),
+so the PVec was read at -1 on every chunk with no flock, and the program panicked
+on the first population tick. Found by bisecting the slot's three stages with a
+temporary knob; the diagnostic printlns never showed because a panic drops the
+buffered stdout, which is worth remembering. The second was cost: `capacity`
+walked every column's depth per species, 4,608 walks a chunk, and the frame
+budget gate failed at 18.55 ms with the fauna slot the second most frequent
+slow phase. Profiling each chunk ONCE -- 256 depths and 256 small-water flags --
+and running the species against the profile brought the gate to 7.72 ms.
+
+**Save/load.** The header carries a `pop` line, 278 entries for the seed-7
+window at the save; a session loaded from it reports 340 animals at frame 0,
+before a single tick has run. A save from before there were populations reads
+an empty list and regrows.
+
+## Populations that persist, and the first season
+
+The dense-window registry was the honest simplification for slice 4, and it
+was the wrong shape for what comes next: a bird that leaves in autumn and comes
+back to the SAME lake needs the lake's record to survive the lake leaving the
+window. So the registry now archives every chunk that leaves, under its world
+coordinate with the tick it left at, and restores it on return -- CAUGHT UP,
+each species moved toward the capacity of the world as it now is by the visits
+it missed. A pond that filled while nobody was watching has its two Sunfin when
+you get back; a pond filled IN while you were away has none. Both are tests.
+
+The save carries every record, window and archive alike, keyed by world chunk:
+a load at the same origin puts a school where it was, a load at another origin
+archives it under world chunk (6, 4) until the window reaches it again. 1,281
+integers in the seed-7 header at the save; 302 animals counted at frame 0 of
+the loaded session.
+
+**Seasons** are a capacity that is zero out of season. A year is eight days --
+an hour of play a season at the default half-hour day, long enough to notice a
+bird has gone and short enough to see it come back. The Frostgull holds the
+coast for the second half of the year and the Marshheron the wetland for the
+first. That is migration as the population sees it; the flocks crossing the sky
+are next.
+
+Frame budget 6.83 ms against 16; save/load round trip passes; 500 tests.
+
+## The flyover
+
+Departure is a flock mode: when a migrant's season closes, `mode_of` returns
+`depart` ahead of everything else -- ahead of the player, ahead of the clock --
+and the flock climbs thirty above its cruise, drops the pull home, and pushes
+the way its species leaves at fleeing speed. The loop keeps its slot while the
+count drains underneath it (which would otherwise free it mid-departure) and
+lets it go once the lead is forty-four blocks out.
+
+Arrival needed no behaviour at all. An arriving migrant is placed forty-four
+blocks out and twenty-five up, from the way it leaves; the pull home it has
+past `home_radius` and the altitude spring fly it in over ten seconds or so.
+The test is the same for both: a gull whose season is over ends sixty ticks
+well above where it would cruise and thirty north of home, past the reach; a
+gull started forty-four out and twenty-four up ends a hundred and twenty ticks
+inside its home radius, down at its cruise.
+
+Watched in the game with a two-second day, so the year turns in sixteen: at
+year 0.70 a Marshheron -- whose season closed at 0.5 -- is at y 103 seventeen
+blocks north of its home, on its way out. Nothing placed it there but the
+calendar.
+
+## The survey reads the animals
+
+Slice 5, and the line that closes the loop from the player's side. The survey
+instrument that says what a place IS now also says what could LIVE there and
+what to dig to get it.
+
+Aimed at an animal -- a sphere test along the look ray over every drawn animal,
+run only while the survey is open or the scan key is down -- the panel names it
+and its niche once scanned (`FROSTGULL  BEACH TUNDRA  WINTER`), and prompts
+`UNKNOWN ANIMAL  SCAN` until then. The scan key takes the animal when there is
+one under the reticle and the ground otherwise, so the two catalogues share a
+key without fighting over it. Scanned animals are a bitmask of their own in the
+header, beside `known`: eighteen species beside six, and two catalogues that
+read independently.
+
+Aimed at the ground, for the reticle's chunk and only for species already
+scanned: which would live here, and the first that would not and why -- in
+terms the player can act on. A fish wants a depth (`NEEDS DEEPER WATER  14`),
+a pond, or open water; a bird wants a biome (`PINECREST  NEEDS TAIGA FOREST`);
+a migrant out of season is `AWAY UNTIL WINTER`. On the seed-7 spawn hill with
+everything scanned: `WOULD LIVE HERE  GRASSPIPIT  CINDERFINCH / PINECREST
+NEEDS TAIGA FOREST`. Nothing scanned, nothing said: the gate is the same one
+the fungus half already uses.
+
+The report is per CHUNK, because that is where a flock lives, while the rest
+of the panel is per column; a Cinderfinch reported on a grassland column is a
+desert corner of the same chunk. Honest, and slightly surprising; worth a word
+in the panel if it confuses anyone.
+
+Frame budget 8.29 ms against 16; save/load round trip passes.
 ## The window shift, staged over four frames (2026-09-06)
 
 Reported as "big FPS drops and 58 fps most of the time". The 58 fps is vsync:
@@ -3146,3 +3531,50 @@ reading water as transparent.
 The lesson is the oracle's, not the bug's. `cf_occ_check` was written to compare
 what the shadow trace could see, so it certified a texture that was wrong in a
 way nothing yet looked at. An oracle only checks what it is asked to check.
+
+
+## Correction: the 57 fps baseline was a bad sample (2026-09-07)
+
+Numbers earlier in this file quote "57 -> 109 fps" for the streaming work. **The
+57 does not reproduce.** Re-measuring the branch's starting commit today, five
+runs of the same line: 111, 111, 111, 111, 111. The session's opening 56.94 is
+almost exactly half of that, which is vsync half-rate on a cold or contended
+machine, not the code.
+
+Measured properly -- five samples each, a reference build of the starting commit
+in a second worktree:
+
+| | start (8 chunks) | after (12 chunks) |
+|---|---|---|
+| fps, vsync on, median | 111 | **120** |
+| samples | 111 111 111 111 111 | 101 102 120 120 122 |
+| worst frame, median | **84 ms** | **35 ms** |
+| samples | 10 76 84 86 93 | 31 34 35 35 35 |
+| view distance | 48-80 blocks | **80-112** |
+| vertices | 218 064 | 334 878 |
+
+So the honest headline is **+8% fps and less than half the worst frame, with
+1.5x the view distance** -- not the near-doubling the bad sample suggested. The
+hitch numbers are the real result: the spread went from 10-93 ms to 31-35.
+
+Uncapped at a fixed camera the starting build is FASTER (351 against 194 fps at
+800x600), as it must be -- it draws 2.25x less world. That throughput was spent
+on view distance deliberately.
+
+## Merging main's fauna, and a stride that was only accidentally right
+
+Main's fauna work (populations, flocks, the survey) merged with six conflicts in
+the frame loop, all of them the same shape: main's new Frame fields plus the
+staging field, and main's population-and-flock slide rekeyed from the frame the
+shift is QUEUED to the frame the commit lands, since the world only moves once.
+
+Five of main's tests then failed, and the cause was mine. `Biome.water_dist_at`,
+`water_reach_at` and `trend_at` indexed the distance array by `stride()`, the
+compile-time width, where every other accessor uses `side_of` -- the array's own
+width. That was correct only while `stride()` happened to equal the world's
+width. Widening the window to twelve chunks made those three read eight columns
+off in any narrower world, which is what a test's eight-chunk world is: a pond
+the fish could not find. They index by `side_of` now, like the rest.
+
+505 tests. fps drops from 120 to 88 with the fauna in, which is the cost of the
+new system rather than anything in this branch.

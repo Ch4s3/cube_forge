@@ -347,6 +347,10 @@ mod CubeForge.World do
 
   doc "Topmost collidable block's y at world (x, z), scanning down from 255; -1 if the column is empty."
   fn surface_y(w : World, x : Int, z : Int) : Int do surface_y_go(w, x, z, 255) end
+  doc "surface_y starting from [y0] rather than the top of the world: for a caller that already knows nothing solid is above it. A lake bed found from the water surface scans a dozen blocks where the full walk scans two hundred."
+  fn surface_y_below(w : World, x : Int, z : Int, y0 : Int) : Int do
+    surface_y_go(w, x, z, if y0 > 255 do 255 else if y0 < 0 do 0 else y0 end end)
+  end
   pfn surface_y_go(w : World, x : Int, z : Int, y : Int) : Int do
     if y < 0 do -1
     else if CubeForge.Chunk.is_collidable(block_at(w, x, y, z)) do y
