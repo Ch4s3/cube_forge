@@ -1541,3 +1541,24 @@ so this is specific to the call path, not to messages.
 - **Would need:** a parse error in any test file to fail the run, or at least
   the summary to say `N modules skipped`. Until then, the number on the
   `Finished:` line is the check: it must not go down.
+
+### G85. `doc` before an attribute lints as a parse error; attribute before `doc` fails to compile
+
+    doc "Face [yaw] radians."
+    @[no_alloc]
+    fn with_yaw(p : Player, yaw : Float) : Player do ... end
+
+builds and runs. `forge lint` reports `player.march:1:0: error [parse/error]
+parse error` — the file's first line, not the offending one. Swapping the two
+lines satisfies the linter and then the compiler rejects it with a typecheck
+error. No order of a doc string and an attribute on the same function is
+accepted by both tools.
+
+- **How it showed:** `forge lint` failing on main with a location that pointed
+  at nothing. Found by deleting the attribute, which made lint pass.
+- **Done instead:** the doc became a `--` comment and the attribute stayed,
+  since `@[no_alloc]` is a checked assertion and its sibling `with_pitch` has
+  the same shape. The function loses its rendered documentation.
+- **Would need:** the linter and compiler to share a parser, or at least one
+  agreed order, and a lint location that names the line it stopped on.
+
