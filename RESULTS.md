@@ -2834,6 +2834,46 @@ per column, and a Cinderfinch reported on a grassland column was a desert
 corner of the same chunk.
 
 Frame budget 6.72 ms against 16.
+
+## A perf pass on the finished fauna
+
+Measured first. On the standard scenario, fauna on against fauna off (a new
+`CF_FAUNA=0` switch, kept for weak machines), interleaved, three runs each:
+**135 fps against 148, worst frame 8.1 ms against 6.6**. A tenth of the frame
+rate. Inside the fauna slot everything was cheap -- pop tick 0.1 ms, assign
+0.02, flock ticks 0.13 -- and the cost was the DRAW: 0.4-0.8 ms to re-stamp 23
+animals into a buffer and ~10 MB re-uploaded every frame, for 260,000 vertices
+whose only change since the last frame was six floats each of position, yaw and
+size.
+
+So the templates are uploaded ONCE, at startup, and each animal is one draw
+call from that static slot with its transform as uniforms: the vertex shader
+gains a model mode -- place at u_mpos, turn by u_mrot, scale by u_mscale, lit
+by u_msky/u_mblk, the normal turned with the body, which also retires the
+quarter-turn face hack the stamp needed. The interpolation between ticks is
+the only per-frame arithmetic left on the March side.
+
+| | before | after |
+|---|---|---|
+| fauna draw, per frame | 0.6-1.0 ms | 0.04-0.10 ms |
+| fauna on / off, frame rate | 135 / 148 fps | 149 / 150 fps |
+| slow frames on the fauna slot, of 600 | 26 | 10 |
+| frame budget gate | 8.2 ms | 6.1 ms |
+
+The demo modes still stamp and upload, into a slot of their own so the static
+blob is never clobbered; they are inspection tools and the stamp path is what
+their tests cover.
+
+What is left on the fauna slot is the population tick's chunk profile, 0.1 ms
+ordinarily and 1.4 on a chunk that is mostly water, once every ten frames.
+Below the vegetation and water ticks now, and not worth a second pass.
+
+The single-specimen inspector (`CF_FAUNA_DEMO=100+n`, `200+n`) now draws
+through the model path too, so the check that a body looks right is a check of
+the shader's transform and turned normal, not of the stamp the game no longer
+uses for animals. That mattered: a draw count of 36 animals is not evidence
+that a new shader path drew anything, and the first in-world screenshot after
+the change caught none. The inspector did.
 ## Points of interest, phase 1: buttes and the arch (2026-09-06)
 
 Design `docs/superpowers/specs/2026-09-06-points-of-interest-design.md`, plan

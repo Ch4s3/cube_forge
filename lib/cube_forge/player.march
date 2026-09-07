@@ -38,7 +38,7 @@ mod CubeForge.Player do
   fn with_pitch(p : Player, pitch : Float) : Player do
     match p do Player(pos, vel, yaw, _, g) -> Player(pos, vel, yaw, pitch, g) end
   end
-  doc "Face [yaw] radians (0 = -Z). What CF_YAW sets: a scripted look needs an ANGLE, and CF_AUTOSPIN is a rate, so which way a dump faces was a lottery in the spin value and the dump frame."
+  -- Face [yaw] radians (0 = -Z). What CF_YAW sets: a scripted look needs an ANGLE, and CF_AUTOSPIN is a rate, so which way a dump faces was a lottery in the spin value and the dump frame.
   @[no_alloc]
   fn with_yaw(p : Player, yaw : Float) : Player do
     match p do Player(pos, vel, _, pitch, g) -> Player(pos, vel, yaw, pitch, g) end
