@@ -387,3 +387,12 @@ abyssal floor, full up to sea + 12 and fading above so high ground is an island
 an atoll, in open water, ring and lagoon and gap all readable from above. Three
 pinned terrain tests broke on the way, each a hunt asking a simpler question
 than the generator; RESULTS has them.
+
+## 15. Coloured block light (2026-09-07)
+
+Not three fields. The block-light byte's spare high nibble carries the
+emitter's colour index, swept with the level; skylight's is always zero, so
+nothing there changes. `Light.get` still returns a level; `Light.colour` reads
+the index. The face key carries it in bits 56-57, the fx word in bits 16 and up,
+and the shader picks a cold glow for colour 1. The limit is a hard seam where
+two colours meet, not a blend -- one index is not three channels. RESULTS.

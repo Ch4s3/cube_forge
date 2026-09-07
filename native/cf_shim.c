@@ -247,7 +247,7 @@ static const char *VS =
     /* Water bobs: a small vertical wave on any water effect (>= 2). Cosmetic
      * only -- v_world stays at the true position so lighting, shadows and
      * fog see the block the game logic sees. */
-    "  int fe = int(a_fx + 0.5) >> 8;\n"
+    "  int fe = (int(a_fx + 0.5) >> 8) & 255;\n"
     "  vec3 p = a_pos;\n"
     "  vec3 n = NORMALS[f];\n"
     "  if (u_model == 1) {\n"
@@ -312,6 +312,10 @@ static const char *FS =
     /* Block light (glowing fungus, later any emissive block): warm, and its own
      * source rather than a sun term. */
     "const vec3  GLOW = vec3(1.00, 0.90, 0.70);\n"
+    /* Block light carries a colour index (Light.colour_cold): the cold, near-white
+     * cast of selenite, so a crystal cavern's walls are lit by what is in it
+     * rather than by the same orange as a glowing mushroom. */
+    "const vec3  GLOW_COLD = vec3(0.82, 0.94, 1.00);\n"
     /* Deep water. A water fragment has no idea how much water is under it --
      * its colour is a texture times the light -- so a 24-block lagoon rendered
      * exactly like a puddle. Still water (effect 10) carries its depth in
@@ -480,7 +484,8 @@ static const char *FS =
     "const vec2 DIRS[8] = vec2[8](vec2(1,0), vec2(0.7071,0.7071), vec2(0,1), vec2(-0.7071,0.7071), vec2(-1,0), vec2(-0.7071,-0.7071), vec2(0,-1), vec2(0.7071,-0.7071));\n"
     "void main(){\n"
     "  int  fxw = int(v_fx + 0.5);\n"
-    "  int  fe  = fxw >> 8;\n"
+    "  int  fe  = (fxw >> 8) & 255;\n"
+    "  int  lci = fxw >> 16;\n"
     /* The shade float packs two channels (see Vertex.pack_shade): sky shade in
      * [0, 1], and block-light shade in even integers above it. Overlays push a
      * plain shade in [0, 1], which decodes as sky-only and leaves them alone. */
@@ -570,7 +575,7 @@ static const char *FS =
      * glowing mushroom. This fixes the emitter's own faces; the light it casts
      * on the rock around it is still warm, and fixing that needs three
      * block-light fields. */
-    "  vec3  glow = (fe == 12) ? t.rgb * 1.15 : GLOW;\n"
+    "  vec3  glow = (fe == 12) ? t.rgb * 1.15 : ((lci == 1) ? GLOW_COLD : GLOW);\n"
     "  vec3  world = max(baked, bl * glow) + vec3(flash);\n"
     /* Overlays (HUD, outline, map marker) share this program but are not part of
      * the world: they keep their own vertex shade and skip lighting entirely. */
@@ -591,7 +596,7 @@ static const char *FS =
      * rain out exactly as the storm peaked.
      *
      * Exponential fog, so the far plane does not enter into it. */
-    "  if (u_unlit != 1 && (fx >> 8) != 1) lit = mix(lit, u_fog_color, fogf);\n"
+    "  if (u_unlit != 1 && ((fx >> 8) & 255) != 1) lit = mix(lit, u_fog_color, fogf);\n"
     /* Deep water is more opaque than shallow: you can read the bottom of a
      * puddle and not the bottom of a lagoon. */
     "  o_color = vec4(lit, mix(t.a * a, 1.0, 0.7 * deep));\n"
@@ -1623,10 +1628,11 @@ static double cf_brightness(double p) { double h = floor(p / 2.0); return (p - 2
  * A layer of 1000 or more is Texture.selflit_bias: the block lights its own
  * faces with its own colour, and the bias is how that one bit reaches here
  * without a second array through the FFI. Strip it and set effect 12. */
-static void cf_vert(float *o, double x, double y, double z, double u, double v, double layer, double shade, double face) {
+static void cf_vert(float *o, double x, double y, double z, double u, double v, double layer, double shade, double face, int64_t col) {
     double blk = floor(shade * 0.5);
-    double fx = 255.0;
-    if (layer >= 1000.0) { layer -= 1000.0; fx = 12.0 * 256.0 + 255.0; }
+    /* the block light's colour index rides in bits 16 and up of fx (Vertex.light_colour_of) */
+    double fx = 255.0 + 65536.0 * (double)col;
+    if (layer >= 1000.0) { layer -= 1000.0; fx = 12.0 * 256.0 + 255.0 + 65536.0 * (double)col; }
     o[0] = (float)x; o[1] = (float)y; o[2] = (float)z; o[3] = (float)u; o[4] = (float)v;
     o[5] = (float)layer; o[6] = (float)(shade - 2.0 * blk); o[7] = (float)face; o[8] = (float)fx;
     o[9] = (float)(blk / 255.0);
@@ -1695,6 +1701,7 @@ static void cf_quad_into(float *o, int64_t d, int64_t sy, int64_t a, int64_t u, 
     int64_t id = key % 256;
     int64_t c0 = (key / 256) % 1024, c1 = (key / 262144) % 1024, c2 = (key / 268435456) % 1024, c3 = (key / 274877906944LL) % 1024;
     int64_t sp = (key / 281474976710656LL) % 256;
+    int64_t col = (key / 72057594037927936LL) % 4;   /* the face's block-light colour, bits 56.. */
     double layer;
     if (id >= 26 && id <= 46 && sp > 0) {
         int64_t k = (id - 26) / 3;
@@ -1747,19 +1754,19 @@ static void cf_quad_into(float *o, int64_t d, int64_t sy, int64_t a, int64_t u, 
     double face = (double)d;
     int flip = cf_brightness(S[0]) + cf_brightness(S[2]) < cf_brightness(S[1]) + cf_brightness(S[3]);
     if (flip) {
-        cf_vert(o + 0,  X[1], Y[1], Z[1], uw,  0.0, layer, S[1], face);
-        cf_vert(o + 10,  X[2], Y[2], Z[2], uw,  vh,  layer, S[2], face);
-        cf_vert(o + 20, X[3], Y[3], Z[3], 0.0, vh,  layer, S[3], face);
-        cf_vert(o + 30, X[1], Y[1], Z[1], uw,  0.0, layer, S[1], face);
-        cf_vert(o + 40, X[3], Y[3], Z[3], 0.0, vh,  layer, S[3], face);
-        cf_vert(o + 50, X[0], Y[0], Z[0], 0.0, 0.0, layer, S[0], face);
+        cf_vert(o + 0,  X[1], Y[1], Z[1], uw,  0.0, layer, S[1], face, col);
+        cf_vert(o + 10,  X[2], Y[2], Z[2], uw,  vh,  layer, S[2], face, col);
+        cf_vert(o + 20, X[3], Y[3], Z[3], 0.0, vh,  layer, S[3], face, col);
+        cf_vert(o + 30, X[1], Y[1], Z[1], uw,  0.0, layer, S[1], face, col);
+        cf_vert(o + 40, X[3], Y[3], Z[3], 0.0, vh,  layer, S[3], face, col);
+        cf_vert(o + 50, X[0], Y[0], Z[0], 0.0, 0.0, layer, S[0], face, col);
     } else {
-        cf_vert(o + 0,  X[0], Y[0], Z[0], 0.0, 0.0, layer, S[0], face);
-        cf_vert(o + 10,  X[1], Y[1], Z[1], uw,  0.0, layer, S[1], face);
-        cf_vert(o + 20, X[2], Y[2], Z[2], uw,  vh,  layer, S[2], face);
-        cf_vert(o + 30, X[0], Y[0], Z[0], 0.0, 0.0, layer, S[0], face);
-        cf_vert(o + 40, X[2], Y[2], Z[2], uw,  vh,  layer, S[2], face);
-        cf_vert(o + 50, X[3], Y[3], Z[3], 0.0, vh,  layer, S[3], face);
+        cf_vert(o + 0,  X[0], Y[0], Z[0], 0.0, 0.0, layer, S[0], face, col);
+        cf_vert(o + 10,  X[1], Y[1], Z[1], uw,  0.0, layer, S[1], face, col);
+        cf_vert(o + 20, X[2], Y[2], Z[2], uw,  vh,  layer, S[2], face, col);
+        cf_vert(o + 30, X[0], Y[0], Z[0], 0.0, 0.0, layer, S[0], face, col);
+        cf_vert(o + 40, X[2], Y[2], Z[2], uw,  vh,  layer, S[2], face, col);
+        cf_vert(o + 50, X[3], Y[3], Z[3], 0.0, vh,  layer, S[3], face, col);
     }
 }
 

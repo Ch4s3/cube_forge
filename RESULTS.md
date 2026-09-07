@@ -3377,3 +3377,39 @@ change the slice showed plainly. The world hash at that spawn responds to
 `CF_POI`, so the beams were there; at floor level looking down, a chamber whose
 ceiling is white shafts looks the same whether the shafts are a slab or six.
 The camera was the wrong instrument; the slice was the right one.
+
+## Coloured block light, in the nibble the byte had spare (2026-09-07)
+
+Every emitter lit the world the same warm orange, so a near-white selenite
+beam cast an orange glow on the rock round it, and the self-lit effect (which
+fixes an emitter's own faces) could not fix what it cast. The design note said
+three fields -- 12 MB instead of 4, three sweeps, a wider vertex. It was not
+needed. A block-light byte holds a level of 0..15 in its low nibble and nothing
+in its high one, so the high nibble now carries the emitter's **colour index**,
+swept along with the level: `give1`, `give_level`, `at_level`, `level_go`, the
+gather and the two write sites (`list_go`, `full_row_ip`) compare on the low
+nibble and carry `16 * colour` of the source into every neighbour they light.
+Seeding writes `pack_bl(emission, emission_colour)`. Skylight's colour nibble is
+always zero, so every skylight byte is what it was, bit for bit -- and so is
+every block-light byte in a world without a cold emitter: seed 7's pinned
+hashes did not move.
+
+From the field to the pixel: `Light.get` strips the nibble, so every caller that
+wanted a level still gets one; `Light.colour` reads it. `key_for` reads the
+colour at the voxel just outside a face and puts it in **bits 56 and 57** of the
+greedy key, above the species, so faces lit by different emitters do not merge;
+`cf_quad_into` decodes it and `cf_vert` writes it into bits 16 and up of the fx
+word (`Vertex.light_colour_of`); the shader picks `GLOW_COLD` -- (0.82, 0.94,
+1.00) -- for colour 1 and the old warm `GLOW` otherwise. The effect id is eight
+bits now, not sixteen: the one test that pinned the sixteen-bit ceiling was
+pinning an accident of the old layout, and now pins the eight-bit one and that
+the colour above it does not leak.
+
+The one behaviour deliberately left: two emitters of different colours within
+reach of one voxel do not blend. The voxel takes the colour of whichever gave
+it its level -- a hard seam, not a gradient. No world has both kinds in one
+cavern today; when one does, the seam is a real limit of one index against
+three channels, and it will show.
+
+534 tests. Worst frame 7.90 ms against 16; the drained mesh equals the rebuild.
+`docs/poi-crystal-cavern.png` is the seed 18 chamber under its own light.

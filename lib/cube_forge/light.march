@@ -37,12 +37,46 @@ mod CubeForge.Light do
 
   doc "A dark light field."
   fn new() : NativeU8Arr do NativeArray.make_u8(4194304, 0) end
+  -- ── A byte of light: level in the low nibble, COLOUR in the high ─────────
+  -- Block light is one channel, and every emitter lit the world the same warm
+  -- orange: a near-white crystal cast an orange glow on the rock round it. The
+  -- fix that fits is not three fields (12 MB and three sweeps) but a nibble the
+  -- byte already had to spare: level 0..15 below, the emitter's colour index
+  -- above, carried along by the sweep with the level. Skylight's colour nibble
+  -- is always 0, so every skylight byte is what it was, bit for bit.
+  doc "Colour 0: the warm glow every emitter had until now (fungus, glow cap)."
+  fn colour_warm() : Int do 0 end
+  doc "Colour 1: cold and near-white -- selenite."
+  fn colour_cold() : Int do 1 end
   @[no_alloc]
-  -- Light at a world coordinate; 0 outside the world.
+  fn bl_level(v : Int) : Int do v % 16 end
+  @[no_alloc]
+  fn bl_colour(v : Int) : Int do v / 16 end
+  @[no_alloc]
+  fn pack_bl(level : Int, colour : Int) : Int do level + 16 * colour end
+  @[no_alloc]
+  -- The colour an emitting block casts.
+  fn emission_colour(id : Int) : Int do
+    if id == C.crystal() || id == C.crystal_beam() do colour_cold() else colour_warm() end
+  end
+
+  @[no_alloc]
+  -- Light LEVEL at a world coordinate; 0 outside the world. The colour nibble is
+  -- stripped, so every caller that wants a level still gets one.
   fn get(la : NativeU8Arr, x : Int, y : Int, z : Int) : Int do
     if x < 0 || x >= 128 || y < 0 || y >= 256 || z < 0 || z >= 128 do 0
-    else NativeArray.get_u8(la, index(x, y, z)) end
+    else bl_level(NativeArray.get_u8(la, index(x, y, z))) end
   end
+  doc "Light COLOUR at a world coordinate (see colour_warm, colour_cold); warm outside the world."
+  @[no_alloc]
+  fn colour(la : NativeU8Arr, x : Int, y : Int, z : Int) : Int do
+    if x < 0 || x >= 128 || y < 0 || y >= 256 || z < 0 || z >= 128 do 0
+    else bl_colour(NativeArray.get_u8(la, index(x, y, z))) end
+  end
+  @[no_alloc]
+  -- The colour bits of the byte at flat index [i], ready to add to a level. A
+  -- leaf read, so the caller that writes the array does not hold it (G67).
+  pfn col16(la : NativeU8Arr, i : Int) : Int do 16 * (NativeArray.get_u8(la, i) / 16) end
   @[no_alloc]
   -- Light absorbed per step by a voxel of block [id]: 0 air, 2 water, 15 (total) otherwise.
   fn opacity(id : Int) : Int do
@@ -160,32 +194,33 @@ mod CubeForge.Light do
   @[no_alloc]
   -- Give light to the single neighbour (x, y, z) from a voxel at level [lv].
   -- Reads [src], writes [dst].
-  pfn give1(src : NativeU8Arr, dst : NativeU8Arr, w : CubeForge.World.World, x : Int, y : Int, z : Int, lv : Int) : NativeU8Arr do
+  pfn give1(src : NativeU8Arr, dst : NativeU8Arr, w : CubeForge.World.World, x : Int, y : Int, z : Int, lv : Int, c16 : Int) : NativeU8Arr do
     if x < 0 || x >= 128 || y < 0 || y >= 256 || z < 0 || z >= 128 do dst
     -- The best this neighbour could receive is lv - 1, so when it already has
     -- that much there is nothing to do — and no reason to pay for the chunk
     -- lookup below. Open sky is almost entirely this case.
-    else if lv - 1 <= NativeArray.get_u8(src, index(x, y, z)) do dst
+    else if lv - 1 <= bl_level(NativeArray.get_u8(src, index(x, y, z))) do dst
     else
       let id = CubeForge.World.block_at(w, x, y, z)
       if is_opaque(id) do dst
       else
         let nl = lv - 1 - opacity(id)
         if nl <= 0 do dst
-        else if nl <= NativeArray.get_u8(src, index(x, y, z)) do dst
-        else NativeArray.set_u8(dst, index(x, y, z), nl) end end
+        else if nl <= bl_level(NativeArray.get_u8(src, index(x, y, z))) do dst
+        else NativeArray.set_u8(dst, index(x, y, z), nl + c16) end end
       end
     end end
   end
 
   @[no_alloc]
-  pfn give6(src : NativeU8Arr, dst : NativeU8Arr, w : CubeForge.World.World, x : Int, y : Int, z : Int, lv : Int) : NativeU8Arr do
-    let d1 = give1(src, dst, w, x + 1, y, z, lv)
-    let d2 = give1(src, d1, w, x - 1, y, z, lv)
-    let d3 = give1(src, d2, w, x, y + 1, z, lv)
-    let d4 = give1(src, d3, w, x, y - 1, z, lv)
-    let d5 = give1(src, d4, w, x, y, z + 1, lv)
-    give1(src, d5, w, x, y, z - 1, lv)
+  -- [c16] is the source's colour bits, carried to every neighbour it lights.
+  pfn give6(src : NativeU8Arr, dst : NativeU8Arr, w : CubeForge.World.World, x : Int, y : Int, z : Int, lv : Int, c16 : Int) : NativeU8Arr do
+    let d1 = give1(src, dst, w, x + 1, y, z, lv, c16)
+    let d2 = give1(src, d1, w, x - 1, y, z, lv, c16)
+    let d3 = give1(src, d2, w, x, y + 1, z, lv, c16)
+    let d4 = give1(src, d3, w, x, y - 1, z, lv, c16)
+    let d5 = give1(src, d4, w, x, y, z + 1, lv, c16)
+    give1(src, d5, w, x, y, z - 1, lv, c16)
   end
 
   -- Highest y holding a non-air voxel. Everything above it sees unobstructed sky,
@@ -221,8 +256,8 @@ mod CubeForge.Light do
   -- One level of the sweep: every voxel at exactly [lv] gives to its neighbours.
   pfn level_go(src : NativeU8Arr, dst : NativeU8Arr, w : CubeForge.World.World, lv : Int, i : Int, stop : Int) : NativeU8Arr do
     if i >= stop do dst
-    else if NativeArray.get_u8(src, i) != lv do level_go(src, dst, w, lv, i + 1, stop)
-    else level_go(src, give6(src, dst, w, i % size_x(), i / layer(), (i / size_x()) % size_z(), lv), w, lv, i + 1, stop) end end
+    else if bl_level(NativeArray.get_u8(src, i)) != lv do level_go(src, dst, w, lv, i + 1, stop)
+    else level_go(src, give6(src, dst, w, i % size_x(), i / layer(), (i / size_x()) % size_z(), lv, col16(src, i)), w, lv, i + 1, stop) end end
   end
 
   -- Lists levels [lv] down to 2. Each level writes into a FRESH buffer rather
@@ -261,9 +296,10 @@ mod CubeForge.Light do
   pfn seed_emit_chunk_go(lb : NativeU8Arr, c : CubeForge.Chunk.Chunk, cx : Int, cz : Int, i : Int, stop : Int) : NativeU8Arr do
     if i >= stop do lb
     else
-      let e = emission(C.get_idx(c, i))
+      let id = C.get_idx(c, i)
+      let e = emission(id)
       if e <= 0 do seed_emit_chunk_go(lb, c, cx, cz, i + 1, stop)
-      else seed_emit_chunk_go(NativeArray.set_u8(lb, index(16 * cx + i % 16, i / 256, 16 * cz + (i / 16) % 16), e), c, cx, cz, i + 1, stop) end
+      else seed_emit_chunk_go(NativeArray.set_u8(lb, index(16 * cx + i % 16, i / 256, 16 * cz + (i / 16) % 16), pack_bl(e, emission_colour(id))), c, cx, cz, i + 1, stop) end
     end
   end
 
@@ -418,7 +454,7 @@ mod CubeForge.Light do
   pfn gather_row(la : NativeU8Arr, wl : NativeIntArr, x : Int, x1 : Int, y : Int, z : Int) : NativeIntArr do
     if x > x1 do wl
     else
-      let v = NativeArray.get_u8(la, index(x, y, z))
+      let v = bl_level(NativeArray.get_u8(la, index(x, y, z)))
       gather_row(la, if v >= 2 do wl_push(wl, v, index(x, y, z)) else wl end, x + 1, x1, y, z)
     end
   end
@@ -451,7 +487,7 @@ mod CubeForge.Light do
   pfn give_level(la : NativeU8Arr, occ : NativeU8Arr, x : Int, y : Int, z : Int, lv : Int) : Int do
     if x < 0 || x >= 128 || y < 0 || y >= 256 || z < 0 || z >= 128 do 0
     else
-      let cur = NativeArray.get_u8(la, index(x, y, z))
+      let cur = bl_level(NativeArray.get_u8(la, index(x, y, z)))
       if lv - 1 <= cur do 0
       else
         let v = NativeArray.get_u8(occ, occ_index(x, y, z))
@@ -464,7 +500,7 @@ mod CubeForge.Light do
     end
   end
   @[no_alloc]
-  pfn at_level(la : NativeU8Arr, i : Int, lv : Int) : Bool do NativeArray.get_u8(la, i) == lv end
+  pfn at_level(la : NativeU8Arr, i : Int, lv : Int) : Bool do bl_level(NativeArray.get_u8(la, i)) == lv end
 
   -- The pair the walk returns -- ONCE, at the very end. Returning it per level
   -- cost 1.2 s a relight: while the cell holds both arrays their refcounts are
@@ -492,8 +528,9 @@ mod CubeForge.Light do
         let x = i % 128
         let y = i / 16384
         let z = (i / 128) % 128
+        let c = col16(la, i)
         let n1 = give_level(la, occ, x + 1, y, z, lv)
-        let a1 = if n1 > 0 do NativeArray.set_u8(la, flat(x + 1, y, z), n1) else la end
+        let a1 = if n1 > 0 do NativeArray.set_u8(la, flat(x + 1, y, z), n1 + c) else la end
         let l1 = if n1 >= 2 do wl_push(wl, n1, flat(x + 1, y, z)) else wl end
         let n2 = give_level(a1, occ, x - 1, y, z, lv)
         let a2 = if n2 > 0 do NativeArray.set_u8(a1, flat(x - 1, y, z), n2) else a1 end
@@ -523,8 +560,9 @@ mod CubeForge.Light do
     if x > x1 do la
     else if !at_level(la, flat(x, y, z), lv) do full_row_ip(la, occ, lv, x + 1, x1, y, z)
     else
+      let c = col16(la, flat(x, y, z))
       let n1 = give_level(la, occ, x + 1, y, z, lv)
-      let a1 = if n1 > 0 do NativeArray.set_u8(la, flat(x + 1, y, z), n1) else la end
+      let a1 = if n1 > 0 do NativeArray.set_u8(la, flat(x + 1, y, z), n1 + c) else la end
       let n2 = give_level(a1, occ, x - 1, y, z, lv)
       let a2 = if n2 > 0 do NativeArray.set_u8(a1, flat(x - 1, y, z), n2) else a1 end
       let n3 = give_level(a2, occ, x, y + 1, z, lv)
@@ -741,9 +779,10 @@ mod CubeForge.Light do
   pfn seed_emit_col_go(lb : NativeU8Arr, c : CubeForge.Chunk.Chunk, lx : Int, lz : Int, x : Int, z : Int, y : Int, y1 : Int) : NativeU8Arr do
     if y > y1 do lb
     else
-      let e = emission(C.get_or_air(c, lx, y, lz))
+      let id = C.get_or_air(c, lx, y, lz)
+      let e = emission(id)
       if e <= 0 do seed_emit_col_go(lb, c, lx, lz, x, z, y + 1, y1)
-      else seed_emit_col_go(NativeArray.set_u8(lb, index(x, y, z), e), c, lx, lz, x, z, y + 1, y1) end
+      else seed_emit_col_go(NativeArray.set_u8(lb, index(x, y, z), pack_bl(e, emission_colour(id))), c, lx, lz, x, z, y + 1, y1) end
     end
   end
 

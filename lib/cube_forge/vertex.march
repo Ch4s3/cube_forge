@@ -63,7 +63,11 @@ mod CubeForge.Vertex do
   end
 
   doc "The effect id in a packed fx float."
-  fn effect_of(p : Float) : Int do float_to_int(p +. 0.5) / 256 end
+  fn effect_of(p : Float) : Int do (float_to_int(p +. 0.5) / 256) % 256 end
+  doc "The block-light colour index a face's fx carries in bits 16 and up (Light.colour_warm / colour_cold): what tints the glow the shader gives it."
+  fn light_colour_of(p : Float) : Int do float_to_int(p +. 0.5) / 65536 end
+  doc "The fx word with a light colour set: colour * 65536 + the rest."
+  fn with_light_colour(p : Float, colour : Int) : Float do int_to_float(float_to_int(p +. 0.5) % 65536 + 65536 * colour) end
 
   doc "The alpha 0..1 in a packed fx float."
   fn alpha_of(p : Float) : Float do
