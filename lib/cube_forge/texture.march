@@ -144,6 +144,18 @@ mod CubeForge.Texture do
     else palette_go(put_rgba(a, 91 * 1024 + i * 4, CubeForge.Model.colour_r(i), CubeForge.Model.colour_g(i), CubeForge.Model.colour_b(i), 255), i + 1) end
   end
 
+  -- The animals' share of the same layer, written over the top: three texels a
+  -- species from its one base colour. They live here rather than in Model's
+  -- table because Fauna already depends on Model and the arrow cannot go both
+  -- ways -- and because sixteen species is a table, not forty-eight literals.
+  pfn fauna_palette_go(a : NativeU8Arr, i : Int) : NativeU8Arr do
+    if i >= CubeForge.Fauna.palette_span() do a
+    else
+      let k = CubeForge.Fauna.palette_base() + i
+      fauna_palette_go(put_rgba(a, 91 * 1024 + k * 4, CubeForge.Fauna.palette_r(i), CubeForge.Fauna.palette_g(i), CubeForge.Fauna.palette_b(i), 255), i + 1)
+    end
+  end
+
   -- Palm fronds: the leaf cutout in a yellower green, with a lighter midrib on
   -- the two middle rows so a frond reads as a blade rather than a clump.
   pfn fronds_go(a : NativeU8Arr, layer : Int, i : Int) : NativeU8Arr do
@@ -181,7 +193,10 @@ mod CubeForge.Texture do
   (small, stem, cap) x six species, 87 palm bark, 88 palm frond, 89 sandstone, 90 shale, 91 the model palette, 92 crystal, 93 crystal beam
   (texel k is Model.colour k).
   """
-  fn checkerboard() : NativeU8Arr do
+  fn checkerboard() : NativeU8Arr do checkerboard_tinted(myc_tint()) end
+
+  doc "The texture atlas. [tint] scales how strongly mycelium shows on a surface (see myc_tint)."
+  fn checkerboard_tinted(tint : Int) : NativeU8Arr do
     let a0 = checker_go(NativeArray.make_u8(94 * 16 * 16 * 4, 0), 0)
     let a1 = water_go(a0, 0)
     let a2 = speckle_go(a1, 2, 0, 134, 96, 67)
@@ -207,8 +222,8 @@ mod CubeForge.Texture do
     let a22 = fronds_go(a21, 88, 0)
     let a23 = bedded_go(a22, 89, 0, 206, 178, 128, 3)
     let a24 = bedded_go(a23, 90, 0, 96, 104, 118, 2)
-    let a25 = beam_go(crystal_go(palette_go(a24, 0), 0), 0)
-    fruit_all_go(spore_all_go(myc_all_go(a25, 0), 1), 0)
+    let a25 = beam_go(crystal_go(fauna_palette_go(palette_go(a24, 0), 0), 0), 0)
+    fruit_all_go(spore_all_go(myc_all_go(a25, tint, 0), 1), 0)
   end
 
   -- Layer 15: the spring ITEM's icon -- water blue with a pale ring, so a spring in
@@ -297,6 +312,8 @@ mod CubeForge.Texture do
   -- Layer 21 + 6 * base_index + (species - 1). Each layer REPRODUCES its base
   -- from the base's formula rather than copying the base layer: reading the
   -- array while writing it would copy all 60 KB per texel (GAPS G21).
+  doc "Mycelium layers in the atlas: seven bases x six species, contiguous from myc_layer(0, 1)."
+  fn myc_layer_count() : Int do 42 end
   doc "Texture layer for mycelium over base index [k] (0..6) in species [sp] (1..6)."
   fn myc_layer(k : Int, sp : Int) : Float do int_to_float(21 + 6 * k + (sp - 1)) end
 
@@ -306,7 +323,18 @@ mod CubeForge.Texture do
   pfn myc_base_g(k : Int) : Int do if k == 1 do 96 else if k == 2 do 203 else if k == 3 do 246 else if k == 4 do 110 else if k == 5 do 142 else 128 end end end end end end
   pfn myc_base_b(k : Int) : Int do if k == 1 do 67 else if k == 2 do 146 else if k == 3 do 250 else if k == 4 do 106 else if k == 5 do 124 else 132 end end end end end end
 
-  pfn myc_go(a : NativeU8Arr, layer : Int, k : Int, sp : Int, i : Int) : NativeU8Arr do
+  doc """
+  How strongly the network shows on a surface, in percent. The threads carry
+  the species colour and the rest of the texel is pulled a little toward it;
+  [tint] scales both, and how many texels are threads at all: at 0 a mycelium
+  layer is exactly its base, at 100 it is a third threads at two-thirds
+  species colour, which was the original strength and read as a change of
+  biome rather than a skin over one. 60 keeps the ground its own colour with
+  a warm cast. CF_MYC_TINT overrides it.
+  """
+  fn myc_tint() : Int do 60 end
+
+  pfn myc_go(a : NativeU8Arr, layer : Int, k : Int, sp : Int, tint : Int, i : Int) : NativeU8Arr do
     if i >= 256 do a
     else
       let x = i % 16
@@ -317,24 +345,30 @@ mod CubeForge.Texture do
       let bg = if k == 0 do (if light do 190 else 140 end) else myc_base_g(k) + d end
       let bb = if k == 0 do (if light do 80 else 60 end) else myc_base_b(k) + d end
       -- the threads: a sparse branching lattice, about a third of the texels
+      -- at full strength, fewer as the tint comes down
       let t = (x * 3 + y * 5 + (x * y) % 7 + sp) % 9
-      let thread = t < 3
+      let thread = t < (3 * tint + 50) / 100
       let sr = CubeForge.Species.colour_r(sp)
       let sg = CubeForge.Species.colour_g(sp)
       let sb = CubeForge.Species.colour_b(sp)
-      -- a thread texel is two-thirds species colour; the rest of the layer is
-      -- the base pulled a sixth of the way toward it, so the tint reads at a distance
-      let r = if thread do (br + 2 * sr) / 3 else (5 * br + sr) / 6 end
-      let g = if thread do (bg + 2 * sg) / 3 else (5 * bg + sg) / 6 end
-      let b = if thread do (bb + 2 * sb) / 3 else (5 * bb + sb) / 6 end
-      myc_go(put_rgba(a, layer * 1024 + i * 4, r, g, b, 255), layer, k, sp, i + 1)
+      -- At full strength a thread texel is two-thirds species colour and the
+      -- rest of the layer is the base pulled a sixth of the way toward it, so
+      -- the tint reads at a distance. Both weights are twelfths scaled by
+      -- [tint], so 100 is exactly those fractions.
+      let tw = 8 * tint / 100
+      let bw = 2 * tint / 100
+      let w = if thread do tw else bw end
+      let r = (br * (12 - w) + sr * w) / 12
+      let g = (bg * (12 - w) + sg * w) / 12
+      let b = (bb * (12 - w) + sb * w) / 12
+      myc_go(put_rgba(a, layer * 1024 + i * 4, r, g, b, 255), layer, k, sp, tint, i + 1)
     end
   end
 
   -- All 42 layers: j runs over base index x species.
-  pfn myc_all_go(a : NativeU8Arr, j : Int) : NativeU8Arr do
+  pfn myc_all_go(a : NativeU8Arr, tint : Int, j : Int) : NativeU8Arr do
     if j >= 42 do a
-    else myc_all_go(myc_go(a, 21 + j, j / 6, j % 6 + 1, 0), j + 1) end
+    else myc_all_go(myc_go(a, 21 + j, j / 6, j % 6 + 1, tint, 0), tint, j + 1) end
   end
 
 

@@ -1,0 +1,287 @@
+-- Fauna: the bodies mesh, and the transform stamp does what its name says.
+--
+-- The stamp is the piece everything else rests on, and it is written in C, so
+-- it is checked here against arithmetic done in March rather than trusted.
+mod CubeForge.Test.Fauna do
+
+  import Test
+  alias CubeForge.Fauna as F
+  alias CubeForge.F32Buf as B
+  alias CubeForge.Vertex as Vx
+  alias CubeForge.Model as Mdl
+
+  -- Float [j] of vertex [v] of a buffer.
+  pfn at(b : CubeForge.F32Buf.F32Buf, v : Int, j : Int) : Float do
+    NativeArray.get_f32(B.storage(b), v * Vx.floats() + j)
+  end
+  pfn close(a : Float, b : Float) : Bool do Math.abs(a -. b) < 0.0005 end
+
+  pfn nonempty_go(s : CubeForge.Fauna.Poses, k : Int) : Bool do
+    if k >= F.template_count() do true
+    else if F.floats(s, k) <= 0 do false
+    else nonempty_go(s, k + 1) end end
+  end
+
+  describe "Fauna bodies" do
+    test "every pose of every species meshes to something, and stays under the face cap" do
+      let s = F.build()
+      Test.assert_eq_int(F.template_count(), 72, "eighteen species, four poses each")
+      Test.assert_true(nonempty_go(s, 0), "no empty body")
+      let wk = worst_faces(s, 0, 0, 0)
+      Test.assert_true(F.faces(s, wk) <= F.face_cap(),
+        "the largest body is species " ++ int_to_string(wk / F.poses() + 1) ++ " pose " ++ int_to_string(wk % F.poses())
+          ++ " at " ++ int_to_string(F.faces(s, wk)) ++ " quads, against a cap of " ++ int_to_string(F.face_cap()))
+    end
+
+    test "a roosting bird has its wings in, and a fish at rest is a fish" do
+      let s = F.build()
+      let level = F.template_of(F.sp_ridgehawk(), 1)
+      let folded = F.template_of(F.sp_ridgehawk(), F.pose_roost())
+      Test.assert_true(F.blob_hash(s, level) != F.blob_hash(s, folded), "folded is not level")
+      -- folded wings hug the body: the roost template's z extent is the body's,
+      -- where the level one reaches a wingspan out
+      Test.assert_true(F.extent_z(s, folded) < F.extent_z(s, level) *. 0.6, "and a folded wing reaches nowhere near as far out as a spread one")
+      Test.assert_eq_int(F.blob_hash(s, F.template_of(F.sp_sunfin(), F.pose_roost())), F.blob_hash(s, F.template_of(F.sp_sunfin(), 0)), "a fish's fourth pose is its first")
+    end
+
+    test "the poses of one species differ" do
+      let s = F.build()
+      -- wings down and wings up cannot greedy-mesh to the same float count and
+      -- the same first vertex; if they do, the pose argument is being ignored.
+      let down = F.template_of(F.sp_grasspipit(), 0)
+      let up = F.template_of(F.sp_grasspipit(), 2)
+      Test.assert_true(F.offset(s, down) != F.offset(s, up), "different places in the blob")
+      -- Compare the whole template, not its length and first vertex: two
+      -- mirror-image bends greedy-mesh to the same number of quads and put
+      -- their first face in the same place, so that proxy said "identical" for
+      -- wings that plainly were not.
+      Test.assert_true(F.blob_hash(s, down) != F.blob_hash(s, up), "the wings are not in the same place")
+    end
+  end
+
+
+  -- ── Connectivity ─────────────────────────────────────────────────────────
+  -- A body must be ONE piece. This is the invariant the body-plan generators
+  -- exist to guarantee, and it is the bug that motivated them: the first
+  -- hand-built bird had its wings two cells clear of its flank, touching
+  -- nothing, and flew apart.
+  --
+  -- Note what this is not. Checking that every filled cell touches another
+  -- filled cell would have PASSED that bird: the wing was a solid slab, so its
+  -- own cells touched each other perfectly well. Only reaching every cell from
+  -- one seed catches a part that is whole and in the wrong place.
+  -- A worklist flood, not repeated sweeps. Sweeping the whole grid until the
+  -- marked count stops changing is O(cells x rounds), which was fine at 16 cells
+  -- a side and is 260,000 cells x 54 templates at 64. This visits each cell
+  -- once: pop, mark, push the six neighbours.
+  pfn vol(n : Int) : Int do n * n * n end
+
+  pfn push_if(g : NativeU8Arr, m : NativeU8Arr, n : Int, st : List(Int), x : Int, y : Int, z : Int) : List(Int) do
+    if x < 0 do st
+    else if y < 0 do st
+    else if z < 0 do st
+    else if x >= n do st
+    else if y >= n do st
+    else if z >= n do st
+    else
+      let i = Mdl.idx_n(n, x, y, z)
+      if NativeArray.get_u8(g, i) == 0 do st
+      else if NativeArray.get_u8(m, i) != 0 do st
+      else Cons(i, st) end end
+    end end end end end end
+  end
+
+  type Flood = Flood(NativeU8Arr, Int)
+  pfn flood_go(g : NativeU8Arr, m : NativeU8Arr, n : Int, st : List(Int), seen : Int) : Flood do
+    match st do
+      Nil -> Flood(m, seen)
+      Cons(i, rest) ->
+        if NativeArray.get_u8(m, i) != 0 do flood_go(g, m, n, rest, seen)
+        else
+          let x = i % n
+          let z = (i / n) % n
+          let y = i / (n * n)
+          let m1 = NativeArray.set_u8(m, i, 1)
+          let s1 = push_if(g, m1, n, rest, x + 1, y, z)
+          let s2 = push_if(g, m1, n, s1, x - 1, y, z)
+          let s3 = push_if(g, m1, n, s2, x, y + 1, z)
+          let s4 = push_if(g, m1, n, s3, x, y - 1, z)
+          let s5 = push_if(g, m1, n, s4, x, y, z + 1)
+          flood_go(g, m1, n, push_if(g, m1, n, s5, x, y, z - 1), seen + 1)
+        end
+    end
+  end
+
+  pfn count_filled(g : NativeU8Arr, n : Int, i : Int, acc : Int) : Int do
+    if i >= vol(n) do acc else count_filled(g, n, i + 1, if NativeArray.get_u8(g, i) != 0 do acc + 1 else acc end) end
+  end
+  pfn first_filled(g : NativeU8Arr, n : Int, i : Int) : Int do
+    if i >= vol(n) do 0 - 1
+    else if NativeArray.get_u8(g, i) != 0 do i
+    else first_filled(g, n, i + 1) end end
+  end
+  -- The first cell the flood did NOT reach: which part came off, in cells.
+  -- Bisecting for it by hand cost three ninety-second runs.
+  pfn first_stray(g : NativeU8Arr, m : NativeU8Arr, n : Int, i : Int) : Int do
+    if i >= vol(n) do 0 - 1
+    else if NativeArray.get_u8(g, i) == 0 do first_stray(g, m, n, i + 1)
+    else if NativeArray.get_u8(m, i) != 0 do first_stray(g, m, n, i + 1)
+    else i end end end
+  end
+  pfn marks_of(g : NativeU8Arr, n : Int) : NativeU8Arr do
+    let seed = first_filled(g, n, 0)
+    if seed < 0 do NativeArray.make_u8(vol(n), 0)
+    else match flood_go(g, NativeArray.make_u8(vol(n), 0), n, Cons(seed, Nil), 0) do Flood(m, _) -> m end end
+  end
+  pfn one_piece_n(g : NativeU8Arr, n : Int) : Bool do
+    let seed = first_filled(g, n, 0)
+    if seed < 0 do false
+    else
+      match flood_go(g, NativeArray.make_u8(vol(n), 0), n, Cons(seed, Nil), 0) do
+        Flood(_, seen) -> seen == count_filled(g, n, 0, 0)
+      end
+    end
+  end
+  -- Reports WHICH template broke, not merely that one did. Finding it by
+  -- bisection cost two ninety-second runs; the index costs a string.
+  pfn first_broken(k : Int) : Int do
+    if k >= F.template_count() do 0 - 1
+    else if !one_piece_n(F.shape(k), F.grid_of_template(k)) do k
+    else first_broken(k + 1) end end
+  end
+  -- Where the stray cell is, in the grid the template was built on.
+  pfn stray_where(k : Int) : String do
+    if k < 0 do ""
+    else
+      let n = F.grid_of_template(k)
+      let g = F.shape(k)
+      let i = first_stray(g, marks_of(g, n), n, 0)
+      if i < 0 do ""
+      else
+        -- how big the loose piece is: a wingtip and a whole wing want different
+        -- fixes, and the count says which without another run
+        let piece = match flood_go(g, NativeArray.make_u8(vol(n), 0), n, Cons(i, Nil), 0) do Flood(_, c) -> c end
+        " stray piece of " ++ int_to_string(piece) ++ " cells (body has " ++ int_to_string(count_filled(g, n, 0, 0))
+          ++ "), first at (" ++ int_to_string(i % n) ++ ", " ++ int_to_string(i / (n * n)) ++ ", " ++ int_to_string((i / n) % n)
+          ++ ") of " ++ int_to_string(n) ++ ", colour " ++ int_to_string(NativeArray.get_u8(g, i))
+      end
+    end
+  end
+  pfn worst_faces(s : CubeForge.Fauna.Poses, k : Int, best : Int, bestk : Int) : Int do
+    if k >= F.template_count() do bestk
+    else
+      let f = F.faces(s, k)
+      worst_faces(s, k + 1, if f > best do f else best end, if f > best do k else bestk end)
+    end
+  end
+
+  describe "body plans" do
+    test "every body is a single connected piece" do
+      let bad = first_broken(0)
+      Test.assert_eq_int(bad, 0 - 1,
+        "species " ++ int_to_string(bad / F.poses() + 1) ++ " (" ++ F.name(bad / F.poses() + 1)
+          ++ ") pose " ++ int_to_string(bad % F.poses()) ++ " has a part floating clear of the rest;" ++ stray_where(bad))
+    end
+
+    test "the flood fill can actually fail" do
+      -- A negative control. Without this, "every body is connected" might only
+      -- mean the checker says yes to everything.
+      let n = 64
+      let apart = Mdl.box_n(Mdl.box_n(Mdl.empty_n(n), n, 20, 20, 20, 24, 24, 24, 1), n, 0, 0, 0, 2, 2, 2, 1)
+      Test.assert_true(!one_piece_n(apart, n), "two separated blocks are not one piece")
+      Test.assert_true(one_piece_n(Mdl.box_n(Mdl.empty_n(n), n, 20, 20, 20, 24, 24, 24, 1), n), "one block is")
+    end
+  end
+
+  describe "the transform stamp" do
+    test "yaw 0 at scale 1 is the template, recentred on the given point" do
+      let s = F.build()
+      let k = F.template_of(F.sp_sunfin(), 0)
+      let n = F.floats(s, k)
+      -- The template's own coordinates are in [0, 1]; the stamp treats (0.5,
+      -- 0.5, 0.5) as the body centre, so placing the centre at (0.5, 0.5, 0.5)
+      -- with no rotation and no scale must reproduce them exactly.
+      let b = B.stamp_xf(B.new(4096), F.blob(s), F.offset(s, k), n, 0.5, 0.5, 0.5, 1.0, 1.0, 0.0, 1.0)
+      Test.assert_eq_int(B.len(b), n, "same float count")
+      Test.assert_true(close(at(b, 0, 0), NativeArray.get_f32(F.blob(s), F.offset(s, k) + 0)), "x survives")
+      Test.assert_true(close(at(b, 0, 1), NativeArray.get_f32(F.blob(s), F.offset(s, k) + 1)), "y survives")
+      Test.assert_true(close(at(b, 0, 2), NativeArray.get_f32(F.blob(s), F.offset(s, k) + 2)), "z survives")
+    end
+
+    test "a quarter turn sends +x to +z, in the geometry and in the face" do
+      let s = F.build()
+      let k = F.template_of(F.sp_sunfin(), 0)
+      let n = F.floats(s, k)
+      -- One sub-cube forward of centre (+x) must land one sub-cube toward +z.
+      let b = B.stamp_xf(B.new(4096), F.blob(s), F.offset(s, k), n, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0)
+      let src = F.blob(s)
+      let o = F.offset(s, k)
+      let px = NativeArray.get_f32(src, o + 0) -. 0.5
+      let pz = NativeArray.get_f32(src, o + 2) -. 0.5
+      Test.assert_true(close(at(b, 0, 0), 0.0 -. pz), "x' = -z")
+      Test.assert_true(close(at(b, 0, 2), px), "z' = x")
+      Test.assert_true(close(at(b, 0, 1), NativeArray.get_f32(src, o + 1) -. 0.5), "y is untouched by yaw")
+      -- The face index turns with the body: +x (2) becomes +z (4), and the
+      -- cycle is 2 -> 4 -> 3 -> 5. A face that did not move would light a
+      -- turned animal as though it still faced east.
+      let f0 = float_to_int(NativeArray.get_f32(src, o + 7) +. 0.5)
+      let f1 = float_to_int(at(b, 0, 7) +. 0.5)
+      let want = if f0 == 2 do 4 else if f0 == 4 do 3 else if f0 == 3 do 5 else if f0 == 5 do 2 else f0 end end end end
+      Test.assert_eq_int(f1, want, "the face turned with the body")
+    end
+
+    test "scale multiplies the offset from the centre, not the position" do
+      let s = F.build()
+      let k = F.template_of(F.sp_grasspipit(), 1)
+      let n = F.floats(s, k)
+      let b1 = B.stamp_xf(B.new(4096), F.blob(s), F.offset(s, k), n, 10.0, 5.0, 3.0, 1.0, 1.0, 0.0, 1.0)
+      let b2 = B.stamp_xf(B.new(4096), F.blob(s), F.offset(s, k), n, 10.0, 5.0, 3.0, 1.0, 1.0, 0.0, 2.0)
+      -- The centre is where it was asked for at either size; the vertex moves
+      -- twice as far from it.
+      let d1 = at(b1, 0, 0) -. 10.0
+      let d2 = at(b2, 0, 0) -. 10.0
+      Test.assert_true(close(d2, 2.0 *. d1), "twice the scale, twice the offset from the centre")
+    end
+
+    test "a body is drawn where it is put" do
+      let s = F.build()
+      let k = F.template_of(F.sp_sunfin(), 0)
+      let n = F.floats(s, k)
+      let b = B.stamp_xf(B.new(4096), F.blob(s), F.offset(s, k), n, 100.5, 64.25, 12.75, 1.0, 1.0, 0.0, 0.5)
+      -- every vertex within half a scale of the centre it was given
+      Test.assert_true(Math.abs(at(b, 0, 0) -. 100.5) <= 0.25001, "x near the centre")
+      Test.assert_true(Math.abs(at(b, 0, 1) -. 64.25) <= 0.25001, "y near the centre")
+      Test.assert_true(Math.abs(at(b, 0, 2) -. 12.75) <= 0.25001, "z near the centre")
+    end
+  end
+
+  describe "the demo flock" do
+    test "it builds the bodies it says it will, and clearing is not cumulative" do
+      let s = F.build()
+      let b1 = F.demo_build(B.new(8192), s, 64.0, 70.0, 64.0, 1.0, 0.0, 0.0)
+      -- Read everything wanted from b1 BEFORE handing it on: the buffer is
+      -- rewritten in place, so a live second reference makes it shared and the
+      -- shim refuses to write (GAPS G68, and cf_f32_stamp_xf's rc check).
+      let n1 = B.len(b1)
+      let v1 = F.vertex_count(b1)
+      let b2 = F.demo_build(b1, s, 64.0, 70.0, 64.0, 1.0, 0.0, 1.0)
+      Test.assert_true(n1 > 0, "something was built")
+      -- NOT an equality: the poses differ between the two moments and a raised
+      -- wing greedy-meshes to a different number of quads than a lowered one,
+      -- so the buffer legitimately changes size frame to frame. What must hold
+      -- is that clear() actually cleared -- a second build that appended would
+      -- be about double.
+      Test.assert_true(B.len(b2) < 2 * n1, "the second build replaced the first rather than appending to it")
+      Test.assert_eq_int(v1 % 6, 0, "whole quads")
+    end
+
+    test "the flock moves with the clock" do
+      let s = F.build()
+      let b1 = F.demo_build(B.new(8192), s, 64.0, 70.0, 64.0, 1.0, 0.0, 0.0)
+      let x0 = at(b1, 0, 0)
+      let b2 = F.demo_build(B.new(8192), s, 64.0, 70.0, 64.0, 1.0, 0.0, 2.0)
+      Test.assert_true(!close(x0, at(b2, 0, 0)), "two seconds later, somewhere else")
+    end
+  end
+
+end

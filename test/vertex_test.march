@@ -3,6 +3,7 @@ mod CubeForge.Test.Vertex do
 
   import Test
   alias CubeForge.Vertex as Vx
+  alias CubeForge.F32Buf as B
 
   -- Every alpha step, at three effect values, must survive a round trip.
   pfn alpha_roundtrip(e : Int, i : Int) : Int do
@@ -29,8 +30,8 @@ mod CubeForge.Test.Vertex do
       Test.assert_true(Math.abs(Vx.plain() -. 255.0) < 0.0001, "the literal every emit site pushes")
     end
 
-    test "the layout is nine floats" do
-      Test.assert_eq_int(Vx.floats(), 9, "pos3 + uv2 + layer + shade + face + fx")
+    test "the layout is ten floats" do
+      Test.assert_eq_int(Vx.floats(), 10, "pos3 + uv2 + layer + sky + face + fx + block light")
     end
   end
 
@@ -80,6 +81,37 @@ mod CubeForge.Test.Vertex do
     test "brightness is the sum, and sky clamps" do
       Test.assert_true(Math.abs(Vx.brightness_of(Vx.pack_shade(0.25, 0.5)) -. 0.75) < 0.01, "0.25 + 0.5")
       Test.assert_true(Math.abs(Vx.sky_of(Vx.pack_shade(1.7, 0.0)) -. 1.0) < 0.0001, "sky above 1 clamps")
+    end
+  end
+
+
+  -- The two light channels once shared one float, unpacked in the fragment
+  -- shader. A varying is interpolated, and this is what that did to a face
+  -- whose corners were both fully sunlit but differed in block light.
+  describe "Vertex.pack_shade is not interpolation-safe" do
+    test "decoding a blend is not the blend of the decodings" do
+      let a = Vx.pack_shade(1.0, 0.0)
+      let b = Vx.pack_shade(1.0, 0.4)
+      Test.assert_true(Math.abs(Vx.sky_of(a) -. 1.0) < 0.0001, "corner A is fully sunlit")
+      Test.assert_true(Math.abs(Vx.sky_of(b) -. 1.0) < 0.0001, "corner B is fully sunlit")
+      -- Both corners say 1.0, so every point between them should too. The
+      -- rasterizer interpolates the packed word, and three tenths of the way
+      -- across the decoded sky has fallen to a fifth: that trough, repeated,
+      -- is the black banding the separate slots removed.
+      Test.assert_true(Math.abs(Vx.sky_of(a +. 0.3 *. (b -. a)) -. 1.0) > 0.5, "three tenths across, the sky decodes to something else entirely")
+      -- which is why F32Buf.push_vertex splits it on the CPU into two slots
+      Test.assert_eq_int(Vx.floats(), 10, "and why the vertex carries the two separately")
+    end
+  end
+
+  describe "F32Buf.push_vertex" do
+    test "splits the packed shade into slot 6 (sky) and slot 9 (block light)" do
+      let b = B.push_vertex(B.new(16), 1.0, 2.0, 3.0, 0.0, 0.0, 4.0, Vx.pack_shade(1.0, 0.4), 2.0, Vx.plain())
+      Test.assert_eq_int(B.len(b), 10, "one vertex")
+      Test.assert_true(Math.abs(Test.assert_some(B.get(b, 6), "sky") -. 1.0) < 0.0001, "sky is its own slot, undisturbed")
+      Test.assert_true(Math.abs(Test.assert_some(B.get(b, 9), "blk") -. 0.4) < 0.005, "block light is its own slot")
+      Test.assert_true(Math.abs(Test.assert_some(B.get(b, 7), "face") -. 2.0) < 0.0001, "face still at 7")
+      Test.assert_true(Math.abs(Test.assert_some(B.get(b, 8), "fx") -. 255.0) < 0.0001, "fx still at 8")
     end
   end
 

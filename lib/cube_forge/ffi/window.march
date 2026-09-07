@@ -27,6 +27,7 @@ mod CubeForge.Ffi.Window do
     fn x_gfx_upload_part(slot: Int, offset: Int, arr: NativeF32Arr, nfloats: Int): Unit = "cf_gfx_upload_part"
     fn x_gfx_begin_frame(r: Float, g: Float, b: Float): Unit = "cf_gfx_begin_frame"
     fn x_gfx_set_weather(fog: Float, overcast: Float, bolt: Float): Unit = "cf_gfx_set_weather"
+    fn x_gfx_set_myc(first: Int, count: Int, rgb: NativeF32Arr, branch: Float, scale: Float, sharp: Float): Unit = "cf_gfx_set_myc"
     fn x_gfx_set_time(t: Float): Unit = "cf_gfx_set_time"
     fn x_spring_set(x: Int, y: Int, z: Int, flag: Int): Unit = "cf_spring_set"   -- not `on`: reserved (GAPS G65)
     fn x_spring_count(): Int = "cf_spring_count"
@@ -35,7 +36,7 @@ mod CubeForge.Ffi.Window do
     fn x_spray_frame(dt: Float, tick: Int): Int = "cf_spray_frame"
     fn x_gfx_draw_precip(slot: Int, nverts: Int): Unit = "cf_gfx_draw_precip"
     fn x_precip_init(cap: Int): Unit = "cf_precip_init"
-    fn x_biome_map_upload(biomes: NativeU8Arr, n: Int): Unit = "cf_biome_map_upload"
+    fn x_biome_map_upload(biomes: NativeU8Arr, active: NativeU8Arr, n: Int): Unit = "cf_biome_map_upload"
     fn x_myc_map_upload(species: NativeU8Arr, vigour: NativeU8Arr, n: Int): Unit = "cf_myc_map_upload"
     fn x_precip_frame(light: NativeU8Arr, live: Int, snow: Int, ex: Float, ey: Float, ez: Float, rx: Float, rz: Float, dt: Float, tick: Int): Unit = "cf_precip_frame"
     fn x_gfx_set_view_proj(m: NativeF32Arr): Unit = "cf_gfx_set_view_proj"
@@ -58,6 +59,7 @@ mod CubeForge.Ffi.Window do
     fn x_u8_zero_box(consume a: NativeU8Arr, x0: Int, x1: Int, y0: Int, y1: Int, z0: Int, z1: Int): NativeU8Arr = "cf_u8_zero_box"
     fn x_mark_box(consume marks: NativeIntArr, a: NativeU8Arr, b: NativeU8Arr, x0: Int, x1: Int, y0: Int, y1: Int, z0: Int, z1: Int): NativeIntArr = "cf_mark_box"
     fn x_f32_stamp(consume dst: NativeF32Arr, di: Int, src: NativeF32Arr, si: Int, n: Int, dx: Float, dy: Float, dz: Float, shade: Float): NativeF32Arr = "cf_f32_stamp"
+    fn x_f32_stamp_xf(consume dst: NativeF32Arr, di: Int, src: NativeF32Arr, si: Int, n: Int, dx: Float, dy: Float, dz: Float, shade: Float, cosv: Float, sinv: Float, scale: Float): NativeF32Arr = "cf_f32_stamp_xf"
     fn x_mesh_slice(consume dst: NativeF32Arr, at: Int, mask: NativeIntArr, base: Int, d: Int, sy: Int, a: Int, ox: Float, oz: Float, layers: NativeF32Arr): NativeF32Arr = "cf_mesh_slice"
     fn x_mesh_quad(consume dst: NativeF32Arr, at: Int, d: Int, sy: Int, a: Int, u: Int, v: Int, wd: Int, h: Int, key: Int, ox: Float, oz: Float, layers: NativeF32Arr): NativeF32Arr = "cf_mesh_quad"
     fn x_gfx_draw_lines(slot: Int, nverts: Int): Unit = "cf_gfx_draw_lines"
@@ -109,12 +111,14 @@ mod CubeForge.Ffi.Window do
 
   doc "Fog density, overcast 0..1 and the lightning spike. The fog colour is whatever gfx_begin_frame last cleared to, so fog and sky always agree."
   fn gfx_set_weather(fog : Float, overcast : Float, bolt : Float) : Unit do x_gfx_set_weather(fog, overcast, bolt) end
+  doc "Tell the shader which layers are mycelium, the species colours to draw filaments in (3 floats each, 0..1), and how strongly. Startup only."
+  fn gfx_set_myc(first : Int, count : Int, rgb : NativeF32Arr, branch : Float, scale : Float, sharp : Float) : Unit do x_gfx_set_myc(first, count, rgb, branch, scale, sharp) end
 
   doc "Draw a precipitation slot: blended, depth-write off, unlit and untextured."
   fn gfx_draw_precip(slot : Int, nverts : Int) : Unit do x_gfx_draw_precip(slot, nverts) end
 
-  doc "Upload the biome map as a flat coloured quad per column into slot 248, for the map view."
-  fn biome_map_upload(biomes : NativeU8Arr, n : Int) : Unit do x_biome_map_upload(biomes, n) end
+  doc "Upload the biome map as a flat coloured quad per column into slot 248, for the map view. Columns flagged in [active] are drawn lighter, marking what is still changing."
+  fn biome_map_upload(biomes : NativeU8Arr, active : NativeU8Arr, n : Int) : Unit do x_biome_map_upload(biomes, active, n) end
   fn myc_map_upload(species : NativeU8Arr, vigour : NativeU8Arr, n : Int) : Unit do x_myc_map_upload(species, vigour, n) end
 
   doc "Allocate the particle pool for [cap] particles. Once, at startup."
@@ -170,6 +174,10 @@ mod CubeForge.Ffi.Window do
   fn mark_box(marks : NativeIntArr, a : NativeU8Arr, b : NativeU8Arr, x0 : Int, x1 : Int, y0 : Int, y1 : Int, z0 : Int, z1 : Int) : NativeIntArr do x_mark_box(marks, a, b, x0, x1, y0, y1, z0, z1) end
   doc "Copy [n] floats of 9-float vertices from src[si..] to dst[di..], adding (dx, dy, dz) to each position and writing [shade]: a model template stamped into a cell."
   fn f32_stamp(dst : NativeF32Arr, di : Int, src : NativeF32Arr, si : Int, n : Int, dx : Float, dy : Float, dz : Float, shade : Float) : NativeF32Arr do x_f32_stamp(dst, di, src, si, n, dx, dy, dz, shade) end
+  doc "f32_stamp with a yaw and a uniform scale: the template's unit cell is a body centred on (0.5, 0.5, 0.5), scaled, turned about +y by the angle with cosine [cosv] and sine [sinv], and placed with its centre at (dx, dy, dz). Face indices move by the nearest quarter turn so a turned body is lit as it faces. See cf_f32_stamp_xf."
+  fn f32_stamp_xf(dst : NativeF32Arr, di : Int, src : NativeF32Arr, si : Int, n : Int, dx : Float, dy : Float, dz : Float, shade : Float, cosv : Float, sinv : Float, scale : Float) : NativeF32Arr do
+    x_f32_stamp_xf(dst, di, src, si, n, dx, dy, dz, shade, cosv, sinv, scale)
+  end
   doc "Greedy-merge one 256-key slice of the mesher's mask (read only) into quads at dst[at..], which must have 256 * 54 + 1 floats of room; the floats written come back in dst[at + 256 * 54]. See cf_mesh_slice."
   fn mesh_slice(dst : NativeF32Arr, at : Int, mask : NativeIntArr, base : Int, d : Int, sy : Int, a : Int, ox : Float, oz : Float, layers : NativeF32Arr) : NativeF32Arr do
     x_mesh_slice(dst, at, mask, base, d, sy, a, ox, oz, layers)

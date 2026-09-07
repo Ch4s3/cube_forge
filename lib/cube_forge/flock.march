@@ -1,0 +1,566 @@
+-- Flock — a group of animals that moves as one unit of state.
+--
+-- The actor grain is the flock, not the animal. A per-animal actor is the
+-- literal reading of "animals are actors" and the wrong one here: a few hundred
+-- animals would be a few hundred call/reply pairs against a 16 ms frame, and
+-- flocking would then need actors talking to each other to do what one shared
+-- state does for free. One actor owns 5-20 animals, their positions and their
+-- shared mode, and replies with a packed list of transforms -- the shape
+-- CubeForge.Water's chunk actors already established.
+--
+-- ── What the flock is told, and why it is not what Water does ──────────────
+--
+-- Messages cannot carry native arrays (GAPS G44). WaterChunk answers that by
+-- REGENERATING its chunk from (cx, cz, seed), and copying that here would break
+-- the feature outright: regenerated terrain is terrain as it was GENERATED, and
+-- the whole point of the fauna design is that the player has since changed it.
+-- A flock navigating generated ground would fly into a hill the player built
+-- and ignore the lake they dug.
+--
+-- So the flock is told, each tick, in scalars: a small square of ground heights
+-- around its home (patch_side() squared, packed a byte at a time into Ints),
+-- the water surface, the sun, and where the player is. That is enough for every
+-- behaviour here, it is a handful of Ints per flock per tick, and it is correct
+-- against edits by construction.
+--
+-- ── Pure step, actor wrapper ──────────────────────────────────────────────
+--
+-- `step` is an ordinary function over a Flock. The actor holds one and calls
+-- it. Tests hash the result after N steps; nothing about the behaviour needs a
+-- running actor to check, which is the same division Water uses.
+mod CubeForge.Flock do
+
+  alias CubeForge.Fauna as Fa
+
+  doc "Animals a flock may hold. Twenty steers and separates in 400 pair tests a tick, which is nothing; two hundred would not be."
+  fn cap() : Int do 20 end
+
+  doc "Floats per animal in the body array: position then velocity."
+  fn stride() : Int do 6 end
+
+  -- species, how many animals, the tick counter (the wander clock), the seed,
+  -- the home point, the bodies: stride() floats each, x y z vx vy vz -- and the
+  -- flock's mode from the last step (without the player's term), which is what
+  -- picks the pose: a roosting flock folds its wings.
+  type Flock = Flock(Int, Int, Int, Int, Float, Float, Float, NativeFloatArr, Int)
+
+  fn species(f : Flock) : Int do match f do Flock(s, _, _, _, _, _, _, _, _) -> s end end
+  fn count(f : Flock) : Int do match f do Flock(_, n, _, _, _, _, _, _, _) -> n end end
+  fn tick_of(f : Flock) : Int do match f do Flock(_, _, t, _, _, _, _, _, _) -> t end end
+  fn seed_of(f : Flock) : Int do match f do Flock(_, _, _, s, _, _, _, _, _) -> s end end
+  fn home_x(f : Flock) : Float do match f do Flock(_, _, _, _, x, _, _, _, _) -> x end end
+  fn home_y(f : Flock) : Float do match f do Flock(_, _, _, _, _, y, _, _, _) -> y end end
+  fn home_z(f : Flock) : Float do match f do Flock(_, _, _, _, _, _, z, _, _) -> z end end
+  fn bodies(f : Flock) : NativeFloatArr do match f do Flock(_, _, _, _, _, _, _, b, _) -> b end end
+  doc "The flock's mode from its last step: feeding, roosting, or departing (the player's flee is per animal and not kept)."
+  fn mode(f : Flock) : Int do match f do Flock(_, _, _, _, _, _, _, _, m) -> m end end
+
+  fn pos_x(b : NativeFloatArr, i : Int) : Float do NativeArray.get_float(b, i * stride()) end
+  fn pos_y(b : NativeFloatArr, i : Int) : Float do NativeArray.get_float(b, i * stride() + 1) end
+  fn pos_z(b : NativeFloatArr, i : Int) : Float do NativeArray.get_float(b, i * stride() + 2) end
+  fn vel_x(b : NativeFloatArr, i : Int) : Float do NativeArray.get_float(b, i * stride() + 3) end
+  fn vel_y(b : NativeFloatArr, i : Int) : Float do NativeArray.get_float(b, i * stride() + 4) end
+  fn vel_z(b : NativeFloatArr, i : Int) : Float do NativeArray.get_float(b, i * stride() + 5) end
+
+  -- ── The ground patch ──────────────────────────────────────────────────────
+  doc "Samples a side of the ground patch a flock is told about."
+  fn patch_side() : Int do 5 end
+  doc "Blocks between ground samples: the patch spans patch_side() * this, centred on the home."
+  fn patch_step() : Int do 8 end
+  doc "Ints a packed patch takes: seven 8-bit heights each."
+  fn patch_ints() : Int do (patch_side() * patch_side() + 6) / 7 end
+
+  pfn pow256(k : Int) : Int do if k <= 0 do 1 else 256 * pow256(k - 1) end end
+  doc "Pack ground height [h] of sample [i] into the [i / 7]th word at 8 bits."
+  fn patch_pack(acc : NativeIntArr, i : Int, h : Int) : NativeIntArr do
+    let w = i / 7
+    NativeArray.set_int(acc, w, NativeArray.get_int(acc, w) + h % 256 * pow256(i % 7))
+  end
+  doc "Sample [i] out of a packed patch."
+  fn patch_at(words : NativeIntArr, i : Int) : Int do
+    NativeArray.get_int(words, i / 7) / pow256(i % 7) % 256
+  end
+
+  pfn clampi(v : Int, lo : Int, hi : Int) : Int do if v < lo do lo else if v > hi do hi else v end end end
+  pfn clampf(v : Float, lo : Float, hi : Float) : Float do if v < lo do lo else if v > hi do hi else v end end end
+
+  doc "The ground under (x, z), from the patch: nearest sample, which at eight blocks apart is as much resolution as a bird needs to not fly into a hill."
+  fn ground_at(patch : NativeIntArr, hx : Float, hz : Float, x : Float, z : Float) : Int do
+    let half = patch_side() / 2
+    let sx = clampi(float_to_int((x -. hx) /. int_to_float(patch_step()) +. 0.5) + half, 0, patch_side() - 1)
+    let sz = clampi(float_to_int((z -. hz) /. int_to_float(patch_step()) +. 0.5) + half, 0, patch_side() - 1)
+    patch_at(patch, sx + patch_side() * sz)
+  end
+
+  -- ── Behaviour ─────────────────────────────────────────────────────────────
+  doc "Modes: 0 feeding (the ordinary day), 1 roosting (down, still), 2 fleeing the player, 3 departing (the season is over: climb, and go)."
+  fn m_feed() : Int do 0 end
+  fn m_roost() : Int do 1 end
+  fn m_flee() : Int do 2 end
+  fn m_depart() : Int do 3 end
+  doc "How far above its cruise a departing flock climbs before it is out of sight."
+  fn depart_climb() : Float do 30.0 end
+  doc "How far out an arriving flock starts, and a departing one is let go."
+  fn migrate_reach() : Float do 44.0 end
+
+  doc "How far a bird cruises above the ground while feeding."
+  fn cruise() : Float do 9.0 end
+  doc "How far above the ground a roosting bird settles."
+  fn roost_y() : Float do 1.5 end
+  doc "How far below the surface a fish holds."
+  fn fish_depth() : Float do 2.0 end
+  doc "How far a flock strays from its home before it is steered back."
+  fn home_radius() : Float do 14.0 end
+  doc "Closer than this and flockmates push apart."
+  fn separation() : Float do 1.6 end
+  doc "The player closer than this puts the flock up and away. What makes scanning a skill rather than a formality."
+  fn flee_radius() : Float do 7.0 end
+  doc "Blocks a second, feeding."
+  fn cruise_speed() : Float do 4.5 end
+  doc "Blocks a second, fleeing."
+  fn flee_speed() : Float do 9.0 end
+  doc "The sun level below which a diurnal flock roosts. Matches the dusk the sky already shows (moon_level starts at 0.25)."
+  fn dusk() : Float do 0.22 end
+
+  doc """
+  The mode this flock is in. The player takes precedence over the clock: a bird
+  put up at dusk is a bird put up, whatever it was about to do.
+
+  A nocturnal species inverts the clock -- it feeds through the night and roosts
+  by day -- which is what makes the day cycle read as a shift change rather than
+  as a dimmer.
+  """
+  fn mode_of(sp : Int, sun : Float, player_near : Bool, in_season : Bool) : Int do
+    -- the season outranks everything: a bird whose time is up is leaving,
+    -- whatever the clock or the player is doing
+    if !in_season do m_depart()
+    else if player_near do m_flee()
+    else if Fa.nocturnal(sp) do (if sun > dusk() do m_roost() else m_feed() end)
+    else (if sun > dusk() do m_feed() else m_roost() end) end end end
+  end
+
+  doc "How far below the surface a fish holds at [sun]: its ordinary depth by day; a twilight species comes up toward the surface at dawn and dusk and goes deep at midday, a night species comes up in the dark. The day cycle read from under water."
+  fn fish_hold(sp : Int, sun : Float) : Float do
+    let act = Fa.activity(sp)
+    if act == Fa.act_twilight() do
+      (if sun > 0.05 && sun < 0.45 do 0.8 else if sun >= 0.7 do fish_depth() *. 3.0 else fish_depth() end end)
+    else if act == Fa.act_night() do (if sun < 0.1 do 0.8 else fish_depth() *. 3.0 end)
+    else fish_depth() end end
+  end
+  doc "The height this animal wants, from the ground under it. A fish is never asked to leave the water, however hard it is fleeing."
+  fn want_y(sp : Int, mode : Int, ground : Int, water_y : Float, sun : Float) : Float do
+    let g = int_to_float(ground)
+    if Fa.is_fish(sp) do clampf(water_y -. fish_hold(sp, sun), g +. 0.6, water_y -. 0.6)
+    else if mode == m_roost() do g +. roost_y()
+    else if mode == m_flee() do g +. cruise() +. 4.0
+    else if mode == m_depart() do g +. cruise() +. depart_climb()
+    else g +. cruise() end end end end
+  end
+
+  -- A wander angle that is a pure function of the flock's seed, the animal and
+  -- the tick: no RNG state to thread, and the same flock does the same thing
+  -- twice, which is what makes the step hashable.
+  pfn wander(seed : Int, i : Int, t : Int) : Float do
+    let h = int_and(seed * 1103515245 + i * 12345 + t * 2654435761, 65535)
+    int_to_float(h) /. 65536.0 *. 6.283185307
+  end
+
+  -- ── One animal ────────────────────────────────────────────────────────────
+  -- Cohesion toward the flock's centre, separation from whoever is too close, a
+  -- pull home once it strays, the height it wants, and the player. Five terms
+  -- summed as accelerations, then drag and a speed clamp -- boids without the
+  -- parts that need tuning, since every term above is bounded.
+  --
+  -- Separation is two walks rather than one returning a pair: a two-element
+  -- result would have to be an array, and allocating one per animal per tick is
+  -- exactly the shape of allocation this codebase keeps having to remove.
+  pfn sep_x(b : NativeFloatArr, n : Int, i : Int, j : Int, acc : Float) : Float do
+    if j >= n do acc
+    else if j == i do sep_x(b, n, i, j + 1, acc)
+    else
+      let dx = pos_x(b, i) -. pos_x(b, j)
+      let dz = pos_z(b, i) -. pos_z(b, j)
+      let d2 = dx *. dx +. dz *. dz
+      if d2 > separation() *. separation() do sep_x(b, n, i, j + 1, acc)
+      else if d2 < 0.0001 do sep_x(b, n, i, j + 1, acc +. 0.5)
+      else sep_x(b, n, i, j + 1, acc +. dx /. d2) end end end end
+  end
+  pfn sep_z(b : NativeFloatArr, n : Int, i : Int, j : Int, acc : Float) : Float do
+    if j >= n do acc
+    else if j == i do sep_z(b, n, i, j + 1, acc)
+    else
+      let dx = pos_x(b, i) -. pos_x(b, j)
+      let dz = pos_z(b, i) -. pos_z(b, j)
+      let d2 = dx *. dx +. dz *. dz
+      if d2 > separation() *. separation() do sep_z(b, n, i, j + 1, acc)
+      else if d2 < 0.0001 do sep_z(b, n, i, j + 1, acc -. 0.5)
+      else sep_z(b, n, i, j + 1, acc +. dz /. d2) end end end end
+  end
+
+  pfn centre_x(b : NativeFloatArr, n : Int, i : Int, acc : Float) : Float do
+    if i >= n do acc /. int_to_float(n) else centre_x(b, n, i + 1, acc +. pos_x(b, i)) end
+  end
+  pfn centre_z(b : NativeFloatArr, n : Int, i : Int, acc : Float) : Float do
+    if i >= n do acc /. int_to_float(n) else centre_z(b, n, i + 1, acc +. pos_z(b, i)) end
+  end
+
+  -- Step one animal. The bodies array arrives unwrapped, so these writes are in
+  -- place rather than a copy of the whole flock per float (GAPS G68).
+  pfn step_one(b : NativeFloatArr, f_sp : Int, n : Int, i : Int, seed : Int, t : Int,
+               hx : Float, hz : Float, cx : Float, cz : Float,
+               patch : NativeIntArr, water_y : Float, sun : Float,
+               px : Float, py : Float, pz : Float, in_season : Bool, dt : Float) : NativeFloatArr do
+    let x = pos_x(b, i)
+    let y = pos_y(b, i)
+    let z = pos_z(b, i)
+    let pdx = x -. px
+    let pdz = z -. pz
+    let pdy = y -. py
+    let near = pdx *. pdx +. pdy *. pdy +. pdz *. pdz < flee_radius() *. flee_radius()
+    let mode = mode_of(f_sp, sun, near, in_season)
+    let ground = ground_at(patch, hx, hz, x, z)
+    let ty = want_y(f_sp, mode, ground, water_y, sun)
+
+    let ahx = (cx -. x) *. 0.35
+    let ahz = (cz -. z) *. 0.35
+    let asx = sep_x(b, n, i, 0, 0.0) *. 2.2
+    let asz = sep_z(b, n, i, 0, 0.0) *. 2.2
+    -- home pulls only once it has actually strayed, so the flock drifts rather
+    -- than orbiting a post
+    let dhx = x -. hx
+    let dhz = z -. hz
+    let far = Math.sqrt(dhx *. dhx +. dhz *. dhz)
+    -- a departing flock is not pulled home; it is pushed the way it leaves
+    let leaving = mode == m_depart()
+    let ahomex = if leaving do Fa.leave_dx(f_sp) *. 6.0 else if far > home_radius() do 0.0 -. dhx /. far *. 3.0 else 0.0 end end
+    let ahomez = if leaving do Fa.leave_dz(f_sp) *. 6.0 else if far > home_radius() do 0.0 -. dhz /. far *. 3.0 else 0.0 end end
+    let w = wander(seed, i, t)
+    let awx = Math.cos(w) *. 1.4
+    let awz = Math.sin(w) *. 1.4
+    let pd = Math.sqrt(pdx *. pdx +. pdz *. pdz)
+    let afx = if near do (if pd < 0.0001 do 1.0 else pdx /. pd *. 8.0 end) else 0.0 end
+    let afz = if near do (if pd < 0.0001 do 0.0 else pdz /. pd *. 8.0 end) else 0.0 end
+
+    let vx0 = vel_x(b, i) +. (ahx +. asx +. ahomex +. awx +. afx) *. dt
+    let vz0 = vel_z(b, i) +. (ahz +. asz +. ahomez +. awz +. afz) *. dt
+    -- height is a spring toward the wanted height rather than one force among
+    -- several: an animal at the wrong altitude is wrong in a way cohesion
+    -- should not be able to outvote
+    let vy0 = vel_y(b, i) +. (ty -. y) *. 2.0 *. dt
+
+    let top = if mode == m_flee() do flee_speed() else if leaving do flee_speed() else cruise_speed() end end
+    let slow = if mode == m_roost() do 0.25 else 1.0 end
+    let vx1 = vx0 *. 0.86
+    let vz1 = vz0 *. 0.86
+    let vy1 = vy0 *. 0.86
+    let spd = Math.sqrt(vx1 *. vx1 +. vz1 *. vz1)
+    let lim = top *. slow
+    let k = if spd > lim do lim /. spd else 1.0 end
+    let vx = vx1 *. k
+    let vz = vz1 *. k
+    let vy = clampf(vy1, 0.0 -. lim, lim)
+
+    let nx = x +. vx *. dt
+    let nz = z +. vz *. dt
+    -- the ground is a floor, not a suggestion: whatever the steering wanted, an
+    -- animal never ends a tick inside the terrain it was told about
+    let ng = int_to_float(ground_at(patch, hx, hz, nx, nz))
+    let floor_y = if Fa.is_fish(f_sp) do ng +. 0.5 else ng +. 0.4 end
+    let ceil_y = if Fa.is_fish(f_sp) do water_y -. 0.3 else 254.0 end
+    let ny = clampf(y +. vy *. dt, floor_y, if ceil_y < floor_y do floor_y else ceil_y end)
+
+    let b1 = NativeArray.set_float(b, i * stride(), nx)
+    let b2 = NativeArray.set_float(b1, i * stride() + 1, ny)
+    let b3 = NativeArray.set_float(b2, i * stride() + 2, nz)
+    let b4 = NativeArray.set_float(b3, i * stride() + 3, vx)
+    let b5 = NativeArray.set_float(b4, i * stride() + 4, if ny <= floor_y do 0.0 else vy end)
+    NativeArray.set_float(b5, i * stride() + 5, vz)
+  end
+
+  pfn step_go(b : NativeFloatArr, f_sp : Int, n : Int, i : Int, seed : Int, t : Int,
+              hx : Float, hz : Float, cx : Float, cz : Float,
+              patch : NativeIntArr, water_y : Float, sun : Float,
+              px : Float, py : Float, pz : Float, in_season : Bool, dt : Float) : NativeFloatArr do
+    if i >= n do b
+    else step_go(step_one(b, f_sp, n, i, seed, t, hx, hz, cx, cz, patch, water_y, sun, px, py, pz, in_season, dt),
+                 f_sp, n, i + 1, seed, t, hx, hz, cx, cz, patch, water_y, sun, px, py, pz, in_season, dt)
+    end
+  end
+
+  doc """
+  One tick of the flock, [dt] seconds long.
+
+  [patch] is the packed ground around the home (see patch_pack), [water_y] the
+  surface a fish lives under, [sun] the sun level 0..1, and (px, py, pz) the
+  player. Deterministic: the same flock, patch and clock give the same flock
+  back, which is what the position hash in the tests rests on.
+  """
+  fn step(f : Flock, patch : NativeIntArr, water_y : Float, sun : Float,
+          px : Float, py : Float, pz : Float, in_season : Bool, dt : Float) : Flock do
+    match f do
+      Flock(sp, n, t, seed, hx, hy, hz, b, _) ->
+        let m = mode_of(sp, sun, false, in_season)
+        if n <= 0 do Flock(sp, n, t, seed, hx, hy, hz, b, m)
+        else
+          -- the centre is read before anything moves, so every animal steers
+          -- against the same flock rather than against a half-updated one
+          let cx = centre_x(b, n, 0, 0.0)
+          let cz = centre_z(b, n, 0, 0.0)
+          Flock(sp, n, t + 1, seed, hx, hy, hz,
+                step_go(b, sp, n, 0, seed, t, hx, hz, cx, cz, patch, water_y, sun, px, py, pz, in_season, dt), m)
+        end
+    end
+  end
+
+  -- ── Making one ────────────────────────────────────────────────────────────
+  -- Animals start scattered around the home in a ring that depends only on the
+  -- seed and the index, so a flock is reproducible from its row.
+  pfn place_go(b : NativeFloatArr, n : Int, i : Int, seed : Int, hx : Float, hy : Float, hz : Float) : NativeFloatArr do
+    if i >= n do b
+    else
+      let a = wander(seed, i, 0)
+      let r = 1.5 +. int_to_float(i % 5)
+      let b1 = NativeArray.set_float(b, i * stride(), hx +. Math.cos(a) *. r)
+      let b2 = NativeArray.set_float(b1, i * stride() + 1, hy +. int_to_float(i % 3) *. 0.7)
+      let b3 = NativeArray.set_float(b2, i * stride() + 2, hz +. Math.sin(a) *. r)
+      let b4 = NativeArray.set_float(b3, i * stride() + 3, 0.0)
+      let b5 = NativeArray.set_float(b4, i * stride() + 4, 0.0)
+      place_go(NativeArray.set_float(b5, i * stride() + 5, 0.0), n, i + 1, seed, hx, hy, hz)
+    end
+  end
+
+  doc "The flock moved by (dx, dz) blocks: the window slid under it. Home and every animal move together; nothing about the flock's behaviour changes."
+  fn translate(f : Flock, dx : Float, dz : Float) : Flock do
+    match f do
+      Flock(sp, n, t, seed, hx, hy, hz, b, m) -> Flock(sp, n, t, seed, hx +. dx, hy, hz +. dz, translate_go(b, n, dx, dz, 0), m)
+    end
+  end
+  pfn translate_go(b : NativeFloatArr, n : Int, dx : Float, dz : Float, i : Int) : NativeFloatArr do
+    if i >= n do b
+    else
+      let b1 = NativeArray.set_float(b, i * stride(), pos_x(b, i) +. dx)
+      translate_go(NativeArray.set_float(b1, i * stride() + 2, pos_z(b1, i) +. dz), n, dx, dz, i + 1)
+    end
+  end
+
+  doc "The flock at [n] animals: the ones it has keep their places, newcomers start at home, and the surplus is dropped from the end. So a school can grow with its pond without every fish jumping back to where it began."
+  fn resize(f : Flock, n : Int) : Flock do
+    match f do
+      Flock(sp, m, t, seed, hx, hy, hz, b, md) ->
+        let k = clampi(n, 0, cap())
+        Flock(sp, k, t, seed, hx, hy, hz, if k > m do place_go(b, k, m, seed, hx, hy, hz) else b end, md)
+    end
+  end
+
+  doc "Every animal moved by (dx, dy, dz), the home left where it is: the start of an arriving flock, which then flies home on the pull it already has."
+  fn offset(f : Flock, dx : Float, dy : Float, dz : Float) : Flock do
+    match f do
+      Flock(sp, n, t, seed, hx, hy, hz, b, m) -> Flock(sp, n, t, seed, hx, hy, hz, offset_go(b, n, dx, dy, dz, 0), m)
+    end
+  end
+  pfn offset_go(b : NativeFloatArr, n : Int, dx : Float, dy : Float, dz : Float, i : Int) : NativeFloatArr do
+    if i >= n do b
+    else
+      let b1 = NativeArray.set_float(b, i * stride(), pos_x(b, i) +. dx)
+      let b2 = NativeArray.set_float(b1, i * stride() + 1, pos_y(b1, i) +. dy)
+      offset_go(NativeArray.set_float(b2, i * stride() + 2, pos_z(b2, i) +. dz), n, dx, dy, dz, i + 1)
+    end
+  end
+  doc "How far the flock's first animal is from its home, on the ground plane: what says a departing flock has gone."
+  fn lead_dist(f : Flock) : Float do
+    if count(f) <= 0 do 0.0
+    else
+      let dx = pos_x(bodies(f), 0) -. home_x(f)
+      let dz = pos_z(bodies(f), 0) -. home_z(f)
+      Math.sqrt(dx *. dx +. dz *. dz)
+    end
+  end
+
+  doc "A flock of [n] animals of [sp] around (hx, hy, hz)."
+  fn new(sp : Int, n : Int, seed : Int, hx : Float, hy : Float, hz : Float) : Flock do
+    let m = clampi(n, 0, cap())
+    Flock(sp, m, 0, seed, hx, hy, hz, place_go(NativeArray.make_float(cap() * stride(), 0.0), m, 0, seed, hx, hy, hz), m_feed())
+  end
+
+  -- ── The reply ─────────────────────────────────────────────────────────────
+  -- One Int per animal. Positions are relative to the home and quantised to an
+  -- eighth of a block, which is finer than a body a third of a block long can
+  -- show; the alternative -- floats -- cannot cross an actor boundary at all
+  -- (GAPS G44), and a list of Ints is what Water already replies with.
+  --
+  --   index  5 bits   0..31
+  --   pose   2 bits   0..3
+  --   yaw    8 bits   a turn in 256 steps: smooth enough for a banking bird,
+  --                   and finer than the quarter turns the face rotation reads
+  --   dx,dz 10 bits   +-64 blocks of home at 1/8
+  --   dy    11 bits   0..255 absolute at 1/8
+  fn q_span() : Int do 1024 end
+  fn q_mid() : Int do 512 end
+  fn q_yspan() : Int do 2048 end
+
+  -- The bias is added BEFORE the scale, so the value rounded is never negative:
+  -- float_to_int truncates toward zero, and -8.5 truncating to -8 would make a
+  -- westward offset a half-cell short while an eastward one was exact.
+  pfn q_off(v : Float) : Int do clampi(float_to_int((v +. int_to_float(q_mid()) /. 8.0) *. 8.0 +. 0.5), 0, q_span() - 1) end
+  pfn q_abs(v : Float) : Int do clampi(float_to_int(v *. 8.0 +. 0.5), 0, q_yspan() - 1) end
+
+  doc "Pack one animal's transform."
+  fn pack(i : Int, pose : Int, yaw8 : Int, qx : Int, qy : Int, qz : Int) : Int do
+    i + 32 * (pose + 4 * (yaw8 + 256 * (qx + q_span() * (qz + q_span() * qy))))
+  end
+  fn un_index(v : Int) : Int do v % 32 end
+  fn un_pose(v : Int) : Int do v / 32 % 4 end
+  fn un_yaw8(v : Int) : Int do v / 128 % 256 end
+  fn un_qx(v : Int) : Int do v / 32768 % q_span() end
+  fn un_qz(v : Int) : Int do v / 32768 / q_span() % q_span() end
+  fn un_qy(v : Int) : Int do v / 32768 / q_span() / q_span() % q_yspan() end
+  doc "The world x of a packed transform, given the flock's home."
+  fn un_x(v : Int, hx : Float) : Float do hx +. int_to_float(un_qx(v) - q_mid()) /. 8.0 end
+  fn un_z(v : Int, hz : Float) : Float do hz +. int_to_float(un_qz(v) - q_mid()) /. 8.0 end
+  fn un_y(v : Int) : Float do int_to_float(un_qy(v)) /. 8.0 end
+  doc "The heading of a packed transform, in radians."
+  fn un_yaw(v : Int) : Float do int_to_float(un_yaw8(v)) /. 256.0 *. 6.283185307 end
+
+  -- The wing goes down, level, up, level: three poses read as four steps, so
+  -- the flap has no jump back to the bottom.
+  pfn flap_pose(step : Int) : Int do
+    let k = step % 4
+    if k == 0 do 0 else if k == 1 do 1 else if k == 2 do 2 else 1 end end end
+  end
+
+  pfn transforms_go(b : NativeFloatArr, seed : Int, n : Int, t : Int, hx : Float, hz : Float, roost : Bool, i : Int, acc : List(Int)) : List(Int) do
+    if i < 0 do acc
+    else
+      let vx = vel_x(b, i)
+      let vz = vel_z(b, i)
+      -- at roost a still animal folds its wings; one that is moving -- put up
+      -- by the player -- is flapping like any other
+      let still = vx *. vx +. vz *. vz < 0.25
+      -- an animal that has stopped keeps a heading of its own rather than
+      -- snapping east, so a roosting flock does not all face one way
+      let yaw = if vx *. vx +. vz *. vz < 0.0001 do wander(seed, i, 0) else Math.atan2(vz, vx) end
+      let yaw8 = int_and(float_to_int(yaw /. 6.283185307 *. 256.0 +. 256.5), 255)
+      let pose = if roost && still do Fa.pose_roost() else flap_pose(t + i) end
+      transforms_go(b, seed, n, t, hx, hz, roost, i - 1,
+                    Cons(pack(i, pose, yaw8, q_off(pos_x(b, i) -. hx), q_abs(pos_y(b, i)), q_off(pos_z(b, i) -. hz)), acc))
+    end
+  end
+
+  doc "The flock's animals as packed transforms, one Int each."
+  fn transforms(f : Flock) : List(Int) do
+    transforms_go(bodies(f), seed_of(f), count(f), tick_of(f), home_x(f), home_z(f), mode(f) == m_roost(), count(f) - 1, Nil)
+  end
+
+  doc "A number that changes when any animal moves: the oracle the behaviour tests hold."
+  fn state_hash(f : Flock) : Int do hash_go(bodies(f), count(f) * stride(), 0, 2166136261) end
+  pfn hash_go(b : NativeFloatArr, n : Int, i : Int, acc : Int) : Int do
+    if i >= n do acc
+    else hash_go(b, n, i + 1, int_and(acc * 16777619 + float_to_int(NativeArray.get_float(b, i) *. 64.0), 1073741823))
+    end
+  end
+
+  -- ── The actor ─────────────────────────────────────────────────────────────
+  -- A thin shell over `step`. Everything interesting is above and is testable
+  -- without a running actor, which is the division Water uses.
+  --
+  -- Fixed point on the wire: a message carries Ints, so positions and the sun
+  -- arrive scaled and are divided back here. An eighth of a block and a
+  -- thousandth of the sun are both finer than anything downstream can see.
+  doc "Seconds a flock tick covers: one world tick, which is ten frames. The renderer interpolates between two ticks, so the AI runs at a sixth of the frame rate and the motion is still smooth."
+  fn tick_dt() : Float do 1.0 /. 6.0 end
+  fn fx8() : Float do 8.0 end
+
+  -- The tick's inputs arrive as an ordinary send, and the tick itself is a
+  -- NULLARY call. Two messages where one would do, and deliberately: every
+  -- Actor.call in this codebase is nullary (Water, Weather), a call carrying
+  -- arguments was tried here first, and every argument arrived as zero -- the
+  -- flock read a ground of 0 and a water surface of 0, so the fish sank to
+  -- y 0.5 (its floor, ground + 0.5) and the birds cruised toward y 9. Sends
+  -- carry their arguments; WLoad has always relied on that.
+  type Inputs = Inputs(Int, Int, Int, Int, Int, Int, Int, Int, Int, Int)
+  type FTickReq = FTickReq
+
+  pfn no_inputs() : Inputs do Inputs(0, 0, 0, 0, 0, 0, 0, 0, 0, 1) end
+
+  pfn unpack_patch(p0 : Int, p1 : Int, p2 : Int, p3 : Int) : NativeIntArr do
+    let a0 = NativeArray.make_int(patch_ints(), 0)
+    let a1 = NativeArray.set_int(a0, 0, p0)
+    let a2 = NativeArray.set_int(a1, 1, p1)
+    NativeArray.set_int(NativeArray.set_int(a2, 2, p2), 3, p3)
+  end
+
+  pfn handle_tick(reply_to, f : Flock, inp : Inputs) : Flock do
+    match inp do
+      Inputs(p0, p1, p2, p3, water8, sun1000, px8, py8, pz8, season) ->
+        let f1 = step(f, unpack_patch(p0, p1, p2, p3), int_to_float(water8) /. fx8(), int_to_float(sun1000) /. 1000.0,
+                      int_to_float(px8) /. fx8(), int_to_float(py8) /. fx8(), int_to_float(pz8) /. fx8(), season == 1, tick_dt())
+        Actor.reply(reply_to, transforms(f1))
+        f1
+    end
+  end
+
+  actor FlockActor do
+    state { f : Flock, inp : Inputs }
+    init { f: new(1, 0, 0, 0.0, 0.0, 0.0), inp: no_inputs() }
+
+    -- call handler first (tag 0): step on the inputs last sent, and reply with
+    -- the packed transforms
+    on FTick(reply_to) do
+      { state with f: handle_tick(reply_to, state.f, state.inp) }
+    end
+
+    on FLoad(sp : Int, n : Int, seed : Int, hx8 : Int, hy8 : Int, hz8 : Int) do
+      { state with f: new(sp, n, seed, int_to_float(hx8) /. fx8(), int_to_float(hy8) /. fx8(), int_to_float(hz8) /. fx8()) }
+    end
+
+    on FInputs(p0 : Int, p1 : Int, p2 : Int, p3 : Int, water8 : Int, sun1000 : Int, px8 : Int, py8 : Int, pz8 : Int, season : Int) do
+      { state with inp: Inputs(p0, p1, p2, p3, water8, sun1000, px8, py8, pz8, season) }
+    end
+
+    on FOffset(dx8 : Int, dy8 : Int, dz8 : Int) do
+      { state with f: offset(state.f, int_to_float(dx8) /. fx8(), int_to_float(dy8) /. fx8(), int_to_float(dz8) /. fx8()) }
+    end
+
+    on FResize(n : Int) do
+      { state with f: resize(state.f, n) }
+    end
+
+    on FShift(dx8 : Int, dz8 : Int) do
+      { state with f: translate(state.f, int_to_float(dx8) /. fx8(), int_to_float(dz8) /. fx8()) }
+    end
+  end
+
+  -- Message constructors are in scope only inside this module and only after
+  -- the actor declaration (GAPS.md G46), so the frame loop drives it through
+  -- these.
+  fn spawn_flock() do spawn(FlockActor) end
+  fn send_load(pid, sp : Int, n : Int, seed : Int, hx : Float, hy : Float, hz : Float) : Unit do
+    let _ = send(pid, FLoad(sp, n, seed, float_to_int(hx *. fx8()), float_to_int(hy *. fx8()), float_to_int(hz *. fx8())))
+    ()
+  end
+  doc "Bring the flock to [n] animals."
+  fn send_resize(pid, n : Int) : Unit do
+    let _ = send(pid, FResize(n))
+    ()
+  end
+  doc "The window slid: move the flock by (dx, dz) blocks."
+  fn send_shift(pid, dx : Float, dz : Float) : Unit do
+    let _ = send(pid, FShift(float_to_int(dx *. fx8()), float_to_int(dz *. fx8())))
+    ()
+  end
+  doc "Tell the flock what the world looks like around it. Sent before every tick."
+  fn send_inputs(pid, patch : NativeIntArr, water_y : Float, sun : Float, px : Float, py : Float, pz : Float, in_season : Bool) : Unit do
+    let _ = send(pid, FInputs(NativeArray.get_int(patch, 0), NativeArray.get_int(patch, 1), NativeArray.get_int(patch, 2), NativeArray.get_int(patch, 3),
+                              float_to_int(water_y *. fx8()), float_to_int(sun *. 1000.0),
+                              float_to_int(px *. fx8()), float_to_int(py *. fx8()), float_to_int(pz *. fx8()), if in_season do 1 else 0 end))
+    ()
+  end
+  doc "Move every animal by (dx, dy, dz), leaving the home: an arriving flock starts out here and flies in."
+  fn send_offset(pid, dx : Float, dy : Float, dz : Float) : Unit do
+    let _ = send(pid, FOffset(float_to_int(dx *. fx8()), float_to_int(dy *. fx8()), float_to_int(dz *. fx8())))
+    ()
+  end
+  doc "Step the flock on the inputs it was last sent, and return its packed transforms."
+  fn call_tick(pid) : Result(List(Int), String) do Actor.call(pid, FTickReq, 2000) end
+
+end

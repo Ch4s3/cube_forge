@@ -37,6 +37,21 @@ measurements.
 
 - [x] **Points of interest** — done 2026-09-07 (`docs/superpowers/specs/2026-09-06-points-of-interest-design.md`, plan `docs/superpowers/plans/2026-09-06-poi-phase1.md`, measurements in RESULTS). All seven kinds from the request are in: desert buttes, the stone arch, the crystal cavern, the giant tree, the canyon, the atoll, the delta. A kind is a row in `CubeForge.Poi`'s tables plus a shape from shared profiles; three classes (scatter, landmark, field) decide where its rules are read; `CF_POI_PREVIEW=<kind>` draws it, `CF_POI_TRANSECT=<z>` reads a landform across the world, `CF_POI_GATE=1` says which placement rule refuses a kind, and one test walks every kind through the invariants. `CF_POI=0` leaves the world bit-identical. Landed on the way: the water depth tint, self-lit emissive faces, `CF_SPAWN_X/Z`, `CF_YAW`. **Follow-ups, not started:** coloured block light (three fields) so an emitter's cast light matches its own colour; another look at the crystals' proportions; the atoll now sits in real sea: an open-ocean regime landed in `Noise` on 2026-09-07 (`ocean_mask`, `ocean_of`), and the atoll's country is the ocean's mask.
 
+## Play
+
+- [x] **Survey and scanning** — done 2026-09-06
+  (`docs/superpowers/specs/2026-09-05-survey-and-scanning-design.md`). The
+  instrument that makes the existing simulation playable: a survey panel (`Q`)
+  showing a place's biome, axes, the inputs the player can change (height,
+  distance to water) and which way it is drifting, plus a drift overlay on the
+  map reusing `Biome.active`. Species advice is gated behind scanning (`E`) a
+  living specimen, so the six climate bands are a reason to explore. Adds no
+  simulation; the canal loop it exposes is already tested by `CF_AUTOCANAL`.
+  Built in two slices: the place half (panel, trend, drift marking) and the
+  species half (scanning, the known bitmask in the save header, the two gated
+  lines). CF_AUTOSURVEY, CF_AUTOSCAN and CF_KNOWN drive it headlessly. The line
+  gap that the design left open measured 0.060 against a 0.045-tall glyph.
+
 ## Engine
 
 - [ ] **Main-thread pinning runtime patch** (GAPS.md G15) — chip spawned, in progress in a separate session.

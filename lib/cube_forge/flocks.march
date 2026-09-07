@@ -1,0 +1,221 @@
+-- Flocks — the herd: every flock the world is running, and the two snapshots
+-- the renderer interpolates between.
+--
+-- A flock's AI runs on a phase slot, once per world tick, the same way the
+-- water, mycelium and vegetation ticks do. Ten frames apart is far too coarse
+-- to draw directly -- animals would visibly step -- so each flock keeps the
+-- transforms from the last two ticks and the renderer blends between them by
+-- how far through the period the frame is. The AI runs at a sixth of the frame
+-- rate and the motion is smooth anyway, which is the same trade the biome
+-- sweep already makes.
+--
+-- The pids live in the frame loop beside the water pool's, not here: this is
+-- the state that changes every tick, and keeping it free of the actor type
+-- keeps `Frame` free of a type parameter.
+mod CubeForge.Flocks do
+
+  alias CubeForge.Flock as Fl
+  alias CubeForge.Fauna as Fa
+  alias CubeForge.F32Buf as B
+  alias CubeForge.Vertex as Vx
+
+  doc "Flocks the world runs at once. Slice 2 spawns these by hand; the population tick will decide them."
+  fn cap() : Int do 8 end
+
+  -- homes (3 floats each), species per flock, the previous tick's transforms,
+  -- this tick's, and how many flocks are live.
+  type Snap = Snap(NativeFloatArr, NativeIntArr, Array.PVec(List(Int)), Array.PVec(List(Int)), Int)
+
+  fn homes(s : Snap) : NativeFloatArr do match s do Snap(h, _, _, _, _) -> h end end
+  fn species(s : Snap) : NativeIntArr do match s do Snap(_, sp, _, _, _) -> sp end end
+  fn prev(s : Snap) : Array.PVec(List(Int)) do match s do Snap(_, _, p, _, _) -> p end end
+  fn cur(s : Snap) : Array.PVec(List(Int)) do match s do Snap(_, _, _, c, _) -> c end end
+  fn live(s : Snap) : Int do match s do Snap(_, _, _, _, n) -> n end end
+
+  fn home_x(s : Snap, i : Int) : Float do NativeArray.get_float(homes(s), 3 * i) end
+  fn home_y(s : Snap, i : Int) : Float do NativeArray.get_float(homes(s), 3 * i + 1) end
+  fn home_z(s : Snap, i : Int) : Float do NativeArray.get_float(homes(s), 3 * i + 2) end
+  fn species_of(s : Snap, i : Int) : Int do NativeArray.get_int(species(s), i) end
+
+  pfn empty_lists(i : Int, acc : List(List(Int))) : List(List(Int)) do
+    if i <= 0 do acc else empty_lists(i - 1, Cons(Nil, acc)) end
+  end
+  doc "No flocks yet."
+  fn new() : Snap do
+    Snap(NativeArray.make_float(3 * cap(), 0.0), NativeArray.make_int(cap(), 0),
+         Array.from_list(empty_lists(cap(), Nil)), Array.from_list(empty_lists(cap(), Nil)), 0)
+  end
+
+  doc "Record that flock [i] is species [sp] living at (x, y, z), and count it live."
+  fn with_flock(s : Snap, i : Int, sp : Int, x : Float, y : Float, z : Float) : Snap do
+    match s do
+      Snap(h, spa, p, c, n) ->
+        let h1 = NativeArray.set_float(NativeArray.set_float(NativeArray.set_float(h, 3 * i, x), 3 * i + 1, y), 3 * i + 2, z)
+        Snap(h1, NativeArray.set_int(spa, i, sp), p, c, if i + 1 > n do i + 1 else n end)
+    end
+  end
+
+  doc "Slot [i] is empty again: species 0, nothing to draw. The actor is emptied by its caller."
+  fn free(s : Snap, i : Int) : Snap do
+    match s do Snap(h, sp, p, c, n) -> Snap(h, NativeArray.set_int(sp, i, 0), Array.set(p, i, Nil), Array.set(c, i, Nil), n) end
+  end
+  doc "An empty slot, or -1."
+  fn free_slot(s : Snap) : Int do free_go(s, 0) end
+  pfn free_go(s : Snap, i : Int) : Int do
+    if i >= cap() do 0 - 1 else if species_of(s, i) == 0 do i else free_go(s, i + 1) end end
+  end
+  doc "The slot holding a flock of [sp] whose home is in chunk (cx, cz), or -1."
+  fn find(s : Snap, cx : Int, cz : Int, sp : Int) : Int do find_go(s, cx, cz, sp, 0) end
+  pfn find_go(s : Snap, cx : Int, cz : Int, sp : Int, i : Int) : Int do
+    if i >= cap() do 0 - 1
+    else if species_of(s, i) != sp do find_go(s, cx, cz, sp, i + 1)
+    else if float_to_int(home_x(s, i)) / 16 != cx do find_go(s, cx, cz, sp, i + 1)
+    else if float_to_int(home_z(s, i)) / 16 != cz do find_go(s, cx, cz, sp, i + 1)
+    else i end end end end
+  end
+  doc "Every home moved by (dx, dz) blocks: the window slid. The transforms are home-relative, so only the homes move. A flock whose home left the window is freed."
+  fn shift(s : Snap, dx : Float, dz : Float, side : Int) : Snap do shift_go(s, dx, dz, side, 0) end
+  pfn shift_go(s : Snap, dx : Float, dz : Float, side : Int, i : Int) : Snap do
+    if i >= cap() do s
+    else if species_of(s, i) == 0 do shift_go(s, dx, dz, side, i + 1)
+    else
+      let nx = home_x(s, i) +. dx
+      let nz = home_z(s, i) +. dz
+      let lim = int_to_float(16 * side)
+      let s1 = if nx < 0.0 || nz < 0.0 || nx >= lim || nz >= lim do free(s, i)
+               else match s do Snap(h, sp, p, c, n) -> Snap(NativeArray.set_float(NativeArray.set_float(h, 3 * i, nx), 3 * i + 2, nz), sp, p, c, n) end end
+      shift_go(s1, dx, dz, side, i + 1)
+    end end
+  end
+  doc "How far slot [i]'s first animal is from its home on the ground plane, from the current snapshot: what says a departing flock has gone."
+  fn lead_dist(s : Snap, i : Int) : Float do
+    match Array.get(cur(s), i) do
+      Nil -> 0.0
+      Cons(v, _) ->
+        let dx = Fl.un_x(v, home_x(s, i)) -. home_x(s, i)
+        let dz = Fl.un_z(v, home_z(s, i)) -. home_z(s, i)
+        Math.sqrt(dx *. dx +. dz *. dz)
+    end
+  end
+
+  -- ── Aiming at an animal ───────────────────────────────────────────────────
+  -- A sphere test along the aim ray over every drawn animal: the nearest one
+  -- whose body the ray passes through. Run only while the survey is open or
+  -- the scan key is down, so it costs nothing the rest of the time -- and a
+  -- few hundred sphere tests is nothing even then.
+  pfn aim_list(sp : Int, hx : Float, hz : Float, ts : List(Int), ox : Float, oy : Float, oz : Float, dx : Float, dy : Float, dz : Float, max : Float, best_t : Float, best_sp : Int) : Int do
+    match ts do
+      Nil -> best_sp * 65536 + float_to_int(best_t *. 8.0)
+      Cons(v, rest) ->
+        let px = Fl.un_x(v, hx) -. ox
+        let py = Fl.un_y(v) -. oy
+        let pz = Fl.un_z(v, hz) -. oz
+        let t = px *. dx +. py *. dy +. pz *. dz
+        let r = Fa.body_scale(sp) *. 0.5 +. 0.5
+        let cx = px -. t *. dx
+        let cy = py -. t *. dy
+        let cz = pz -. t *. dz
+        let miss = cx *. cx +. cy *. cy +. cz *. cz
+        if t < 0.0 do aim_list(sp, hx, hz, rest, ox, oy, oz, dx, dy, dz, max, best_t, best_sp)
+        else if t > max do aim_list(sp, hx, hz, rest, ox, oy, oz, dx, dy, dz, max, best_t, best_sp)
+        else if miss > r *. r do aim_list(sp, hx, hz, rest, ox, oy, oz, dx, dy, dz, max, best_t, best_sp)
+        else if t >= best_t do aim_list(sp, hx, hz, rest, ox, oy, oz, dx, dy, dz, max, best_t, best_sp)
+        else aim_list(sp, hx, hz, rest, ox, oy, oz, dx, dy, dz, max, t, sp) end end end end
+    end
+  end
+  pfn aim_go(s : Snap, ox : Float, oy : Float, oz : Float, dx : Float, dy : Float, dz : Float, max : Float, i : Int, best_t : Float, best_sp : Int) : Int do
+    if i >= cap() do best_sp
+    else if species_of(s, i) == 0 do aim_go(s, ox, oy, oz, dx, dy, dz, max, i + 1, best_t, best_sp)
+    else
+      let packed = aim_list(species_of(s, i), home_x(s, i), home_z(s, i), Array.get(cur(s), i), ox, oy, oz, dx, dy, dz, max, best_t, best_sp)
+      aim_go(s, ox, oy, oz, dx, dy, dz, max, i + 1, int_to_float(packed % 65536) /. 8.0, packed / 65536)
+    end end
+  end
+  doc "The species of the nearest animal the ray from (ox, oy, oz) along the unit (dx, dy, dz) passes through within [max] blocks, or 0."
+  fn aim(s : Snap, ox : Float, oy : Float, oz : Float, dx : Float, dy : Float, dz : Float, max : Float) : Int do
+    aim_go(s, ox, oy, oz, dx, dy, dz, max, 0, max +. 1.0, 0)
+  end
+
+  doc "Live flocks: slots holding a species."
+  fn in_use(s : Snap) : Int do use_go(s, 0, 0) end
+  pfn use_go(s : Snap, i : Int, acc : Int) : Int do
+    if i >= cap() do acc else use_go(s, i + 1, if species_of(s, i) != 0 do acc + 1 else acc end) end
+  end
+
+  doc """
+  Flock [i] has ticked: what was current becomes previous, and [ts] becomes
+  current. The renderer then has two ends to blend between.
+  """
+  fn advance(s : Snap, i : Int, ts : List(Int)) : Snap do
+    match s do
+      Snap(h, sp, p, c, n) ->
+        let was = Array.get(c, i)
+        -- A flock's first tick has no previous, so it starts where it is rather
+        -- than sliding in from wherever the empty snapshot would have put it.
+        let before = match was do
+          Nil -> ts
+          Cons(_, _) -> was
+        end
+        Snap(h, sp, Array.set(p, i, before), Array.set(c, i, ts), n)
+    end
+  end
+
+  -- ── Drawing ───────────────────────────────────────────────────────────────
+  -- Yaw is 8-bit and wraps, so a bird turning through north must not spin the
+  -- long way round: the difference is taken to the shorter side of the circle.
+  pfn lerp(a : Float, b : Float, t : Float) : Float do a +. (b -. a) *. t end
+  pfn lerp_yaw8(a : Int, b : Int, t : Float) : Float do
+    let d0 = b - a
+    let d = if d0 > 128 do d0 - 256 else if d0 < 0 - 128 do d0 + 256 else d0 end end
+    (int_to_float(a) +. int_to_float(d) *. t) /. 256.0 *. 6.283185307
+  end
+
+  -- Walk one flock's two transform lists together. They are the same length and
+  -- in the same order -- both are built by Flock.transforms over the same
+  -- animals -- so this is a parallel walk, not a lookup.
+  pfn draw_go(b : CubeForge.F32Buf.F32Buf, m : CubeForge.Fauna.Poses, sp : Int, hx : Float, hz : Float,
+              ps : List(Int), cs : List(Int), t : Float, shade : Float) : CubeForge.F32Buf.F32Buf do
+    match cs do
+      Nil -> b
+      Cons(cv, crest) ->
+        match ps do
+          Nil -> b
+          Cons(pv, prest) ->
+            let x = lerp(Fl.un_x(pv, hx), Fl.un_x(cv, hx), t)
+            let y = lerp(Fl.un_y(pv), Fl.un_y(cv), t)
+            let z = lerp(Fl.un_z(pv, hz), Fl.un_z(cv, hz), t)
+            let yaw = lerp_yaw8(Fl.un_yaw8(pv), Fl.un_yaw8(cv), t)
+            draw_go(Fa.stamp(b, m, sp, Fl.un_pose(cv), x, y, z, yaw, shade), m, sp, hx, hz, prest, crest, t, shade)
+        end
+    end
+  end
+
+  pfn build_go(b : CubeForge.F32Buf.F32Buf, m : CubeForge.Fauna.Poses, s : Snap, t : Float, shade : Float, i : Int) : CubeForge.F32Buf.F32Buf do
+    if i >= cap() do b
+    else if species_of(s, i) == 0 do build_go(b, m, s, t, shade, i + 1)
+    else build_go(draw_go(b, m, species_of(s, i), home_x(s, i), home_z(s, i), Array.get(prev(s), i), Array.get(cur(s), i), t, shade),
+                  m, s, t, shade, i + 1)
+    end end
+  end
+
+  doc """
+  Rebuild [b] (cleared in place) with every animal of every flock, [t] of the
+  way from the last tick to this one.
+
+  [shade] is one packed light value for the lot. An animal is a third of a block
+  and moves every frame, so sampling the light field per animal would cost a
+  lookup a frame for a difference nobody can see; the sky above is what a flying
+  thing is lit by anyway. A fish under water is the case this is wrong for, and
+  the case to fix first if it shows.
+  """
+  fn build(b : CubeForge.F32Buf.F32Buf, m : CubeForge.Fauna.Poses, s : Snap, t : Float, shade : Float) : CubeForge.F32Buf.F32Buf do
+    build_go(B.clear(b), m, s, t, shade, 0)
+  end
+
+  doc "Animals drawn: the transforms in the current snapshot."
+  fn drawn(s : Snap) : Int do drawn_go(s, 0, 0) end
+  pfn drawn_go(s : Snap, i : Int, acc : Int) : Int do
+    if i >= cap() do acc else drawn_go(s, i + 1, acc + List.length(Array.get(cur(s), i))) end
+  end
+
+end

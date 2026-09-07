@@ -1,0 +1,307 @@
+-- Flock: the steering is deterministic, and it does what the mode says.
+--
+-- `step` is an ordinary function, so none of this needs a running actor -- the
+-- same division CubeForge.Water uses between its `tick` and its WaterChunk.
+mod CubeForge.Test.Flock do
+
+  import Test
+  alias CubeForge.Flock as Fl
+  alias CubeForge.Fauna as Fa
+
+  -- A patch of flat ground at [h], the shape the actor would send.
+  pfn flat_go(a : NativeIntArr, h : Int, i : Int) : NativeIntArr do
+    if i >= Fl.patch_side() * Fl.patch_side() do a else flat_go(Fl.patch_pack(a, i, h), h, i + 1) end
+  end
+  pfn flat_patch(h : Int) : NativeIntArr do flat_go(NativeArray.make_int(4, 0), h, 0) end
+
+  -- Ground that steps up sharply on the +x side, for the terrain-avoidance test.
+  pfn ridge_go(a : NativeIntArr, lo : Int, hi : Int, i : Int) : NativeIntArr do
+    if i >= Fl.patch_side() * Fl.patch_side() do a
+    else ridge_go(Fl.patch_pack(a, i, if i % Fl.patch_side() >= 3 do hi else lo end), lo, hi, i + 1) end
+  end
+
+  pfn run(f : CubeForge.Flock.Flock, patch : NativeIntArr, sun : Float, px : Float, py : Float, pz : Float, n : Int) : CubeForge.Flock.Flock do
+    if n <= 0 do f
+    else run(Fl.step(f, patch, 62.0, sun, px, py, pz, true, Fl.tick_dt()), patch, sun, px, py, pz, n - 1) end
+  end
+
+  pfn min_y(f : CubeForge.Flock.Flock, i : Int, acc : Float) : Float do
+    if i >= Fl.count(f) do acc
+    else
+      let y = Fl.pos_y(Fl.bodies(f), i)
+      min_y(f, i + 1, if y < acc do y else acc end)
+    end
+  end
+  pfn max_y(f : CubeForge.Flock.Flock, i : Int, acc : Float) : Float do
+    if i >= Fl.count(f) do acc
+    else
+      let y = Fl.pos_y(Fl.bodies(f), i)
+      max_y(f, i + 1, if y > acc do y else acc end)
+    end
+  end
+  pfn max_home_dist(f : CubeForge.Flock.Flock, i : Int, acc : Float) : Float do
+    if i >= Fl.count(f) do acc
+    else
+      let dx = Fl.pos_x(Fl.bodies(f), i) -. Fl.home_x(f)
+      let dz = Fl.pos_z(Fl.bodies(f), i) -. Fl.home_z(f)
+      let d = Math.sqrt(dx *. dx +. dz *. dz)
+      max_home_dist(f, i + 1, if d > acc do d else acc end)
+    end
+  end
+  -- The closest any two flockmates are: what separation is supposed to hold up.
+  pfn closest_pair(f : CubeForge.Flock.Flock, i : Int, j : Int, acc : Float) : Float do
+    if i >= Fl.count(f) do acc
+    else if j >= Fl.count(f) do closest_pair(f, i + 1, i + 2, acc)
+    else
+      let dx = Fl.pos_x(Fl.bodies(f), i) -. Fl.pos_x(Fl.bodies(f), j)
+      let dz = Fl.pos_z(Fl.bodies(f), i) -. Fl.pos_z(Fl.bodies(f), j)
+      let d = Math.sqrt(dx *. dx +. dz *. dz)
+      closest_pair(f, i, j + 1, if d < acc do d else acc end)
+    end end
+  end
+  pfn mean_dist_to(f : CubeForge.Flock.Flock, x : Float, z : Float, i : Int, acc : Float) : Float do
+    if i >= Fl.count(f) do acc /. int_to_float(Fl.count(f))
+    else
+      let dx = Fl.pos_x(Fl.bodies(f), i) -. x
+      let dz = Fl.pos_z(Fl.bodies(f), i) -. z
+      mean_dist_to(f, x, z, i + 1, acc +. Math.sqrt(dx *. dx +. dz *. dz))
+    end
+  end
+
+  describe "the ground patch" do
+    test "a packed patch reads back the heights that went in" do
+      Test.assert_eq_int(Fl.patch_ints(), 4, "25 samples at seven a word")
+      let p = flat_patch(70)
+      Test.assert_eq_int(Fl.patch_at(p, 0), 70, "first sample")
+      Test.assert_eq_int(Fl.patch_at(p, 12), 70, "the middle")
+      Test.assert_eq_int(Fl.patch_at(p, 24), 70, "the last")
+      -- and a patch that is not uniform, so this is not just reading zeroes
+      let r = ridge_go(NativeArray.make_int(4, 0), 64, 96, 0)
+      Test.assert_eq_int(Fl.patch_at(r, 0), 64, "low side")
+      Test.assert_eq_int(Fl.patch_at(r, 4), 96, "high side")
+    end
+
+    test "ground_at picks the sample under the point, and the edges clamp" do
+      let r = ridge_go(NativeArray.make_int(4, 0), 64, 96, 0)
+      Test.assert_eq_int(Fl.ground_at(r, 100.0, 100.0, 100.0, 100.0), 64, "at home, the middle sample")
+      Test.assert_eq_int(Fl.ground_at(r, 100.0, 100.0, 116.0, 100.0), 96, "two samples east is the ridge")
+      Test.assert_eq_int(Fl.ground_at(r, 100.0, 100.0, 900.0, 100.0), 96, "far outside the patch clamps to its edge")
+    end
+  end
+
+  describe "packed transforms" do
+    test "a transform survives the round trip at an eighth of a block" do
+      let v = Fl.pack(7, 2, 100, Fl.q_span() - 400, 560, Fl.q_span() - 300)
+      Test.assert_eq_int(Fl.un_index(v), 7, "index")
+      Test.assert_eq_int(Fl.un_pose(v), 2, "pose")
+      Test.assert_eq_int(Fl.un_yaw8(v), 100, "yaw")
+      Test.assert_eq_int(Fl.un_qx(v), Fl.q_span() - 400, "x")
+      Test.assert_eq_int(Fl.un_qy(v), 560, "y")
+      Test.assert_eq_int(Fl.un_qz(v), Fl.q_span() - 300, "z")
+    end
+
+    test "an animal's position comes back where it was, west of home as well as east" do
+      let f = run(Fl.new(Fa.sp_grasspipit(), 6, 11, 100.0, 78.0, 100.0), flat_patch(70), 1.0, 0.0, 0.0, 0.0, 12)
+      let ts = Fl.transforms(f)
+      Test.assert_eq_int(List.length(ts), 6, "one per animal")
+      Test.assert_true(round_trips(f, ts), "every position within an eighth of a block of the flock's own")
+    end
+  end
+
+  pfn round_trips(f : CubeForge.Flock.Flock, ts : List(Int)) : Bool do
+    match ts do
+      Nil -> true
+      Cons(v, rest) ->
+        let i = Fl.un_index(v)
+        let dx = Math.abs(Fl.un_x(v, Fl.home_x(f)) -. Fl.pos_x(Fl.bodies(f), i))
+        let dy = Math.abs(Fl.un_y(v) -. Fl.pos_y(Fl.bodies(f), i))
+        let dz = Math.abs(Fl.un_z(v, Fl.home_z(f)) -. Fl.pos_z(Fl.bodies(f), i))
+        if dx > 0.07 do false
+        else if dy > 0.07 do false
+        else if dz > 0.07 do false
+        else round_trips(f, rest) end end end
+    end
+  end
+
+  describe "the step is deterministic" do
+    test "the same flock, patch and clock give the same flock back" do
+      let p = flat_patch(70)
+      let a = run(Fl.new(Fa.sp_grasspipit(), 8, 4242, 100.0, 80.0, 100.0), p, 1.0, 0.0, 0.0, 0.0, 40)
+      let b = run(Fl.new(Fa.sp_grasspipit(), 8, 4242, 100.0, 80.0, 100.0), p, 1.0, 0.0, 0.0, 0.0, 40)
+      Test.assert_eq_int(Fl.state_hash(a), Fl.state_hash(b), "forty ticks, twice, identical")
+    end
+
+    test "the hash can tell flocks apart" do
+      -- A negative control. Without it, "identical" might only mean the hash
+      -- says yes to everything.
+      let p = flat_patch(70)
+      let a = run(Fl.new(Fa.sp_grasspipit(), 8, 4242, 100.0, 80.0, 100.0), p, 1.0, 0.0, 0.0, 0.0, 40)
+      let c = run(Fl.new(Fa.sp_grasspipit(), 8, 99, 100.0, 80.0, 100.0), p, 1.0, 0.0, 0.0, 0.0, 40)
+      Test.assert_true(Fl.state_hash(a) != Fl.state_hash(c), "a different seed is a different flock")
+      let d = run(Fl.new(Fa.sp_grasspipit(), 8, 4242, 100.0, 80.0, 100.0), p, 1.0, 0.0, 0.0, 0.0, 41)
+      Test.assert_true(Fl.state_hash(a) != Fl.state_hash(d), "one more tick is a different flock")
+    end
+  end
+
+  pfn run_out(f : CubeForge.Flock.Flock, patch : NativeIntArr, n : Int) : CubeForge.Flock.Flock do
+    if n <= 0 do f
+    else run_out(Fl.step(f, patch, 62.0, 1.0, 0.0, 0.0, 0.0, false, Fl.tick_dt()), patch, n - 1) end
+  end
+  pfn mean_z(f : CubeForge.Flock.Flock, i : Int, acc : Float) : Float do
+    if i >= Fl.count(f) do acc /. int_to_float(Fl.count(f))
+    else mean_z(f, i + 1, acc +. Fl.pos_z(Fl.bodies(f), i)) end
+  end
+
+  -- A unit direction from the eye to (x, y, z).
+  pfn dir_x(ex : Float, ey : Float, ez : Float, x : Float, y : Float, z : Float) : Float do (x -. ex) /. dist3(ex, ey, ez, x, y, z) end
+  pfn dir_y(ex : Float, ey : Float, ez : Float, x : Float, y : Float, z : Float) : Float do (y -. ey) /. dist3(ex, ey, ez, x, y, z) end
+  pfn dir_z(ex : Float, ey : Float, ez : Float, x : Float, y : Float, z : Float) : Float do (z -. ez) /. dist3(ex, ey, ez, x, y, z) end
+  pfn dist3(ex : Float, ey : Float, ez : Float, x : Float, y : Float, z : Float) : Float do
+    Math.sqrt((x -. ex) *. (x -. ex) +. (y -. ey) *. (y -. ey) +. (z -. ez) *. (z -. ez))
+  end
+
+  describe "aiming at an animal" do
+    test "the ray finds the animal it is pointed at, and not one behind the eye" do
+      let pip = Fl.new(Fa.sp_grasspipit(), 1, 1, 110.0, 80.0, 100.0)
+      let sun = Fl.new(Fa.sp_sunfin(), 1, 1, 90.0, 80.0, 100.0)
+      let s0 = CubeForge.Flocks.with_flock(CubeForge.Flocks.new(), 0, Fa.sp_grasspipit(), 110.0, 80.0, 100.0)
+      let s1 = CubeForge.Flocks.with_flock(s0, 1, Fa.sp_sunfin(), 90.0, 80.0, 100.0)
+      let both = CubeForge.Flocks.advance(CubeForge.Flocks.advance(s1, 0, Fl.transforms(pip)), 1, Fl.transforms(sun))
+      -- new() scatters an animal up to a block and a half off its home, and
+      -- a pipit is a third of a block: aim at where it actually is
+      let px = Fl.pos_x(Fl.bodies(pip), 0)
+      let py = Fl.pos_y(Fl.bodies(pip), 0)
+      let pz = Fl.pos_z(Fl.bodies(pip), 0)
+      let sx = Fl.pos_x(Fl.bodies(sun), 0)
+      let sy = Fl.pos_y(Fl.bodies(sun), 0)
+      let sz = Fl.pos_z(Fl.bodies(sun), 0)
+      let e = 100.0
+      Test.assert_eq_int(CubeForge.Flocks.aim(both, e, 80.0, e, dir_x(e, 80.0, e, px, py, pz), dir_y(e, 80.0, e, px, py, pz), dir_z(e, 80.0, e, px, py, pz), 40.0), Fa.sp_grasspipit(), "aimed at the pipit, the pipit")
+      Test.assert_eq_int(CubeForge.Flocks.aim(both, e, 80.0, e, dir_x(e, 80.0, e, sx, sy, sz), dir_y(e, 80.0, e, sx, sy, sz), dir_z(e, 80.0, e, sx, sy, sz), 40.0), Fa.sp_sunfin(), "aimed at the sunfin, the sunfin")
+      Test.assert_eq_int(CubeForge.Flocks.aim(both, e, 80.0, e, 0.0, 1.0, 0.0, 40.0), 0, "looking up sees nothing")
+      Test.assert_eq_int(CubeForge.Flocks.aim(both, e, 80.0, e, dir_x(e, 80.0, e, px, py, pz), dir_y(e, 80.0, e, px, py, pz), dir_z(e, 80.0, e, px, py, pz), 5.0), 0, "and not past the reach")
+    end
+  end
+
+  describe "migration" do
+    test "a flock whose season is over climbs and leaves the way its species goes" do
+      let p = flat_patch(70)
+      let stay = run(Fl.new(Fa.sp_frostgull(), 8, 5, 100.0, 79.0, 100.0), p, 1.0, 0.0, 0.0, 0.0, 60)
+      let go = run_out(Fl.new(Fa.sp_frostgull(), 8, 5, 100.0, 79.0, 100.0), p, 60)
+      Test.assert_true(min_y(go, 0, 999.0) > max_y(stay, 0, 0.0) +. 10.0, "well above where it would otherwise cruise")
+      -- the gull leaves toward -z
+      Test.assert_true(mean_z(go, 0, 0.0) < 100.0 -. 30.0, "and gone north, past the home pull")
+      Test.assert_true(Fl.lead_dist(go) > Fl.migrate_reach(), "far enough to be let go")
+    end
+
+    test "a flock started far out flies home on its own" do
+      -- the arriving flock: placed displaced, no new behaviour
+      let p = flat_patch(70)
+      let f0 = Fl.offset(Fl.new(Fa.sp_frostgull(), 8, 5, 100.0, 79.0, 100.0), 0.0, 24.0, 44.0)
+      Test.assert_true(Fl.lead_dist(f0) > 40.0, "starts far")
+      let f1 = run(f0, p, 1.0, 0.0, 0.0, 0.0, 120)
+      Test.assert_true(Fl.lead_dist(f1) < Fl.home_radius() *. 1.5, "and comes home")
+      Test.assert_true(max_y(f1, 0, 0.0) < 70.0 +. Fl.cruise() +. 3.0, "down to its cruise")
+    end
+  end
+
+  describe "fish and the clock" do
+    test "a twilight fish comes up at dusk and goes deep at noon; a day fish holds its depth" do
+      -- water at 62, bed at 50: twelve blocks to move in
+      let p = flat_patch(50)
+      let carp_dusk = run(Fl.new(Fa.sp_reedcarp(), 6, 3, 100.0, 58.0, 100.0), p, 0.25, 0.0, 0.0, 0.0, 80)
+      let carp_noon = run(Fl.new(Fa.sp_reedcarp(), 6, 3, 100.0, 58.0, 100.0), p, 1.0, 0.0, 0.0, 0.0, 80)
+      Test.assert_true(min_y(carp_dusk, 0, 999.0) > max_y(carp_noon, 0, 0.0) +. 2.0, "up at dusk, well below it at noon")
+      Test.assert_true(max_y(carp_dusk, 0, 0.0) < 62.0, "and still under the surface")
+      let sun_dusk = run(Fl.new(Fa.sp_sunfin(), 6, 3, 100.0, 58.0, 100.0), p, 0.25, 0.0, 0.0, 0.0, 80)
+      let sun_noon = run(Fl.new(Fa.sp_sunfin(), 6, 3, 100.0, 58.0, 100.0), p, 1.0, 0.0, 0.0, 0.0, 80)
+      Test.assert_true(Math.abs(mean_y(sun_dusk, 0, 0.0) -. mean_y(sun_noon, 0, 0.0)) < 1.0, "a day fish does not care what time it is")
+    end
+  end
+
+  describe "the flock behaves" do
+    test "birds climb to their cruising height over flat ground and stay there" do
+      let f = run(Fl.new(Fa.sp_grasspipit(), 8, 7, 100.0, 71.0, 100.0), flat_patch(70), 1.0, 0.0, 0.0, 0.0, 60)
+      let want = 70.0 +. Fl.cruise()
+      Test.assert_true(min_y(f, 0, 999.0) > want -. 1.5, "none left below the cruise")
+      Test.assert_true(max_y(f, 0, 0.0) < want +. 1.5, "and none above it")
+    end
+
+    test "a flock stays near its home rather than wandering off" do
+      let f = run(Fl.new(Fa.sp_grasspipit(), 10, 3, 100.0, 80.0, 100.0), flat_patch(70), 1.0, 0.0, 0.0, 0.0, 200)
+      -- the home pull starts at home_radius() and is not a wall, so allow drift
+      -- past it -- but two hundred ticks of wander must not carry them away
+      Test.assert_true(max_home_dist(f, 0, 0.0) < Fl.home_radius() *. 1.6, "still a flock, still here")
+    end
+
+    test "flockmates hold each other off" do
+      -- They start on a ring 1.5 to 5.5 out and are pulled together by cohesion;
+      -- separation is the only thing stopping them stacking on one point.
+      let f = run(Fl.new(Fa.sp_grasspipit(), 10, 21, 100.0, 80.0, 100.0), flat_patch(70), 1.0, 0.0, 0.0, 0.0, 80)
+      Test.assert_true(closest_pair(f, 0, 1, 999.0) > 0.35, "nobody is standing inside anybody")
+    end
+
+    test "the player puts them up and away" do
+      let p = flat_patch(70)
+      let calm = run(Fl.new(Fa.sp_grasspipit(), 8, 5, 100.0, 79.0, 100.0), p, 1.0, 0.0, 0.0, 0.0, 40)
+      let spooked = run(Fl.new(Fa.sp_grasspipit(), 8, 5, 100.0, 79.0, 100.0), p, 1.0, 100.0, 79.0, 100.0, 40)
+      Test.assert_true(mean_dist_to(spooked, 100.0, 100.0, 0, 0.0) > mean_dist_to(calm, 100.0, 100.0, 0, 0.0), "further from the player than an undisturbed flock")
+      Test.assert_true(min_y(spooked, 0, 999.0) > min_y(calm, 0, 999.0), "and higher")
+    end
+
+    test "at night a still flock folds its wings; by day it flaps" do
+      let p = flat_patch(70)
+      let night = run(Fl.new(Fa.sp_grasspipit(), 6, 9, 100.0, 79.0, 100.0), p, 0.0, 0.0, 0.0, 0.0, 120)
+      Test.assert_eq_int(Fl.mode(night), Fl.m_roost(), "the flock is at roost")
+      Test.assert_true(count_pose(Fl.transforms(night), Fa.pose_roost(), 0) > 0, "and at least one bird has settled and folded")
+      let day = run(Fl.new(Fa.sp_grasspipit(), 6, 9, 100.0, 79.0, 100.0), p, 1.0, 0.0, 0.0, 0.0, 120)
+      Test.assert_eq_int(count_pose(Fl.transforms(day), Fa.pose_roost(), 0), 0, "nobody folds in flight")
+    end
+
+    test "at night a diurnal flock comes down to roost" do
+      let p = flat_patch(70)
+      let day = run(Fl.new(Fa.sp_grasspipit(), 8, 9, 100.0, 79.0, 100.0), p, 1.0, 0.0, 0.0, 0.0, 60)
+      let night = run(Fl.new(Fa.sp_grasspipit(), 8, 9, 100.0, 79.0, 100.0), p, 0.0, 0.0, 0.0, 0.0, 60)
+      Test.assert_true(max_y(night, 0, 0.0) < 70.0 +. Fl.roost_y() +. 1.0, "down on the ground")
+      Test.assert_true(max_y(night, 0, 0.0) < min_y(day, 0, 999.0), "and below where the same flock spends its day")
+    end
+
+    test "a fish stays in the water, even fleeing" do
+      -- Water at 62, a bed at 55. Fleeing sends a bird UP; a fish has nowhere
+      -- up to go, and must not be steered out through the surface.
+      let p = flat_patch(55)
+      let f = run(Fl.new(Fa.sp_sunfin(), 8, 13, 100.0, 60.0, 100.0), p, 1.0, 100.0, 60.0, 100.0, 60)
+      Test.assert_true(max_y(f, 0, 0.0) < 62.0, "none above the surface")
+      Test.assert_true(min_y(f, 0, 999.0) > 55.0, "and none in the bed")
+    end
+
+    test "birds do not end a tick inside a hill the player built" do
+      -- The east half of the patch stands at 96 while the flock cruises over 64.
+      -- Whatever the steering wanted, the floor is not negotiable.
+      let r = ridge_go(NativeArray.make_int(4, 0), 64, 96, 0)
+      let f = run(Fl.new(Fa.sp_grasspipit(), 10, 17, 100.0, 70.0, 100.0), r, 1.0, 0.0, 0.0, 0.0, 120)
+      Test.assert_true(above_ground(f, r, 0), "every animal above the ground under it")
+    end
+  end
+
+  pfn mean_y(f : CubeForge.Flock.Flock, i : Int, acc : Float) : Float do
+    if i >= Fl.count(f) do acc /. int_to_float(Fl.count(f))
+    else mean_y(f, i + 1, acc +. Fl.pos_y(Fl.bodies(f), i)) end
+  end
+  pfn count_pose(ts : List(Int), pose : Int, acc : Int) : Int do
+    match ts do
+      Nil -> acc
+      Cons(v, rest) -> count_pose(rest, pose, if Fl.un_pose(v) == pose do acc + 1 else acc end)
+    end
+  end
+  pfn above_ground(f : CubeForge.Flock.Flock, patch : NativeIntArr, i : Int) : Bool do
+    if i >= Fl.count(f) do true
+    else
+      let x = Fl.pos_x(Fl.bodies(f), i)
+      let z = Fl.pos_z(Fl.bodies(f), i)
+      let g = int_to_float(Fl.ground_at(patch, Fl.home_x(f), Fl.home_z(f), x, z))
+      if Fl.pos_y(Fl.bodies(f), i) < g do false else above_ground(f, patch, i + 1) end
+    end
+  end
+
+end
