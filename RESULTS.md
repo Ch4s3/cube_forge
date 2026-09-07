@@ -2933,3 +2933,66 @@ asynchrony is a second, larger one.
 
 So culling was checked by eye instead (no holes, no missing chunks) and measured
 with the GPU timer, which does not care about determinism.
+
+
+## Lighting moves off the mesh (2026-09-07)
+
+Light is sampled per fragment from a 3D texture now; the mesher no longer bakes
+it into the vertex or into the greedy key. `Mesher.corner_pack` lives in the
+fragment shader as `smoothLight` -- for each of the four corners of the voxel
+face, the light of the face-adjacent air voxel and the three neighbours round
+that corner, averaged over the unoccluded ones, AO from how many were occluded,
+bilinearly blended. Occlusion-aware, so it does not leak through a one-block
+wall the way a filtered volume lightmap would.
+
+### What it buys
+
+| | before | after |
+|---|---|---|
+| vertices | 517 098 | **334 878** (-35%) |
+| mesh all | 410 ms | 377 ms |
+| relights that force a remesh | all of them | **none** |
+
+Light is out of `Mesher.key_of`, so two faces that differ only in their light
+merge. That 35% was the whole reason the key carried four 10-bit corners.
+
+Nothing marks a section dirty for a light change any more -- a mesh cannot show
+stale light when it holds none. Only geometry does.
+
+### Keeping the texture current
+
+The two fields go up as one RG8 3D texture, toroidal with the occupancy. A
+relight WIDENS a dirty box; the frame flushes it once before drawing, the way
+the drain batches remeshing. Doing it per relight instead cost more than the
+whole change saved: a retexture slot alone is dozens of single-column edits.
+Flushed box, over a walking run: median 4 096 texels, p90 24 576, 0.02 MB
+staged, 223 flushes in 3 000 frames.
+
+### The measurement that was not a measurement
+
+The first numbers said mean frame 4.11 -> 8.61 ms and 39 -> 142 frames over
+budget, which looked like a bad regression. It was not one, and the way it fell
+apart is worth recording.
+
+Segmenting the whole frame showed **SWAP** carrying it -- 5.08 ms in the first
+quarter of a 20 000-frame run, 0.74 by the third, with every other segment flat.
+Swap blocking is the GPU behind, so the two runs were looking at different
+things: the scripted walk is dt-dependent, my change moved dt, and the camera
+path diverged. The same trap as the frame dumps, one level up.
+
+Against a reference build of HEAD in a second worktree, with a FIXED camera so
+both see the same world:
+
+| | HEAD (vertex light) | now (per fragment) |
+|---|---|---|
+| fps, pitch -0.10 | 121.8 | **122.5** |
+| fps, pitch -0.70 | 104.3 | **103.5** |
+| GPU ms, pitch -0.10 | 3.176 | **3.292** |
+
+Within noise, and the 35% of vertices is free.
+
+**The autowalk benchmark line cannot A/B two builds.** Five runs each: HEAD 89,
+92, 101, 104, 114; this build 42, 86, 104, 106, 126. A ±25% spread on the same
+binary, because the walk's path depends on frame timing. Every "57 -> 109 fps"
+style number in this file is a single sample of that, and only the large ones
+mean anything. Use a fixed camera, or the GPU timer, for anything smaller.

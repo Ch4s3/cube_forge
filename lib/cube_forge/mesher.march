@@ -46,7 +46,12 @@ mod CubeForge.Mesher do
 
   -- Mask key: block id in the low 8 bits, four 10-bit corners in mask (u, v)
   -- order, then the column's shown species in bits 48..55. Two faces merge only
-  -- when all of it agrees: block, light at every corner, and species.
+  -- when all of it agrees. The corners USED to carry light and ambient
+  -- occlusion, which is what stopped otherwise identical faces from merging;
+  -- they are now the same constant everywhere (flat_corner) and the shape is
+  -- kept because the overlays still pack colour through the same field.
+  doc "The corner every terrain face now carries: full skylight, no ambient occlusion, no block light. The shader replaces both channels; this is only what the vertex holds so the overlays can keep using the attribute."
+  fn flat_corner() : Int do pack_corner(15, 3, 0) end
   fn key_of(id : Int, c0 : Int, c1 : Int, c2 : Int, c3 : Int, sp : Int) : Int do
     id + 256 * c0 + 262144 * c1 + 268435456 * c2 + 274877906944 * c3 + 281474976710656 * sp
   end
@@ -369,14 +374,18 @@ mod CubeForge.Mesher do
       let uz = t1z(d)
       let vy = t2y(d)
       let vz = t2z(d)
-      -- corners c0..c3 at (du, dv) = (-,-) (+,-) (+,+) (-,+) in mask order
-      let k0 = corner_pack(la, lb, sps, occ, oxi, ozi, nx, ny, nz, 0 - ux, 0 - uz, 0 - vy, 0 - vz)
-      let k1 = corner_pack(la, lb, sps, occ, oxi, ozi, nx, ny, nz, ux, uz, 0 - vy, 0 - vz)
-      let k2 = corner_pack(la, lb, sps, occ, oxi, ozi, nx, ny, nz, ux, uz, vy, vz)
-      let k3 = corner_pack(la, lb, sps, occ, oxi, ozi, nx, ny, nz, 0 - ux, 0 - uz, vy, vz)
+      -- Light is NOT in the key any more. It is sampled per fragment from the
+      -- light texture (smoothLight in the shader, which is corner_pack moved
+      -- across), so two faces that differ only in their light merge -- and that
+      -- is where a third of the vertices went: 517 098 against 334 878.
+      --
+      -- The vertex keeps its shade attribute, because the overlays and the HUD
+      -- push colour through it; terrain writes the constant below, full sky and
+      -- no block light, and the shader overwrites both channels.
+      let kc = flat_corner()
       -- mycelium takes its texture from the column's shown species
       let sp = if C.is_myc(id) do NativeArray.get_u8(sps, oxi + x + CubeForge.Biome.side_of(sps) * (ozi + z)) else 0 end
-      key_of(id, k0, k1, k2, k3, sp)
+      key_of(id, kc, kc, kc, kc, sp)
     end
   end
 

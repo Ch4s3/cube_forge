@@ -344,18 +344,29 @@ mod CubeForge.Test.Light do
     else shade_of_face(b, f, i + 1, n) end end
   end
 
-  describe "Mesher reads the skylight field" do
-    test "a slab is lit on top and black underneath" do
+  -- The mesher no longer reads the light fields into the vertex: the shader
+  -- samples them per fragment (smoothLight). So "lit on top, black underneath"
+  -- is a property of the FIELD, asserted here directly, and what the mesh
+  -- carries is the same flat corner on every face whatever the light says.
+  describe "light is in the field, not the mesh" do
+    test "a slab is lit on top and black underneath in the light field" do
       -- Every chunk carries the same stone layer at y = 8, so nothing leaks in
       -- sideways: above the slab is open sky, below it is sealed.
+      let w = CubeForge.World.relight_all(slab_world(8))
+      Test.assert_eq_int(L.get(CubeForge.World.light(w), 34, 9, 34), L.max_level(), "open sky above the slab")
+      Test.assert_eq_int(L.get(CubeForge.World.light(w), 34, 7, 34), 0, "sealed underneath")
+    end
+
+    test "the mesh carries the same flat corner either side of the slab" do
       let w = CubeForge.World.relight_all(slab_world(8))
       let c = CubeForge.World.chunk_at(w, 2, 2)
       let b = CubeForge.Mesher.mesh_section_opaque(c, c, c, c, c, CubeForge.World.light(w), CubeForge.World.block_light(w), CubeForge.World.shown(w), CubeForge.World.occupancy(w), 0, 32.0, 32.0, CubeForge.World.default_models())
       let n = CubeForge.Mesher.vertex_count(b)
       Test.assert_true(n > 0, "the slab meshed to something")
-      -- face 0 is +y (the sunlit top), face 1 is -y (the sealed underside)
-      Test.assert_true(near(shade_of_face(b, 0.0, 0, n), 1.0), "top face is full brightness")
-      Test.assert_true(near(shade_of_face(b, 1.0, 0, n), 0.0), "underside is black")
+      -- face 0 is +y (the sunlit top), face 1 is -y (the sealed underside):
+      -- once they carried 1.0 and 0.0, and now they carry the same constant
+      Test.assert_true(near(shade_of_face(b, 0.0, 0, n), 1.0), "top face carries the flat corner")
+      Test.assert_true(near(shade_of_face(b, 1.0, 0, n), 1.0), "so does the underside")
     end
 
     test "opening a shaft lights the ceiling around it" do

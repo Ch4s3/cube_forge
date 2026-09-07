@@ -52,6 +52,9 @@ mod CubeForge.Ffi.Window do
     fn x_gfx_upload_light(la: NativeU8Arr, lb: NativeU8Arr, w: Int, h: Int, d: Int): Unit = "cf_gfx_upload_light"
     fn x_gfx_set_gpulight(flag: Int): Unit = "cf_gfx_set_gpulight"   -- not `on`: reserved (GAPS G65)
     fn x_gfx_gpu_us(): Int = "cf_gfx_gpu_us"
+    fn x_gfx_sync_light_box(la: NativeU8Arr, lb: NativeU8Arr, x0: Int, y0: Int, z0: Int, x1: Int, y1: Int, z1: Int): Unit = "cf_gfx_sync_light_box"
+    fn x_gfx_light_dirty(x0: Int, y0: Int, z0: Int, x1: Int, y1: Int, z1: Int): Unit = "cf_gfx_light_dirty"
+    fn x_gfx_flush_light(la: NativeU8Arr, lb: NativeU8Arr): Unit = "cf_gfx_flush_light"
     fn x_gfx_draw(slot: Int, nverts: Int): Unit = "cf_gfx_draw"
     fn x_gfx_read_pixel(x: Int, y: Int): Int = "cf_gfx_read_pixel"
     fn x_gfx_draw_hud(slot: Int, nverts: Int, textured: Int): Unit = "cf_gfx_draw_hud"
@@ -170,6 +173,12 @@ mod CubeForge.Ffi.Window do
   fn gfx_set_gpulight(flag : Bool) : Unit do x_gfx_set_gpulight(if flag do 1 else 0 end) end
   doc "GPU microseconds for the last completed frame, by timer query. The game is CPU-bound, so fps cannot see what the fragment shader costs; this can."
   fn gfx_gpu_us() : Int do x_gfx_gpu_us() end
+  doc "Sync a box of the light texture from the two light fields, through the toroidal wrap: what every relight and every shift band calls."
+  fn gfx_sync_light_box(la : NativeU8Arr, lb : NativeU8Arr, x0 : Int, y0 : Int, z0 : Int, x1 : Int, y1 : Int, z1 : Int) : Unit do x_gfx_sync_light_box(la, lb, x0, y0, z0, x1, y1, z1) end
+  doc "Widen the frame's dirty light box. A relight calls this; the frame flushes once before drawing."
+  fn gfx_light_dirty(x0 : Int, y0 : Int, z0 : Int, x1 : Int, y1 : Int, z1 : Int) : Unit do x_gfx_light_dirty(x0, y0, z0, x1, y1, z1) end
+  doc "Sync whatever the frame's relights made dirty, once."
+  fn gfx_flush_light(la : NativeU8Arr, lb : NativeU8Arr) : Unit do x_gfx_flush_light(la, lb) end
   fn gfx_draw(slot : Int, nverts : Int) : Unit do x_gfx_draw(slot, nverts) end
   doc "Draw a slot as GL_LINES in world space (untextured, no depth test)."
   fn gfx_draw_lines(slot : Int, nverts : Int) : Unit do x_gfx_draw_lines(slot, nverts) end

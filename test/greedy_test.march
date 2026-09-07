@@ -171,14 +171,19 @@ mod CubeForge.Test.Greedy do
   end
 
 
-  describe "block light breaks merges" do
-    test "a glow beside a slab splits the merged top face" do
+  -- Light used to be part of the greedy key, so a glow beside a slab split the
+  -- merged top face and the world carried 517 098 vertices instead of 334 878.
+  -- It is sampled per fragment from the light texture now, so it is out of the
+  -- key and out of the mesh: the same geometry meshes the same way whatever the
+  -- light does. This is the test that used to assert the opposite.
+  describe "light does not break merges" do
+    test "a glow beside a slab leaves the merged top face alone" do
       let c = slab_go(C.new(), 0)
       let e = C.new()
       let dark = Mesher.mesh_section_opaque(c, e, e, e, e, CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.World.shown_new(8), CubeForge.Light.new(), 0, 0.0, 0.0, CubeForge.World.default_models())
       let lb = NativeArray.set_u8(CubeForge.Light.new(), CubeForge.Light.index(5, 10, 5), 9)
       let lit = Mesher.mesh_section_opaque(c, e, e, e, e, CubeForge.Light.new(), lb, CubeForge.World.shown_new(8), CubeForge.Light.new(), 0, 0.0, 0.0, CubeForge.World.default_models())
-      Test.assert_true(Mesher.vertex_count(lit) > Mesher.vertex_count(dark), "a lit corner cannot merge with dark ones")
+      Test.assert_eq_int(Mesher.vertex_count(lit), Mesher.vertex_count(dark), "a glow does not split a merged face")
     end
   end
 

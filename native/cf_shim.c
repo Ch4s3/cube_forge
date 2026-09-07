@@ -510,7 +510,7 @@ static const char *FS =
     /* PROTOTYPE: take the same two channels from the light texture instead of
      * the vertex, computed per fragment. Uniform branch, so it is coherent
      * across the draw and the off case pays nothing. */
-    "  if (u_gpulight == 1 && (fxw >> 8) == 0) { vec2 g = smoothLight(v_world, v_normal); sk = g.r; bl = g.g; }\n"
+    "  if (u_gpulight == 1 && u_unlit != 1 && (fxw >> 8) != 1) { vec2 g = smoothLight(v_world, v_normal); sk = g.r; bl = g.g; }\n"
     "  float spd = float(fxw & 255) / 255.0 * 7.0;\n"
     /* Flowing water scrolls its ripple along the flow; still water drifts;
      * fast or falling water blends toward the foam layer. */
@@ -1085,6 +1085,80 @@ void cf_gfx_upload_light(void *la, void *lb, int64_t w, int64_t h, int64_t d) {
     glActiveTexture(GL_TEXTURE0);
 }
 void cf_gfx_set_gpulight(int64_t on) { if (g_u_gpulight >= 0) glUniform1i(g_u_gpulight, (int)on); }
+
+/* Sync a box of the light texture from the two light fields, through the same
+ * toroidal wrap the occupancy uses. The fields are indexed
+ * x + w * (z + d * y) (CubeForge.Light.index); the texture wants x fastest then
+ * y then z, so the box is staged in the texture's order and uploaded in at most
+ * four pieces where it straddles the seam. */
+/* Relights land many times a frame -- a retexture slot alone is dozens of
+ * single-column edits -- and each one used to stage and upload its own box,
+ * which cost more than the whole per-fragment change saved (mean frame 4.1 ->
+ * 10.6 ms). So a relight only WIDENS a dirty box here, and the frame flushes it
+ * once before drawing, the way the mesh drain batches its work. */
+static int64_t g_ld[6];
+static int     g_ld_any = 0;
+void cf_gfx_light_dirty(int64_t x0, int64_t y0, int64_t z0, int64_t x1, int64_t y1, int64_t z1) {
+    if (x1 < x0 || y1 < y0 || z1 < z0) return;
+    if (!g_ld_any) { g_ld[0] = x0; g_ld[1] = y0; g_ld[2] = z0; g_ld[3] = x1; g_ld[4] = y1; g_ld[5] = z1; g_ld_any = 1; return; }
+    if (x0 < g_ld[0]) g_ld[0] = x0;
+    if (y0 < g_ld[1]) g_ld[1] = y0;
+    if (z0 < g_ld[2]) g_ld[2] = z0;
+    if (x1 > g_ld[3]) g_ld[3] = x1;
+    if (y1 > g_ld[4]) g_ld[4] = y1;
+    if (z1 > g_ld[5]) g_ld[5] = z1;
+}
+void cf_gfx_sync_light_box(void *la, void *lb, int64_t x0, int64_t y0, int64_t z0, int64_t x1, int64_t y1, int64_t z1);
+void cf_gfx_flush_light(void *la, void *lb) {
+    if (!g_ld_any) return;
+    g_ld_any = 0;
+    cf_gfx_sync_light_box(la, lb, g_ld[0], g_ld[1], g_ld[2], g_ld[3], g_ld[4], g_ld[5]);
+}
+
+void cf_gfx_sync_light_box(void *la, void *lb, int64_t x0, int64_t y0, int64_t z0, int64_t x1, int64_t y1, int64_t z1) {
+    if (!g_lt || !g_occ_w) return;
+    if (narr_len(la) < g_occ_w * g_occ_h * g_occ_d || narr_len(lb) < g_occ_w * g_occ_h * g_occ_d) return;
+    if (x0 < 0) x0 = 0; if (y0 < 0) y0 = 0; if (z0 < 0) z0 = 0;
+    if (x1 >= g_occ_w) x1 = g_occ_w - 1; if (y1 >= g_occ_h) y1 = g_occ_h - 1; if (z1 >= g_occ_d) z1 = g_occ_d - 1;
+    if (x0 > x1 || y0 > y1 || z0 > z1) return;
+    const unsigned char *a = (const unsigned char *)narr_data(la);
+    const unsigned char *b = (const unsigned char *)narr_data(lb);
+    int64_t bw = x1 - x0 + 1, bh = y1 - y0 + 1, bd = z1 - z0 + 1;
+    unsigned char *stage = (unsigned char *)malloc((size_t)(bw * bh * bd * 2));
+    if (!stage) return;
+    for (int64_t z = z0; z <= z1; z++)
+        for (int64_t y = y0; y <= y1; y++)
+            for (int64_t x = x0; x <= x1; x++) {
+                size_t src = (size_t)x + g_occ_w * ((size_t)z + g_occ_d * (size_t)y);
+                size_t dst = ((size_t)(x - x0) + bw * ((size_t)(y - y0) + bh * (size_t)(z - z0))) * 2;
+                stage[dst] = (unsigned char)(a[src] * 17);
+                stage[dst + 1] = (unsigned char)(b[src] * 17);
+            }
+    glActiveTexture(GL_TEXTURE3);
+    glBindTexture(GL_TEXTURE_3D, g_lt);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, (GLint)bw);
+    glPixelStorei(GL_UNPACK_IMAGE_HEIGHT, (GLint)bh);
+    int64_t tx = occ_tx(x0), tz = occ_tz(z0);
+    int64_t xs[2], xw[2], zs[2], zd[2]; int nx, nz;
+    if (tx + bw <= g_occ_w) { xs[0] = 0; xw[0] = bw; nx = 1; }
+    else { xs[0] = 0; xw[0] = g_occ_w - tx; xs[1] = xw[0]; xw[1] = bw - xw[0]; nx = 2; }
+    if (tz + bd <= g_occ_d) { zs[0] = 0; zd[0] = bd; nz = 1; }
+    else { zs[0] = 0; zd[0] = g_occ_d - tz; zs[1] = zd[0]; zd[1] = bd - zd[0]; nz = 2; }
+    for (int i = 0; i < nx; i++)
+        for (int j = 0; j < nz; j++) {
+            glPixelStorei(GL_UNPACK_SKIP_PIXELS, (GLint)xs[i]);
+            glPixelStorei(GL_UNPACK_SKIP_IMAGES, (GLint)zs[j]);
+            glTexSubImage3D(GL_TEXTURE_3D, 0, (GLint)(i == 0 ? tx : 0), (GLint)y0, (GLint)(j == 0 ? tz : 0),
+                            (GLsizei)xw[i], (GLsizei)bh, (GLsizei)zd[j], GL_RG, GL_UNSIGNED_BYTE, stage);
+        }
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    glPixelStorei(GL_UNPACK_IMAGE_HEIGHT, 0);
+    glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
+    glPixelStorei(GL_UNPACK_SKIP_IMAGES, 0);
+    free(stage);
+    glActiveTexture(GL_TEXTURE0);
+}
 
 static void occ_push_off(void) {
     if (g_u_occ_off >= 0) glUniform2f(g_u_occ_off, (float)g_occ_ox, (float)g_occ_oz);
