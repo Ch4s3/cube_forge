@@ -330,8 +330,13 @@ mod CubeForge do
   end
 
   -- ── Populations drive the flocks ──────────────────────────────────────────
-  doc "Chunks the population tick visits per world tick: four, so a full pass of a 64-chunk window takes under three seconds at six ticks a second, and a dug pond has fish in it inside ten."
-  fn pop_chunks_per_tick() : Int do 4 end
+  fn pop_chunks_per_tick() : Int do Pop.chunks_per_tick() end
+  doc "Where in the year the clock is, 0..1: the day clock over Fauna.year_days()."
+  pfn year_of(secs : Float, day_len : Float) : Float do
+    let days = secs /. day_len
+    let y = int_to_float(Fauna.year_days())
+    (days -. Math.floor(days /. y) *. y) /. y
+  end
   doc "Animals of a species a chunk needs before a flock is put there."
   fn spawn_min() : Int do 2 end
   doc "Chunks from the player's within which a population is given a flock. Populations exist everywhere in the window; flocks are the sample of them near enough to see, and a slot spent on a school four chunks away is a slot not spent on the one beside you."
@@ -342,11 +347,11 @@ mod CubeForge do
     dx <= flock_radius() && dz <= flock_radius()
   end
 
-  pfn pop_tick_go(pop : CubeForge.Pop.Reg, w : CubeForge.World.World, bio : CubeForge.Biome.Field, n : Int, tick : Int, j : Int) : CubeForge.Pop.Reg do
+  pfn pop_tick_go(pop : CubeForge.Pop.Reg, w : CubeForge.World.World, bio : CubeForge.Biome.Field, n : Int, tick : Int, year : Float, j : Int) : CubeForge.Pop.Reg do
     if j >= pop_chunks_per_tick() do pop
     else
       let d = (tick * pop_chunks_per_tick() + j) % (n * n)
-      pop_tick_go(Pop.tick_chunk(pop, w, bio, d % n, d / n), w, bio, n, tick, j + 1)
+      pop_tick_go(Pop.tick_chunk(pop, w, bio, d % n, d / n, year), w, bio, n, tick, year, j + 1)
     end
   end
 
@@ -2174,8 +2179,19 @@ mod CubeForge do
           let sdx = shift_dx(player_in)
           let sdz = if sdx != 0 do 0 else shift_dz(player_in) end
           let sc = if sdx != 0 || sdz != 0 do shift_scene(sc_in, sdx, sdz, seed, workers) else sc_in end
-          -- the populations and the flocks slide with the window
-          let pop_s = if sdx != 0 || sdz != 0 do Pop.shift(pop, sdx, sdz) else pop end
+          -- The populations and the flocks slide with the window. Chunks that
+          -- left are archived under their world key; chunks that came in are
+          -- restored from the archive and caught up against the world as it
+          -- is now, which needs the shifted world and biome field.
+          -- from the last frame's clock: `now` is read further down, and a year
+          -- is hours long
+          let year_now = year_of(last_t -. t0 +. day0, day_len)
+          let pop_s = if sdx != 0 || sdz != 0 do
+            let ox0 = World.origin_x(scene_world(sc_in))
+            let oz0 = World.origin_z(scene_world(sc_in))
+            Pop.restore_entered(Pop.shift(pop, sdx, sdz, ox0, oz0, frame / tick_period()), scene_world(sc), scene_biome(sc), sdx, sdz,
+                                World.origin_x(scene_world(sc)), World.origin_z(scene_world(sc)), year_now, frame / tick_period())
+          else pop end
           let herd_s = if sdx != 0 || sdz != 0 do shift_herd(herd, fpids, sdx, sdz, World.side(scene_world(sc))) else herd end
           let player = if sdx != 0 || sdz != 0 do Player.translate(player_in, int_to_float(0 - 16 * sdx), int_to_float(0 - 16 * sdz)) else player_in end
           -- I toggles the inventory. While it is open the cursor is released and no
@@ -2338,7 +2354,7 @@ mod CubeForge do
           let load_slot = if first && autoload >= 0 && frame == autoload do autoload_slot
                           else if slot_click > 0 && Menu.is_start(menu3) do slot_click else 0 end end
           let menu4 = if save_slot > 0 do
-                        let saved = save_game(save_slot, scene_world(sc_drag), player, ui_inv(scene_ui(sc_drag)), seed, now -. t0 +. day0, wxpid, scene_biome(sc_drag), scene_myc(sc_drag), known, Pop.to_list(pop))
+                        let saved = save_game(save_slot, scene_world(sc_drag), player, ui_inv(scene_ui(sc_drag)), seed, now -. t0 +. day0, wxpid, scene_biome(sc_drag), scene_myc(sc_drag), known, Pop.to_list(pop, World.origin_x(scene_world(sc_drag)), World.origin_z(scene_world(sc_drag)), frame / tick_period()))
                         Menu.set_slots(Menu.set_status(menu3, save_slot, if saved do Menu.status_saved() else Menu.status_failed() end, frame), Save.list(Save.dir(), -1))
                       else menu3 end
           -- A slot is validated while this world still runs, so a bad slot never leaves you without one.
@@ -2663,7 +2679,7 @@ mod CubeForge do
           -- match. Then the flocks themselves step. All on one slot, so the
           -- animals a dug pond earns appear on the tick that counts them.
           let pop1 = if phase == fauna_slot() do
-            pop_tick_go(pop_s, scene_world(sc1), scene_biome(sc1), World.side(scene_world(sc1)), frame / tick_period(), 0)
+            pop_tick_go(pop_s, scene_world(sc1), scene_biome(sc1), World.side(scene_world(sc1)), frame / tick_period(), year_now, 0)
           else pop_s end
           let herd_a = if phase == fauna_slot() do
             assign_flocks(herd_s, pop1, scene_world(sc1), scene_biome(sc1), fpids, World.side(scene_world(sc1)), frame / tick_period(), seed,
@@ -2821,7 +2837,7 @@ mod CubeForge do
             -- "the mesh always equals a full rebuild" but "what the queue
             -- finishes equals a full rebuild", so the oracle settles it first.
             let scq = drain(sc1, 4096, false)
-            println("  fauna: " ++ int_to_string(Pop.total(pop1)) ++ " animals counted in the window, " ++ int_to_string(CubeForge.Flocks.in_use(herd1)) ++ " flocks, " ++ int_to_string(CubeForge.Flocks.drawn(herd1)) ++ " animals drawn, " ++ int_to_string(F32Buf.len(faunab1) / Vx.floats()) ++ " vertices")
+            println("  fauna: " ++ int_to_string(Pop.total(pop1)) ++ " animals counted in the window, " ++ int_to_string(Pop.archived(pop1)) ++ " chunks archived, year " ++ float_to_string(year_now) ++ ", " ++ int_to_string(CubeForge.Flocks.in_use(herd1)) ++ " flocks, " ++ int_to_string(CubeForge.Flocks.drawn(herd1)) ++ " animals drawn, " ++ int_to_string(F32Buf.len(faunab1) / Vx.floats()) ++ " vertices")
             println(flock_report(herd1, 0, ""))
             println("  survey: " ++ join_lines(survey_lines(sc1, sx, sz, int_to_float(myc_feedback) /. 100.0, known1, tint), ""))
             println("  state: biome " ++ int_to_string(Biome.state_hash(scene_biome(scq), World.side(scene_world(scq)) * 16)) ++ " myc " ++ int_to_string(Myc.state_hash(scene_myc(scq), World.side(scene_world(scq)) * 16))
@@ -3444,7 +3460,7 @@ mod CubeForge do
       -- The populations come back with the save; a new world's regrow from
       -- habitat over the first pass of the population tick.
       let pop0 = match loaded do
-        Loaded(h, _, _) -> Pop.from_list(n, Save.h_pop(h))
+        Loaded(h, _, _) -> Pop.from_list(n, Save.h_origin_x(h), Save.h_origin_z(h), Save.h_pop(h))
         NoLoad -> Pop.new(n)
       end
       let known0 = match loaded do

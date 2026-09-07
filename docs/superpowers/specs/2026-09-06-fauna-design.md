@@ -303,8 +303,11 @@ Each slice is independently verifiable and independently useful.
 4. **Populations.** *(done)* Capacity from habitat, the ease, the registry,
    save/load, and flocks placed and retired from the counts. The registry is
    dense over the window rather than sparse over the world -- a chunk that
-   leaves the window regrows from its capacity on return, since habitat is
-   what persists -- and rides in the save header as a `pop` line. Oracle: a
+   leaves the window is ARCHIVED under its world key with the tick it left at,
+   and restored on return caught up by the visits it missed -- so a school you
+   watched fill in twenty chunks away is there when you come back, grown or
+   thinned by the time between. The save carries every record keyed by world
+   chunk, so a load does not care where the window was. Oracle: a
    flat world with a 6x6 pond dug into it holds two Sunfin and no Deepmaw;
    fill the pond and the count goes to nothing, one a tick. Flocks are given
    only to chunks within two of the player: populations exist everywhere in
@@ -312,6 +315,17 @@ Each slice is independently verifiable and independently useful.
 5. **Survey integration.** The fauna bitmask, the animal ray test, the habitat
    report, and the save round-trip.
 6. **Day and night.** Roosting, the nocturnal shift, crepuscular depth changes.
+
+## Seasons, and the migrants to come
+
+A migrant's capacity is zero outside its season, so its counts drain when the
+season ends and refill when it returns -- and because the registry persists,
+it returns to the same water. A year is eight days; the Frostgull holds the
+coast for the second half of it and the Marshheron the wetland for the first,
+so the two are never here together. That is migration as the population sees
+it. The flocks crossing the sky to do it are the flourish still to build: a
+departing flock that climbs and leaves the window, and an arriving one that
+comes in high and settles, both driven by the same season line.
 
 ## Risks worth naming now
 

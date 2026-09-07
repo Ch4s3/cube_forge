@@ -2710,3 +2710,29 @@ and running the species against the profile brought the gate to 7.72 ms.
 window at the save; a session loaded from it reports 340 animals at frame 0,
 before a single tick has run. A save from before there were populations reads
 an empty list and regrows.
+
+## Populations that persist, and the first season
+
+The dense-window registry was the honest simplification for slice 4, and it
+was the wrong shape for what comes next: a bird that leaves in autumn and comes
+back to the SAME lake needs the lake's record to survive the lake leaving the
+window. So the registry now archives every chunk that leaves, under its world
+coordinate with the tick it left at, and restores it on return -- CAUGHT UP,
+each species moved toward the capacity of the world as it now is by the visits
+it missed. A pond that filled while nobody was watching has its two Sunfin when
+you get back; a pond filled IN while you were away has none. Both are tests.
+
+The save carries every record, window and archive alike, keyed by world chunk:
+a load at the same origin puts a school where it was, a load at another origin
+archives it under world chunk (6, 4) until the window reaches it again. 1,281
+integers in the seed-7 header at the save; 302 animals counted at frame 0 of
+the loaded session.
+
+**Seasons** are a capacity that is zero out of season. A year is eight days --
+an hour of play a season at the default half-hour day, long enough to notice a
+bird has gone and short enough to see it come back. The Frostgull holds the
+coast for the second half of the year and the Marshheron the wetland for the
+first. That is migration as the population sees it; the flocks crossing the sky
+are next.
+
+Frame budget 6.83 ms against 16; save/load round trip passes; 500 tests.
