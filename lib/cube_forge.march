@@ -356,6 +356,35 @@ mod CubeForge do
   -- returns the array — discarding it loses the write when the array is shared, GAPS.md G47).
   type Rep = Rep(CubeForge.World.World, NativeIntArr)
 
+  -- The lowest and highest y a batch of chunk-local cells touches. A cell is
+  -- idx * 256 + id with idx = lx + 16 lz + 256 y, so y is v / 65536.
+  pfn cells_y_lo(cells : List(Int), acc : Int) : Int do
+    match cells do
+      Nil -> acc
+      Cons(v, rest) -> cells_y_lo(rest, if acc < 0 do v / 65536 else Math.min_int(acc, v / 65536) end)
+    end
+  end
+  pfn cells_y_hi(cells : List(Int), acc : Int) : Int do
+    match cells do
+      Nil -> acc
+      Cons(v, rest) -> cells_y_hi(rest, Math.max_int(acc, v / 65536))
+    end
+  end
+  -- Water moving is a block write like any other, and it changes the occupancy
+  -- byte: air is 0 and water is 2. Nothing synced that to the GPU, because
+  -- until the light flood started subtracting the opacity per step nothing on
+  -- the GPU could tell 0 from 2 -- the shadow trace only ever asks `> 0.5`. The
+  -- exact-byte occupancy oracle now catches it, and this is the fix: the touched
+  -- y range of the chunk, which for water is a few layers near the surface.
+  pfn sync_water_occ(w : CubeForge.World.World, cx : Int, cz : Int, cells : List(Int)) : CubeForge.World.World do
+    let lo = cells_y_lo(cells, 0 - 1)
+    if lo < 0 do w
+    else
+      Win.gfx_sync_box(World.occupancy(w), 16 * cx, lo, 16 * cz, 16 * cx + 15, cells_y_hi(cells, lo), 16 * cz + 15)
+      w
+    end
+  end
+
   -- Apply one actor's reply: cell writes are batched per chunk, edge/spill entries become
   -- messages to neighbours (flagging them), a pending marker keeps the chunk flagged.
   pfn apply_reply(w : CubeForge.World.World, pids, flags : NativeIntArr, ci : Int, out : List(Int), cells : List(Int)) : Rep do
@@ -363,7 +392,7 @@ mod CubeForge do
     let cx = ci % n
     let cz = ci / n
     match out do
-      Nil -> Rep(World.set_cells(w, cx, cz, cells), flags)
+      Nil -> Rep(sync_water_occ(World.set_cells(w, cx, cz, cells), cx, cz, cells), flags)
       Cons(v, rest) ->
         let kind = v / 4294967296
         let payload = v % 4294967296

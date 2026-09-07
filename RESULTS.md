@@ -3116,3 +3116,33 @@ A real flood starts from the seed: sky columns filled and emitters set,
 everything else zero. **That seed pass is the next piece**, and after it the
 wiring that lets the GPU result replace the CPU sweep, and then the relight
 path. The rule itself is now known to be right.
+
+
+## The occupancy bug was only half fixed (2026-09-07)
+
+Tightening `cf_occ_check` from "solidity agrees" to "the exact byte agrees" --
+which is what the light flood actually reads -- showed the texture still
+disagreeing with the world, and getting worse with time: 47 texels at frame 30,
+148 by frame 800.
+
+**Water.** `World.set_cells`, the path the water tick applies its replies
+through, writes the CPU occupancy byte (air 0, water 2) and nothing ever synced
+that to the GPU. Every water movement diverged the texture a little further.
+Invisible for as long as the only consumer was the shadow trace, which asks
+`> 0.5` and cannot tell 0 from 2; a real defect the moment the flood began
+subtracting the opacity per step.
+
+Fixed by syncing the touched y range of the chunk after the cells are applied --
+a few layers near the surface, not the whole column.
+
+| | before | after |
+|---|---|---|
+| occupancy oracle, exact byte, frames 30 / 400 / 800 | 47 / 130 / 148 | **0 / 0 / 0** |
+| flood oracle, sky | 2 / 17 / 67 | **0 / 0 / 4** |
+
+The flood agrees better too, which is the same fact from the other side: it was
+reading water as transparent.
+
+The lesson is the oracle's, not the bug's. `cf_occ_check` was written to compare
+what the shadow trace could see, so it certified a texture that was wrong in a
+way nothing yet looked at. An oracle only checks what it is asked to check.

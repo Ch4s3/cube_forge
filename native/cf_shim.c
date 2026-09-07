@@ -1290,12 +1290,15 @@ int64_t cf_occ_check(void *arr) {
     for (int64_t z = 0; z < g_occ_d; z++)
         for (int64_t y = 0; y < g_occ_h; y++)
             for (int64_t x = 0; x < g_occ_w; x++) {
-                /* Solidity, not the raw byte: the array holds the light opacity
-                 * (2 water, 6 leaves) and cf_gfx_upload_occupancy uploads it
-                 * verbatim while cf_gfx_sync_box normalises to 0/255. The shader
-                 * only ever asks `> 0.5`, so that is what has to agree. */
-                int want = a[x + g_occ_w * (y + g_occ_h * z)] > 127;
-                int got  = tex[occ_tx(x) + g_occ_w * (y + g_occ_h * occ_tz(z))] > 127;
+                /* The EXACT byte, not just solidity. It used to be solidity,
+                 * because cf_gfx_sync_box normalised to 0/255 where
+                 * cf_gfx_upload_occupancy uploaded verbatim, and the shadow
+                 * trace could not tell the difference. That disagreement was
+                 * invisible until the light flood started subtracting the
+                 * opacity per step, so the oracle now insists on the value the
+                 * flood actually reads. */
+                int want = a[x + g_occ_w * (y + g_occ_h * z)];
+                int got  = tex[occ_tx(x) + g_occ_w * (y + g_occ_h * occ_tz(z))];
                 if (want != got) bad++;
             }
     free(tex);
