@@ -79,6 +79,30 @@ mod CubeForge.Test.Model do
     end
   end
 
+  describe "Model palette allocation" do
+    -- Three allocators share one 256-texel layer by hand: the block models
+    -- (1..22), the fauna's accents and species tones (23..85, generated from
+    -- Fauna.palette_base), and the crystals. The merge that brought the fauna in
+    -- collided with the crystal at 23 and 24 and was caught only because both
+    -- sides happened to conflict in git; a texel that is merely the wrong colour
+    -- makes no noise at all. This pins the fences.
+    test "the block models, the fauna and the crystals do not overlap" do
+      Test.assert_true(Md.c_bush_stem() < Md.c_beak(), "block-model colours end before the fauna's accents")
+      let fauna_top = CubeForge.Fauna.palette_base() + 3 * CubeForge.Fauna.count()
+      Test.assert_true(Md.c_beak() < CubeForge.Fauna.palette_base(), "the accents sit below the species tones")
+      Test.assert_true(Md.c_eye() < CubeForge.Fauna.palette_base(), "both of them")
+      Test.assert_true(fauna_top <= Md.c_crystal(), "the crystals start above the last species tone")
+      Test.assert_true(Md.c_crystal_pale() < 256, "and fit the layer")
+    end
+    test "every allocated index has a colour, and the gap between ranges is empty" do
+      Test.assert_true(Md.colour_r(Md.c_crystal()) + Md.colour_g(Md.c_crystal()) + Md.colour_b(Md.c_crystal()) > 0, "crystal has a colour")
+      Test.assert_true(Md.colour_r(Md.c_crystal_pale()) > Md.colour_r(Md.c_crystal()), "and its tip is paler")
+      Test.assert_true(Md.colour_r(Md.c_beak()) + Md.colour_g(Md.c_eye()) > 0, "the fauna accents have colours")
+      -- 31 is the one unallocated texel between the accents and the species
+      Test.assert_eq_int(Md.colour_r(31) + Md.colour_g(31) + Md.colour_b(31), 0, "the hole at 31 is black, not someone's stray entry")
+    end
+  end
+
   describe "Model palette layer" do
     test "texel 17 of the palette layer is the frond green" do
       let a = CubeForge.Texture.checkerboard()
