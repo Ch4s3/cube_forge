@@ -3343,3 +3343,37 @@ and 87. GAPS renumbered: the silent-test-drop finding is G85.
 before and after -- but the vertex layout is not, so the pinned mesh hashes
 move once more: `CF_POI=0` **360460515**, POIs on **1064367677**. Worst frame
 6.93 ms.
+
+## The crystals, revisited with a slice (2026-09-07)
+
+`CF_POI_SLICE=1` prints a plan of the first cavern's chamber 0 at its centre
+height and a vertical section through it, drawn through `Poi.vol_block` -- the
+same function the generator uses. The preview draws a hypothetical cell on
+flat ground; this draws the chamber the camera is standing in, and it said in
+one screen what six rounds of cameras had not: **the beams had fused into a
+slab** 28 columns wide. Six shafts at radius 2.0-3.3 in an eleven-radius
+chamber, each a third of the room, centred near its middle with free hashed
+directions, lay together and merged.
+
+Three changes, each against the slice:
+
+- **Thin.** Radius 1.0-1.6: a tenth of the room's radius, a metre-thick crystal
+  in a ten-metre chamber, which is Naica's proportion.
+- **Fanned.** Azimuths one slot each round the compass with a hashed jitter,
+  the way the giant tree throws its boughs, so two shafts never lie parallel
+  through the same middle. Elevation +-45 rather than +-70: Naica's lean, they
+  do not stand.
+- **No popcorn.** The blade models on every surface read as white lumps and
+  stole the scene from the shafts; Naica has no fine growth like that. They are
+  floor rubble now, at 3% of shell voxels below the chamber's centre.
+
+After: separable shafts, one long diagonal about four blocks thick crossing the
+chamber end to end with a second across it, in both the plan and the section.
+`docs/poi-crystal-cavern.png` is from the chamber's south side at eye level.
+
+One non-finding worth recording: five floor-level cameras produced frames
+pixel-identical to the previous build's, save the frame counter, across a
+change the slice showed plainly. The world hash at that spawn responds to
+`CF_POI`, so the beams were there; at floor level looking down, a chamber whose
+ceiling is white shafts looks the same whether the shafts are a slab or six.
+The camera was the wrong instrument; the slice was the right one.

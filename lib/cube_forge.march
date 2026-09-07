@@ -3285,7 +3285,60 @@ mod CubeForge do
       poi_transect_go(n, seed, z, x + 1, acc ++ c)
     end
   end
+  -- CF_POI_SLICE=1: for the first cavern in the span, a PLAN of chamber 0 at
+  -- its centre height and a vertical SECTION through its centre along x, each
+  -- 61 columns wide, drawn through Poi.vol_block -- the same function the
+  -- generator uses, so what this prints is what is in the world. The preview
+  -- draws a hypothetical cell on flat ground; this draws the one the camera is
+  -- standing in.  '#' rock  '.' air  'X' beam  '*' blade
+  pfn slice_ch(k : Int, cx : Int, cz : Int, seed : Int, wx : Int, y : Int, wz : Int, g : Int) : String do
+    let b = CubeForge.Poi.vol_block(k, cx, cz, seed, wx, wz, y, g)
+    if b == CubeForge.Chunk.crystal_beam() do "X" else if b == CubeForge.Chunk.crystal() do "*"
+    else if b == 0 do "." else (if y <= CubeForge.Noise.height_base(wx, wz, seed) do "#" else " " end) end end end
+  end
+  pfn slice_row(k : Int, cx : Int, cz : Int, seed : Int, x0 : Int, y : Int, wz : Int, g : Int, i : Int, acc : String) : String do
+    if i > 60 do acc else slice_row(k, cx, cz, seed, x0, y, wz, g, i + 1, acc ++ slice_ch(k, cx, cz, seed, x0 + i, y, wz, g)) end
+  end
+  pfn slice_plan(k : Int, cx : Int, cz : Int, seed : Int, x0 : Int, y : Int, z0 : Int, g : Int, j : Int) : Unit do
+    if j > 60 do ()
+    else
+      println("   " ++ (if z0 + j < 100 do " " else "" end) ++ int_to_string(z0 + j) ++ " " ++ slice_row(k, cx, cz, seed, x0, y, z0 + j, g, 0, ""))
+      slice_plan(k, cx, cz, seed, x0, y, z0, g, j + 1)
+    end
+  end
+  pfn slice_sect(k : Int, cx : Int, cz : Int, seed : Int, x0 : Int, wz : Int, g : Int, y : Int, y1 : Int) : Unit do
+    if y < y1 do ()
+    else
+      println("   " ++ (if y < 100 do " " else "" end) ++ int_to_string(y) ++ " " ++ slice_row(k, cx, cz, seed, x0, y, wz, g, 0, ""))
+      slice_sect(k, cx, cz, seed, x0, wz, g, y - 1, y1)
+    end
+  end
+  pfn poi_slice_go(n : Int, seed : Int, i : Int) : Unit do
+    let k = CubeForge.Poi.k_cavern()
+    let cells = 16 * n / CubeForge.Poi.cell(k) + 1
+    if i >= cells * cells do ()
+    else
+      let cx = i % cells
+      let cz = i / cells
+      if !CubeForge.Poi.here(k, cx, cz, seed, CubeForge.Poi.poi_scale()) do poi_slice_go(n, seed, i + 1)
+      else
+        let g = CubeForge.Poi.ground(k, cx, cz, seed)
+        let a = CubeForge.Poi.bearing(k, cx, cz, seed)
+        let cu = CubeForge.Poi.cham_u(k, cx, cz, seed, 0)
+        let cv = CubeForge.Poi.cham_v(k, cx, cz, seed, 0)
+        let mx = CubeForge.Poi.sx(k, cx, cz, seed) + float_to_int(cu *. Math.cos(a) -. cv *. Math.sin(a))
+        let mz = CubeForge.Poi.sz(k, cx, cz, seed) + float_to_int(cu *. Math.sin(a) +. cv *. Math.cos(a))
+        let my = float_to_int(CubeForge.Poi.cham_y(k, cx, cz, seed, 0, g))
+        println("  cavern slice: chamber 0 at " ++ int_to_string(mx) ++ "," ++ int_to_string(mz) ++ " y " ++ int_to_string(my)
+                ++ "  radius " ++ int_to_string(float_to_int(CubeForge.Poi.cham_r(k, cx, cz, seed, 0))) ++ "  -- plan at y " ++ int_to_string(my) ++ ", x " ++ int_to_string(mx - 30) ++ ".." ++ int_to_string(mx + 30))
+        slice_plan(k, cx, cz, seed, mx - 30, my, mz - 30, g, 0)
+        println("  -- section along x at z " ++ int_to_string(mz))
+        slice_sect(k, cx, cz, seed, mx - 30, mz, g, my + 22, my - 22)
+      end
+    end
+  end
   pfn poi_report(n : Int, seed : Int) : Unit do
+    if Env.get_int("CF_POI_SLICE", 0) == 1 do poi_slice_go(n, seed, 0) else () end
     if Env.get_int("CF_POI_GATE", 0) == 1 do poi_gate(seed) else () end
     let tz = Env.get_int("CF_POI_TRANSECT", -1)
     if tz >= 0 do println("  transect z=" ++ int_to_string(tz) ++ ": " ++ poi_transect_go(n, seed, tz, 0, "")) else () end

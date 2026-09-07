@@ -775,19 +775,24 @@ mod CubeForge.Poi do
   -- once when the beam count changed, and a collision here is invisible -- two
   -- draws that should be independent quietly agree.
   doc "Beams crossing each chamber."
-  fn beams() : Int do 5 end
+  fn beams() : Int do 6 end
 
   -- Beam [b] of chamber [j]: a segment through the chamber at a hashed
   -- attitude, longer than the chamber is wide so it drives into both walls.
-  pfn beam_dx(k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int) : Float do
-    Math.cos(hash(k, cx, cz, seed, 110 + 4 * (7 * j + b)) *. 6.2831853) *. Math.cos(hash(k, cx, cz, seed, 111 + 4 * (7 * j + b)) *. 2.4 -. 1.2)
+  -- Azimuth: fanned evenly round the compass, one slot per beam, with a hashed
+  -- jitter -- the way the giant tree throws its boughs. With a free hash per
+  -- beam, two of the six in a chamber lay nearly parallel through the same
+  -- middle and merged into one slab; the cavern slice showed a single white
+  -- mass 28 columns wide where the shafts were meant to cross.
+  pfn beam_az(k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int) : Float do
+    int_to_float(b) *. 6.2831853 /. int_to_float(beams()) +. (hash(k, cx, cz, seed, 110 + 4 * (7 * j + b)) -. 0.5) *. 0.6 +. int_to_float(j) *. 0.7
   end
-  pfn beam_dy(k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int) : Float do
-    Math.sin(hash(k, cx, cz, seed, 111 + 4 * (7 * j + b)) *. 2.4 -. 1.2)
+  pfn beam_el(k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int) : Float do
+    hash(k, cx, cz, seed, 111 + 4 * (7 * j + b)) *. 1.6 -. 0.8
   end
-  pfn beam_dz(k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int) : Float do
-    Math.sin(hash(k, cx, cz, seed, 110 + 4 * (7 * j + b)) *. 6.2831853) *. Math.cos(hash(k, cx, cz, seed, 111 + 4 * (7 * j + b)) *. 2.4 -. 1.2)
-  end
+  pfn beam_dx(k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int) : Float do Math.cos(beam_az(k, cx, cz, seed, j, b)) *. Math.cos(beam_el(k, cx, cz, seed, j, b)) end
+  pfn beam_dy(k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int) : Float do Math.sin(beam_el(k, cx, cz, seed, j, b)) end
+  pfn beam_dz(k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int) : Float do Math.sin(beam_az(k, cx, cz, seed, j, b)) *. Math.cos(beam_el(k, cx, cz, seed, j, b)) end
   doc """
   Is beam [b] one of the large ones. FOUR IN FIVE are: Naica is packed with big
   ones, and a chamber where the big shafts are the minority reads as a cave that
@@ -815,7 +820,10 @@ mod CubeForge.Poi do
     let h = hash(k, cx, cz, seed, 113 + 4 * (7 * j + b))
     -- the long ones carry the look, so they are the medium-thick ones; the
     -- short ones stay slender or they read as boulders rather than crystals
-    if beam_long(k, cx, cz, seed, j, b) do 2.0 +. 1.3 *. h else 1.0 +. 0.6 *. h end
+    -- a tenth of the room's radius, as at Naica: a metre-thick crystal in a
+    -- ten-metre chamber. At 2.0-3.3 in an eleven-radius chamber six of them
+    -- were a third of the room each and fused into slabs
+    if beam_long(k, cx, cz, seed, j, b) do 1.0 +. 0.6 *. h else 0.6 +. 0.4 *. h end
   end
   doc "How thick the beam is at position [t] along it, as a fraction of beam_rad: full over the middle and drawn to a point at both ends, the way a crystal terminates."
   fn beam_taper(t : Float) : Float do
@@ -830,11 +838,14 @@ mod CubeForge.Poi do
       let l = beam_half(k, cx, cz, seed, j, b)
       -- the beam is offset from the chamber's centre, so the three of them
       -- cross rather than all passing through one point
-      -- spread wide: at half this the five shafts all passed through the middle
-      -- and merged into one white mass with no shaft visible in it
-      let ou = cham_u(k, cx, cz, seed, j) +. (hash(k, cx, cz, seed, 200 + 7 * j + b) -. 0.5) *. 1.5 *. cham_r(k, cx, cz, seed, j)
-      let ov = cham_v(k, cx, cz, seed, j) +. (hash(k, cx, cz, seed, 230 + 7 * j + b) -. 0.5) *. 1.5 *. cham_r(k, cx, cz, seed, j)
-      let oy = cham_y(k, cx, cz, seed, j, g) +. (hash(k, cx, cz, seed, 260 + 7 * j + b) -. 0.5) *. cham_r(k, cx, cz, seed, j) *. 1.1
+      -- centred INSIDE the chamber (within 0.6 of its radius), so a shaft
+      -- crosses the open air end to end and buries only its tips. Spread to 1.5
+      -- radii, most of each beam was in the wall and what showed was a stub;
+      -- spread to 0.5, five of them merged into one mass. The chamber is big
+      -- enough now for the middle.
+      let ou = cham_u(k, cx, cz, seed, j) +. (hash(k, cx, cz, seed, 200 + 7 * j + b) -. 0.5) *. 1.0 *. cham_r(k, cx, cz, seed, j)
+      let ov = cham_v(k, cx, cz, seed, j) +. (hash(k, cx, cz, seed, 230 + 7 * j + b) -. 0.5) *. 1.0 *. cham_r(k, cx, cz, seed, j)
+      let oy = cham_y(k, cx, cz, seed, j, g) +. (hash(k, cx, cz, seed, 260 + 7 * j + b) -. 0.5) *. cham_r(k, cx, cz, seed, j) *. 0.9
       let dx = beam_dx(k, cx, cz, seed, j, b) *. l
       let dy = beam_dy(k, cx, cz, seed, j, b) *. l
       let dz = beam_dz(k, cx, cz, seed, j, b) *. l
@@ -858,10 +869,11 @@ mod CubeForge.Poi do
     if d >= 1.45 do 0 - 1
     else if beams_d(k, cx, cz, seed, u, v, int_to_float(y), g, 0, 9.0) < 1.0 do C.crystal_beam()
     else if d >= 1.0 do 0 - 1
-    -- the fine growth: blades on the shell, floor and ceiling both. Sparser now
-    -- that the beams carry the look; a lining only on the floor lit the chamber
-    -- from below and left its roof black
-    else if d > 0.88 && N.hash2(wx * 31 + y, wz * 17 - y, seed + 909) < 0.09 do C.crystal()
+    -- the fine growth, now only broken pieces on the FLOOR, and few. Blades on
+    -- every surface read as white popcorn and stole the scene from the shafts:
+    -- Naica has no fine growth like that, it has the beams and the rock
+    else if d > 0.90 && int_to_float(y) < cham_y(k, cx, cz, seed, 0, g) -. 2.0
+            && N.hash2(wx * 31 + y, wz * 17 - y, seed + 909) < 0.03 do C.crystal()
     else 0 end end end end
   end
 
