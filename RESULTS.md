@@ -2736,3 +2736,25 @@ first. That is migration as the population sees it; the flocks crossing the sky
 are next.
 
 Frame budget 6.83 ms against 16; save/load round trip passes; 500 tests.
+
+## The flyover
+
+Departure is a flock mode: when a migrant's season closes, `mode_of` returns
+`depart` ahead of everything else -- ahead of the player, ahead of the clock --
+and the flock climbs thirty above its cruise, drops the pull home, and pushes
+the way its species leaves at fleeing speed. The loop keeps its slot while the
+count drains underneath it (which would otherwise free it mid-departure) and
+lets it go once the lead is forty-four blocks out.
+
+Arrival needed no behaviour at all. An arriving migrant is placed forty-four
+blocks out and twenty-five up, from the way it leaves; the pull home it has
+past `home_radius` and the altitude spring fly it in over ten seconds or so.
+The test is the same for both: a gull whose season is over ends sixty ticks
+well above where it would cruise and thirty north of home, past the reach; a
+gull started forty-four out and twenty-four up ends a hundred and twenty ticks
+inside its home radius, down at its cruise.
+
+Watched in the game with a two-second day, so the year turns in sixteen: at
+year 0.70 a Marshheron -- whose season closed at 0.5 -- is at y 103 seventeen
+blocks north of its home, on its way out. Nothing placed it there but the
+calendar.

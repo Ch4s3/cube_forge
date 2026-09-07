@@ -368,13 +368,23 @@ mod CubeForge do
   -- species whose count has gone to nothing loses its flock. A flock's size is
   -- its count when it was placed -- it does not grow with the count, which is
   -- a simplification and the first thing to revisit.
-  pfn assign_go(herd : CubeForge.Flocks.Snap, pop : CubeForge.Pop.Reg, w : CubeForge.World.World, bio : CubeForge.Biome.Field, fpids, n : Int, cx : Int, cz : Int, near : Bool, seed : Int, sp : Int) : CubeForge.Flocks.Snap do
+  pfn assign_go(herd : CubeForge.Flocks.Snap, pop : CubeForge.Pop.Reg, w : CubeForge.World.World, bio : CubeForge.Biome.Field, fpids, n : Int, cx : Int, cz : Int, near : Bool, year : Float, seed : Int, sp : Int) : CubeForge.Flocks.Snap do
     if sp > Fauna.count() do herd
     else
       let have = Pop.count_of(pop, cx, cz, sp)
       let slot = CubeForge.Flocks.find(herd, cx, cz, sp)
       let wanted = near && have >= spawn_min()
-      let herd1 = if wanted && slot < 0 do place_flock(herd, w, bio, fpids, n, cx, cz, seed, sp, have)
+      let in_season = Fauna.in_season(sp, year)
+      -- A migrant whose season is over keeps its flock while it flies off --
+      -- the count is draining underneath it, which would otherwise free the
+      -- slot mid-departure -- and loses it once the lead is far enough to be
+      -- out of sight.
+      let herd1 = if slot >= 0 && !in_season do
+                    (if CubeForge.Flocks.lead_dist(herd, slot) > Flock.migrate_reach() do
+                       Flock.send_load(Array.get(fpids, slot), 0, 0, 0, 0.0, 0.0, 0.0)
+                       CubeForge.Flocks.free(herd, slot)
+                     else herd end)
+                  else if wanted && slot < 0 do place_flock(herd, w, bio, fpids, n, cx, cz, seed, sp, have)
                   else if !wanted && slot >= 0 do
                     -- the count has gone, or the player has: the slot is freed
                     Flock.send_load(Array.get(fpids, slot), 0, 0, 0, 0.0, 0.0, 0.0)
@@ -386,8 +396,8 @@ mod CubeForge do
                     -- the count moved: the flock follows it, in place
                     Flock.send_resize(Array.get(fpids, slot), have)
                     herd
-                  else herd end end end end
-      assign_go(herd1, pop, w, bio, fpids, n, cx, cz, near, seed, sp + 1)
+                  else herd end end end end end
+      assign_go(herd1, pop, w, bio, fpids, n, cx, cz, near, year, seed, sp + 1)
     end
   end
   pfn place_flock(herd : CubeForge.Flocks.Snap, w : CubeForge.World.World, bio : CubeForge.Biome.Field, fpids, n : Int, cx : Int, cz : Int, seed : Int, sp : Int, have : Int) : CubeForge.Flocks.Snap do
@@ -403,16 +413,21 @@ mod CubeForge do
         let hz = int_to_float(z) +. 0.5
         let hy = flock_home_y(bio, sp, x, z)
         Flock.send_load(Array.get(fpids, free), sp, have, seed * 31 + free + 7 * (cx + n * cz), hx, hy, hz)
+        -- a migrant ARRIVES: it starts far out and high, from the way it
+        -- leaves, and the pull home it already has flies it in
+        if Fauna.migrant(sp) do
+          Flock.send_offset(Array.get(fpids, free), 0.0 -. Fauna.leave_dx(sp) *. Flock.migrate_reach(), Flock.depart_climb() *. 0.8, 0.0 -. Fauna.leave_dz(sp) *. Flock.migrate_reach())
+        else () end
         CubeForge.Flocks.with_flock(herd, free, sp, hx, hy, hz)
       end
     end
   end
-  pfn assign_flocks(herd : CubeForge.Flocks.Snap, pop : CubeForge.Pop.Reg, w : CubeForge.World.World, bio : CubeForge.Biome.Field, fpids, n : Int, tick : Int, seed : Int, pcx : Int, pcz : Int, j : Int) : CubeForge.Flocks.Snap do
+  pfn assign_flocks(herd : CubeForge.Flocks.Snap, pop : CubeForge.Pop.Reg, w : CubeForge.World.World, bio : CubeForge.Biome.Field, fpids, n : Int, tick : Int, year : Float, seed : Int, pcx : Int, pcz : Int, j : Int) : CubeForge.Flocks.Snap do
     if j >= pop_chunks_per_tick() do herd
     else
       let d = (tick * pop_chunks_per_tick() + j) % (n * n)
-      assign_flocks(assign_go(herd, pop, w, bio, fpids, n, d % n, d / n, chunk_near(d % n, d / n, pcx, pcz), seed, 1),
-                    pop, w, bio, fpids, n, tick, seed, pcx, pcz, j + 1)
+      assign_flocks(assign_go(herd, pop, w, bio, fpids, n, d % n, d / n, chunk_near(d % n, d / n, pcx, pcz), year, seed, 1),
+                    pop, w, bio, fpids, n, tick, year, seed, pcx, pcz, j + 1)
     end
   end
 
@@ -448,7 +463,7 @@ mod CubeForge do
   end
 
   pfn tick_flocks(herd : CubeForge.Flocks.Snap, w : CubeForge.World.World, bio : CubeForge.Biome.Field, ncols : Int, fpids,
-                  sun : Float, px : Float, py : Float, pz : Float, i : Int) : CubeForge.Flocks.Snap do
+                  sun : Float, px : Float, py : Float, pz : Float, year : Float, i : Int) : CubeForge.Flocks.Snap do
     if i >= CubeForge.Flocks.live(herd) do herd
     else
       let hx = clamp_col(float_to_int(CubeForge.Flocks.home_x(herd, i)), ncols)
@@ -457,14 +472,14 @@ mod CubeForge do
       let patch = patch_go(w, bio, ncols, hx, hz, fish, NativeArray.make_int(4, 0), 0)
       -- The surface this flock lives under is the field's height at its home --
       -- sea level over the sea, and the top of an upland lake over one of those.
-      Flock.send_inputs(Array.get(fpids, i), patch, int_to_float(Biome.height_of(bio, hx, hz)), sun, px, py, pz)
+      Flock.send_inputs(Array.get(fpids, i), patch, int_to_float(Biome.height_of(bio, hx, hz)), sun, px, py, pz, Fauna.in_season(CubeForge.Flocks.species_of(herd, i), year))
       let herd1 = match Flock.call_tick(Array.get(fpids, i)) do
         Ok(ts) -> CubeForge.Flocks.advance(herd, i, ts)
         Err(e) ->
           println("fauna: flock " ++ int_to_string(i) ++ " tick failed: " ++ e)
           herd
       end
-      tick_flocks(herd1, w, bio, ncols, fpids, sun, px, py, pz, i + 1)
+      tick_flocks(herd1, w, bio, ncols, fpids, sun, px, py, pz, year, i + 1)
     end
   end
 
@@ -2682,12 +2697,12 @@ mod CubeForge do
             pop_tick_go(pop_s, scene_world(sc1), scene_biome(sc1), World.side(scene_world(sc1)), frame / tick_period(), year_now, 0)
           else pop_s end
           let herd_a = if phase == fauna_slot() do
-            assign_flocks(herd_s, pop1, scene_world(sc1), scene_biome(sc1), fpids, World.side(scene_world(sc1)), frame / tick_period(), seed,
+            assign_flocks(herd_s, pop1, scene_world(sc1), scene_biome(sc1), fpids, World.side(scene_world(sc1)), frame / tick_period(), year_now, seed,
                           float_to_int(V.x(Player.position(player1))) / 16, float_to_int(V.z(Player.position(player1))) / 16, 0)
           else herd_s end
           let herd1 = if phase == fauna_slot() do
             tick_flocks(herd_a, scene_world(sc1), scene_biome(sc1), World.side(scene_world(sc1)) * 16, fpids, sun,
-                        V.x(Player.position(player1)), V.y(Player.position(player1)), V.z(Player.position(player1)), 0)
+                        V.x(Player.position(player1)), V.y(Player.position(player1)), V.z(Player.position(player1)), year_now, 0)
           else herd_a end
           let faunab1 = if fauna_on do
             let fwd = Player.forward(Player.yaw(player1), 0.0)

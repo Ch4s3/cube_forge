@@ -323,9 +323,13 @@ season ends and refill when it returns -- and because the registry persists,
 it returns to the same water. A year is eight days; the Frostgull holds the
 coast for the second half of it and the Marshheron the wetland for the first,
 so the two are never here together. That is migration as the population sees
-it. The flocks crossing the sky to do it are the flourish still to build: a
-departing flock that climbs and leaves the window, and an arriving one that
-comes in high and settles, both driven by the same season line.
+it. The flocks crossing the sky do it too: a flock whose season is over enters
+a `depart` mode -- climb thirty above its cruise, push the way its species
+leaves at fleeing speed, no pull home -- and is retired once its lead is
+forty-four blocks out. An arriving flock needs no mode at all: it is placed
+forty-four blocks out and twenty-five up, from the way it leaves, and the pull
+home and the altitude spring it already has fly it in. The gull leaves north
+up the coast, the heron south, and each arrives from where it went.
 
 ## Risks worth naming now
 

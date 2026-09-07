@@ -89,10 +89,15 @@ mod CubeForge.Flock do
   end
 
   -- ── Behaviour ─────────────────────────────────────────────────────────────
-  doc "Modes: 0 feeding (the ordinary day), 1 roosting (down, still), 2 fleeing the player."
+  doc "Modes: 0 feeding (the ordinary day), 1 roosting (down, still), 2 fleeing the player, 3 departing (the season is over: climb, and go)."
   fn m_feed() : Int do 0 end
   fn m_roost() : Int do 1 end
   fn m_flee() : Int do 2 end
+  fn m_depart() : Int do 3 end
+  doc "How far above its cruise a departing flock climbs before it is out of sight."
+  fn depart_climb() : Float do 30.0 end
+  doc "How far out an arriving flock starts, and a departing one is let go."
+  fn migrate_reach() : Float do 44.0 end
 
   doc "How far a bird cruises above the ground while feeding."
   fn cruise() : Float do 9.0 end
@@ -121,10 +126,13 @@ mod CubeForge.Flock do
   by day -- which is what makes the day cycle read as a shift change rather than
   as a dimmer.
   """
-  fn mode_of(sp : Int, sun : Float, player_near : Bool) : Int do
-    if player_near do m_flee()
+  fn mode_of(sp : Int, sun : Float, player_near : Bool, in_season : Bool) : Int do
+    -- the season outranks everything: a bird whose time is up is leaving,
+    -- whatever the clock or the player is doing
+    if !in_season do m_depart()
+    else if player_near do m_flee()
     else if Fa.nocturnal(sp) do (if sun > dusk() do m_roost() else m_feed() end)
-    else (if sun > dusk() do m_feed() else m_roost() end) end end
+    else (if sun > dusk() do m_feed() else m_roost() end) end end end
   end
 
   doc "The height this animal wants, from the ground under it. A fish is never asked to leave the water, however hard it is fleeing."
@@ -133,7 +141,8 @@ mod CubeForge.Flock do
     if Fa.is_fish(sp) do clampf(water_y -. fish_depth(), g +. 0.6, water_y -. 0.6)
     else if mode == m_roost() do g +. roost_y()
     else if mode == m_flee() do g +. cruise() +. 4.0
-    else g +. cruise() end end end
+    else if mode == m_depart() do g +. cruise() +. depart_climb()
+    else g +. cruise() end end end end
   end
 
   -- A wander angle that is a pure function of the flock's seed, the animal and
@@ -188,7 +197,7 @@ mod CubeForge.Flock do
   pfn step_one(b : NativeFloatArr, f_sp : Int, n : Int, i : Int, seed : Int, t : Int,
                hx : Float, hz : Float, cx : Float, cz : Float,
                patch : NativeIntArr, water_y : Float, sun : Float,
-               px : Float, py : Float, pz : Float, dt : Float) : NativeFloatArr do
+               px : Float, py : Float, pz : Float, in_season : Bool, dt : Float) : NativeFloatArr do
     let x = pos_x(b, i)
     let y = pos_y(b, i)
     let z = pos_z(b, i)
@@ -196,7 +205,7 @@ mod CubeForge.Flock do
     let pdz = z -. pz
     let pdy = y -. py
     let near = pdx *. pdx +. pdy *. pdy +. pdz *. pdz < flee_radius() *. flee_radius()
-    let mode = mode_of(f_sp, sun, near)
+    let mode = mode_of(f_sp, sun, near, in_season)
     let ground = ground_at(patch, hx, hz, x, z)
     let ty = want_y(f_sp, mode, ground, water_y)
 
@@ -209,8 +218,10 @@ mod CubeForge.Flock do
     let dhx = x -. hx
     let dhz = z -. hz
     let far = Math.sqrt(dhx *. dhx +. dhz *. dhz)
-    let ahomex = if far > home_radius() do 0.0 -. dhx /. far *. 3.0 else 0.0 end
-    let ahomez = if far > home_radius() do 0.0 -. dhz /. far *. 3.0 else 0.0 end
+    -- a departing flock is not pulled home; it is pushed the way it leaves
+    let leaving = mode == m_depart()
+    let ahomex = if leaving do Fa.leave_dx(f_sp) *. 6.0 else if far > home_radius() do 0.0 -. dhx /. far *. 3.0 else 0.0 end end
+    let ahomez = if leaving do Fa.leave_dz(f_sp) *. 6.0 else if far > home_radius() do 0.0 -. dhz /. far *. 3.0 else 0.0 end end
     let w = wander(seed, i, t)
     let awx = Math.cos(w) *. 1.4
     let awz = Math.sin(w) *. 1.4
@@ -225,7 +236,7 @@ mod CubeForge.Flock do
     -- should not be able to outvote
     let vy0 = vel_y(b, i) +. (ty -. y) *. 2.0 *. dt
 
-    let top = if mode == m_flee() do flee_speed() else cruise_speed() end
+    let top = if mode == m_flee() do flee_speed() else if leaving do flee_speed() else cruise_speed() end end
     let slow = if mode == m_roost() do 0.25 else 1.0 end
     let vx1 = vx0 *. 0.86
     let vz1 = vz0 *. 0.86
@@ -257,10 +268,10 @@ mod CubeForge.Flock do
   pfn step_go(b : NativeFloatArr, f_sp : Int, n : Int, i : Int, seed : Int, t : Int,
               hx : Float, hz : Float, cx : Float, cz : Float,
               patch : NativeIntArr, water_y : Float, sun : Float,
-              px : Float, py : Float, pz : Float, dt : Float) : NativeFloatArr do
+              px : Float, py : Float, pz : Float, in_season : Bool, dt : Float) : NativeFloatArr do
     if i >= n do b
-    else step_go(step_one(b, f_sp, n, i, seed, t, hx, hz, cx, cz, patch, water_y, sun, px, py, pz, dt),
-                 f_sp, n, i + 1, seed, t, hx, hz, cx, cz, patch, water_y, sun, px, py, pz, dt)
+    else step_go(step_one(b, f_sp, n, i, seed, t, hx, hz, cx, cz, patch, water_y, sun, px, py, pz, in_season, dt),
+                 f_sp, n, i + 1, seed, t, hx, hz, cx, cz, patch, water_y, sun, px, py, pz, in_season, dt)
     end
   end
 
@@ -273,7 +284,7 @@ mod CubeForge.Flock do
   back, which is what the position hash in the tests rests on.
   """
   fn step(f : Flock, patch : NativeIntArr, water_y : Float, sun : Float,
-          px : Float, py : Float, pz : Float, dt : Float) : Flock do
+          px : Float, py : Float, pz : Float, in_season : Bool, dt : Float) : Flock do
     match f do
       Flock(sp, n, t, seed, hx, hy, hz, b) ->
         if n <= 0 do Flock(sp, n, t, seed, hx, hy, hz, b)
@@ -283,7 +294,7 @@ mod CubeForge.Flock do
           let cx = centre_x(b, n, 0, 0.0)
           let cz = centre_z(b, n, 0, 0.0)
           Flock(sp, n, t + 1, seed, hx, hy, hz,
-                step_go(b, sp, n, 0, seed, t, hx, hz, cx, cz, patch, water_y, sun, px, py, pz, dt))
+                step_go(b, sp, n, 0, seed, t, hx, hz, cx, cz, patch, water_y, sun, px, py, pz, in_season, dt))
         end
     end
   end
@@ -325,6 +336,30 @@ mod CubeForge.Flock do
       Flock(sp, m, t, seed, hx, hy, hz, b) ->
         let k = clampi(n, 0, cap())
         Flock(sp, k, t, seed, hx, hy, hz, if k > m do place_go(b, k, m, seed, hx, hy, hz) else b end)
+    end
+  end
+
+  doc "Every animal moved by (dx, dy, dz), the home left where it is: the start of an arriving flock, which then flies home on the pull it already has."
+  fn offset(f : Flock, dx : Float, dy : Float, dz : Float) : Flock do
+    match f do
+      Flock(sp, n, t, seed, hx, hy, hz, b) -> Flock(sp, n, t, seed, hx, hy, hz, offset_go(b, n, dx, dy, dz, 0))
+    end
+  end
+  pfn offset_go(b : NativeFloatArr, n : Int, dx : Float, dy : Float, dz : Float, i : Int) : NativeFloatArr do
+    if i >= n do b
+    else
+      let b1 = NativeArray.set_float(b, i * stride(), pos_x(b, i) +. dx)
+      let b2 = NativeArray.set_float(b1, i * stride() + 1, pos_y(b1, i) +. dy)
+      offset_go(NativeArray.set_float(b2, i * stride() + 2, pos_z(b2, i) +. dz), n, dx, dy, dz, i + 1)
+    end
+  end
+  doc "How far the flock's first animal is from its home, on the ground plane: what says a departing flock has gone."
+  fn lead_dist(f : Flock) : Float do
+    if count(f) <= 0 do 0.0
+    else
+      let dx = pos_x(bodies(f), 0) -. home_x(f)
+      let dz = pos_z(bodies(f), 0) -. home_z(f)
+      Math.sqrt(dx *. dx +. dz *. dz)
     end
   end
 
@@ -425,10 +460,10 @@ mod CubeForge.Flock do
   -- flock read a ground of 0 and a water surface of 0, so the fish sank to
   -- y 0.5 (its floor, ground + 0.5) and the birds cruised toward y 9. Sends
   -- carry their arguments; WLoad has always relied on that.
-  type Inputs = Inputs(Int, Int, Int, Int, Int, Int, Int, Int, Int)
+  type Inputs = Inputs(Int, Int, Int, Int, Int, Int, Int, Int, Int, Int)
   type FTickReq = FTickReq
 
-  pfn no_inputs() : Inputs do Inputs(0, 0, 0, 0, 0, 0, 0, 0, 0) end
+  pfn no_inputs() : Inputs do Inputs(0, 0, 0, 0, 0, 0, 0, 0, 0, 1) end
 
   pfn unpack_patch(p0 : Int, p1 : Int, p2 : Int, p3 : Int) : NativeIntArr do
     let a0 = NativeArray.make_int(patch_ints(), 0)
@@ -439,9 +474,9 @@ mod CubeForge.Flock do
 
   pfn handle_tick(reply_to, f : Flock, inp : Inputs) : Flock do
     match inp do
-      Inputs(p0, p1, p2, p3, water8, sun1000, px8, py8, pz8) ->
+      Inputs(p0, p1, p2, p3, water8, sun1000, px8, py8, pz8, season) ->
         let f1 = step(f, unpack_patch(p0, p1, p2, p3), int_to_float(water8) /. fx8(), int_to_float(sun1000) /. 1000.0,
-                      int_to_float(px8) /. fx8(), int_to_float(py8) /. fx8(), int_to_float(pz8) /. fx8(), tick_dt())
+                      int_to_float(px8) /. fx8(), int_to_float(py8) /. fx8(), int_to_float(pz8) /. fx8(), season == 1, tick_dt())
         Actor.reply(reply_to, transforms(f1))
         f1
     end
@@ -461,8 +496,12 @@ mod CubeForge.Flock do
       { state with f: new(sp, n, seed, int_to_float(hx8) /. fx8(), int_to_float(hy8) /. fx8(), int_to_float(hz8) /. fx8()) }
     end
 
-    on FInputs(p0 : Int, p1 : Int, p2 : Int, p3 : Int, water8 : Int, sun1000 : Int, px8 : Int, py8 : Int, pz8 : Int) do
-      { state with inp: Inputs(p0, p1, p2, p3, water8, sun1000, px8, py8, pz8) }
+    on FInputs(p0 : Int, p1 : Int, p2 : Int, p3 : Int, water8 : Int, sun1000 : Int, px8 : Int, py8 : Int, pz8 : Int, season : Int) do
+      { state with inp: Inputs(p0, p1, p2, p3, water8, sun1000, px8, py8, pz8, season) }
+    end
+
+    on FOffset(dx8 : Int, dy8 : Int, dz8 : Int) do
+      { state with f: offset(state.f, int_to_float(dx8) /. fx8(), int_to_float(dy8) /. fx8(), int_to_float(dz8) /. fx8()) }
     end
 
     on FResize(n : Int) do
@@ -493,10 +532,15 @@ mod CubeForge.Flock do
     ()
   end
   doc "Tell the flock what the world looks like around it. Sent before every tick."
-  fn send_inputs(pid, patch : NativeIntArr, water_y : Float, sun : Float, px : Float, py : Float, pz : Float) : Unit do
+  fn send_inputs(pid, patch : NativeIntArr, water_y : Float, sun : Float, px : Float, py : Float, pz : Float, in_season : Bool) : Unit do
     let _ = send(pid, FInputs(NativeArray.get_int(patch, 0), NativeArray.get_int(patch, 1), NativeArray.get_int(patch, 2), NativeArray.get_int(patch, 3),
                               float_to_int(water_y *. fx8()), float_to_int(sun *. 1000.0),
-                              float_to_int(px *. fx8()), float_to_int(py *. fx8()), float_to_int(pz *. fx8())))
+                              float_to_int(px *. fx8()), float_to_int(py *. fx8()), float_to_int(pz *. fx8()), if in_season do 1 else 0 end))
+    ()
+  end
+  doc "Move every animal by (dx, dy, dz), leaving the home: an arriving flock starts out here and flies in."
+  fn send_offset(pid, dx : Float, dy : Float, dz : Float) : Unit do
+    let _ = send(pid, FOffset(float_to_int(dx *. fx8()), float_to_int(dy *. fx8()), float_to_int(dz *. fx8())))
     ()
   end
   doc "Step the flock on the inputs it was last sent, and return its packed transforms."

@@ -22,7 +22,7 @@ mod CubeForge.Test.Flock do
 
   pfn run(f : CubeForge.Flock.Flock, patch : NativeIntArr, sun : Float, px : Float, py : Float, pz : Float, n : Int) : CubeForge.Flock.Flock do
     if n <= 0 do f
-    else run(Fl.step(f, patch, 62.0, sun, px, py, pz, Fl.tick_dt()), patch, sun, px, py, pz, n - 1) end
+    else run(Fl.step(f, patch, 62.0, sun, px, py, pz, true, Fl.tick_dt()), patch, sun, px, py, pz, n - 1) end
   end
 
   pfn min_y(f : CubeForge.Flock.Flock, i : Int, acc : Float) : Float do
@@ -140,6 +140,37 @@ mod CubeForge.Test.Flock do
       Test.assert_true(Fl.state_hash(a) != Fl.state_hash(c), "a different seed is a different flock")
       let d = run(Fl.new(Fa.sp_grasspipit(), 8, 4242, 100.0, 80.0, 100.0), p, 1.0, 0.0, 0.0, 0.0, 41)
       Test.assert_true(Fl.state_hash(a) != Fl.state_hash(d), "one more tick is a different flock")
+    end
+  end
+
+  pfn run_out(f : CubeForge.Flock.Flock, patch : NativeIntArr, n : Int) : CubeForge.Flock.Flock do
+    if n <= 0 do f
+    else run_out(Fl.step(f, patch, 62.0, 1.0, 0.0, 0.0, 0.0, false, Fl.tick_dt()), patch, n - 1) end
+  end
+  pfn mean_z(f : CubeForge.Flock.Flock, i : Int, acc : Float) : Float do
+    if i >= Fl.count(f) do acc /. int_to_float(Fl.count(f))
+    else mean_z(f, i + 1, acc +. Fl.pos_z(Fl.bodies(f), i)) end
+  end
+
+  describe "migration" do
+    test "a flock whose season is over climbs and leaves the way its species goes" do
+      let p = flat_patch(70)
+      let stay = run(Fl.new(Fa.sp_frostgull(), 8, 5, 100.0, 79.0, 100.0), p, 1.0, 0.0, 0.0, 0.0, 60)
+      let go = run_out(Fl.new(Fa.sp_frostgull(), 8, 5, 100.0, 79.0, 100.0), p, 60)
+      Test.assert_true(min_y(go, 0, 999.0) > max_y(stay, 0, 0.0) +. 10.0, "well above where it would otherwise cruise")
+      -- the gull leaves toward -z
+      Test.assert_true(mean_z(go, 0, 0.0) < 100.0 -. 30.0, "and gone north, past the home pull")
+      Test.assert_true(Fl.lead_dist(go) > Fl.migrate_reach(), "far enough to be let go")
+    end
+
+    test "a flock started far out flies home on its own" do
+      -- the arriving flock: placed displaced, no new behaviour
+      let p = flat_patch(70)
+      let f0 = Fl.offset(Fl.new(Fa.sp_frostgull(), 8, 5, 100.0, 79.0, 100.0), 0.0, 24.0, 44.0)
+      Test.assert_true(Fl.lead_dist(f0) > 40.0, "starts far")
+      let f1 = run(f0, p, 1.0, 0.0, 0.0, 0.0, 120)
+      Test.assert_true(Fl.lead_dist(f1) < Fl.home_radius() *. 1.5, "and comes home")
+      Test.assert_true(max_y(f1, 0, 0.0) < 70.0 +. Fl.cruise() +. 3.0, "down to its cruise")
     end
   end
 

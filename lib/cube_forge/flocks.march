@@ -87,6 +87,17 @@ mod CubeForge.Flocks do
       shift_go(s1, dx, dz, side, i + 1)
     end end
   end
+  doc "How far slot [i]'s first animal is from its home on the ground plane, from the current snapshot: what says a departing flock has gone."
+  fn lead_dist(s : Snap, i : Int) : Float do
+    match Array.get(cur(s), i) do
+      Nil -> 0.0
+      Cons(v, _) ->
+        let dx = Fl.un_x(v, home_x(s, i)) -. home_x(s, i)
+        let dz = Fl.un_z(v, home_z(s, i)) -. home_z(s, i)
+        Math.sqrt(dx *. dx +. dz *. dz)
+    end
+  end
+
   doc "Live flocks: slots holding a species."
   fn in_use(s : Snap) : Int do use_go(s, 0, 0) end
   pfn use_go(s : Snap, i : Int, acc : Int) : Int do
