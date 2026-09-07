@@ -23,16 +23,18 @@ mod CubeForge.Model do
   fn idx(x : Int, y : Int, z : Int) : Int do x + 8 * (z + 8 * y) end
 
   -- ── Template ids ──────────────────────────────────────────────────────────
-  doc "Templates: mushroom sp 1..6 -> 0..5, frond dir 0..7 -> 6..13, frond umbrella 14, frond tuft 15, bush variant 0..3 -> 16..19."
-  fn count() : Int do 20 end
+  doc "Templates: mushroom sp 1..6 -> 0..5, frond dir 0..7 -> 6..13, frond umbrella 14, frond tuft 15, bush variant 0..3 -> 16..19, crystal variant 0..3 -> 20..23."
+  fn count() : Int do 24 end
   fn t_mushroom(sp : Int) : Int do sp - 1 end
   fn t_frond(dir : Int) : Int do 6 + dir end
   fn t_umbrella() : Int do 14 end
   fn t_tuft() : Int do 15 end
   fn t_bush(variant : Int) : Int do 16 + variant end
+  doc "Crystal blades, four leans. A selenite beam is a shaft, not a cube: at one block per crystal the caverns read as a stack of boxes, and this is what the model layer is for."
+  fn t_crystal(variant : Int) : Int do 20 + variant end
 
   doc "Face caps, per shape, that the tests hold every template under."
-  fn face_cap(k : Int) : Int do if k <= 5 do 160 else if k <= 15 do 120 else 100 end end end
+  fn face_cap(k : Int) : Int do if k <= 5 do 160 else if k <= 15 do 120 else if k <= 19 do 100 else 120 end end end end
 
   -- ── The palette: one texture layer, texel k is colour k ─────────────────
   doc "The texture layer whose 256 texels are the model colours."
@@ -61,6 +63,9 @@ mod CubeForge.Model do
   -- species is a table, and forty-eight literals in this chain is not one.
   fn c_beak() : Int do 26 end
   fn c_eye() : Int do 30 end
+  doc "Selenite: milky cream, and its brighter tip, above the fauna's range (32 + 3 x 18 species). Naica's crystals are gypsum with a warm cast, not the blue-green a crystal is usually drawn as."
+  fn c_crystal() : Int do 86 end
+  fn c_crystal_pale() : Int do 87 end
 
   doc "Palette colour k, red channel."
   fn colour_r(k : Int) : Int do
@@ -71,7 +76,8 @@ mod CubeForge.Model do
     else if k == 20 do 62 else if k == 21 do 90 else if k == 22 do 90
     else if k == 23 do 150 else if k == 24 do 118 else if k == 25 do 226 else if k == 26 do 54
     else if k == 27 do 226 else if k == 28 do 236 else if k == 29 do 240 else if k == 30 do 24
-    else 0 end end end end end end end end end end end end end end end end end end end end
+    else if k == 86 do 228 else if k == 87 do 248
+    else 0 end end end end end end end end end end end end end end end end end end end end end end
   end
   fn colour_g(k : Int) : Int do
     if k >= 1 && k <= 6 do S.colour_g(k)
@@ -81,7 +87,8 @@ mod CubeForge.Model do
     else if k == 20 do 128 else if k == 21 do 160 else if k == 22 do 64
     else if k == 23 do 112 else if k == 24 do 86 else if k == 25 do 214 else if k == 26 do 44
     else if k == 27 do 134 else if k == 28 do 146 else if k == 29 do 236 else if k == 30 do 20
-    else 0 end end end end end end end end end end end end end end end end end end end end
+    else if k == 86 do 230 else if k == 87 do 250
+    else 0 end end end end end end end end end end end end end end end end end end end end end end
   end
   fn colour_b(k : Int) : Int do
     if k >= 1 && k <= 6 do S.colour_b(k)
@@ -91,7 +98,8 @@ mod CubeForge.Model do
     else if k == 20 do 54 else if k == 21 do 70 else if k == 22 do 40
     else if k == 23 do 72 else if k == 24 do 56 else if k == 25 do 196 else if k == 26 do 36
     else if k == 27 do 62 else if k == 28 do 52 else if k == 29 do 226 else if k == 30 do 18
-    else 0 end end end end end end end end end end end end end end end end end end end end
+    else if k == 86 do 222 else if k == 87 do 244
+    else 0 end end end end end end end end end end end end end end end end end end end end end end
   end
 
   -- ── Grids of any side ─────────────────────────────────────────────────────
@@ -254,13 +262,42 @@ mod CubeForge.Model do
     plate_go(box(empty(), 3, 0, 3, 4, 0, 4, c_bush_stem()), variant, 0)
   end
 
+  -- ── Crystal blades ───────────────────────────────────────────────────────
+  -- Naica's selenite: long shafts leaning across each other, not cubes. A blade
+  -- is drawn by walking its length and laying a square down at each step,
+  -- tapering to a point, so the whole thing is one line of code per beam.
+
+  -- A blade from (bx, bz) on the floor to (tx, tz) at height [h], tapering.
+  pfn beam_go(g : NativeU8Arr, bx : Int, bz : Int, tx : Int, tz : Int, h : Int, t : Int) : NativeU8Arr do
+    if t > h do g
+    else
+      let x = bx + (tx - bx) * t / h
+      let z = bz + (tz - bz) * t / h
+      -- two thick for the first two thirds, one at the point
+      let w = if t * 3 < h * 2 do 1 else 0 end
+      let k = if t * 4 < h * 3 do c_crystal() else c_crystal_pale() end
+      beam_go(box(g, x - w, t, z - w, x, t, z, k), bx, bz, tx, tz, h, t + 1)
+    end
+  end
+
+  doc "A cluster of selenite blades, variant 0..3: a long lean and a short one across it, so a run of cells reads as beams crossing rather than a row of spikes."
+  fn crystal(v : Int) : NativeU8Arr do
+    let bx = if v == 0 do 2 else if v == 1 do 5 else if v == 2 do 2 else 4 end end end
+    let bz = if v == 0 do 2 else if v == 1 do 2 else if v == 2 do 5 else 4 end end end
+    let tx = if v == 0 do 6 else if v == 1 do 2 else if v == 2 do 6 else 4 end end end
+    let tz = if v == 0 do 6 else if v == 1 do 6 else if v == 2 do 3 else 7 end end end
+    let a = beam_go(empty(), bx, bz, tx, tz, 7, 0)
+    if v == 3 do a else beam_go(a, 6 - bx, 6 - bz, 6 - tx, 5 - tz, 5, 0) end
+  end
+
   doc "The grid for template id [k]."
   fn shape(k : Int) : NativeU8Arr do
     if k <= 5 do mushroom(k + 1)
     else if k <= 13 do frond(k - 6)
     else if k == 14 do frond_umbrella()
     else if k == 15 do frond_tuft()
-    else bush(k - 16) end end end end
+    else if k <= 19 do bush(k - 16)
+    else crystal(k - 20) end end end end end
   end
 
   -- ── Templates: greedy over the 8x8x8 grid, once ─────────────────────────
@@ -359,7 +396,8 @@ mod CubeForge.Model do
 
   fn face_float(d : Int) : Float do int_to_float(d) end
   pfn vert(b : CubeForge.F32Buf.F32Buf, x : Float, y : Float, z : Float, k : Int, d : Int) : CubeForge.F32Buf.F32Buf do
-    B.push_vertex(b, x, y, z, palette_u(k), palette_v(k), palette_layer(), 1.0, face_float(d), Vx.plain())
+    -- a crystal blade lights its own faces with its own colour (Vertex.fx_selflit)
+    B.push_vertex(b, x, y, z, palette_u(k), palette_v(k), palette_layer(), 1.0, face_float(d), if k == c_crystal() || k == c_crystal_pale() do Vx.selflit() else Vx.plain() end)
   end
   pfn quad(b : CubeForge.F32Buf.F32Buf, x0 : Float, y0 : Float, z0 : Float, x1 : Float, y1 : Float, z1 : Float,
            x2 : Float, y2 : Float, z2 : Float, x3 : Float, y3 : Float, z3 : Float, k : Int, d : Int) : CubeForge.F32Buf.F32Buf do

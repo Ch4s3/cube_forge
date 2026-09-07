@@ -256,7 +256,7 @@ static const char *VS =
     "    n = vec3(n.x * u_mrot.x - n.z * u_mrot.y, n.y, n.x * u_mrot.y + n.z * u_mrot.x);\n"
     "  } else {\n"
     "    p.xz += u_off;\n"
-    "    if (fe >= 2) p.y += 0.03 * sin(u_time * 1.7 + p.x * 1.3 + p.z * 0.9);\n"
+    "    if (fe >= 2 && fe <= 11) p.y += 0.03 * sin(u_time * 1.7 + p.x * 1.3 + p.z * 0.9);\n"
     "  }\n"
     "  gl_Position = u_vp * vec4(p,1.0);\n"
     "  v_uv=a_uv; v_layer=a_layer;\n"
@@ -312,6 +312,15 @@ static const char *FS =
     /* Block light (glowing fungus, later any emissive block): warm, and its own
      * source rather than a sun term. */
     "const vec3  GLOW = vec3(1.00, 0.90, 0.70);\n"
+    /* Deep water. A water fragment has no idea how much water is under it --
+     * its colour is a texture times the light -- so a 24-block lagoon rendered
+     * exactly like a puddle. Still water (effect 10) carries its depth in
+     * blocks in the byte a flowing cell uses for speed, which the shader never
+     * reads for effect 10, so this costs no vertex float, no uniform, no pass
+     * and not one extra vertex. Scaled by the baked skylight, so a flooded
+     * cave stays black rather than glowing blue. */
+    "const vec3  DEEP = vec3(0.05, 0.22, 0.40);\n"
+    "const float DEEP_K = 0.16;\n"
     "const float MOON_LEVEL = 0.13;\n"
     "const float MOON_UNTIL = 0.25;\n"
     /* Sunlight reddens as it nears the horizon. SUN_WARM is dawn/dusk, SUN_WHITE
@@ -478,6 +487,9 @@ static const char *FS =
     "  float sk = v_shade;\n"
     "  float bl = v_blk;\n"
     "  float spd = float(fxw & 255) / 255.0 * 7.0;\n"
+    /* Effect 10's byte is depth in blocks, not speed (see Vertex.pack_depth). */
+    "  float wdep = (fe == 10) ? float(fxw & 255) : 0.0;\n"
+    "  float deep = 1.0 - exp(-wdep * DEEP_K);\n"
     /* Flowing water scrolls its ripple along the flow; still water drifts;
      * fast or falling water blends toward the foam layer. */
     "  vec2 uv = v_uv;\n"
@@ -553,10 +565,19 @@ static const char *FS =
     /* Block light is its own source: independent of the sun, so it is what
      * you see at midnight. max, not +, so a glowing patch at noon is not
      * brighter than the noon around it. */
-    "  vec3  world = max(baked, bl * GLOW) + vec3(flash);\n"
+    /* A self-lit block glows in its OWN colour: block light is one channel and
+     * GLOW is warm, so a near-white selenite beam came out the same orange as a
+     * glowing mushroom. This fixes the emitter's own faces; the light it casts
+     * on the rock around it is still warm, and fixing that needs three
+     * block-light fields. */
+    "  vec3  glow = (fe == 12) ? t.rgb * 1.15 : GLOW;\n"
+    "  vec3  world = max(baked, bl * glow) + vec3(flash);\n"
     /* Overlays (HUD, outline, map marker) share this program but are not part of
      * the world: they keep their own vertex shade and skip lighting entirely. */
     "  vec3 lit = t.rgb * ((u_unlit == 1) ? vec3(sk) : world);\n"
+    /* Before the fog, so distant deep water still fades into the sky rather
+     * than standing on the horizon as a blue slab. */
+    "  if (deep > 0.0) lit = mix(lit, DEEP * (0.35 + 0.65 * sk), deep);\n"
     "  int  fx  = fxw;\n"
     /* Water effects carry speed in the alpha byte, not alpha. */
     "  float a  = (fe >= 2) ? 1.0 : float(fx & 255) / 255.0;\n"
@@ -571,7 +592,9 @@ static const char *FS =
      *
      * Exponential fog, so the far plane does not enter into it. */
     "  if (u_unlit != 1 && (fx >> 8) != 1) lit = mix(lit, u_fog_color, fogf);\n"
-    "  o_color = vec4(lit, t.a * a);\n"
+    /* Deep water is more opaque than shallow: you can read the bottom of a
+     * puddle and not the bottom of a lagoon. */
+    "  o_color = vec4(lit, mix(t.a * a, 1.0, 0.7 * deep));\n"
     "}\n";
 
 static GLuint compile(GLenum kind, const char *src) {
@@ -1595,11 +1618,17 @@ static double cf_pack_shade(double sky, double blk) { return 2.0 * (double)(int6
 static double cf_brightness(double p) { double h = floor(p / 2.0); return (p - 2.0 * h) + h / 255.0; }
 /* [shade] arrives packed (see cf_pack_shade / CubeForge.Vertex.pack_shade) and is
  * split HERE, on the CPU, into the two attributes the GPU interpolates. The
- * packed form never reaches a varying -- see the layout note above. */
+ * packed form never reaches a varying -- see the layout note above.
+ *
+ * A layer of 1000 or more is Texture.selflit_bias: the block lights its own
+ * faces with its own colour, and the bias is how that one bit reaches here
+ * without a second array through the FFI. Strip it and set effect 12. */
 static void cf_vert(float *o, double x, double y, double z, double u, double v, double layer, double shade, double face) {
     double blk = floor(shade * 0.5);
+    double fx = 255.0;
+    if (layer >= 1000.0) { layer -= 1000.0; fx = 12.0 * 256.0 + 255.0; }
     o[0] = (float)x; o[1] = (float)y; o[2] = (float)z; o[3] = (float)u; o[4] = (float)v;
-    o[5] = (float)layer; o[6] = (float)(shade - 2.0 * blk); o[7] = (float)face; o[8] = 255.0f;
+    o[5] = (float)layer; o[6] = (float)(shade - 2.0 * blk); o[7] = (float)face; o[8] = (float)fx;
     o[9] = (float)(blk / 255.0);
 }
 static void cf_quad_into(float *o, int64_t d, int64_t sy, int64_t a, int64_t u, int64_t v, int64_t wd, int64_t h,

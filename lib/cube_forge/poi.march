@@ -1,0 +1,1199 @@
+-- Poi — points of interest as a TEMPLATE rather than as hand-written code.
+--
+-- The arch was written twice and got the wrong shape both times, because each
+-- kind was its own algorithm arrived at by trying it, looking at a screenshot,
+-- and trying again. This module is the answer to that: a kind is a row in a
+-- table plus a shape built out of shared profiles, and the placement, the local
+-- frame, the invariants and the preview come with it.
+--
+-- ── The one distinction that decides everything ─────────────────────────────
+--
+-- A kind is a SCATTER or a LANDMARK, and almost every other choice follows.
+--
+--   scatter   many, small, on a small cell grid. Its rules are read at the
+--             COLUMN being evaluated, because a site probe would run for nine
+--             cells on every column and no small-cell kind can afford that. It
+--             therefore fades at the edges of its country rather than stopping,
+--             and its shapes are allowed to be clipped. Buttes are a scatter.
+--
+--   landmark  few, large, on a big cell grid. Its rules are read at the SITE,
+--             once, so every column agrees about whether it exists and how big
+--             it is -- which is what lets it be carved as well as raised. It is
+--             whole or absent, never clipped. The arch is a landmark, and so
+--             are the crystal cavern, the giant tree and the atoll.
+--
+-- ── The two passes ──────────────────────────────────────────────────────────
+--
+--   height    `height_at`, called from `Noise.height` per column. This is what
+--             makes a feature read as TERRAIN: surface materials, strata,
+--             talus, trees, the lake pour and the biome all follow from it. A
+--             feature that should look like ground goes here, never in a stamp.
+--
+--   volume    `carve`, called per chunk after the fill. Only what a heightmap
+--             cannot express: a hole, a cavern, an overhang.
+--
+-- ── The rules (`rule_ok`, checked for every kind by one test) ───────────────
+--
+--   1. reach <= cell, so two instances of a kind never overlap and a column
+--      need only look at the 3x3 around it.
+--   2. an opening must be strictly inside the mass that carries it: twice its
+--      half-width under the flat top, and a band of at least `roof()` above it.
+--      An arch whose opening is as tall as its rise is a lintel, not an arch --
+--      this is the rule that would have caught the first one.
+--   3. a level top comes from an ABSOLUTE top level, never from a rise added
+--      to the ground, which tilts with the slope under it.
+--   4. a vertical wall uses `prof_hard`; anything meant to blend uses
+--      `prof_flat` or `prof_round`. A one-block ramp is neither and leaves a
+--      half-height shelf.
+--   5. a landmark's site rules never read `height` (no bottom to that
+--      recursion); `height_base` is safe and is what they use.
+--
+-- ── The preview (`CF_POI_PREVIEW=<kind>`) ───────────────────────────────────
+--
+-- Prints the kind's table and three orthographic sections of it standing on
+-- flat ground -- along the frame, across it, and in plan -- so a shape is read
+-- in a second instead of hunted for in a world with a blind camera. Every
+-- iteration on a shape should happen here.
+mod CubeForge.Poi do
+
+  needs IO.Process   -- CF_POI, CF_POI_DENSITY
+  needs IO.Console   -- CF_POI_PREVIEW
+
+  alias CubeForge.Noise as N
+  alias CubeForge.Chunk as C
+
+  -- ── Kinds ────────────────────────────────────────────────────────────────
+
+  fn k_butte() : Int do 0 end
+  fn k_arch() : Int do 1 end
+  fn k_cavern() : Int do 2 end
+  fn k_tree() : Int do 3 end
+  fn k_canyon() : Int do 4 end
+  fn k_atoll() : Int do 5 end
+  fn k_delta() : Int do 6 end
+  doc "How many kinds there are: the rules test walks 0 .. kinds() - 1."
+  fn kinds() : Int do 7 end
+  fn kind_name(k : Int) : String do
+    if k == k_butte() do "butte" else if k == k_arch() do "arch" else if k == k_cavern() do "cavern"
+    else if k == k_tree() do "giant tree" else if k == k_canyon() do "canyon" else if k == k_atoll() do "atoll" else "delta" end end end end end end
+  end
+
+  -- ── What a kind does to the world ────────────────────────────────────────
+  -- Orthogonal to scatter/landmark: a kind may raise the ground, may write
+  -- into the volume, or both. The arch does both; the cavern and the giant
+  -- tree only write volume, and a butte only raises.
+
+  fn vol_none() : Int do 0 end
+  doc "Removes ground: an opening, a chamber."
+  fn vol_carve() : Int do 1 end
+  doc "Writes blocks into air: a trunk, a canopy."
+  fn vol_stamp() : Int do 2 end
+  doc "What kind [k] does to the volume."
+  fn vol_of(k : Int) : Int do
+    if k == k_butte() || k == k_atoll() || k == k_canyon() || k == k_delta() do vol_none()
+    else if k == k_tree() do vol_stamp()
+    else vol_carve() end end
+  end
+  doc """
+  Does the kind contribute to `height`. A feature that should read as TERRAIN
+  must -- that is what gets it surface materials, strata, talus and trees. A
+  feature that is not terrain (a cavern in the rock, a tree standing on it)
+  must not, and is kept out of the per-column scan entirely.
+  """
+  fn raises(k : Int) : Bool do k == k_butte() || k == k_arch() || k == k_canyon() || k == k_atoll() || k == k_delta() end
+
+  fn cls_scatter() : Int do 0 end
+  fn cls_landmark() : Int do 1 end
+  doc """
+  A FIELD has no cells and no site at all: it is a term evaluated at every
+  column from what `height` already has in hand -- the river, its crease, the
+  ruggedness -- gated by a country mask. A canyon is not a thing placed in a
+  valley, it is what the valley becomes where canyon country is; so it is a
+  field. Fields skip every cell rule and cannot be carved.
+  """
+  fn cls_field() : Int do 2 end
+  doc "Scatter, landmark or field: see the module header. This decides where a kind's rules are read and whether it may be carved."
+  fn class_of(k : Int) : Int do
+    if k == k_butte() do cls_scatter()
+    else if k == k_canyon() || k == k_delta() do cls_field()
+    else cls_landmark() end end
+  end
+
+  doc "The least rock a carved opening keeps over it. Rule 2."
+  fn roof() : Int do 8 end
+
+  -- ── The placement table ──────────────────────────────────────────────────
+
+  doc "Side of the kind's cell in blocks: one instance at most per cell."
+  fn cell(k : Int) : Int do
+    if k == k_butte() do 24 else if k == k_cavern() do 128 else if k == k_atoll() do 256 else if class_of(k) == cls_field() do 1 else 160 end end end end
+  end
+  doc "Fraction of cells in full country holding one."
+  fn density(k : Int) : Float do
+    if k == k_butte() do 0.35 else if k == k_arch() do 0.5 else if k == k_cavern() do 0.65
+    else if k == k_atoll() do 0.85 else if class_of(k) == cls_field() do 1.0 else 0.4 end end end end end
+  end
+  doc "Frequency of the kind's country octave: how wide a region of them is."
+  fn cty_freq(k : Int) : Float do
+    if k == k_butte() do 0.0075 else if k == k_arch() do 0.0035 else if k == k_cavern() do 0.0040
+    -- a canyon SYSTEM runs for hundreds of blocks, so its country is the broadest octave here
+    else if k == k_canyon() do 0.0025 else if k == k_atoll() do 0.0030
+    -- a great river is a regional thing: the broadest octave of all
+    else if k == k_delta() do 0.0020 else 0.0060 end end end end end end
+  end
+  doc "Where the country octave has to reach before the kind appears at all: its rarity."
+  fn cty_lo(k : Int) : Float do
+    if k == k_butte() do 0.62 else if k == k_arch() do 0.56 else if k == k_cavern() do 0.52
+    else if k == k_canyon() do 0.66 else if k == k_atoll() do 0.38 else if k == k_delta() do 0.74 else 0.60 end end end end end end
+  end
+  doc "How wide the country's edge band is."
+  fn cty_band(k : Int) : Float do 0.10 end
+  doc "How far outside a chunk an instance may sit and still write into it."
+  fn reach(k : Int) : Int do
+    if k == k_butte() do 12 else if k == k_arch() do 26 else if k == k_cavern() do 54
+    else if k == k_atoll() do 90 else if class_of(k) == cls_field() do 0 else 58 end end end end end
+  end
+  doc "The least a landmark's ground must stand above sea level."
+  fn min_ground(k : Int) : Int do
+    if k == k_butte() do 0
+    else if k == k_arch() do N.sea_level() + 5
+    -- A cavern needs rock over it across its whole footprint, not just at its
+    -- site (see `cover`). That makes this threshold do far more work than it
+    -- looks: at sea + 26 it held over a fifty-block cross and no world in forty
+    -- seeds had a cavern at all.
+    else if k == k_cavern() do N.sea_level() + 18
+    -- an atoll's ground rule is a CEILING, not a floor: see max_ground
+    else if k == k_atoll() do 0
+    else if class_of(k) == cls_field() do 0
+    else N.sea_level() + 3 end end end end end
+  end
+  doc """
+  The most the ground may stand over a landmark's footprint. An atoll wants to
+  START under water, and no more than that: its lagoon is cut to an absolute
+  floor and its ring raised to an absolute top, so a shallow shelf serves as
+  well as a deep sea. It had asked for eight under the sea across the ring, and
+  this terrain has shelf rather than ocean -- the placement gate print showed
+  the ground at hashed sites at 49..105 over thirty seeds, the shallowest
+  barely wet. Every other kind has no ceiling.
+  """
+  fn max_ground(k : Int) : Int do if k == k_atoll() do N.sea_level() - 6 else 9999 end end
+
+  -- ── The parameter table ──────────────────────────────────────────────────
+  -- Six numbers per kind. A kind that does not use one leaves it zero.
+
+  doc "Parameter 0: half-extent along the frame's axis."
+  fn p_len() : Int do 0 end
+  doc "Parameter 1: half-extent across the frame."
+  fn p_wide() : Int do 1 end
+  doc "Parameter 2: blocks added above the ground."
+  fn p_rise() : Int do 2 end
+  doc "Parameter 3: an ABSOLUTE top level, for a shape whose top must be flat whatever the ground does (rule 3)."
+  fn p_top() : Int do 3 end
+  doc "Parameter 4: half-width of the opening, along the frame."
+  fn p_hole_w() : Int do 4 end
+  doc "Parameter 5: height of the opening above its floor."
+  fn p_hole_h() : Int do 5 end
+  doc "Parameter 6: how far below the surface the shape sits. Underground kinds only."
+  fn p_depth() : Int do 6 end
+  fn params() : Int do 7 end
+
+  fn plo(k : Int, i : Int) : Int do
+    if k == k_butte() do (if i == p_len() do 5 else if i == p_wide() do 5 else if i == p_top() do 74 else 0 end end end)
+    else if k == k_arch() do (if i == p_len() do 24 else if i == p_wide() do 5 else if i == p_rise() do 26 else 0 end end end)
+    -- cavern: len is how far its chambers spread, wide is a chamber's radius
+    else if k == k_cavern() do (if i == p_len() do 16 else if i == p_wide() do 12 else if i == p_depth() do 30 else 0 end end end)
+    -- atoll: len is the ring's radius, wide half its width, top the reef flat, depth the lagoon floor below the sea
+    else if k == k_atoll() do (if i == p_len() do 26 else if i == p_wide() do 5 else if i == p_top() do N.sea_level() + 1 else if i == p_depth() do 22 else 0 end end end end)
+    else if class_of(k) == cls_field() do 0
+    -- tree: len is the crown's radius, wide the trunk's, rise the trunk's height
+    else (if i == p_len() do 26 else if i == p_wide() do 4 else if i == p_rise() do 14 else 0 end end end) end end end end end
+  end
+  fn phi(k : Int, i : Int) : Int do
+    if k == k_butte() do (if i == p_len() do 11 else if i == p_wide() do 11 else if i == p_top() do 100 else 0 end end end)
+    else if k == k_arch() do (if i == p_len() do 36 else if i == p_wide() do 8 else if i == p_rise() do 40 else 0 end end end)
+    else if k == k_cavern() do (if i == p_len() do 26 else if i == p_wide() do 20 else if i == p_depth() do 44 else 0 end end end)
+    else if k == k_atoll() do (if i == p_len() do 44 else if i == p_wide() do 9 else if i == p_top() do N.sea_level() + 3 else if i == p_depth() do 30 else 0 end end end end)
+    else if class_of(k) == cls_field() do 0
+    else (if i == p_len() do 38 else if i == p_wide() do 6 else if i == p_rise() do 22 else 0 end end end) end end end end end
+  end
+
+  pfn hash(k : Int, cx : Int, cz : Int, seed : Int, salt : Int) : Float do
+    N.hash2(cx * 7919 + salt * 104729, cz * 6271 + salt * 15485863, seed + 2100 + 200 * k)
+  end
+
+  doc """
+  Parameter [i] of the instance in cell (cx, cz): a hash in [lo, hi], except
+  where a kind DERIVES one from another. The derived ones exist so rule 2 holds
+  by construction rather than by luck -- an opening cannot be made wider than
+  the mass over it by turning a knob.
+  """
+  fn param(k : Int, cx : Int, cz : Int, seed : Int, i : Int) : Int do
+    if k == k_arch() && i == p_hole_w() do param(k, cx, cz, seed, p_len()) * 45 / 100
+    else if k == k_arch() && i == p_hole_h() do param(k, cx, cz, seed, p_rise()) - roof() - 2
+    else
+      let lo = plo(k, i)
+      let hi = phi(k, i)
+      if hi <= lo do lo else lo + float_to_int(hash(k, cx, cz, seed, 10 + i) *. int_to_float(hi - lo + 1)) end
+    end end
+  end
+
+  -- Buttes are round, so their two half-extents are one number.
+  fn radius(k : Int, cx : Int, cz : Int, seed : Int) : Int do param(k, cx, cz, seed, p_len()) end
+
+  -- ── The frame ────────────────────────────────────────────────────────────
+  -- Every kind has a site column, the ground under it, and a bearing; a shape
+  -- is written in (u along, v across) so it never has to think about world axes.
+
+  pfn floor_div(a : Int, b : Int) : Int do if a >= 0 do a / b else (a - b + 1) / b end end
+
+  fn sx(k : Int, cx : Int, cz : Int, seed : Int) : Int do cx * cell(k) + float_to_int(hash(k, cx, cz, seed, 2) *. int_to_float(cell(k))) end
+  fn sz(k : Int, cx : Int, cz : Int, seed : Int) : Int do cz * cell(k) + float_to_int(hash(k, cx, cz, seed, 3) *. int_to_float(cell(k))) end
+  doc "Which way the instance faces, in radians."
+  fn bearing(k : Int, cx : Int, cz : Int, seed : Int) : Float do hash(k, cx, cz, seed, 4) *. 6.2831853 end
+  doc "Offset of (wx, wz) along the instance's axis."
+  fn u_of(k : Int, cx : Int, cz : Int, seed : Int, wx : Int, wz : Int) : Float do
+    let a = bearing(k, cx, cz, seed)
+    int_to_float(wx - sx(k, cx, cz, seed)) *. Math.cos(a) +. int_to_float(wz - sz(k, cx, cz, seed)) *. Math.sin(a)
+  end
+  doc "Offset of (wx, wz) across it."
+  fn v_of(k : Int, cx : Int, cz : Int, seed : Int, wx : Int, wz : Int) : Float do
+    int_to_float(wz - sz(k, cx, cz, seed)) *. Math.cos(bearing(k, cx, cz, seed))
+      -. int_to_float(wx - sx(k, cx, cz, seed)) *. Math.sin(bearing(k, cx, cz, seed))
+  end
+
+  doc "The kind's country mask at (wx, wz): one broad octave over a high threshold."
+  fn country(k : Int, wx : Int, wz : Int, seed : Int) : Float do
+    -- an atoll's country IS the ocean's: giving it an octave of its own meant
+    -- the two rarely coincided, and a ring probed thirty blocks out from a deep
+    -- site kept finding the coast of the ocean's own patch. One in 140 seeds.
+    if k == k_atoll() do N.ocean_mask(int_to_float(wx), int_to_float(wz), seed)
+    else N.smooth(N.clamp01((N.value2(int_to_float(wx) *. cty_freq(k), int_to_float(wz) *. cty_freq(k), seed + 2301 + 200 * k) -. cty_lo(k)) /. cty_band(k))) end
+  end
+
+  -- ── Profiles ─────────────────────────────────────────────────────────────
+  -- Rule 4: a shape picks one of these; there is no fifth, ad-hoc option.
+
+  doc "A cliff: 1 inside [r], 0 outside, with no ramp at all. What a butte wall and a mesa rim are."
+  fn prof_hard(d : Float, r : Float) : Float do if d >= r do 0.0 else 1.0 end end
+  doc "Flat over the middle, easing to nothing over the outer [ease] of the radius. What a ridge's length is."
+  fn prof_flat(d : Float, r : Float, ease : Float) : Float do N.smooth(N.clamp01((1.0 -. d /. r) /. ease)) end
+  doc "Rounded from the middle out. What a ridge's thickness is, so its top is walkable rather than a knife edge."
+  fn prof_round(d : Float, r : Float) : Float do N.smooth(N.clamp01((1.0 -. d /. r) *. 1.6)) end
+
+  -- ── Placement ────────────────────────────────────────────────────────────
+
+  doc "Are points of interest on at all: CF_POI=0 turns every one off."
+  fn poi_on() : Bool do Env.get_int("CF_POI", 1) != 0 end
+  doc "Scales every density: CF_POI_DENSITY percent, 100 by default; 0 with CF_POI=0."
+  fn poi_scale() : Float do if !poi_on() do 0.0 else int_to_float(Env.get_int("CF_POI_DENSITY", 100)) /. 100.0 end end
+
+  doc """
+  Does cell (cx, cz) hold an instance of [k]. A LANDMARK reads its country and
+  its ground at the SITE, so the height pass and the carve pass cannot disagree
+  (rule 5: `height_base`, never `height`). A SCATTER cannot afford a site probe
+  -- nine small cells on every column -- so its country is folded into [scale]
+  by the caller, read at the column.
+  """
+  fn here(k : Int, cx : Int, cz : Int, seed : Int, scale : Float) : Bool do
+    if class_of(k) == cls_scatter() do hash(k, cx, cz, seed, 1) <= density(k) *. scale
+    else
+      if hash(k, cx, cz, seed, 1) > density(k) *. scale *. country(k, sx(k, cx, cz, seed), sz(k, cx, cz, seed), seed) do false
+      else cover(k, cx, cz, seed) >= min_ground(k) && cover_hi(k, cx, cz, seed) <= max_ground(k) end
+    end
+  end
+
+  doc "The HIGHEST ground over the instance's footprint: what an atoll is checked against, because its ring must lie in open water all the way round. Only the atoll probes; everything else asks its own column."
+  fn cover_hi(k : Int, cx : Int, cz : Int, seed : Int) : Int do
+    let x = sx(k, cx, cz, seed)
+    let z = sz(k, cx, cz, seed)
+    let at = N.height_base(x, z, seed)
+    if k != k_atoll() do at
+    else
+      -- probed a little inside the ring's radius: it is the ring and the lagoon
+      -- that must lie in water, and the outer foot may climb onto a shelf.
+      -- At the full radius no seed in a hundred and forty had an atoll.
+      let r = param(k, cx, cz, seed, p_len()) * 3 / 4
+      Math.max_int(Math.max_int(at, Math.max_int(N.height_base(x + r, z, seed), N.height_base(x - r, z, seed))),
+                   Math.max_int(N.height_base(x, z + r, seed), N.height_base(x, z - r, seed)))
+    end
+  end
+
+  doc """
+  The lowest ground over the instance's whole footprint, not just at its site.
+  A cavern spreads its chambers thirty blocks sideways, and the site's own
+  column says nothing about the hillside they run into: checking the site alone
+  put chambers through the side of a hill, where the sea promptly filled them.
+  Only a landmark that reaches wide needs the probes; everything else asks its
+  own column.
+  """
+  fn cover(k : Int, cx : Int, cz : Int, seed : Int) : Int do
+    let x = sx(k, cx, cz, seed)
+    let z = sz(k, cx, cz, seed)
+    let at = N.height_base(x, z, seed)
+    if k != k_cavern() do at
+    else
+      -- the chambers sit within p_len of the site, so that is the span that has
+      -- to be covered; probing out to len + wide as well rejected every world
+      let r = param(k, cx, cz, seed, p_len())
+      Math.min_int(Math.min_int(at, Math.min_int(N.height_base(x + r, z, seed), N.height_base(x - r, z, seed))),
+                   Math.min_int(N.height_base(x, z + r, seed), N.height_base(x, z - r, seed)))
+    end
+  end
+
+  doc "The ground an instance stands on: height_base at its site, which carries no POI term. A cavern hangs off its cover instead, so a chamber under a slope follows the low side rather than the high one."
+  fn ground(k : Int, cx : Int, cz : Int, seed : Int) : Int do
+    if k == k_cavern() do cover(k, cx, cz, seed) else N.height_base(sx(k, cx, cz, seed), sz(k, cx, cz, seed), seed) end
+  end
+
+  -- ── The height pass ──────────────────────────────────────────────────────
+
+  doc """
+  Blocks cell (cx, cz)'s instance would add at (wx, wz) if it existed, given the
+  column's height with dunes [hd]: the SHAPE alone, with no placement in it. One
+  case per kind, built from the shared profiles.
+
+  Shape and placement are separated because the preview draws the shape and
+  nothing else -- a preview that asked whether an instance happened to be placed
+  at the sample cell would usually draw an empty sky, which is exactly what the
+  first run of it did.
+  """
+  fn shape_at(k : Int, cx : Int, cz : Int, wx : Int, wz : Int, seed : Int, hd : Float) : Int do
+    if !raises(k) do 0
+    else if class_of(k) == cls_field() do 0
+    else if k == k_butte() do
+      -- a mesa: a hard rim (rule 4) and an ABSOLUTE top (rule 3), so its top is
+      -- level whatever the ground under it does, and a cell whose ground is
+      -- already near its top holds nothing
+      let dx = wx - sx(k, cx, cz, seed)
+      let dz = wz - sz(k, cx, cz, seed)
+      let r = int_to_float(radius(k, cx, cz, seed))
+      if prof_hard(Math.sqrt(int_to_float(dx * dx + dz * dz)), r) <= 0.0 do 0
+      else
+        let rise = param(k, cx, cz, seed, p_top()) - float_to_int(hd)
+        if rise < roof() do 0 else rise end
+      end
+    else if k == k_atoll() do atoll_at(k, cx, cz, wx, wz, seed, hd)
+    else
+      -- a fin: flat-topped along its length, rounded across it
+      let fu = prof_flat(Math.abs(u_of(k, cx, cz, seed, wx, wz)), int_to_float(param(k, cx, cz, seed, p_len())), 0.5)
+      let fv = prof_round(Math.abs(v_of(k, cx, cz, seed, wx, wz)), int_to_float(param(k, cx, cz, seed, p_wide())))
+      float_to_int(int_to_float(param(k, cx, cz, seed, p_rise())) *. fu *. fv)
+    end end end end
+  end
+
+  -- ── The atoll ────────────────────────────────────────────────────────────
+  -- A reef ring in open ocean round a deep lagoon. Both the ring's top and the
+  -- lagoon's floor are ABSOLUTE levels (rule 3): the sea bed under an atoll is
+  -- whatever it is, and a reef flat that followed it would not be flat.
+  --
+  -- One gap in the ring is forced below sea level, so the lagoon is always
+  -- connected to the sea and fills by the sea rule rather than by the lake
+  -- pour -- which is cut at tile seams and would leave a dry lagoon on one.
+
+  doc "Half the angular width of the gap in the ring, radians."
+  fn atoll_gap() : Float do 0.32 end
+  doc "Over how many blocks the lagoon floor eases up to the ring's inner foot, and the ring's outer foot eases down to the moat."
+  fn atoll_ease() : Float do 7.0 end
+  doc "How far under the sea the water outside the ring is cut to, so the reef stands in water whatever the shelf was."
+  fn atoll_moat() : Int do 6 end
+  doc "Over how many blocks the moat eases back up to the bed it was cut from."
+  fn atoll_apron() : Float do 18.0 end
+
+  -- The ring's radius at bearing [ang]: the hashed radius wobbled by a low
+  -- octave, so it is not a compass circle.
+  pfn atoll_r(k : Int, cx : Int, cz : Int, seed : Int, wx : Int, wz : Int) : Float do
+    int_to_float(param(k, cx, cz, seed, p_len()))
+      *. (1.0 +. 0.16 *. (N.value2(int_to_float(wx) *. 0.03, int_to_float(wz) *. 0.03, seed + 2500 + cx * 7 + cz * 13) -. 0.5) *. 2.0)
+  end
+
+  pfn atoll_at(k : Int, cx : Int, cz : Int, wx : Int, wz : Int, seed : Int, hd : Float) : Int do
+    let dx = int_to_float(wx - sx(k, cx, cz, seed))
+    let dz = int_to_float(wz - sz(k, cx, cz, seed))
+    let d = Math.sqrt(dx *. dx +. dz *. dz)
+    let r = atoll_r(k, cx, cz, seed, wx, wz)
+    let w = int_to_float(param(k, cx, cz, seed, p_wide()))
+    let top = int_to_float(param(k, cx, cz, seed, p_top()))
+    let floor = int_to_float(N.sea_level() - param(k, cx, cz, seed, p_depth()))
+    let ease = atoll_ease()
+    -- the gap: the arc about the hashed bearing where the ring is not raised
+    let ang = Math.atan2(dz, dx)
+    let gap_c = bearing(k, cx, cz, seed)
+    let da0 = Math.abs(ang -. gap_c)
+    let da = if da0 > 3.14159 do 6.2831853 -. da0 else da0 end
+    let in_gap = da < atoll_gap()
+    -- the apron: a moat cut to atoll_moat() round the outside of the ring,
+    -- easing back to the bed over atoll_apron(). This terrain has shelf, not
+    -- ocean: without it the ring stood in two blocks of water and read as a
+    -- sandbar round a pit, not as a reef in the sea.
+    let moat = int_to_float(N.sea_level() - atoll_moat())
+    if d > r +. w +. ease +. atoll_apron() do 0
+    else if d > r +. w +. ease do
+      let t = N.smooth((d -. (r +. w +. ease)) /. atoll_apron())
+      let want = moat +. (hd -. moat) *. t
+      if want < hd do float_to_int(want -. hd) else 0 end
+    else if d > r +. w do
+      -- the outer foot: from the ring's top down to the moat
+      let t = N.smooth((d -. r -. w) /. ease)
+      let want = if in_gap do (if moat < hd do moat else hd end) else top +. (moat -. top) *. t end
+      float_to_int(want -. hd)
+    else if d >= r -. w do
+      -- the ring itself, a little higher in the middle; in the gap, the channel
+      if in_gap do (if moat < hd do float_to_int(moat -. hd) else 0 end)
+      else float_to_int(top +. (if Math.abs(d -. r) < w *. 0.4 do 1.0 else 0.0 end) -. hd) end
+    else if d >= r -. w -. ease do
+      -- the inner foot: from the lagoon floor up to the ring -- or, in the
+      -- gap, up to the moat, so the channel out to sea is a ramp a boat could
+      -- take and not a thirty-block wall where the lagoon meets the shelf
+      let t = N.smooth((d -. (r -. w -. ease)) /. ease)
+      let want = if in_gap do floor +. (moat -. floor) *. t else floor +. (top -. floor) *. t end
+      float_to_int(want -. hd)
+    else float_to_int(floor -. hd) end end end end end
+  end
+
+  -- The shape, once placement has agreed there is one here.
+  pfn rise_at(k : Int, cx : Int, cz : Int, wx : Int, wz : Int, seed : Int, scale : Float, hd : Float) : Int do
+    let dx = wx - sx(k, cx, cz, seed)
+    let dz = wz - sz(k, cx, cz, seed)
+    let far = param(k, cx, cz, seed, p_len())
+    -- cheap rejection before the trig and before the site probe, which is what
+    -- keeps nine cells a column affordable
+    if dx > far || dx < 0 - far || dz > far || dz < 0 - far do 0
+    else if !here(k, cx, cz, seed, scale) do 0
+    else shape_at(k, cx, cz, wx, wz, seed, hd) end end
+  end
+
+  -- ── The canyon: a field ──────────────────────────────────────────────────
+  -- Where canyon country is, the river valley is re-cut as a SLOT: the river
+  -- mask is sharpened so the walls stand near-vertical instead of a V, the cut
+  -- is dropped by canyon_depth, and it is quantised to benches so the walls
+  -- step down. The floor keeps clear of the sea, so the channel is a brook and
+  -- not an arm of the ocean, and the existing valley-spring rule waters it.
+
+  doc "How deep a canyon is cut below the valley it replaces: 40 young, 60 ancient."
+  fn canyon_depth(a : Float) : Float do 40.0 +. 20.0 *. a end
+  doc "Bench height, blocks: the walls step down in these."
+  fn canyon_bench() : Int do 6 end
+  doc "The least a column must stand above the sea before canyon country cuts it."
+  fn canyon_rise_above() : Int do 20 end
+
+  doc "Blocks the canyon term removes at a column: a negative number, or 0. [cty] is the canyon country there -- the caller reads it, so the preview can hand in 1 and draw the shape without a placement in it."
+  fn canyon_at(seed : Int, hd : Float, river : Float, rug : Float, cty0 : Float) : Int do
+    let cty = strength(cty0)
+    let above = hd -. int_to_float(N.sea_level() + canyon_rise_above())
+    if above <= 0.0 do 0
+    else if river <= 0.05 do 0
+    else if rug < 0.3 do 0
+    else
+      if cty <= 0.0 do 0
+      else
+        -- the slot: 0 at the valley's lip, 1 across most of its floor
+        let slot = N.smooth(N.clamp01((river -. 0.15) /. 0.45))
+        let want = canyon_depth(N.age_frac(seed)) *. slot *. cty *. N.smooth(N.clamp01((rug -. 0.3) /. 0.3)) *. poi_scale()
+        -- benches, and never below the brook's floor
+        let cut = float_to_int(want) / canyon_bench() * canyon_bench()
+        let most = float_to_int(above) + canyon_rise_above() - 4
+        0 - (if cut > most do most else cut end)
+      end
+    end end end
+  end
+
+  -- ── The delta: a field ───────────────────────────────────────────────────
+  -- Where great-river country meets the coast, two things happen to the
+  -- river. Inland, the TRUNK: the raw crease is read against a far lower edge
+  -- than the ordinary river uses, so the channel is 20-40 across instead of 3,
+  -- and its bed is cut below the sea so it holds water its whole length. At
+  -- the mouth, the FAN: the lobe is flattened to a block above the sea and a
+  -- braid of channels cut across it, and the sediment pass already puts mud
+  -- and clay under a floodplain, so the land between reads as delta unasked.
+  --
+  -- The honest limit, from the design: with no flow routing the great river is
+  -- great only where its country is, and fades to an ordinary river upstream.
+
+  doc """
+  Where the trunk's channel starts on the raw crease, against the ordinary
+  river's 0.66..0.86. The crease is a RIDGED field, 1 - |2n - 1|, so it is
+  above 0.6 wherever the noise is within 0.2 of a half -- a band, not a line:
+  at 0.55 the trunk was forty-five columns across, at 0.60 up to seventy-eight.
+  0.72 is a channel twenty to forty wide, which is what a great river is.
+  """
+  fn delta_edge() : Float do 0.72 end
+  doc "The highest ground the delta touches: above this it is not the coast."
+  fn delta_rise_above() : Int do 16 end
+  doc "How far below the sea the trunk's bed is cut at the channel's centre."
+  fn delta_bed() : Float do 4.0 end
+
+  doc """
+  A country mask as a field should use it: full strength over nearly all of
+  the country and easing only at the very edge. Scaling a cut by the raw mask
+  gave half-dug channels -- a delta's trunk at seed 13 read as one bench along
+  its whole length, a dry trough with its bed still above the sea, because the
+  mask there was 0.4.
+  """
+  fn strength(cty : Float) : Float do N.smooth(N.clamp01(cty *. 2.5)) end
+
+  doc "Blocks the delta term adds or removes at a column: [rv] is the raw crease, [cty0] the great-river country there. The preview hands in 1."
+  fn delta_at(seed : Int, wx : Int, wz : Int, hd : Float, rv : Float, cty0 : Float) : Int do
+    let sea = int_to_float(N.sea_level())
+    let cty = strength(cty0)
+    if hd > sea +. int_to_float(delta_rise_above()) do 0
+    else if cty <= 0.0 do 0
+    else
+      -- 1 at the mouth (at or under the sea), 0 six blocks up
+      let coast = N.smooth(N.clamp01((sea +. 6.0 -. hd) /. 8.0))
+      let wide = N.smooth(N.clamp01((rv -. delta_edge()) /. (1.0 -. delta_edge())))
+      -- the fan is the MOUTH of this channel and nothing else: it is gated on
+      -- the trunk's own width. Gated on the raw crease it flattened every
+      -- coastal column in great-river country -- 11,000 of a window's 16,384
+      -- at seed 13, fifty-eight columns of seabed raised into land in one row
+      -- -- because the crease is high across half the world.
+      let lobe = wide
+      if coast < 0.2 do
+        -- the trunk: cut the wide channel's bed below the sea
+        let bed = sea -. delta_bed() *. wide
+        if wide <= 0.0 || bed >= hd do 0 else float_to_int((bed -. hd) *. cty) end
+      else if lobe <= 0.0 do 0
+      else
+        -- the fan: flatten the lobe to a block above the sea, and braid it
+        let flat = (sea +. 1.0 -. hd) *. 0.85 *. coast *. lobe
+        let braid = N.ridged(int_to_float(wx) *. 0.045 +. 1.7, int_to_float(wz) *. 0.045 +. 4.1, seed + 2600)
+        let channel = if braid > 0.80 do ((sea -. 2.0) -. (hd +. flat)) *. lobe else 0.0 end
+        float_to_int((flat +. channel) *. cty)
+      end end
+    end end
+  end
+
+  pfn pick(best : Int, cand : Int) : Int do
+    if best == 0 do cand else if cand == 0 do best else Math.max_int(best, cand) end end
+  end
+
+  pfn kind_go(k : Int, wx : Int, wz : Int, seed : Int, scale : Float, hd : Float, i : Int, best : Int) : Int do
+    if i >= 9 do best
+    else
+      let cx = floor_div(wx, cell(k)) - 1 + i % 3
+      let cz = floor_div(wz, cell(k)) - 1 + i / 3
+      -- max, not sum: two overlapping instances are one mass at the taller of
+      -- them, never a tower of both their rises. But a CUT must beat nothing:
+      -- an atoll's lagoon is negative, and against a best of zero `max` threw
+      -- it away -- the site said -12 and the world said 0. An instance never
+      -- overlaps another of its kind (reach <= cell), so "nonzero beats zero,
+      -- then max" is exact.
+      kind_go(k, wx, wz, seed, scale, hd, i + 1, pick(best, rise_at(k, cx, cz, wx, wz, seed, scale, hd)))
+    end
+  end
+
+  doc """
+  Blocks every landform point of interest adds at (wx, wz) -- or removes, for a
+  canyon. [dmask] is the dune mask, [hd] the column's height with dunes,
+  [river] and [rv] the river mask and its raw crease, [rug] the ruggedness: all
+  already computed by `height` for its own purposes, so a field costs nothing
+  to gate.
+
+  Outside a kind's country this is zero and costs one broad octave -- the nine
+  cell hashes and the CF_POI read are both behind that gate, so a column in open
+  country pays almost nothing.
+  """
+  fn height_at(wx : Int, wz : Int, seed : Int, dmask : Float, hd : Float, river : Float, rv : Float, rug : Float) : Int do
+    -- the butte: a scatter, so its country and its desert mask are read here,
+    -- at the column, and folded into the density
+    let b = if dmask <= 0.0 do 0
+            else
+              let cty = country(k_butte(), wx, wz, seed)
+              -- doubled before clamping, so the inside of a field is at full
+              -- density and only its fringe thins; a field that faded linearly
+              -- from its centre never reads as a field at all
+              if cty <= 0.0 do 0 else kind_go(k_butte(), wx, wz, seed, N.clamp01(2.0 *. cty *. dmask) *. poi_scale(), hd, 0, 0) end
+            end
+    -- the arch: a landmark, so the country here only GATES the scan; whether it
+    -- exists was settled at its site. The mask still multiplies the fin, so
+    -- where the gate cuts, the fin has already faded to nothing
+    let cty = country(k_arch(), wx, wz, seed)
+    let a = if cty <= 0.0 do 0 else float_to_int(int_to_float(kind_go(k_arch(), wx, wz, seed, poi_scale(), hd, 0, 0)) *. cty) end
+    -- the atoll: a landmark in the sea, so the scan is gated on the column
+    -- being no higher than its reef flat -- the ring's outer parts stand on
+    -- shelf that may be nearly dry
+    let at = if hd > int_to_float(N.sea_level() + 3) do 0
+             else
+               let cty2 = country(k_atoll(), wx, wz, seed)
+               if cty2 <= 0.0 do 0 else kind_go(k_atoll(), wx, wz, seed, poi_scale(), hd, 0, 0) end
+             end
+    -- the raised kinds take the max; the canyon is a cut and adds to that
+    -- (a canyon through a butte field cuts the mesas too, which is right)
+    -- the canyon is a field: its country is read here and the cut is added
+    -- to whatever was raised (a canyon through a butte field cuts the mesas
+    -- too, which is right). The octave is behind the same cheap gates as the
+    -- cut itself, so open lowland never samples it.
+    let cut = if hd < int_to_float(N.sea_level() + canyon_rise_above()) || river <= 0.05 || rug < 0.3 do 0
+              else canyon_at(seed, hd, river, rug, country(k_canyon(), wx, wz, seed)) end
+    -- the atoll lowers as well as raises, and nothing else raises under the
+    -- sea, so where it speaks it is the answer
+    -- the delta, a field too, disjoint from the canyon by height: a canyon
+    -- wants sea + 20 and above, a delta sea + 16 and below
+    let dl = if hd > int_to_float(N.sea_level() + delta_rise_above()) || rv <= 0.45 do 0
+             else delta_at(seed, wx, wz, hd, rv, country(k_delta(), wx, wz, seed)) end
+    (if at != 0 do at else Math.max_int(b, a) end) + cut + dl
+  end
+
+  -- ── The volume pass ────────────────────────────────────────────────────
+  --
+  -- ONE function decides what a kind does to a voxel, and both the generator
+  -- and the preview call it. That is deliberate: the preview exists to be
+  -- believed, and a preview that modelled the shape separately would drift from
+  -- what the world actually builds -- which is the whole class of bug this
+  -- module was written to end.
+  --
+  --   -1  leave the voxel alone
+  --    0  clear it (only ever ground: never water, never bedrock)
+  --   id  write this block into it, if it is air
+
+  doc "May the carve take this block: anything but air, water and bedrock. A river under an arch stays a river."
+  fn carvable(id : Int) : Bool do
+    if id == 0 do false else if id == C.bedrock() do false else !C.is_water(id) end end
+  end
+
+  pfn sq(a : Float) : Float do a *. a end
+
+  -- Position along the segment (ax, ay, az)-(ex, ey, ez) nearest (px, py, pz),
+  -- clamped to 0..1. What a taper is written against.
+  pfn seg_t(px : Float, py : Float, pz : Float, ax : Float, ay : Float, az : Float, ex : Float, ey : Float, ez : Float) : Float do
+    let dx = ex -. ax
+    let dy = ey -. ay
+    let dz = ez -. az
+    let len2 = dx *. dx +. dy *. dy +. dz *. dz
+    if len2 <= 0.0001 do 0.0 else N.clamp01(((px -. ax) *. dx +. (py -. ay) *. dy +. (pz -. az) *. dz) /. len2) end
+  end
+
+  doc """
+  Distance from (px, py, pz) to the axis (ax, ay, az)-(ex, ey, ez), measured in
+  a PRISM's norm rather than a circle's: an octagonal cross-section, so a beam
+  has flat faces and hard edges.
+
+  This is the thing that was wrong with the crystals, and no amount of tuning
+  their length or count was going to fix it. A radial distance gives a cylinder,
+  and a voxelised cylinder is a staircase — round in principle, lumpy in fact.
+  A selenite beam is a prism: big flat planes meeting at sharp edges, which is
+  most of what makes one read as a crystal rather than as a pale rock.
+
+  The cross-section basis is free: for an axis `d`, `e1 = (dz, 0, -dx)` is
+  perpendicular to it by inspection, and the second component follows from
+  Pythagoras against the full perpendicular offset, so no second basis vector
+  and no cross product are needed.
+  """
+  pfn prism_d(px : Float, py : Float, pz : Float, ax : Float, ay : Float, az : Float, ex : Float, ey : Float, ez : Float) : Float do
+    let dx = ex -. ax
+    let dy = ey -. ay
+    let dz = ez -. az
+    let t = seg_t(px, py, pz, ax, ay, az, ex, ey, ez)
+    -- offset from the nearest point on the axis
+    let ox = px -. (ax +. dx *. t)
+    let oy = py -. (ay +. dy *. t)
+    let oz = pz -. (az +. dz *. t)
+    let r2 = ox *. ox +. oy *. oy +. oz *. oz
+    let h = Math.sqrt(dx *. dx +. dz *. dz)
+    -- a near-vertical beam has no horizontal component to build e1 from
+    let a = if h < 0.0001 do ox else (ox *. dz -. oz *. dx) /. h end
+    let b2 = r2 -. a *. a
+    let b = if b2 <= 0.0 do 0.0 else Math.sqrt(b2) end
+    let fa = Math.abs(a)
+    -- an octagon, not a square: four faces read as a crate, eight as a crystal
+    Math.max_float(Math.max_float(fa, b), (fa +. b) *. 0.7071)
+  end
+
+  -- Squared distance from (px, py, pz) to the segment (ax, ay, az)-(ex, ey, ez).
+  -- The end point is `e`, not `b`: `by` is a keyword, and a parameter named
+  -- that is a parse error on the signature line with no hint as to why.
+  pfn seg_d2(px : Float, py : Float, pz : Float, ax : Float, ay : Float, az : Float, ex : Float, ey : Float, ez : Float) : Float do
+    let dx = ex -. ax
+    let dy = ey -. ay
+    let dz = ez -. az
+    let len2 = dx *. dx +. dy *. dy +. dz *. dz
+    let t0 = if len2 <= 0.0001 do 0.0 else ((px -. ax) *. dx +. (py -. ay) *. dy +. (pz -. az) *. dz) /. len2 end
+    let t = N.clamp01(t0)
+    sq(px -. (ax +. dx *. t)) +. sq(py -. (ay +. dy *. t)) +. sq(pz -. (az +. dz *. t))
+  end
+
+  -- ── The arch's opening ───────────────────────────────────────────────────
+  pfn vol_arch(k : Int, cx : Int, cz : Int, seed : Int, wx : Int, wz : Int, y : Int, g : Int) : Int do
+    let u = u_of(k, cx, cz, seed, wx, wz)
+    let hw = int_to_float(param(k, cx, cz, seed, p_hole_w()))
+    let q = 1.0 -. sq(u /. hw)
+    -- through the whole fin and a little past it, so the opening is a hole
+    -- rather than a pair of alcoves
+    if Math.abs(v_of(k, cx, cz, seed, wx, wz)) > int_to_float(param(k, cx, cz, seed, p_wide())) +. 2.0 do 0 - 1
+    else if q <= 0.0 do 0 - 1
+    else if y < g + 1 do 0 - 1
+    else if y > g + 1 + float_to_int(int_to_float(param(k, cx, cz, seed, p_hole_h())) *. Math.sqrt(q)) do 0 - 1
+    else 0 end end end end
+  end
+
+  -- ── The cavern's chambers ────────────────────────────────────────────────
+  doc "How many chambers a cavern has."
+  fn chambers() : Int do 3 end
+
+  doc "Chamber [j]'s centre, in the frame, and its radius. Public so the CF_TERRAIN_STATS line can say where to stand to see one."
+  fn cham_u(k : Int, cx : Int, cz : Int, seed : Int, j : Int) : Float do
+    (hash(k, cx, cz, seed, 40 + 3 * j) -. 0.5) *. 2.0 *. int_to_float(param(k, cx, cz, seed, p_len()))
+  end
+  fn cham_v(k : Int, cx : Int, cz : Int, seed : Int, j : Int) : Float do
+    (hash(k, cx, cz, seed, 41 + 3 * j) -. 0.5) *. 2.0 *. int_to_float(param(k, cx, cz, seed, p_len()))
+  end
+  fn cham_y(k : Int, cx : Int, cz : Int, seed : Int, j : Int, g : Int) : Float do
+    int_to_float(g - param(k, cx, cz, seed, p_depth())) +. (hash(k, cx, cz, seed, 42 + 3 * j) -. 0.5) *. 10.0
+  end
+  -- The multiplier never exceeds 1, so `phi(p_wide)` is a true maximum and the
+  -- roof rule can be written against it. It used to reach 1.25, which put a
+  -- chamber's ceiling above the rock the rule had reserved for it: at the
+  -- largest radius the caverns broke the surface and flooded.
+  fn cham_r(k : Int, cx : Int, cz : Int, seed : Int, j : Int) : Float do
+    int_to_float(param(k, cx, cz, seed, p_wide())) *. (0.62 +. 0.38 *. hash(k, cx, cz, seed, 60 + j))
+  end
+
+  -- The nearest chamber's surface, as a fraction of its radius: under 1 is
+  -- inside it. Chambers are joined by a tube along the line between them, so a
+  -- cavern is one place rather than three unconnected bubbles.
+  pfn cav_d(k : Int, cx : Int, cz : Int, seed : Int, u : Float, v : Float, y : Float, g : Int, j : Int, best : Float) : Float do
+    if j >= chambers() do best
+    else
+      let r = cham_r(k, cx, cz, seed, j)
+      let d = Math.sqrt(sq(u -. cham_u(k, cx, cz, seed, j)) +. sq(v -. cham_v(k, cx, cz, seed, j)) +. sq(y -. cham_y(k, cx, cz, seed, j, g))) /. r
+      -- the tube to the next chamber, at a third of the radius
+      let n = (j + 1) % chambers()
+      let td = Math.sqrt(seg_d2(u, y, v, cham_u(k, cx, cz, seed, j), cham_y(k, cx, cz, seed, j, g), cham_v(k, cx, cz, seed, j),
+                                cham_u(k, cx, cz, seed, n), cham_y(k, cx, cz, seed, n, g), cham_v(k, cx, cz, seed, n))) /. (r *. 0.34)
+      cav_d(k, cx, cz, seed, u, v, y, g, j + 1, Math.min_float(best, Math.min_float(d, td)))
+    end
+  end
+
+  -- ── Selenite beams ───────────────────────────────────────────────────────
+  -- A model blade cannot be longer than the cell it is drawn in, so the LONG
+  -- crystals are geometry, not models: a beam is a segment through the chamber,
+  -- the same primitive the giant tree's boughs use, and the block it is made of
+  -- greedy-meshes into a prism. Naica's are metres across and span the cave.
+
+  -- Salt ranges, kept apart on purpose: the direction, length and radius draws
+  -- take 110..193 (four per beam, twenty-one beams), the three centre offsets
+  -- 200..220, 230..250 and 260..280, and the size class 290..310. They collided
+  -- once when the beam count changed, and a collision here is invisible -- two
+  -- draws that should be independent quietly agree.
+  doc "Beams crossing each chamber."
+  fn beams() : Int do 5 end
+
+  -- Beam [b] of chamber [j]: a segment through the chamber at a hashed
+  -- attitude, longer than the chamber is wide so it drives into both walls.
+  pfn beam_dx(k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int) : Float do
+    Math.cos(hash(k, cx, cz, seed, 110 + 4 * (7 * j + b)) *. 6.2831853) *. Math.cos(hash(k, cx, cz, seed, 111 + 4 * (7 * j + b)) *. 2.4 -. 1.2)
+  end
+  pfn beam_dy(k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int) : Float do
+    Math.sin(hash(k, cx, cz, seed, 111 + 4 * (7 * j + b)) *. 2.4 -. 1.2)
+  end
+  pfn beam_dz(k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int) : Float do
+    Math.sin(hash(k, cx, cz, seed, 110 + 4 * (7 * j + b)) *. 6.2831853) *. Math.cos(hash(k, cx, cz, seed, 111 + 4 * (7 * j + b)) *. 2.4 -. 1.2)
+  end
+  doc """
+  Is beam [b] one of the large ones. FOUR IN FIVE are: Naica is packed with big
+  ones, and a chamber where the big shafts are the minority reads as a cave that
+  happens to have some crystal in it rather than as a crystal cave. The rest are
+  short stubs broken across them, which is what keeps it from reading as a
+  lattice.
+  """
+  fn beam_long(k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int) : Bool do
+    hash(k, cx, cz, seed, 290 + 7 * j + b) < 0.80
+  end
+
+  doc "Half the beam's length, in blocks. A long one overshoots the chamber's radius, so it is embedded in the rock at both ends; a short one is a stub a third of the way across."
+  fn beam_half(k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int) : Float do
+    let h = hash(k, cx, cz, seed, 112 + 4 * (7 * j + b))
+    if beam_long(k, cx, cz, seed, j, b) do cham_r(k, cx, cz, seed, j) *. (0.90 +. 0.45 *. h)
+    else cham_r(k, cx, cz, seed, j) *. (0.30 +. 0.25 *. h) end
+  end
+  doc """
+  The beam's radius at its thickest, in blocks. That thickness against its
+  LENGTH is what makes it read as a crystal: at radius 2.5 the same beam looked
+  like a pale boulder, because the eye reads thickness against length, not
+  against the room it is in.
+  """
+  fn beam_rad(k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int) : Float do
+    let h = hash(k, cx, cz, seed, 113 + 4 * (7 * j + b))
+    -- the long ones carry the look, so they are the medium-thick ones; the
+    -- short ones stay slender or they read as boulders rather than crystals
+    if beam_long(k, cx, cz, seed, j, b) do 2.0 +. 1.3 *. h else 1.0 +. 0.6 *. h end
+  end
+  doc "How thick the beam is at position [t] along it, as a fraction of beam_rad: full over the middle and drawn to a point at both ends, the way a crystal terminates."
+  fn beam_taper(t : Float) : Float do
+    let e = Math.abs(2.0 *. t -. 1.0)
+    1.0 -. 0.92 *. e *. e *. e *. e
+  end
+
+  -- Nearest beam of chamber [j], as a fraction of its own radius.
+  pfn beam_d(k : Int, cx : Int, cz : Int, seed : Int, u : Float, v : Float, y : Float, g : Int, j : Int, b : Int, best : Float) : Float do
+    if b >= beams() do best
+    else
+      let l = beam_half(k, cx, cz, seed, j, b)
+      -- the beam is offset from the chamber's centre, so the three of them
+      -- cross rather than all passing through one point
+      -- spread wide: at half this the five shafts all passed through the middle
+      -- and merged into one white mass with no shaft visible in it
+      let ou = cham_u(k, cx, cz, seed, j) +. (hash(k, cx, cz, seed, 200 + 7 * j + b) -. 0.5) *. 1.5 *. cham_r(k, cx, cz, seed, j)
+      let ov = cham_v(k, cx, cz, seed, j) +. (hash(k, cx, cz, seed, 230 + 7 * j + b) -. 0.5) *. 1.5 *. cham_r(k, cx, cz, seed, j)
+      let oy = cham_y(k, cx, cz, seed, j, g) +. (hash(k, cx, cz, seed, 260 + 7 * j + b) -. 0.5) *. cham_r(k, cx, cz, seed, j) *. 1.1
+      let dx = beam_dx(k, cx, cz, seed, j, b) *. l
+      let dy = beam_dy(k, cx, cz, seed, j, b) *. l
+      let dz = beam_dz(k, cx, cz, seed, j, b) *. l
+      let t = seg_t(u, y, v, ou -. dx, oy -. dy, ov -. dz, ou +. dx, oy +. dy, ov +. dz)
+      let d = prism_d(u, y, v, ou -. dx, oy -. dy, ov -. dz, ou +. dx, oy +. dy, ov +. dz)
+              /. (beam_rad(k, cx, cz, seed, j, b) *. beam_taper(t))
+      beam_d(k, cx, cz, seed, u, v, y, g, j, b + 1, Math.min_float(best, d))
+    end
+  end
+  pfn beams_d(k : Int, cx : Int, cz : Int, seed : Int, u : Float, v : Float, y : Float, g : Int, j : Int, best : Float) : Float do
+    if j >= chambers() do best
+    else beams_d(k, cx, cz, seed, u, v, y, g, j + 1, Math.min_float(best, beam_d(k, cx, cz, seed, u, v, y, g, j, 0, 9.0))) end
+  end
+
+  pfn vol_cavern(k : Int, cx : Int, cz : Int, seed : Int, wx : Int, wz : Int, y : Int, g : Int) : Int do
+    let u = u_of(k, cx, cz, seed, wx, wz)
+    let v = v_of(k, cx, cz, seed, wx, wz)
+    let d = cav_d(k, cx, cz, seed, u, v, int_to_float(y), g, 0, 9.0)
+    -- a little past the shell, so a beam is driven into the rock at both ends
+    -- rather than stopping neatly at the wall
+    if d >= 1.45 do 0 - 1
+    else if beams_d(k, cx, cz, seed, u, v, int_to_float(y), g, 0, 9.0) < 1.0 do C.crystal_beam()
+    else if d >= 1.0 do 0 - 1
+    -- the fine growth: blades on the shell, floor and ceiling both. Sparser now
+    -- that the beams carry the look; a lining only on the floor lit the chamber
+    -- from below and left its roof black
+    else if d > 0.88 && N.hash2(wx * 31 + y, wz * 17 - y, seed + 909) < 0.09 do C.crystal()
+    else 0 end end end end
+  end
+
+  -- ── The giant tree ───────────────────────────────────────────────────────
+  -- A live oak, not a conifer: WIDER THAN IT IS TALL, on a short thick trunk
+  -- that the branches leave low down. The first version was a 50-block pole
+  -- with blobs round it, which is a different tree entirely -- the proportions
+  -- are the whole character of this one, so they are the numbers to look at
+  -- first in the preview.
+  --
+  -- A branch is two segments, not one: it sweeps out and slightly DOWN from the
+  -- trunk, then lifts to its tip. That dip is what makes it read as a bough
+  -- carrying its own weight rather than a spoke.
+
+  doc "How many boughs a giant tree throws."
+  fn branches() : Int do 7 end
+
+  -- Where branch [j] leaves the trunk, how far it reaches, and how far it lifts.
+  pfn br_h(k : Int, cx : Int, cz : Int, seed : Int, j : Int) : Float do
+    int_to_float(param(k, cx, cz, seed, p_rise())) *. (0.55 +. 0.40 *. hash(k, cx, cz, seed, 70 + j))
+  end
+  pfn br_a(k : Int, cx : Int, cz : Int, seed : Int, j : Int) : Float do
+    bearing(k, cx, cz, seed) +. int_to_float(j) *. 6.2831853 /. int_to_float(branches()) +. (hash(k, cx, cz, seed, 80 + j) -. 0.5) *. 0.7
+  end
+  pfn br_len(k : Int, cx : Int, cz : Int, seed : Int, j : Int) : Float do
+    int_to_float(param(k, cx, cz, seed, p_len())) *. (0.70 +. 0.40 *. hash(k, cx, cz, seed, 90 + j))
+  end
+  pfn br_lift(k : Int, cx : Int, cz : Int, seed : Int, j : Int) : Float do
+    br_len(k, cx, cz, seed, j) *. (0.15 +. 0.45 *. hash(k, cx, cz, seed, 100 + j))
+  end
+  pfn br_base_y(k : Int, cx : Int, cz : Int, seed : Int, j : Int, g : Int) : Float do int_to_float(g) +. br_h(k, cx, cz, seed, j) end
+  pfn br_tip_u(k : Int, cx : Int, cz : Int, seed : Int, j : Int) : Float do Math.cos(br_a(k, cx, cz, seed, j)) *. br_len(k, cx, cz, seed, j) end
+  pfn br_tip_v(k : Int, cx : Int, cz : Int, seed : Int, j : Int) : Float do Math.sin(br_a(k, cx, cz, seed, j)) *. br_len(k, cx, cz, seed, j) end
+  pfn br_tip_y(k : Int, cx : Int, cz : Int, seed : Int, j : Int, g : Int) : Float do br_base_y(k, cx, cz, seed, j, g) +. br_lift(k, cx, cz, seed, j) end
+  -- the elbow: half way out, dipped below the straight line
+  pfn br_mid_u(k : Int, cx : Int, cz : Int, seed : Int, j : Int) : Float do br_tip_u(k, cx, cz, seed, j) *. 0.5 end
+  pfn br_mid_v(k : Int, cx : Int, cz : Int, seed : Int, j : Int) : Float do br_tip_v(k, cx, cz, seed, j) *. 0.5 end
+  pfn br_mid_y(k : Int, cx : Int, cz : Int, seed : Int, j : Int, g : Int) : Float do
+    br_base_y(k, cx, cz, seed, j, g) +. br_lift(k, cx, cz, seed, j) *. 0.5 -. br_len(k, cx, cz, seed, j) *. 0.16
+  end
+
+  -- Nearest bough, as a fraction of its own thickness. The inner half is
+  -- thicker than the outer, so a bough tapers from the trunk to its tip.
+  pfn br_d(k : Int, cx : Int, cz : Int, seed : Int, u : Float, v : Float, y : Float, g : Int, j : Int, best : Float) : Float do
+    if j >= branches() do best
+    else
+      let inner = Math.sqrt(seg_d2(u, y, v, 0.0, br_base_y(k, cx, cz, seed, j, g), 0.0,
+                                   br_mid_u(k, cx, cz, seed, j), br_mid_y(k, cx, cz, seed, j, g), br_mid_v(k, cx, cz, seed, j))) /. 2.6
+      let outer = Math.sqrt(seg_d2(u, y, v, br_mid_u(k, cx, cz, seed, j), br_mid_y(k, cx, cz, seed, j, g), br_mid_v(k, cx, cz, seed, j),
+                                   br_tip_u(k, cx, cz, seed, j), br_tip_y(k, cx, cz, seed, j, g), br_tip_v(k, cx, cz, seed, j))) /. 1.8
+      br_d(k, cx, cz, seed, u, v, y, g, j + 1, Math.min_float(best, Math.min_float(inner, outer)))
+    end
+  end
+
+  -- A leaf mass at every bough's tip, so the canopy's edge follows the boughs
+  -- rather than being a circle drawn over them.
+  pfn leaf_d(k : Int, cx : Int, cz : Int, seed : Int, u : Float, v : Float, y : Float, g : Int, j : Int, best : Float) : Float do
+    if j >= branches() do best
+    else
+      let r = br_len(k, cx, cz, seed, j) *. 0.42
+      let d = Math.sqrt(sq(u -. br_tip_u(k, cx, cz, seed, j)) +. sq(v -. br_tip_v(k, cx, cz, seed, j))
+                        +. sq((y -. (br_tip_y(k, cx, cz, seed, j, g) +. r *. 0.35)) *. 1.6)) /. r
+      leaf_d(k, cx, cz, seed, u, v, y, g, j + 1, Math.min_float(best, d))
+    end
+  end
+
+  pfn vol_tree(k : Int, cx : Int, cz : Int, seed : Int, wx : Int, wz : Int, y : Int, g : Int) : Int do
+    let u = u_of(k, cx, cz, seed, wx, wz)
+    let v = v_of(k, cx, cz, seed, wx, wz)
+    let fy = int_to_float(y)
+    let l = int_to_float(param(k, cx, cz, seed, p_len()))
+    let tr = int_to_float(param(k, cx, cz, seed, p_wide()))
+    let top = int_to_float(g) +. int_to_float(param(k, cx, cz, seed, p_rise()))
+    -- a short trunk that flares at the foot, like a live oak's buttress
+    let trunk = if fy < int_to_float(g) || fy > top do false
+                else Math.sqrt(u *. u +. v *. v) <= tr *. (1.35 -. 0.45 *. (fy -. int_to_float(g)) /. (top -. int_to_float(g))) end
+    -- the crown: a broad flattened dome sitting ON the boughs, wider than the
+    -- whole tree is tall
+    let ch = int_to_float(g) +. int_to_float(param(k, cx, cz, seed, p_rise())) +. l *. 0.42
+    let cr = l *. 0.92
+    let cd = Math.sqrt(u *. u +. v *. v +. sq((fy -. ch) *. 2.6)) /. cr
+    if trunk do C.oak_log()
+    else if br_d(k, cx, cz, seed, u, v, fy, g, 0, 9.0) < 1.0 do C.oak_log()
+    else if leaf_d(k, cx, cz, seed, u, v, fy, g, 0, 9.0) < 1.0 do C.oak_leaves()
+    else if cd < 1.0 do C.oak_leaves()
+    else 0 - 1 end end end end
+  end
+
+  doc """
+  What kind [k]'s instance in cell (cx, cz) does to the voxel (wx, y, wz), given
+  the ground [g] its site stands on: -1 leave alone, 0 clear, or a block id to
+  write into air. The generator and the preview both go through here.
+  """
+  fn vol_block(k : Int, cx : Int, cz : Int, seed : Int, wx : Int, wz : Int, y : Int, g : Int) : Int do
+    if k == k_arch() do vol_arch(k, cx, cz, seed, wx, wz, y, g)
+    else if k == k_cavern() do vol_cavern(k, cx, cz, seed, wx, wz, y, g)
+    else if k == k_tree() do vol_tree(k, cx, cz, seed, wx, wz, y, g)
+    else 0 - 1 end end end
+  end
+
+  doc "The lowest voxel kind [k] can touch, above the ground [g] its site stands on."
+  fn vol_y0(k : Int, cx : Int, cz : Int, seed : Int, g : Int) : Int do
+    if k == k_cavern() do g - param(k, cx, cz, seed, p_depth()) - param(k, cx, cz, seed, p_wide()) - 8
+    else g + 1 end
+  end
+  doc "The highest voxel kind [k] can touch."
+  fn vol_y1(k : Int, cx : Int, cz : Int, seed : Int, g : Int) : Int do
+    if k == k_cavern() do g - param(k, cx, cz, seed, p_depth()) + param(k, cx, cz, seed, p_wide()) + 8
+    else if k == k_tree() do g + param(k, cx, cz, seed, p_rise()) + param(k, cx, cz, seed, p_len())
+    else g + 1 + param(k, cx, cz, seed, p_hole_h()) end end
+  end
+
+  -- ── Applying it to a chunk ───────────────────────────────────────────────
+
+  pfn apply_y_go(c : CubeForge.Chunk.Chunk, k : Int, cx : Int, cz : Int, seed : Int,
+                 wx : Int, wz : Int, x : Int, z : Int, y : Int, y1 : Int, g : Int) : CubeForge.Chunk.Chunk do
+    if y > y1 do c
+    else
+      let c1 = if y < 1 || y >= 256 do c
+               else
+                 let b = vol_block(k, cx, cz, seed, wx, wz, y, g)
+                 let had = C.get(c, x, y, z)
+                 if b < 0 do c
+                 else if b == 0 do (if carvable(had) do C.set(c, x, y, z, 0) else c end)
+                 -- A CARVE owns the volume it opens, so what it puts back --
+                 -- the crystal lining a chamber's shell -- replaces the ground
+                 -- it just took. A STAMP does not own anything: it writes only
+                 -- into air, so a tree can never eat the hill it stands on.
+                 -- Getting this the same for both left every cavern unlit: the
+                 -- crystals were being asked to replace rock and declining.
+                 else if vol_of(k) == vol_stamp() do (if had == 0 do C.set(c, x, y, z, b) else c end)
+                 else (if carvable(had) || had == 0 do C.set(c, x, y, z, b) else c end) end end end
+               end
+      apply_y_go(c1, k, cx, cz, seed, wx, wz, x, z, y + 1, y1, g)
+    end
+  end
+
+  -- Every column of the chunk against one instance: 256 columns is cheaper to
+  -- walk than the instance's own footprint, and it needs no clipping.
+  pfn apply_col_go(c : CubeForge.Chunk.Chunk, k : Int, wx0 : Int, wz0 : Int, seed : Int,
+                   cx : Int, cz : Int, i : Int, g : Int) : CubeForge.Chunk.Chunk do
+    if i >= 256 do c
+    else
+      let x = i % 16
+      let z = i / 16
+      -- a column outside the instance's horizontal reach cannot be touched by
+      -- it at any height, and the y walk is 60 voxels deep for a giant tree
+      let dx = wx0 + x - sx(k, cx, cz, seed)
+      let dz = wz0 + z - sz(k, cx, cz, seed)
+      let r = reach(k)
+      if dx * dx + dz * dz > r * r do apply_col_go(c, k, wx0, wz0, seed, cx, cz, i + 1, g)
+      else
+        apply_col_go(apply_y_go(c, k, cx, cz, seed, wx0 + x, wz0 + z, x, z,
+                                vol_y0(k, cx, cz, seed, g), vol_y1(k, cx, cz, seed, g), g),
+                     k, wx0, wz0, seed, cx, cz, i + 1, g)
+      end
+    end
+  end
+
+  pfn apply_cell(c : CubeForge.Chunk.Chunk, k : Int, wx0 : Int, wz0 : Int, seed : Int, cx : Int, cz : Int, scale : Float) : CubeForge.Chunk.Chunk do
+    if !here(k, cx, cz, seed, scale) do c
+    else
+      -- a column of the chunk more than the instance's reach away cannot be
+      -- touched by it, so a distant instance costs one distance test
+      let dx = wx0 + 8 - sx(k, cx, cz, seed)
+      let dz = wz0 + 8 - sz(k, cx, cz, seed)
+      let r = reach(k) + 12
+      if dx > r || dx < 0 - r || dz > r || dz < 0 - r do c
+      else apply_col_go(c, k, wx0, wz0, seed, cx, cz, 0, ground(k, cx, cz, seed)) end
+    end
+  end
+
+  pfn apply_cells_go(c : CubeForge.Chunk.Chunk, k : Int, wx0 : Int, wz0 : Int, seed : Int, i : Int, cx0 : Int, cz0 : Int, nx : Int, nz : Int, scale : Float) : CubeForge.Chunk.Chunk do
+    if i >= nx * nz do c
+    else apply_cells_go(apply_cell(c, k, wx0, wz0, seed, cx0 + i % nx, cz0 + i / nx, scale), k, wx0, wz0, seed, i + 1, cx0, cz0, nx, nz, scale) end
+  end
+
+  pfn apply_kind(c : CubeForge.Chunk.Chunk, k : Int, wx0 : Int, wz0 : Int, seed : Int, scale : Float) : CubeForge.Chunk.Chunk do
+    if vol_of(k) == vol_none() do c
+    else
+      let r = reach(k)
+      let a = cell(k)
+      let cx0 = floor_div(wx0 - r, a)
+      let cz0 = floor_div(wz0 - r, a)
+      -- the two spans are computed separately: at these cell sizes and 16-block
+      -- chunks they are not always the same number
+      apply_cells_go(c, k, wx0, wz0, seed, 0, cx0, cz0, floor_div(wx0 + 15 + r, a) - cx0 + 1, floor_div(wz0 + 15 + r, a) - cz0 + 1, scale)
+    end
+  end
+
+  pfn apply_go(c : CubeForge.Chunk.Chunk, k : Int, wx0 : Int, wz0 : Int, seed : Int, scale : Float) : CubeForge.Chunk.Chunk do
+    if k >= kinds() do c else apply_go(apply_kind(c, k, wx0, wz0, seed, scale), k + 1, wx0, wz0, seed, scale) end
+  end
+
+  doc "Write every point of interest's volume into the chunk at (wx0, wz0): the arch's opening, the cavern's chambers, the giant tree."
+  fn carve(c : CubeForge.Chunk.Chunk, wx0 : Int, wz0 : Int, seed : Int) : CubeForge.Chunk.Chunk do
+    let scale = poi_scale()
+    if scale <= 0.0 do c else apply_go(c, 0, wx0, wz0, seed, scale) end
+  end
+
+  -- ── The rules ────────────────────────────────────────────────────────────
+
+  doc """
+  The invariants of the template, for kind [k] at a sample cell. One test walks
+  every kind through this, so a new kind cannot ship breaking them. See the
+  module header for what each rule is for.
+  """
+  fn rule_ok(k : Int, cx : Int, cz : Int, seed : Int) : Bool do
+    let len = param(k, cx, cz, seed, p_len())
+    let hw = param(k, cx, cz, seed, p_hole_w())
+    let hh = param(k, cx, cz, seed, p_hole_h())
+    let rise = param(k, cx, cz, seed, p_rise())
+    -- a field has no cells: only the rules about what it is apply
+    if class_of(k) == cls_field() do raises(k) && vol_of(k) == vol_none()
+    -- 1: an instance never leaves its own cell's reach
+    else if reach(k) > cell(k) do false
+    -- 1: the widest shape fits in the 3x3 a column looks at
+    else if phi(k, p_len()) > cell(k) do false
+    -- 2: an opening sits strictly inside the mass over it
+    else if hw * 2 >= len do false
+    else if hh > 0 && hh + roof() > rise do false
+    -- 2, underground: a chamber keeps a roof's worth of rock over it, whatever
+    -- its radius and however shallow it is allowed to sit
+    -- the widest a chamber can be is phi(p_wide) exactly (see cham_r), and it
+    -- must still keep a roof's worth of rock over it at the shallowest depth
+    else if k == k_cavern() && plo(k, p_depth()) < phi(k, p_wide()) + roof() do false
+    else if k == k_cavern() && min_ground(k) < plo(k, p_depth()) + phi(k, p_wide()) do false
+    -- 3: a kind with a level top declares an absolute one
+    else if k == k_butte() && phi(k, p_top()) <= 0 do false
+    -- 3: an atoll's reef flat is an absolute level too
+    else if k == k_atoll() && phi(k, p_top()) <= 0 do false
+    -- 5: a landmark resolves at its site -- against a floor or a ceiling
+    else if class_of(k) == cls_landmark() && min_ground(k) <= 0 && max_ground(k) >= 9999 do false
+    -- a stamp is not terrain: it must not also raise the ground, or a tree
+    -- would grow its own hill and get grass on the branches
+    else if vol_of(k) == vol_stamp() && raises(k) do false
+    else if vol_of(k) == vol_stamp() && phi(k, p_rise()) <= 0 do false
+    -- a kind that neither raises nor writes volume does nothing at all
+    else if !raises(k) && vol_of(k) == vol_none() do false
+    else true end end end end end end end end end end end end end
+  end
+
+  -- ── The preview ──────────────────────────────────────────────────────────
+  -- Every iteration on a shape belongs here, not in a world with a blind
+  -- camera. It draws through `shape_at` and `vol_block` -- the same two
+  -- functions the generator uses -- so what it shows is what gets built.
+
+  doc "Flat ground the preview stands kind [k] on: deep enough that an underground kind has rock over it."
+  fn preview_ground(k : Int) : Int do
+    if k == k_cavern() do min_ground(k) + 6
+    else if k == k_atoll() do N.sea_level() - 12
+    else if k == k_canyon() do N.sea_level() + 34
+    else if k == k_delta() do N.sea_level() + 4
+    else 70 end end end end
+  end
+
+  -- A field has no shape of its own to draw, so the preview hands it a valley:
+  -- a river crease running along u, 22 blocks wide, in rugged country.
+  pfn pv_field(k : Int, v : Int, g : Int) : Int do
+    let river = N.smooth(N.clamp01(1.0 -. Math.abs(int_to_float(v)) /. 22.0))
+    if k == k_canyon() do canyon_at(1, int_to_float(g), river, 0.7, 1.0)
+    else if k == k_delta() do delta_at(1, v * 3, 0, int_to_float(g), N.clamp01(1.0 -. Math.abs(int_to_float(v)) /. 30.0), 1.0)
+    else 0 end end
+  end
+
+  -- World column of frame offset (u, v).
+  pfn pv_wx(k : Int, cx : Int, cz : Int, seed : Int, u : Int, v : Int) : Int do
+    sx(k, cx, cz, seed) + float_to_int(int_to_float(u) *. Math.cos(bearing(k, cx, cz, seed)) -. int_to_float(v) *. Math.sin(bearing(k, cx, cz, seed)))
+  end
+  pfn pv_wz(k : Int, cx : Int, cz : Int, seed : Int, u : Int, v : Int) : Int do
+    sz(k, cx, cz, seed) + float_to_int(int_to_float(u) *. Math.sin(bearing(k, cx, cz, seed)) +. int_to_float(v) *. Math.cos(bearing(k, cx, cz, seed)))
+  end
+
+  -- One character: what the generator would leave at (u, v, y) on flat ground.
+  --   '#' ground   ':' the kind's own raised mass   '.' carved void
+  --   '*' crystal  'T' trunk or branch   'o' leaves   ' ' air
+  pfn pv_cell(k : Int, cx : Int, cz : Int, seed : Int, u : Int, v : Int, y : Int) : String do
+    let g = preview_ground(k)
+    let wx = pv_wx(k, cx, cz, seed, u, v)
+    let wz = pv_wz(k, cx, cz, seed, u, v)
+    let raised = if class_of(k) == cls_field() do pv_field(k, v, g) else shape_at(k, cx, cz, wx, wz, seed, int_to_float(g)) end
+    let b = vol_block(k, cx, cz, seed, wx, wz, y, g)
+    if b > 0 do (if b == C.crystal() do "*" else if b == C.crystal_beam() do "X" else if b == C.oak_log() do "T" else "o" end end end)
+    else if b == 0 do (if y <= g + raised do "." else " " end)
+    else if y <= g + raised do (if raised < 0 do "#" else if y <= g do "#" else ":" end end)
+    else if y <= g do "."
+    else " " end end end end
+  end
+
+  pfn pv_row(k : Int, cx : Int, cz : Int, seed : Int, y : Int, i : Int, n : Int, step : Int, across : Bool, acc : String) : String do
+    if i > n do acc
+    else
+      let d = (i - n / 2) * step
+      let s = if across do pv_cell(k, cx, cz, seed, 0, d, y) else pv_cell(k, cx, cz, seed, d, 0, y) end
+      pv_row(k, cx, cz, seed, y, i + 1, n, step, across, acc ++ s)
+    end
+  end
+
+  pfn pv_go(k : Int, cx : Int, cz : Int, seed : Int, y : Int, lo : Int, n : Int, step : Int, across : Bool) : Unit do
+    if y < lo do ()
+    else
+      println("   " ++ (if y < 10 do "  " else if y < 100 do " " else "" end end) ++ int_to_string(y) ++ " " ++ pv_row(k, cx, cz, seed, y, 0, n, step, across, ""))
+      pv_go(k, cx, cz, seed, y - 1, lo, n, step, across)
+    end
+  end
+
+  doc "Print kind [k]'s table and two orthographic sections of it standing on flat ground: along its frame and across it."
+  fn preview(k : Int, seed : Int) : Unit do
+    let cx = 3
+    let cz = 5
+    let g = preview_ground(k)
+    let lo = Math.min_int(Math.min_int(g - 2, vol_y0(k, cx, cz, seed, g) - 2), g - 64)
+    -- the top of the drawing: the site's own rise, the volume's top, or an
+    -- absolute top level -- the site of an atoll is its lagoon, and asking it
+    -- how high the ring is gets a negative number
+    let hi = Math.max_int(Math.max_int(g + shape_at(k, cx, cz, sx(k, cx, cz, seed), sz(k, cx, cz, seed), seed, int_to_float(g)) + 2, vol_y1(k, cx, cz, seed, g) + 2),
+                          param(k, cx, cz, seed, p_top()) + 4)
+    println("poi preview: " ++ kind_name(k) ++ "  (" ++ (if class_of(k) == cls_scatter() do "scatter" else if class_of(k) == cls_field() do "field" else "landmark" end end)
+            ++ ", " ++ (if raises(k) do "raises" else "no height" end)
+            ++ ", " ++ (if vol_of(k) == vol_none() do "no volume" else if vol_of(k) == vol_carve() do "carves" else "stamps" end end) ++ ")")
+    println("  cell " ++ int_to_string(cell(k)) ++ "  density " ++ int_to_string(float_to_int(density(k) *. 100.0)) ++ "%"
+            ++ "  country over " ++ int_to_string(float_to_int(cty_lo(k) *. 100.0)) ++ "% at 1/" ++ int_to_string(float_to_int(1.0 /. cty_freq(k))) ++ " blocks"
+            ++ "  reach " ++ int_to_string(reach(k)) ++ "  ground >= " ++ int_to_string(min_ground(k)))
+    println("  len " ++ int_to_string(param(k, cx, cz, seed, p_len())) ++ "  wide " ++ int_to_string(param(k, cx, cz, seed, p_wide()))
+            ++ "  rise " ++ int_to_string(param(k, cx, cz, seed, p_rise())) ++ "  top " ++ int_to_string(param(k, cx, cz, seed, p_top()))
+            ++ "  depth " ++ int_to_string(param(k, cx, cz, seed, p_depth()))
+            ++ "  opening " ++ int_to_string(2 * param(k, cx, cz, seed, p_hole_w())) ++ "x" ++ int_to_string(param(k, cx, cz, seed, p_hole_h()))
+            ++ "  rules " ++ (if rule_ok(k, cx, cz, seed) do "ok" else "BROKEN" end))
+    println("  along the frame (u), one column per 2 blocks:")
+    pv_go(k, cx, cz, seed, hi, lo, 40, 2, false)
+    println("  across it (v), one column per 2 blocks:")
+    pv_go(k, cx, cz, seed, hi, lo, 30, 2, true)
+  end
+
+end

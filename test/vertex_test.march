@@ -45,6 +45,18 @@ mod CubeForge.Test.Vertex do
     end
   end
 
+  describe "Vertex.pack_depth" do
+    test "still water carries its depth in blocks where flowing water carries speed" do
+      let p = Vx.pack_depth(7)
+      Test.assert_eq_int(Vx.effect_of(p), Vx.fx_still(), "still")
+      Test.assert_eq_int(Vx.depth_of(p), 7, "seven blocks of water below")
+      -- the byte is the depth itself, not a 0..1 alpha: the shader needs no scale
+      Test.assert_eq_int(Vx.depth_of(Vx.pack_depth(0)), 0, "a one-block puddle has nothing below it and so no tint at all")
+      Test.assert_eq_int(Vx.depth_of(Vx.pack_depth(Vx.depth_max() + 40)), Vx.depth_max(), "deeper than the cap reads as the cap")
+      Test.assert_eq_int(Vx.depth_of(Vx.pack_depth(0 - 3)), 0, "and a negative depth is none")
+    end
+  end
+
 
   pfn shade_roundtrip(i : Int) : Int do
     if i > 255 do -1

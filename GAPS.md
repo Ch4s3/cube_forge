@@ -1529,3 +1529,15 @@ so this is specific to the call path, not to messages.
 - **Would need:** the call path to marshal a request's fields, or a compile
   error saying it cannot. Silently substituting zeros for a message's payload is
   the worst of the three options.
+
+### G85. A test module that fails to parse is dropped, and the suite passes
+
+- **Seen:** `test/poi_test.march` gained a binding named `on` -- a keyword, like
+  `by` (G-less, noted in `Poi.seg_d2`) -- and failed to parse. `forge test`
+  printed the parse error among the refinement hints, dropped the module, ran
+  the other 465 of 486 defined tests and finished with `0 failures`. Twenty-one
+  tests, the whole point-of-interest suite, silently stopped running; the drop
+  was noticed only because the total in the summary line went down.
+- **Would need:** a parse error in any test file to fail the run, or at least
+  the summary to say `N modules skipped`. Until then, the number on the
+  `Finished:` line is the check: it must not go down.

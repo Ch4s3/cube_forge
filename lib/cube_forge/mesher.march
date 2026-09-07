@@ -266,7 +266,11 @@ mod CubeForge.Mesher do
     let fx1 = fx +. 1.0
     let h = fy +. water_height(id)
     let flow = flow_of(id, nb_get(c, n, s, e, w, x + 1, y, z), nb_get(c, n, s, e, w, x - 1, y, z), nb_get(c, n, s, e, w, x, y, z + 1), nb_get(c, n, s, e, w, x, y, z - 1), nb_get(c, n, s, e, w, x, y - 1, z))
-    let fw = Vx.pack_flow(flow_effect(flow), flow_speed(flow))
+    -- Still water carries its DEPTH where flowing water carries its speed: the
+    -- byte is free for effect 10 and it is what the shader needs to make deep
+    -- water look deep. Only still water pays the walk, and only to depth_max().
+    let fw = if flow_effect(flow) == Vx.fx_still() do Vx.pack_depth(water_depth_go(c, n, s, e, w, x, y, z, 0))
+             else Vx.pack_flow(flow_effect(flow), flow_speed(flow)) end
     let fz1 = fz +. 1.0
     let b1 = if !C.is_water(nb_get(c, n, s, e, w, x, y + 1, z)) do
       quad_fx(b, fx, h, fz, fx, h, fz1, fx1, h, fz1, fx1, h, fz, l, 1.0, face_top(), fw) else b end
@@ -280,6 +284,15 @@ mod CubeForge.Mesher do
     let b5b = if b5 < h do quad_fx(b4b, fx1, b5, fz1, fx1, h, fz1, fx, h, fz1, fx, b5, fz1, l, 1.0, face_zpos(), fw) else b4b end
     let b6 = side_base(fy, id, nb_get(c, n, s, e, w, x, y, z - 1))
     if b6 < h do quad_fx(b5b, fx, b6, fz, fx, h, fz, fx1, h, fz, fx1, b6, fz, l, 1.0, face_zneg(), fw) else b5b end
+  end
+
+  doc "How much water stands below (x, y, z), in blocks, capped at Vx.depth_max(): what the still-water depth byte carries. A lone puddle block reads 0, so a puddle is exactly what it was before the depth tint."
+  fn water_depth_go(c : CubeForge.Chunk.Chunk, n : CubeForge.Chunk.Chunk, s : CubeForge.Chunk.Chunk,
+                     e : CubeForge.Chunk.Chunk, w : CubeForge.Chunk.Chunk, x : Int, y : Int, z : Int, acc : Int) : Int do
+    if y <= 0 do acc
+    else if acc >= Vx.depth_max() do acc
+    else if C.is_water(nb_get(c, n, s, e, w, x, y - 1, z)) do water_depth_go(c, n, s, e, w, x, y - 1, z, acc + 1)
+    else acc end end end
   end
 
   -- Bottom of the side strip to emit against neighbour [nid]: the block base for air, the neighbour's
@@ -499,11 +512,12 @@ mod CubeForge.Mesher do
   fn is_model(c : CubeForge.Chunk.Chunk, n : CubeForge.Chunk.Chunk, s : CubeForge.Chunk.Chunk, e : CubeForge.Chunk.Chunk, w : CubeForge.Chunk.Chunk,
               x : Int, y : Int, z : Int, id : Int) : Bool do
     if C.is_fruit_small(id) do true
+    else if id == C.crystal() do true
     else if id == C.palm_frond() do true
     else if id == C.oak_leaves() do
       let below = nb_get(c, n, s, e, w, x, y - 1, z)
       if below == 0 do false else if C.is_water(below) do false else if C.is_foliage(below) do false else !C.is_log(below) end end end
-    else false end end end
+    else false end end end end
   end
 
   -- Frond direction (Model.frond's 0..7) for the blade pointing away from (sx, sz).
@@ -523,6 +537,9 @@ mod CubeForge.Mesher do
   fn template_of(c : CubeForge.Chunk.Chunk, n : CubeForge.Chunk.Chunk, s : CubeForge.Chunk.Chunk, e : CubeForge.Chunk.Chunk, w : CubeForge.Chunk.Chunk,
                  x : Int, y : Int, z : Int, id : Int, oxi : Int, ozi : Int) : Int do
     if C.is_fruit_small(id) do CubeForge.Model.t_mushroom(C.fruit_species(id))
+    -- the variant is hashed on a COARSE grid, so neighbouring blades lean the
+    -- same way and a patch of them reads as one growth rather than a bristle
+    else if id == C.crystal() do CubeForge.Model.t_crystal(float_to_int(CubeForge.Noise.hash2((oxi + x) / 3, (ozi + z) / 3 + y / 3, 5150) *. 4.0) % 4)
     else if id == C.palm_frond() do
       let px = nb_get(c, n, s, e, w, x + 1, y, z)
       let mx = nb_get(c, n, s, e, w, x - 1, y, z)
@@ -541,7 +558,7 @@ mod CubeForge.Mesher do
         else if nb_get(c, n, s, e, w, x, y - 1, z) == C.palm_log() do CubeForge.Model.t_umbrella()
         else CubeForge.Model.t_tuft() end end
       end end end end
-    else CubeForge.Model.t_bush(float_to_int(CubeForge.Noise.hash2(oxi + x, ozi + z, 4242) *. 4.0) % 4) end end
+    else CubeForge.Model.t_bush(float_to_int(CubeForge.Noise.hash2(oxi + x, ozi + z, 4242) *. 4.0) % 4) end end end
   end
 
   doc "Stamp template [k] into the cell whose origin is (fx, fy, fz), every vertex carrying [shade]: one shim copy (cf_f32_stamp) rather than a boxed-Float read and add per float."

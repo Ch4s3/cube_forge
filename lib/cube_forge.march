@@ -3203,6 +3203,99 @@ mod CubeForge do
     end
   end
 
+  -- CF_TERRAIN_STATS: the points of interest in the world span. Both kinds are
+  -- rare by design, so a world with none of either is the normal case and the
+  -- line says so. CF_POI_PREVIEW=<kind> draws a kind's shape instead of hunting
+  -- for one (CubeForge.Poi.preview).
+  pfn poi_rise_go(n : Int, i : Int, seed : Int, acc : Int, first : Int) : Int do
+    let span = 16 * n
+    if i >= span * span do acc * 1000000 + first
+    else
+      let wx = i % span
+      let wz = i / span
+      -- a landform may lower a column as well as raise it: a canyon is a cut
+      if CubeForge.Noise.height(wx, wz, seed) != CubeForge.Noise.height_base(wx, wz, seed) do
+        poi_rise_go(n, i + 1, seed, acc + 1, if first == 0 do wx * 1000 + wz + 1 else first end)
+      else poi_rise_go(n, i + 1, seed, acc, first) end
+    end
+  end
+  pfn poi_cells_go(n : Int, k : Int, i : Int, seed : Int, scale : Float, acc : Int) : Int do
+    let cells = 16 * n / CubeForge.Poi.cell(k) + 1
+    if i >= cells * cells do acc
+    else
+      let cx = i % cells
+      let cz = i / cells
+      if CubeForge.Poi.class_of(k) != CubeForge.Poi.cls_landmark() do acc
+      else if !CubeForge.Poi.here(k, cx, cz, seed, scale) do poi_cells_go(n, k, i + 1, seed, scale, acc)
+      else
+        println("  " ++ CubeForge.Poi.kind_name(k) ++ ": site " ++ int_to_string(CubeForge.Poi.sx(k, cx, cz, seed)) ++ "," ++ int_to_string(CubeForge.Poi.sz(k, cx, cz, seed))
+                ++ "  ground " ++ int_to_string(CubeForge.Poi.ground(k, cx, cz, seed))
+                ++ "  len " ++ int_to_string(CubeForge.Poi.param(k, cx, cz, seed, CubeForge.Poi.p_len()))
+                ++ "  rise " ++ int_to_string(CubeForge.Poi.param(k, cx, cz, seed, CubeForge.Poi.p_rise()))
+                ++ "  depth " ++ int_to_string(CubeForge.Poi.param(k, cx, cz, seed, CubeForge.Poi.p_depth()))
+                ++ "  opening " ++ int_to_string(2 * CubeForge.Poi.param(k, cx, cz, seed, CubeForge.Poi.p_hole_w())) ++ "x" ++ int_to_string(CubeForge.Poi.param(k, cx, cz, seed, CubeForge.Poi.p_hole_h()))
+                ++ "  bearing " ++ int_to_string(float_to_int(CubeForge.Poi.bearing(k, cx, cz, seed) *. 57.2957795)) ++ " deg"
+                ++ (if k != CubeForge.Poi.k_cavern() do "" else
+                      let a = CubeForge.Poi.bearing(k, cx, cz, seed)
+                      let cu = CubeForge.Poi.cham_u(k, cx, cz, seed, 0)
+                      let cv = CubeForge.Poi.cham_v(k, cx, cz, seed, 0)
+                      "  chamber 0 at " ++ int_to_string(CubeForge.Poi.sx(k, cx, cz, seed) + float_to_int(cu *. Math.cos(a) -. cv *. Math.sin(a)))
+                      ++ "," ++ int_to_string(CubeForge.Poi.sz(k, cx, cz, seed) + float_to_int(cu *. Math.sin(a) +. cv *. Math.cos(a)))
+                      ++ " y " ++ int_to_string(float_to_int(CubeForge.Poi.cham_y(k, cx, cz, seed, 0, CubeForge.Poi.ground(k, cx, cz, seed)))) end))
+        poi_cells_go(n, k, i + 1, seed, scale, acc + 1)
+      end end
+    end
+  end
+  pfn poi_kinds_go(n : Int, k : Int, seed : Int, scale : Float, acc : Int) : Int do
+    if k >= CubeForge.Poi.kinds() do acc
+    else poi_kinds_go(n, k + 1, seed, scale, acc + poi_cells_go(n, k, 0, seed, scale, 0)) end
+  end
+  -- CF_POI_GATE=1: for the atoll's cell (0, 0), print each placement gate's
+  -- value, so a kind that never appears can be asked WHICH rule refuses it
+  -- instead of guessed at. A hundred and forty seeds without an atoll was the
+  -- occasion.
+  pfn poi_gate(seed : Int) : Unit do
+    let k = CubeForge.Poi.k_atoll()
+    let x = CubeForge.Poi.sx(k, 0, 0, seed)
+    let z = CubeForge.Poi.sz(k, 0, 0, seed)
+    println("  atoll gate: site " ++ int_to_string(x) ++ "," ++ int_to_string(z)
+            ++ "  country " ++ int_to_string(float_to_int(CubeForge.Poi.country(k, x, z, seed) *. 100.0))
+            ++ "  ground " ++ int_to_string(CubeForge.Noise.height_base(x, z, seed))
+            ++ "  cover_hi " ++ int_to_string(CubeForge.Poi.cover_hi(k, 0, 0, seed))
+            ++ "  max " ++ int_to_string(CubeForge.Poi.max_ground(k))
+            ++ "  here " ++ (if CubeForge.Poi.here(k, 0, 0, seed, 1.0) do "yes" else "no" end))
+    -- and the shape at the site, piece by piece, so a kind that is placed but
+    -- draws nothing can be asked which link of the chain drops it
+    let hb = int_to_float(CubeForge.Noise.height_base(x, z, seed))
+    println("  atoll shape: shape_at " ++ int_to_string(CubeForge.Poi.shape_at(k, 0, 0, x, z, seed, hb))
+            ++ "  height_at " ++ int_to_string(CubeForge.Poi.height_at(x, z, seed, 0.0, hb, 0.0, 0.0, 0.0))
+            ++ "  height " ++ int_to_string(CubeForge.Noise.height(x, z, seed)) ++ " base " ++ int_to_string(CubeForge.Noise.height_base(x, z, seed))
+            ++ "  raises " ++ (if CubeForge.Poi.raises(k) do "yes" else "no" end)
+            ++ "  scale " ++ int_to_string(float_to_int(CubeForge.Poi.poi_scale() *. 100.0)))
+  end
+  -- CF_POI_TRANSECT=<z>: one line across the world at that z, a character per
+  -- column: '.' untouched, '1'..'9' cut by that many benches of six, '+' raised.
+  -- A canyon is a slot in a valley, and a slot is a thing you read across, not
+  -- from a camera on the rim that happens to be behind a hill.
+  pfn poi_transect_go(n : Int, seed : Int, z : Int, x : Int, acc : String) : String do
+    if x >= 16 * n do acc
+    else
+      let d = CubeForge.Noise.height(x, z, seed) - CubeForge.Noise.height_base(x, z, seed)
+      let c = if d == 0 do "." else if d > 0 do "+" else int_to_string(Math.min_int(9, (0 - d + 5) / 6)) end end
+      poi_transect_go(n, seed, z, x + 1, acc ++ c)
+    end
+  end
+  pfn poi_report(n : Int, seed : Int) : Unit do
+    if Env.get_int("CF_POI_GATE", 0) == 1 do poi_gate(seed) else () end
+    let tz = Env.get_int("CF_POI_TRANSECT", -1)
+    if tz >= 0 do println("  transect z=" ++ int_to_string(tz) ++ ": " ++ poi_transect_go(n, seed, tz, 0, "")) else () end
+    let r = poi_rise_go(n, 0, seed, 0, 0)
+    let a = poi_kinds_go(n, 1, seed, CubeForge.Poi.poi_scale(), 0)
+    println("  poi: " ++ int_to_string(r / 1000000) ++ " columns moved by a landform"
+            ++ (if r % 1000000 == 0 do "" else " (first at " ++ int_to_string((r % 1000000 - 1) / 1000) ++ ", " ++ int_to_string((r % 1000000 - 1) % 1000) ++ ")" end)
+            ++ ", " ++ int_to_string(a) ++ " landmarks")
+  end
+
   -- CF_TERRAIN_MAP=1 (alongside CF_TERRAIN_STATS): the world as a character map, one
   -- character per 2x2 columns, so plateaus, valleys and rivers can be seen, not inferred.
   --   ~ underwater   . sand   # granite (cliff)   * snow
@@ -3509,9 +3602,14 @@ mod CubeForge do
     let meshes = mesh_all(world, n, workers)
     let t3 = System.monotonic_time()
     let nverts = count_verts(meshes, 0)
+    -- CF_POI_PREVIEW=<kind>: draw the kind's shape on flat ground and stop.
+    -- Iterating on a shape belongs here, not in a world with a blind camera.
+    let pv = Env.get_int("CF_POI_PREVIEW", -1)
+    if pv >= 0 && pv < CubeForge.Poi.kinds() do CubeForge.Poi.preview(pv, seed) else () end
     if Env.get_int("CF_TERRAIN_STATS", 0) == 1 do
       stats_go(n, 0, seed, 999, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
       springs_go(n, 0, seed, 0, 0)
+      poi_report(n, seed)
       println("  caves: " ++ int_to_string(cave_air_go(world, n, 0, 0, seed)) ++ " air voxels below the surface, " ++ int_to_string(worm_cells_go(n, seed, 0, 0)) ++ " worm cells")
       let tl0 = System.monotonic_time()
       let lk = CubeForge.Lakes.levels(seed, n)
@@ -3535,9 +3633,16 @@ mod CubeForge do
     else
       let counts = upload_meshes(meshes, 0, NativeArray.make_int(4 * water_slot_base(), 0))
       let water_col = World.find_water(world)
+      -- CF_SPAWN_X / CF_SPAWN_Z put the player on a named column instead of the
+      -- generator's choice. Rare features -- a point of interest, a lake outlet
+      -- -- are otherwise unlookable-at: the spawn is wherever the highest flat
+      -- column near the centre happens to be, and four rounds of yaw sweeps at
+      -- seeds carrying an arch landed on a peak, in a lake and under water.
+      let spawn_env_x = Env.get_int("CF_SPAWN_X", -1)
+      let spawn_env_z = Env.get_int("CF_SPAWN_Z", -1)
       let spawn_col = find_spawn_go(world, n, 0, 0, 0)
-      let spawn_x = spawn_col % 4096
-      let spawn_z = spawn_col / 4096
+      let spawn_x = if spawn_env_x >= 0 do spawn_env_x else spawn_col % 4096 end
+      let spawn_z = if spawn_env_z >= 0 do spawn_env_z else spawn_col / 4096 end
       let ground_y = int_to_float(World.surface_y(world, spawn_x, spawn_z) + 1)
       -- CF_AUTODIVE spawns over the same column CF_AUTOSWIM does; the
       -- difference is which key the scripted input holds once it lands.
@@ -3549,7 +3654,12 @@ mod CubeForge do
         -- CF_SPAWN_Y=<y>: start at a chosen height (inspection aid, e.g. to look at the bedrock floor)
         let forced_y = Env.get_int("CF_SPAWN_Y", -1)
         let y0 = if forced_y >= 0 do int_to_float(forced_y) else ground_y end
-        Player.with_pitch(Player.new(int_to_float(spawn_x) +. 0.5, y0, int_to_float(spawn_z) +. 0.5), int_to_float(Env.get_int("CF_PITCH", -25)) /. 100.0)   -- CF_PITCH: spawn pitch in hundredths of a radian, for headless looks at the ground
+        -- CF_PITCH: spawn pitch in hundredths of a radian. CF_YAW: spawn yaw in
+        -- DEGREES (0 = -Z, clockwise), unset to keep the default facing —
+        -- CF_AUTOSPIN is a rate, so without an angle which way a dump faces is
+        -- a lottery in the spin value and the dump frame.
+        Player.with_yaw(Player.with_pitch(Player.new(int_to_float(spawn_x) +. 0.5, y0, int_to_float(spawn_z) +. 0.5), int_to_float(Env.get_int("CF_PITCH", -25)) /. 100.0),
+                        int_to_float(Env.get_int("CF_YAW", 0)) *. 0.0174532925)
       end
       let player = match loaded do
         Loaded(h, _, _) -> Player.of_floats(Save.h_player(h))

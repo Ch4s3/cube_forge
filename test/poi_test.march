@@ -1,0 +1,265 @@
+-- Points of interest: the template's rules, its placement, and the two kinds
+-- it currently carries. Helpers are module-level: `pfn` is not allowed inside
+-- `describe`/`test` (GAPS.md G59).
+--
+-- The rules test is the important one. It walks EVERY kind, so a kind added
+-- later cannot ship with an opening taller than the mass over it, a reach
+-- wider than its cell, or a top that tilts with the ground -- which is the
+-- exact class of mistake the first arch shipped with.
+mod CubeForge.Test.Poi do
+
+  needs IO.Spawn
+  import Test
+  alias CubeForge.Noise as N
+  alias CubeForge.Poi as Pi
+  alias CubeForge.Chunk as C
+
+  fn seed() : Int do 4242 end
+  pfn floor16(v : Int) : Int do if v >= 0 do v / 16 * 16 else (v - 15) / 16 * 16 end end
+
+  -- ── The rules, over every kind and a spread of cells ─────────────────────
+
+  pfn rules_cells(k : Int, i : Int) : Bool do
+    if i >= 64 do true
+    else if Pi.rule_ok(k, i % 8, i / 8, seed()) do rules_cells(k, i + 1) else false end end
+  end
+  pfn rules_go(k : Int) : Bool do
+    if k >= Pi.kinds() do true else if rules_cells(k, 0) do rules_go(k + 1) else false end end
+  end
+  pfn reach_go(k : Int) : Bool do
+    if k >= Pi.kinds() do true
+    else if Pi.reach(k) <= Pi.cell(k) && Pi.phi(k, Pi.p_len()) <= Pi.cell(k) do reach_go(k + 1) else false end end
+  end
+  pfn params_in_range(k : Int, i : Int) : Bool do
+    if i >= Pi.params() do true
+    else
+      let v = Pi.param(k, 3, 5, seed(), i)
+      -- derived parameters are allowed outside the table's own range
+      if v >= Pi.plo(k, i) && (v <= Pi.phi(k, i) || Pi.phi(k, i) == 0) do params_in_range(k, i + 1) else false end
+    end
+  end
+  pfn params_go(k : Int) : Bool do
+    if k >= Pi.kinds() do true else if params_in_range(k, 0) do params_go(k + 1) else false end end
+  end
+
+  -- ── Finding an instance ──────────────────────────────────────────────────
+
+  pfn find_arch_go(i : Int, n : Int) : Int do
+    if i >= n do 0 - 1
+    else
+      let cx = i % 24 - 12
+      let cz = i / 24 - 12
+      if Pi.here(Pi.k_arch(), cx, cz, seed(), 1.0) do (cx + 500) * 100000 + (cz + 500)
+      else find_arch_go(i + 1, n) end
+    end
+  end
+  pfn acx(f : Int) : Int do f / 100000 - 500 end
+  pfn acz(f : Int) : Int do f % 100000 - 500 end
+
+  -- The first column of a 64 x 64 grid at [step] blocks that a landform raised,
+  -- packed x * 100000 + z, or -1.
+  pfn find_rise_go(i : Int, n : Int, step : Int) : Int do
+    if i >= n do 0 - 1
+    else
+      let wx = (i % 64) * step
+      let wz = (i / 64) * step
+      if N.height(wx, wz, seed()) > N.height_base(wx, wz, seed()) do wx * 100000 + wz
+      else find_rise_go(i + 1, n, step) end
+    end
+  end
+
+  pfn air_col(c : CubeForge.Chunk.Chunk, x : Int, z : Int, y : Int, y1 : Int, acc : Int) : Int do
+    if y > y1 do acc
+    else air_col(c, x, z, y + 1, y1, if C.get(c, x, y, z) == 0 do acc + 1 else acc end) end
+  end
+  pfn any_solid_go(c : CubeForge.Chunk.Chunk, x : Int, z : Int, y : Int, top : Int) : Bool do
+    if y > top do false
+    else if C.get(c, x, y, z) != 0 do true else any_solid_go(c, x, z, y + 1, top) end end
+  end
+  pfn diff_col(a : CubeForge.Chunk.Chunk, b : CubeForge.Chunk.Chunk, x : Int, z : Int, y : Int, acc : Int) : Int do
+    if y >= 256 do acc
+    else diff_col(a, b, x, z, y + 1, if C.get(a, x, y, z) != C.get(b, x, y, z) do acc + 1 else acc end) end
+  end
+  pfn diff_go(a : CubeForge.Chunk.Chunk, b : CubeForge.Chunk.Chunk, i : Int, acc : Int) : Int do
+    if i >= 256 do acc else diff_go(a, b, i + 1, diff_col(a, b, i % 16, i / 16, 0, acc)) end
+  end
+
+  describe "the POI template's rules" do
+    test "every kind obeys them, at every cell" do
+      Test.assert_true(rules_go(0), "rule_ok holds for all kinds over 64 cells")
+    end
+    test "no kind can reach out of its own cell" do
+      Test.assert_true(reach_go(0), "reach and the widest half-length both fit the cell")
+    end
+    test "every parameter lands in its declared range" do
+      Test.assert_true(params_go(0), "the table is what the hashes produce")
+    end
+    test "an opening is strictly inside the mass over it" do
+      -- rule 2, the one the first arch broke: it was a lintel, not an arch
+      let k = Pi.k_arch()
+      Test.assert_true(Pi.param(k, 3, 5, seed(), Pi.p_hole_w()) * 2 < Pi.param(k, 3, 5, seed(), Pi.p_len()),
+                       "the opening is narrower than the flat top over it")
+      Test.assert_true(Pi.param(k, 3, 5, seed(), Pi.p_hole_h()) + Pi.roof() <= Pi.param(k, 3, 5, seed(), Pi.p_rise()),
+                       "and there is a roof's worth of arch above it")
+    end
+    test "the profiles are what rule 4 says they are" do
+      Test.assert_true(Pi.prof_hard(4.9, 5.0) == 1.0, "a cliff is full height right up to its rim")
+      Test.assert_true(Pi.prof_hard(5.0, 5.0) == 0.0, "and nothing past it: no ramp, no half-height shelf")
+      Test.assert_true(Pi.prof_flat(0.0, 10.0, 0.5) == 1.0, "a flat top is flat in the middle")
+      Test.assert_true(Pi.prof_flat(10.0, 10.0, 0.5) == 0.0, "and gone at its end")
+      Test.assert_true(Pi.prof_flat(4.0, 10.0, 0.5) == 1.0, "still flat over the middle half")
+      Test.assert_true(Pi.prof_round(0.0, 6.0) == 1.0, "a rounded profile peaks in the middle")
+      Test.assert_true(Pi.prof_round(6.0, 6.0) == 0.0, "and eases to nothing")
+    end
+  end
+
+  describe "the POI off switch" do
+    test "a zero scale places nothing, of either kind" do
+      Test.assert_true(!Pi.here(Pi.k_butte(), 4, 4, seed(), 0.0), "no scale, no mesa")
+      Test.assert_true(!Pi.here(Pi.k_arch(), 0, 0, seed(), 0.0), "no scale, no arch")
+      Test.assert_true(!Pi.here(Pi.k_arch(), 3, 5, seed(), 0.0), "nor in another cell")
+      Test.assert_eq_int(Pi.height_at(1000, 1000, seed(), 0.0, 80.0, 0.0, 0.0, 0.0), 0, "and a column outside the desert raises nothing")
+    end
+  end
+
+  describe "a butte" do
+    test "is a scatter: read at the column, and its top is an absolute level" do
+      Test.assert_eq_int(Pi.class_of(Pi.k_butte()), Pi.cls_scatter(), "scatter")
+      Test.assert_true(Pi.phi(Pi.k_butte(), Pi.p_top()) > 0, "it declares an absolute top (rule 3)")
+      Test.assert_eq_int(Pi.param(Pi.k_butte(), 2, 2, seed(), Pi.p_hole_h()), 0, "and carries no opening")
+    end
+    test "the country octave is rare but not empty" do
+      Test.assert_true(Pi.country(Pi.k_butte(), 1704, 936, seed()) >= 0.0, "a mask is a mask")
+      Test.assert_true(find_rise_go(0, 4096, 24) >= 0, "some column in a 1536-block square is raised by a landform")
+    end
+  end
+
+  describe "a canyon" do
+    test "is a field: no cells, no site, and it only cuts" do
+      Test.assert_eq_int(Pi.class_of(Pi.k_canyon()), Pi.cls_field(), "field")
+      Test.assert_true(Pi.raises(Pi.k_canyon()), "it is a height term")
+      Test.assert_eq_int(Pi.vol_of(Pi.k_canyon()), Pi.vol_none(), "and never writes volume")
+    end
+    test "cuts a slot in a valley, in benches, and never to the sea" do
+      let hd = int_to_float(CubeForge.Noise.sea_level() + 60)
+      let mid = Pi.canyon_at(seed(), hd, 1.0, 0.8, 1.0)
+      Test.assert_true(mid < 0, "the centreline is cut")
+      Test.assert_eq_int((0 - mid) % Pi.canyon_bench(), 0, "in whole benches")
+      Test.assert_true(0 - mid <= 60 + Pi.canyon_rise_above() - 4, "not below the brook")
+      Test.assert_eq_int(Pi.canyon_at(seed(), hd, 0.0, 0.8, 1.0), 0, "the valley's lip is untouched")
+      Test.assert_eq_int(Pi.canyon_at(seed(), hd, 1.0, 0.1, 1.0), 0, "flat country has no canyons")
+      Test.assert_eq_int(Pi.canyon_at(seed(), int_to_float(CubeForge.Noise.sea_level() + 10), 1.0, 0.8, 1.0), 0, "nor does low ground")
+      Test.assert_eq_int(Pi.canyon_at(seed(), hd, 1.0, 0.8, 0.0), 0, "nor a column outside canyon country")
+    end
+    test "the lip is shallower than the floor: the walls step" do
+      let hd = int_to_float(CubeForge.Noise.sea_level() + 60)
+      Test.assert_true(Pi.canyon_at(seed(), hd, 0.3, 0.8, 1.0) >= Pi.canyon_at(seed(), hd, 1.0, 0.8, 1.0), "less cut toward the lip")
+    end
+  end
+
+  describe "a delta" do
+    test "is a field that only reshapes the coast" do
+      Test.assert_eq_int(Pi.class_of(Pi.k_delta()), Pi.cls_field(), "field")
+      Test.assert_true(Pi.raises(Pi.k_delta()), "a height term")
+      Test.assert_eq_int(Pi.vol_of(Pi.k_delta()), Pi.vol_none(), "and no volume")
+      let sea = int_to_float(CubeForge.Noise.sea_level())
+      Test.assert_eq_int(Pi.delta_at(seed(), 10, 10, sea +. 40.0, 1.0, 1.0), 0, "high ground is not the coast")
+      Test.assert_eq_int(Pi.delta_at(seed(), 10, 10, sea +. 10.0, 1.0, 0.0), 0, "outside great-river country nothing happens")
+    end
+    test "the trunk is cut below the sea on the crease and not off it" do
+      let sea = int_to_float(CubeForge.Noise.sea_level())
+      -- `on` is a keyword, like `by`: a binding named that is a parse error with no hint
+      let bed = Pi.delta_at(seed(), 10, 10, sea +. 10.0, 1.0, 1.0)
+      Test.assert_true(bed < 0, "the channel's centre is cut")
+      Test.assert_true(float_to_int(sea +. 10.0) + bed < CubeForge.Noise.sea_level(), "below the sea, so it holds water")
+      Test.assert_eq_int(Pi.delta_at(seed(), 10, 10, sea +. 10.0, 0.3, 1.0), 0, "off the crease the bank is untouched")
+    end
+    test "the mouth is flattened toward a block above the sea" do
+      let sea = int_to_float(CubeForge.Noise.sea_level())
+      let low = Pi.delta_at(seed(), 40, 40, sea -. 3.0, 0.9, 1.0)
+      let high = Pi.delta_at(seed(), 41, 40, sea +. 4.0, 0.9, 1.0)
+      Test.assert_true(low >= 0 || high <= 0, "the lobe is pulled toward one level from both sides")
+    end
+  end
+
+  describe "an atoll" do
+    test "is a landmark with a ceiling on its ground, and absolute levels" do
+      Test.assert_eq_int(Pi.class_of(Pi.k_atoll()), Pi.cls_landmark(), "landmark")
+      Test.assert_true(Pi.max_ground(Pi.k_atoll()) < CubeForge.Noise.sea_level(), "it wants open water")
+      Test.assert_true(Pi.plo(Pi.k_atoll(), Pi.p_top()) > CubeForge.Noise.sea_level(), "the reef flat stands above the sea (rule 3)")
+      Test.assert_eq_int(Pi.vol_of(Pi.k_atoll()), Pi.vol_none(), "and it carves nothing")
+    end
+    test "raises a ring above the sea, sinks a lagoon inside it, and leaves the sea bed beyond" do
+      let k = Pi.k_atoll()
+      let cx = 3
+      let cz = 5
+      let x = Pi.sx(k, cx, cz, seed())
+      let z = Pi.sz(k, cx, cz, seed())
+      let sea = int_to_float(CubeForge.Noise.sea_level())
+      let bed = sea -. 12.0
+      let r = Pi.param(k, cx, cz, seed(), Pi.p_len())
+      -- the lagoon: at the centre, cut to the floor
+      let centre = Pi.shape_at(k, cx, cz, x, z, seed(), bed)
+      Test.assert_true(centre < 0, "the lagoon is deeper than the sea bed")
+      Test.assert_eq_int(float_to_int(bed) + centre, CubeForge.Noise.sea_level() - Pi.param(k, cx, cz, seed(), Pi.p_depth()), "to its absolute floor")
+      -- well outside the ring: nothing
+      Test.assert_eq_int(Pi.shape_at(k, cx, cz, x + r + 40, z, seed(), bed), 0, "the sea bed beyond is untouched")
+    end
+  end
+
+  describe "an arch" do
+    test "is a landmark: resolved at its site, and carved as well as raised" do
+      Test.assert_eq_int(Pi.class_of(Pi.k_arch()), Pi.cls_landmark(), "landmark")
+      Test.assert_true(Pi.min_ground(Pi.k_arch()) > N.sea_level(), "its ground rule is read at the site (rule 5)")
+    end
+    test "the carve takes ground and leaves water and bedrock" do
+      Test.assert_true(!Pi.carvable(0), "air is not carvable")
+      Test.assert_true(!Pi.carvable(C.bedrock()), "nor bedrock")
+      Test.assert_true(!Pi.carvable(C.water()), "nor water: a river under an arch stays a river")
+      Test.assert_true(Pi.carvable(3), "stone is")
+      Test.assert_true(Pi.carvable(C.oak_log()), "and so is a tree standing where the opening goes")
+    end
+    test "its fin stands at its site and tapers to nothing at its ends" do
+      let f = find_arch_go(0, 576)
+      if f < 0 do Test.assert_true(true, "no arch in the scanned cells")
+      else
+        let cx = acx(f)
+        let cz = acz(f)
+        let sx = Pi.sx(Pi.k_arch(), cx, cz, seed())
+        let sz = Pi.sz(Pi.k_arch(), cx, cz, seed())
+        let mid = N.height(sx, sz, seed()) - N.height_base(sx, sz, seed())
+        Test.assert_true(mid > 0, "the fin stands above the field terrain at its site")
+        Test.assert_true(mid >= Pi.param(Pi.k_arch(), cx, cz, seed(), Pi.p_rise()) / 2, "and it stands most of its rise")
+        let far = Pi.param(Pi.k_arch(), cx, cz, seed(), Pi.p_len()) + 12
+        Test.assert_eq_int(Pi.height_at(sx + far, sz, seed(), 0.0, 80.0, 0.0, 0.0, 0.0), 0, "nothing that far along x")
+        Test.assert_eq_int(Pi.height_at(sx, sz + far, seed(), 0.0, 80.0, 0.0, 0.0, 0.0), 0, "nor that far along z")
+      end
+    end
+    test "has a hole through it: air over its floor, and fin over the air" do
+      let f = find_arch_go(0, 576)
+      if f < 0 do Test.assert_true(true, "no arch in the scanned cells")
+      else
+        let cx = acx(f)
+        let cz = acz(f)
+        let sx = Pi.sx(Pi.k_arch(), cx, cz, seed())
+        let sz = Pi.sz(Pi.k_arch(), cx, cz, seed())
+        let wx0 = floor16(sx)
+        let wz0 = floor16(sz)
+        let c = C.generate(wx0, wz0, seed())
+        let yf = Pi.ground(Pi.k_arch(), cx, cz, seed()) + 1
+        let top = yf + Pi.param(Pi.k_arch(), cx, cz, seed(), Pi.p_hole_h())
+        if yf < 1 || top + 12 >= 255 do Test.assert_true(true, "out of the world")
+        else
+          Test.assert_true(air_col(c, sx - wx0, sz - wz0, yf, top - 1, 0) > 0, "the opening is open")
+          Test.assert_true(any_solid_go(c, sx - wx0, sz - wz0, top + 1, top + 12), "and the arch stands over it")
+        end
+      end
+    end
+    test "carving a generated chunk again changes nothing" do
+      let c = C.generate(0, 0, seed())
+      Test.assert_eq_int(diff_go(Pi.carve(c, 0, 0, seed()), C.generate(0, 0, seed()), 0, 0), 0,
+                         "the carve is idempotent: what it would remove is already gone")
+    end
+  end
+
+end

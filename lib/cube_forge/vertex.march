@@ -22,8 +22,37 @@ mod CubeForge.Vertex do
   fn fx_still() : Int do 10 end
   doc "Effect 11: falling water — full foam."
   fn fx_fall() : Int do 11 end
+  doc """
+  Effect 12: SELF-LIT. An emissive block's own faces take their glow colour from
+  their own texture instead of the one warm constant every emitter shares.
+
+  Block light is a single channel, so a crystal lit by it came out the same
+  orange as a glowing mushroom, and a near-white selenite beam rendered beige.
+  Three block-light fields would fix that properly and are far out of scope;
+  this fixes the nine tenths of it that is the emitter's own faces. The light it
+  CASTS on the rock around it stays warm.
+  """
+  fn fx_selflit() : Int do 12 end
+  doc "The fx word of a self-lit face."
+  fn selflit() : Float do int_to_float(fx_selflit() * 256 + 255) end
   doc "Pack a water effect with a speed 0..7 in the alpha byte."
   fn pack_flow(effect : Int, speed : Int) : Float do pack(effect, int_to_float(speed) /. 7.0) end
+
+  doc "Deepest water the depth byte carries, in blocks. Past this the tint has saturated anyway."
+  fn depth_max() : Int do 32 end
+  doc """
+  Pack still water with the DEPTH of water below the cell, in blocks, in the
+  byte that a flowing cell uses for speed. Still water's speed is zero by
+  definition and the shader reads the byte only for effects 2..9, so the byte
+  is free -- and this is what lets deep water look deep without a tenth vertex
+  float or a depth buffer. The byte is the depth itself, not a 0..1 alpha, so
+  the shader needs no scale.
+  """
+  fn pack_depth(d : Int) : Float do
+    int_to_float(fx_still() * 256 + (if d < 0 do 0 else if d > depth_max() do depth_max() else d end end))
+  end
+  doc "The depth in blocks back out of a packed still-water word (see pack_depth)."
+  fn depth_of(p : Float) : Int do float_to_int(p +. 0.5) % 256 end
   doc "The speed 0..7 back out of a packed flow word."
   fn speed_of(p : Float) : Int do float_to_int(alpha_of(p) *. 7.0 +. 0.5) end
 
