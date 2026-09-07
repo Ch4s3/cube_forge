@@ -25,12 +25,23 @@ mod CubeForge.Test.Fauna do
   describe "Fauna bodies" do
     test "every pose of every species meshes to something, and stays under the face cap" do
       let s = F.build()
-      Test.assert_eq_int(F.template_count(), 54, "eighteen species, three poses each")
+      Test.assert_eq_int(F.template_count(), 72, "eighteen species, four poses each")
       Test.assert_true(nonempty_go(s, 0), "no empty body")
       let wk = worst_faces(s, 0, 0, 0)
       Test.assert_true(F.faces(s, wk) <= F.face_cap(),
         "the largest body is species " ++ int_to_string(wk / F.poses() + 1) ++ " pose " ++ int_to_string(wk % F.poses())
           ++ " at " ++ int_to_string(F.faces(s, wk)) ++ " quads, against a cap of " ++ int_to_string(F.face_cap()))
+    end
+
+    test "a roosting bird has its wings in, and a fish at rest is a fish" do
+      let s = F.build()
+      let level = F.template_of(F.sp_ridgehawk(), 1)
+      let folded = F.template_of(F.sp_ridgehawk(), F.pose_roost())
+      Test.assert_true(F.blob_hash(s, level) != F.blob_hash(s, folded), "folded is not level")
+      -- folded wings hug the body: the roost template's z extent is the body's,
+      -- where the level one reaches a wingspan out
+      Test.assert_true(F.extent_z(s, folded) < F.extent_z(s, level) *. 0.6, "and a folded wing reaches nowhere near as far out as a spread one")
+      Test.assert_eq_int(F.blob_hash(s, F.template_of(F.sp_sunfin(), F.pose_roost())), F.blob_hash(s, F.template_of(F.sp_sunfin(), 0)), "a fish's fourth pose is its first")
     end
 
     test "the poses of one species differ" do

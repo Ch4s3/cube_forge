@@ -2789,3 +2789,32 @@ desert corner of the same chunk. Honest, and slightly surprising; worth a word
 in the panel if it confuses anyone.
 
 Frame budget 8.29 ms against 16; save/load round trip passes.
+
+## Roost
+
+A bird asleep on the ground with its wings level looked like a bird that had
+landed and forgotten to stop flying. The fourth pose folds them: a shell one
+cell thick against each flank, from the shoulder back toward the tail, placed
+row by row against the body's ACTUAL surface (body_half_z) so it sits on the
+bird rather than beside it, narrowing toward the tail, dark at the rear where
+the primaries cross. The flock keeps its mode from the last step and a still
+animal wears the fold whenever that mode is roost; one that is moving -- put
+up by the player -- flaps like any other. A fish's fourth pose is its first.
+
+With it: the inner wing's trailing edge is feathered (a cell cut every fourth
+column), and the ratite leg has a hock -- the joint set well back and
+thickened, the shank angled forward -- which is the difference between a bend
+in a post and a joint.
+
+**One lesson.** The first build of this "worked": it compiled, linted, and the
+roost render showed a bird with its wings raised. Two of the edits had silently
+not applied -- a text replace on a string that no longer matched -- so pose 3
+fell through the flap's bend to the "up" branch, and the fold functions were
+never in the file. What caught it was a test with the wrong premise: I had
+asserted a folded wing was fewer faces than a spread one, it failed, and
+following that up found that there was no folded wing. The assertion is now the
+true property -- a folded wing reaches under six tenths as far out as a spread
+one -- and every generated edit here is now checked in the same command that
+makes it.
+
+505 tests, frame budget 8.23 ms against 16.

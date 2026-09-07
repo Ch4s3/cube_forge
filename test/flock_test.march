@@ -235,6 +235,15 @@ mod CubeForge.Test.Flock do
       Test.assert_true(min_y(spooked, 0, 999.0) > min_y(calm, 0, 999.0), "and higher")
     end
 
+    test "at night a still flock folds its wings; by day it flaps" do
+      let p = flat_patch(70)
+      let night = run(Fl.new(Fa.sp_grasspipit(), 6, 9, 100.0, 79.0, 100.0), p, 0.0, 0.0, 0.0, 0.0, 120)
+      Test.assert_eq_int(Fl.mode(night), Fl.m_roost(), "the flock is at roost")
+      Test.assert_true(count_pose(Fl.transforms(night), Fa.pose_roost(), 0) > 0, "and at least one bird has settled and folded")
+      let day = run(Fl.new(Fa.sp_grasspipit(), 6, 9, 100.0, 79.0, 100.0), p, 1.0, 0.0, 0.0, 0.0, 120)
+      Test.assert_eq_int(count_pose(Fl.transforms(day), Fa.pose_roost(), 0), 0, "nobody folds in flight")
+    end
+
     test "at night a diurnal flock comes down to roost" do
       let p = flat_patch(70)
       let day = run(Fl.new(Fa.sp_grasspipit(), 8, 9, 100.0, 79.0, 100.0), p, 1.0, 0.0, 0.0, 0.0, 60)
@@ -261,6 +270,12 @@ mod CubeForge.Test.Flock do
     end
   end
 
+  pfn count_pose(ts : List(Int), pose : Int, acc : Int) : Int do
+    match ts do
+      Nil -> acc
+      Cons(v, rest) -> count_pose(rest, pose, if Fl.un_pose(v) == pose do acc + 1 else acc end)
+    end
+  end
   pfn above_ground(f : CubeForge.Flock.Flock, patch : NativeIntArr, i : Int) : Bool do
     if i >= Fl.count(f) do true
     else
