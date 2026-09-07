@@ -24,7 +24,7 @@ mod CubeForge.Test.Save do
     let p = floats(Cons(1.5, Cons(70.25, Cons(-3.0, Cons(0.0, Cons(-2.5, Cons(0.0, Cons(3.1, Cons(-0.7, Nil)))))))), 8)
     let inv = NativeArray.set_int(NativeArray.set_int(NativeArray.set_int(NativeArray.make_int(73, 0), 0, 3), 1, 12), 72, 4)
     let wx = floats(Cons(2.0, Cons(150.0, Cons(0.7, Cons(0.3, Nil)))), 4)
-    Save.header_new(424242, 1757000000, p, inv, 812.5, wx)
+    Save.header_new(424242, 1757000000, p, inv, 812.5, wx, 0, Nil, 0)
   end
 
   pfn drop_go(ls : List(String), key : String, acc : String) : String do
@@ -57,8 +57,9 @@ mod CubeForge.Test.Save do
       let _ = Test.assert_err(Save.parse_header(s, 8), "version 2")
       ()
     end
-    test "a wrong side is rejected" do
+    test "a wrong side is rejected, and any side is taken when none is asked for" do
       let _ = Test.assert_err(Save.parse_header(Save.encode_header(sample(), 8), 4), "side 4 vs 8")
+      let _ = Test.assert_ok(Save.parse_header(Save.encode_header(sample(), 4), -1), "side -1 reads a 4")
       ()
     end
     test "unknown keys are ignored" do
@@ -90,7 +91,7 @@ mod CubeForge.Test.Save do
       fresh_slot(3)
       let h = Test.assert_ok(Save.check(tmp(), 3, 2), "check")
       Test.assert_eq_int(Save.h_seed(h), 424242, "seed")
-      let cs = Test.assert_ok(Save.read_chunks(tmp(), 3, 2), "read")
+      let cs = Test.assert_ok(Save.read_window(tmp(), 3, 2, 0, 0), "read")
       Test.assert_eq_int(C.get_idx(Array.get(cs, 0), 1000), 11, "chunk 0")
       Test.assert_eq_int(C.get_idx(Array.get(cs, 3), 1000), 44, "chunk 3")
       Test.assert_eq_int(C.get_idx(Array.get(cs, 3), 1001), 0, "untouched byte")
@@ -104,9 +105,9 @@ mod CubeForge.Test.Save do
     end
     test "a short chunk file fails check" do
       fresh_slot(3)
-      let _ = File.write(Save.chunk_path(tmp(), 3, 1), "abc")
+      let _ = File.write(Save.chunk_path_at(tmp(), 3, 1, 0), "abc")
       let _ = Test.assert_err(Save.check(tmp(), 3, 2), "short chunk")
-      let _ = Test.assert_err(Save.read_chunks(tmp(), 3, 2), "short read")
+      let _ = Test.assert_err(Save.read_window(tmp(), 3, 2, 0, 0), "short read")
       ()
     end
     test "list reports seed and time for a used slot" do
@@ -122,4 +123,25 @@ mod CubeForge.Test.Save do
       Test.assert_eq_str(Save.chunk_path("d", 1, 63), "d/slot1/chunk_63.bin", "63")
     end
   end
+
+  describe "Save fields" do
+    test "the fields blob round-trips, the wrong size is rejected, and a missing file is an error" do
+      let slot = 4
+      let _ = Dir.rm_rf(Save.slot_dir(tmp(), slot))
+      let n = 2 * 16
+      let bytes = NativeArray.set_u8(NativeArray.set_u8(NativeArray.make_u8(Save.fields_bytes(2), 0), 0, 3), Save.fields_bytes(2) - 1, 200)
+      let _ = Test.assert_ok(Save.write_with_fields(tmp(), slot, four_chunks(), 2, sample(), bytes), "write")
+      let back = Test.assert_ok(Save.read_fields(tmp(), slot, 2), "read")
+      Test.assert_eq_int(NativeArray.get_u8(back, 0), 3, "first byte")
+      Test.assert_eq_int(NativeArray.get_u8(back, Save.fields_bytes(2) - 1), 200, "last byte")
+      let _ = File.write(Save.fields_path(tmp(), slot), "abc")
+      let _ = Test.assert_err(Save.read_fields(tmp(), slot, 2), "short blob")
+      let _ = File.delete(Save.fields_path(tmp(), slot))
+      let _ = Test.assert_err(Save.read_fields(tmp(), slot, 2), "missing blob")
+      let _ = Test.assert_ok(Save.check(tmp(), slot, 2), "the slot itself is still complete")
+      let _ = Dir.rm_rf(Save.slot_dir(tmp(), slot))
+      ()
+    end
+  end
+
 end

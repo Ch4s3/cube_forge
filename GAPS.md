@@ -824,6 +824,16 @@ are freed immediately.
 
 ---
 
+### G78. Test modules share one alias namespace: the same alias for two modules fails to link
+- `alias CubeForge.Lakes as L` in `test/lakes_test.march` while
+  `test/light_test.march` has `alias CubeForge.Light as L`: the test binary
+  compiles, then the linker wants `_CubeForge.Lakes.chunk_layer`,
+  `_CubeForge.Lakes.emission` -- Light's functions resolved against the
+  Lakes alias from another file. `forge test` builds every test module into
+  one unit and the aliases leak across them. (`world_size_test` already
+  aliases World as `Wf` for the same reason.) Workaround: an alias name is
+  used for one module across the whole test tree; `Lk` here. Found 2026-09-05.
+
 ## Terrain generation notes
 
 ### G61. A `NativeU8Arr` store wraps mod 256 silently, and near-white textures came out red
@@ -1400,3 +1410,122 @@ transitive closure of the alias graph either.
 - **Done instead:** unique aliases per test module (`Myc`, `Sp`).
 - **Would need:** module-scoped aliases in the test build, or a duplicate-alias
   error at compile time.
+
+### G70 — a read in the writer copies; a read in a leaf does not
+
+Sharper than G21/G67 as written. A `NativeArray.get_*` of an array inside a
+function that later writes that array, or passes it to a function that
+writes it, holds the refcount up until the reading function returns, and
+the write copies the whole array. The same read inside a leaf callee that
+only reads is released when the callee returns and costs nothing. So a hot
+writer must do its reads through leaf helpers. Found in the worklist light
+sweep: a push that read the free slot and the list head before writing
+copied a 700 KB pool per push (2.7 s a relight); the same push with the two
+reads in one-line helpers is in place. See RESULTS.md, the perf pass of
+2026-09-05. Also: a variant cell holding two arrays keeps both refcounts at
+2 for as long as it lives, so a per-iteration pair return makes every write
+in the next iteration a copy (G12/G68 restated for this shape).
+
+### G79 — a library-defined type is freed shallowly: no deep drop is synthesized
+
+The drop pass looks a type up by the name a use site carries (the short
+name, inside the defining module or through an alias) against definitions
+registered under qualified names, exactly. It finds nothing for essentially
+every library-defined variant, so a dying cell of such a type releases only
+the box and leaks every field: in this project the biome and mycelium
+fields, the world, a persistent vector's trie nodes. Repro
+`probes/drop_xmod` (WHICH=1 and 2, 2.1 GB resident for 2 MB live). Fixed on
+the March branch `fix/drop-short-type-names` (`lib/tir/drop.ml`: resolve a
+short name to the one qualified definition that ends in it, Boxed only; a
+collision stays unresolved). Verified: the repro drops to 8 MB. See
+RESULTS.md, "where the frame's memory goes".
+
+### G80 — a closure environment is freed shallowly: every capture leaks
+
+`dec_rc` on a closure value frees the environment cell and never releases
+what it captured. Repro `probes/drop_xmod` WHICH=5: a thousand closures
+capturing a 1 MB array, each called once and dropped, leave 1.07 GB
+resident. Consequence in the stdlib: `Array.set` captures the new element in
+the closures of both its update paths, so every persistent-vector update in
+every program leaks the element (WHICH=4: 339 MB for 4 MB live), which in
+this project is 29 leaked 64 KB chunks a frame. Not fixed: the release site
+sees only `Ptr(Unit)` / a function type, so it needs either a synthesized
+drop per closure type reachable from the environment (a layout change, or a
+table keyed by the code pointer) or a runtime release that knows the capture
+kinds. The ownership convention is otherwise fine: the wrapper for a
+borrowed extern parameter releases it after the call.
+
+### G81 — a named binding unused in one arm of a lifted closure is never released
+
+`lst_set`'s loop bound the element being replaced as `h` and left it unused
+in the arm that replaces it; the compiled arm has no release for `h`, where
+the same arm with `_` for the head gets `dec_rc` on the extracted field.
+Worked around in the stdlib on the same branch (`stdlib/array.march`). The
+general rule for this project until it is fixed: in an arm that discards a
+pattern-bound value, bind it `_`.
+
+### G82. `Array.PVec.get` is a list walk: ~50 hops for a 64-element vector
+- `Array.get` on a 64-element `PVec` computes the tail's length by walking
+  the tail list (32 hops), then `lst_nth` walks up to 31 more in the tail or
+  in a leaf's values list. `Array.lst_nth$List_Chunk$Int` shows in every
+  profile of this project at ~2% of the frame; `World.chunk_at` is one such
+  call, and `World.block_at` pays it per voxel in the light sweep's
+  `give_level`, the water scan, vegetation and fruit.
+- Measured (`probes/pvec_get`, release): get 112 ns average (61 at index 0,
+  154 at index 63), set 860 ns, against 72 / 200 ns for a complete binary
+  tree of 64 leaves in plain March variants.
+- **Done instead:** `lib/cube_forge/tree.march`, a complete binary tree the
+  World keeps its chunks in; `World.chunks` converts to a PVec for the save
+  format. Worst frame 8.2 -> 5.7-6.6 ms, biome field build 228 -> 123 ms
+  (RESULTS). The mesher already took its five chunks as arguments.
+- **Would need:** array-backed leaves and a stored tail length in the stdlib
+  `PVec`, or a fixed-size object array.
+
+### G83. A module alias is shadowed by a deeper module of the same initial, and it fails at LINK time
+
+`alias CubeForge.Model as M` followed by `M.box(...)` does not call
+`CubeForge.Model.box`. It compiles, typechecks and lints clean, and then the
+linker asks for `_CubeForge.Math.Mat4.box`, which does not exist. The alias was
+silently outranked by `CubeForge.Math.Mat4` — a module the file never mentions
+and does not import.
+
+- **Cost:** two full test-compile cycles, and the error names a module you have
+  never heard of in this file. There is no diagnostic at the point of the
+  alias, at the point of use, or anywhere in `forge build` — only a list of
+  undefined symbols after clang runs.
+- **Done instead:** aliases in `fauna.march` and `fauna_test.march` are
+  `Mdl`, not `M`. Multi-letter aliases seem not to collide.
+- **Would need:** the alias to win over an unimported module, or — failing
+  that — an error at the use site saying which module a qualified name
+  actually resolved to. A name that resolves to something the file never
+  imported should not be silent.
+
+### G84. A call request that carries arguments delivers zeros; only `send` carries them
+
+`Actor.call(pid, FTickReq(a, b, c), 2000)` against
+
+    type FTickReq = FTickReq(Int, Int, Int)
+    on FTick(reply_to, a : Int, b : Int, c : Int) do ... end
+
+compiles, typechecks, lints, runs, and replies. Every argument arrives as **0**.
+`send(pid, FLoad(...))` against the same actor carries its arguments correctly,
+so this is specific to the call path, not to messages.
+
+- **How it showed:** flocks were told their ground heights, the water surface
+  and the player's position through the call. They read a ground of 0 and a
+  water surface of 0, so the fish sank to y 0.5 — its floor, ground + 0.5 —
+  while the birds set off toward y 9, ground + their cruise. Nothing errored;
+  the animals were simply somewhere else, and the geometry was correct for the
+  numbers they had.
+- **Cost:** most of an afternoon, and only because a fish sitting at y 0.5
+  under a lake at y 81 was too specific a number to be anything but arithmetic
+  on a zero. A less obviously-wrong value would have been taken for a steering
+  bug.
+- **Done instead:** the inputs go by `send` (`FInputs`) and the tick is a
+  nullary call (`FTickReq`), which is what every other actor here already does
+  — `Water.call_tick` and `Weather.call_tick` are both nullary, so the codebase
+  had no case that would have caught this. Two messages a tick instead of one,
+  and no measurable cost.
+- **Would need:** the call path to marshal a request's fields, or a compile
+  error saying it cannot. Silently substituting zeros for a message's payload is
+  the worst of the three options.

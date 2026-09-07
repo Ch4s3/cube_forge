@@ -1,0 +1,76 @@
+-- Effects — timed status effects from food. Four kinds, each an until-time on
+-- the session clock: speed, jump, swim, lantern. Eating refreshes the timer
+-- rather than stacking it. Pure: the caller passes the clock.
+mod CubeForge.Effects do
+
+  type Effects = Effects(NativeFloatArr)   -- until-time per kind, -1 when never applied
+
+  fn kinds() : Int do 4 end
+  fn k_speed() : Int do 0 end
+  fn k_jump() : Int do 1 end
+  fn k_swim() : Int do 2 end
+  fn k_lantern() : Int do 3 end
+  doc "Seconds an effect lasts from the last bite."
+  fn duration() : Float do 30.0 end
+
+  fn new() : Effects do Effects(NativeArray.make_float(kinds(), 0.0 -. 1.0)) end
+
+  doc "Start (or refresh) [kind] at [now]."
+  fn apply(e : Effects, kind : Int, now : Float) : Effects do
+    if kind < 0 || kind >= kinds() do e
+    else match e do Effects(a) -> Effects(NativeArray.set_float(a, kind, now +. duration())) end end
+  end
+  fn active(e : Effects, kind : Int, now : Float) : Bool do
+    if kind < 0 || kind >= kinds() do false
+    else match e do Effects(a) -> NativeArray.get_float(a, kind) > now end end
+  end
+  doc "Seconds left on [kind], 0 when it is not active."
+  fn remaining(e : Effects, kind : Int, now : Float) : Float do
+    if !active(e, kind, now) do 0.0
+    else match e do Effects(a) -> NativeArray.get_float(a, kind) -. now end end
+  end
+
+  doc "Walk speed multiplier."
+  fn speed_mult(e : Effects, now : Float) : Float do if active(e, k_speed(), now) do 1.5 else 1.0 end end
+  doc "Jump speed multiplier."
+  fn jump_mult(e : Effects, now : Float) : Float do if active(e, k_jump(), now) do 1.35 else 1.0 end end
+  doc "Swim speed multiplier, horizontal and vertical."
+  fn swim_mult(e : Effects, now : Float) : Float do if active(e, k_swim(), now) do 1.6 else 1.0 end end
+  doc "The lantern effect: the flashlight without holding it."
+  fn lantern(e : Effects, now : Float) : Bool do active(e, k_lantern(), now) end
+
+  doc "The effect a species' cap gives, or -1. Grassland and desert caps quicken the step, the cold-country caps the jump, the marsh cap the swim, the forest cap lights the way."
+  fn kind_for(sp : Int) : Int do
+    if sp == 3 || sp == 6 do k_speed()
+    else if sp == 1 || sp == 2 do k_jump()
+    else if sp == 5 do k_swim()
+    else if sp == 4 do k_lantern()
+    else 0 - 1 end end end end
+  end
+
+  fn name(kind : Int) : String do
+    if kind == 0 do "SPEED" else if kind == 1 do "JUMP" else if kind == 2 do "SWIM" else if kind == 3 do "LANTERN" else "" end end end end
+  end
+
+  pfn summary_go(e : Effects, now : Float, k : Int, acc : String) : String do
+    if k >= kinds() do acc
+    else if !active(e, k, now) do summary_go(e, now, k + 1, acc)
+    else
+      let secs = float_to_int(remaining(e, k, now) +. 0.999)
+      summary_go(e, now, k + 1, acc ++ (if acc == "" do "" else "  " end) ++ name(k) ++ " " ++ int_to_string(secs))
+    end end
+  end
+  -- Whole seconds left on [kind] (the number the summary prints), 0 when inactive.
+  pfn secs_left(e : Effects, kind : Int, now : Float) : Int do
+    if !active(e, kind, now) do 0 else float_to_int(remaining(e, kind, now) +. 0.999) end
+  end
+  pfn stamp_go(e : Effects, now : Float, k : Int, acc : Int) : Int do
+    if k >= kinds() do acc else stamp_go(e, now, k + 1, acc * 64 + secs_left(e, k, now)) end
+  end
+  doc "An integer that changes exactly when `summary` would: the whole seconds left on each kind, packed. Four float reads and no allocation, so a caller can keep the last summary string until this moves."
+  fn stamp(e : Effects, now : Float) : Int do stamp_go(e, now, 0, 0) end
+
+  doc "The active effects with whole seconds left, for the HUD; empty when none."
+  fn summary(e : Effects, now : Float) : String do summary_go(e, now, 0, "") end
+
+end

@@ -22,8 +22,8 @@
 mod CubeForge.Precip do
 
 
-  doc "Mesh slot for the precipitation buffer (249; 250-254 are taken)."
-  fn slot() : Int do 249 end
+  doc "Mesh slot for the precipitation buffer (505; see the slot map in cube_forge.march)."
+  fn slot() : Int do 505 end
 
   doc "Horizontal radius of the cylinder particles live in, in blocks."
   fn radius() : Float do 24.0 end

@@ -246,6 +246,13 @@ column if it can carry mycelium and is dry, and consumes one; otherwise
 nothing happens. The readout is a HUD text line, uppercase, rebuilt on change.
 `CF_WILD`, `CF_AUTOSPORE`. Measurements in `RESULTS.md`.
 
+*As built (food, 2026-09-05):* caps are food. Using one with nothing in
+reach eats it and starts a thirty-second effect by species: Meadowbell and
+Sunshelf speed, Frostcap and Pinewart jump, Marshlight swim, Lanterncap the
+lantern (the flashlight, hands free). `CubeForge.Effects` is the subsystem;
+the readout line shows what is active. Saves now carry the mycelium field,
+the shown species and the biome's eased axes (§11's risk), in `fields.bin`.
+
 ## 8. Map view
 
 The map gains a mycelium overlay under `CF_MYC_MAP=1`: species colour,
@@ -302,8 +309,20 @@ Phases 1 and 2 are independent and can be built in parallel.
 - **Save/load**: species, vigour and reach are world state that cannot be
   rebuilt from the voxels. Same note the biome spec carries.
 
+## 12. Climate feedback (as built, 2026-09-05)
+
+Each species pulls the climate of the columns it holds, and their eight
+neighbours, toward its own band's core (a table in `Species.pull_t/pull_m`).
+Pulls of distinct species in a column's 3x3 sum and are capped at 0.3 per
+axis; the biome adds the capped offset to its temperature and moisture
+targets before easing. The stability argument that kept this out of the first
+design: no species ever lowers its own fitness by being there, so the feedback
+is monotone reinforcement, bistable at worst and never a cycle. The largest
+single pull (0.12) cannot cross a biome threshold from a band's centre; the
+three damp species together (0.28) can, which is what makes a deliberate
+collection of fungus a terraforming tool. `CF_MYC_FEEDBACK` scales it.
+
 ## Out of scope
 
-Climate feedback from the network (a later species trait, needs a damping
-argument), player buffs on network, signalling or travel along the network,
-mushrooms as food, underground mycelium (the field is surface-only).
+Player buffs on network, signalling or travel along the network,
+underground mycelium (the field is surface-only).

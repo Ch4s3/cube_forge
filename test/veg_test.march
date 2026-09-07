@@ -14,7 +14,7 @@ mod CubeForge.Test.Veg do
     if i < 0 do acc else flat_chunks(i - 1, h, Cons(flat_cells(C.new(), 0, h), acc)) end
   end
   pfn flat_world(h : Int) : CubeForge.World.World do
-    CubeForge.World.World(Array.from_list(flat_chunks(63, h, Nil)), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.World.shown_new(), 8)
+    CubeForge.World.of_chunk_list(flat_chunks(63, h, Nil), 8)
   end
   -- top the first chunk with grass so trees have their palette block under them
   pfn grass_top16(w : CubeForge.World.World, i : Int, h : Int) : CubeForge.World.World do
@@ -42,6 +42,11 @@ mod CubeForge.Test.Veg do
       Test.assert_true(Veg.wants_trees(Biome.b_forest()) && Veg.wants_trees(Biome.b_taiga()) && Veg.wants_trees(Biome.b_wetland()), "the three")
       Test.assert_true(!Veg.wants_trees(Biome.b_desert()) && !Veg.wants_trees(Biome.b_tundra()) && !Veg.wants_trees(Biome.b_grassland()), "not the others")
       Test.assert_true(Math.abs(Veg.density(Biome.b_forest()) -. 0.45) < 0.001, "forest 0.45")
+    end
+    test "an oasis holds palms and bushes; a grove holds nothing" do
+      Test.assert_true(Veg.wants_trees(Biome.b_oasis()) && Veg.wants_bushes(Biome.b_oasis()), "oasis: trees and bushes")
+      Test.assert_true(Math.abs(Veg.density(Biome.b_oasis()) -. 0.5) < 0.001, "oasis 0.5")
+      Test.assert_true(!Veg.wants_trees(Biome.b_grove()) && !Veg.wants_bushes(Biome.b_grove()), "grove: none")
     end
   end
 
@@ -99,7 +104,7 @@ mod CubeForge.Test.Veg do
 
     test "a tree's canopy is not mistaken for a bush" do
       let w = grass_top16(flat_world(70), 0, 70)
-      let w2 = Veg.plant(w, 8, 8, 69, 5, false)
+      let w2 = Veg.plant(w, 8, 8, 69, 5, CubeForge.Trees.oak())
       Test.assert_true(!Veg.has_bush(w2, 9, 8, 73), "a canopy leaf has air or leaves under it")
     end
 
@@ -132,7 +137,7 @@ mod CubeForge.Test.Veg do
       else
         let x = g % 128
         let z = g / 128
-        let w2 = Veg.plant(w, x, z, 69, 5, false)
+        let w2 = Veg.plant(w, x, z, 69, 5, CubeForge.Trees.oak())
         Test.assert_true(Veg.is_log(CubeForge.World.block_at(w2, x, 70, z)), "a log stands on the ground")
         let f2 = Biome.rescan_box(f, w2, x, z, 5, 69 + 5 + 2)
         Test.assert_true(!Veg.can_grow(f2, w2, 7, x, z), "not a growth candidate any more")
@@ -140,9 +145,34 @@ mod CubeForge.Test.Veg do
       end
     end
 
+    test "an oak in a grove decays" do
+      let w = grass_top16(flat_world(70), 0, 70)
+      let w2 = Veg.plant(w, 8, 8, 69, 5, CubeForge.Trees.oak())
+      let f = Biome.rescan_box(Biome.build(w2, 7), w2, 8, 8, 5, 76)
+      let g = Biome.force_biome(f, 128, 8, 8, Biome.b_grove())
+      Test.assert_true(Veg.can_decay(g, w2, 8, 8), "the network took the ground: the oak goes")
+      Test.assert_true(!Veg.can_grow(g, w2, 7, 8, 8), "and nothing grows back")
+    end
+
+    test "a palm is planted and felled by its own shape" do
+      let w = grass_top16(flat_world(70), 0, 70)
+      let w2 = Veg.plant(w, 8, 8, 69, 6, CubeForge.Trees.palm())
+      Test.assert_eq_int(CubeForge.World.block_at(w2, 8, 75, 8), C.palm_log(), "trunk top")
+      Test.assert_eq_int(CubeForge.World.block_at(w2, 10, 75, 8), C.palm_frond(), "frond two out")
+      Test.assert_eq_int(CubeForge.World.block_at(w2, 8, 76, 8), C.palm_frond(), "crown")
+      Test.assert_eq_int(Veg.species_for(Biome.b_oasis()), CubeForge.Trees.palm(), "an oasis grows palms")
+      Test.assert_eq_int(Veg.species_for(Biome.b_taiga()), CubeForge.Trees.pine(), "taiga pines")
+      Test.assert_eq_int(Veg.species_for(Biome.b_forest()), CubeForge.Trees.oak(), "forest oaks")
+      let w3 = Veg.fell(w2, 8, 8, 69)
+      Test.assert_eq_int(CubeForge.World.block_at(w3, 8, 70, 8), 0, "trunk gone")
+      Test.assert_eq_int(CubeForge.World.block_at(w3, 10, 75, 8), 0, "frond gone")
+      Test.assert_eq_int(CubeForge.World.block_at(w3, 8, 76, 8), 0, "crown gone")
+      Test.assert_eq_int(CubeForge.World.block_at(w3, 8, 69, 8), 1, "the grass stays")
+    end
+
     test "felling removes the logs and the leaves" do
       let w = grass_top16(flat_world(70), 0, 70)
-      let w2 = Veg.plant(w, 8, 8, 69, 5, false)
+      let w2 = Veg.plant(w, 8, 8, 69, 5, CubeForge.Trees.oak())
       Test.assert_true(C.count_water(CubeForge.World.chunk_at(w2, 0, 0)) == 0, "sanity: no water")
       let w3 = Veg.fell(w2, 8, 8, 69)
       Test.assert_eq_int(CubeForge.World.block_at(w3, 8, 70, 8), 0, "trunk gone")

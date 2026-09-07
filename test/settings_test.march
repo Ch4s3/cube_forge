@@ -1,0 +1,131 @@
+-- Settings: choice tables, stepping, and the lenient file round-trip.
+mod CubeForge.Test.Settings do
+
+  import Test
+  needs IO.FileRead
+  needs IO.FileWrite
+  alias CubeForge.Settings as Sx
+
+  pfn tmp() : String do "test_settings_tmp" end
+
+  -- Step [f] forward [n] times.
+  pfn step_n(s : CubeForge.Settings.Settings, f : Int, n : Int, dir : Int) : CubeForge.Settings.Settings do
+    if n <= 0 do s else step_n(Sx.step(s, f, dir), f, n - 1, dir) end
+  end
+
+  -- Every field wraps: stepping forward `choices` times is the identity, and
+  -- stepping back once from the first choice lands on the last.
+  pfn wraps_ok(f : Int) : Bool do
+    if f >= Sx.fields() do true
+    else
+      let d = Sx.defaults()
+      let fwd = Sx.index(step_n(d, f, Sx.choices(f), 1), f) == Sx.index(d, f)
+      let at0 = Sx.set_index(d, f, 0)
+      let back = Sx.index(Sx.step(at0, f, -1), f) == Sx.choices(f) - 1
+      if fwd && back do wraps_ok(f + 1) else false end
+    end
+  end
+
+  -- encode then parse returns the same index for every choice of every field.
+  pfn roundtrip_field(f : Int, i : Int) : Bool do
+    if i >= Sx.choices(f) do true
+    else
+      let s = Sx.set_index(Sx.defaults(), f, i)
+      if Sx.index(Sx.parse(Sx.encode(s)), f) == i do roundtrip_field(f, i + 1) else false end
+    end
+  end
+  pfn roundtrip_ok(f : Int) : Bool do
+    if f >= Sx.fields() do true
+    else if roundtrip_field(f, 0) do roundtrip_ok(f + 1) else false end end
+  end
+
+  describe "choices" do
+    test "defaults match the environment defaults the knobs had" do
+      let d = Sx.defaults()
+      Test.assert_eq_int(Sx.value(d, Sx.field_fullscreen()), 0, "windowed")
+      Test.assert_eq_int(Sx.value(d, Sx.field_vsync()), 1, "vsync on")
+      Test.assert_eq_int(Sx.value(d, Sx.field_shadow_dist()), 64, "CF_SHADOW_DIST 64")
+      Test.assert_eq_int(Sx.value(d, Sx.field_soft_shadows()), 1, "CF_SHADOW_SOFT 1")
+      Test.assert_eq_int(Sx.value(d, Sx.field_precip()), 4000, "CF_PRECIP 4000")
+      Test.assert_eq_int(Sx.fields(), 8, "eight fields")
+      Test.assert_eq_int(Sx.value(d, Sx.field_master()), 100, "master full")
+      Test.assert_eq_int(Sx.value(d, Sx.field_ambience()), 100, "ambience full")
+      Test.assert_eq_int(Sx.value(d, Sx.field_music()), 100, "music full")
+    end
+    test "volumes step by 25 and read as a fraction" do
+      let d = Sx.defaults()
+      Test.assert_eq_str(Sx.label(d, Sx.field_master()), "100", "label")
+      let down = Sx.step(d, Sx.field_music(), -1)
+      Test.assert_eq_int(Sx.value(down, Sx.field_music()), 75, "75")
+      Test.assert_true(Sx.fraction(down, Sx.field_music()) > 0.749 && Sx.fraction(down, Sx.field_music()) < 0.751, "0.75")
+      Test.assert_eq_str(Sx.label(Sx.set_index(d, Sx.field_ambience(), 0), Sx.field_ambience()), "OFF", "OFF at 0")
+      Test.assert_eq_int(Sx.nearest(Sx.field_master(), 60), 2, "60 -> 50")
+    end
+    test "labels name the current choice" do
+      let d = Sx.defaults()
+      Test.assert_eq_str(Sx.label(d, Sx.field_fullscreen()), "OFF", "fullscreen")
+      Test.assert_eq_str(Sx.label(d, Sx.field_shadow_dist()), "64", "shadows")
+      Test.assert_eq_str(Sx.label(d, Sx.field_precip()), "HIGH", "precip")
+      Test.assert_eq_str(Sx.name(Sx.field_soft_shadows()), "SOFT SHADOWS", "name")
+    end
+    test "stepping wraps at both ends on every field" do
+      Test.assert_true(wraps_ok(0), "all fields wrap")
+      Test.assert_eq_int(Sx.value(Sx.step(Sx.defaults(), Sx.field_shadow_dist(), 1), Sx.field_shadow_dist()), 128, "64 -> 128")
+      Test.assert_eq_int(Sx.value(Sx.step(Sx.defaults(), Sx.field_shadow_dist(), -1), Sx.field_shadow_dist()), 32, "64 -> 32")
+    end
+    test "nearest picks the closest choice, inside and outside the range" do
+      let f = Sx.field_shadow_dist()
+      Test.assert_eq_int(Sx.nearest(f, 64), 3, "exact")
+      Test.assert_eq_int(Sx.nearest(f, 40), 2, "between, nearer 32")
+      Test.assert_eq_int(Sx.nearest(f, 1000), 4, "above the range")
+      Test.assert_eq_int(Sx.nearest(f, -5), 0, "below the range")
+      Test.assert_eq_int(Sx.nearest(Sx.field_precip(), 3000), 2, "2500 not 4000")
+    end
+  end
+
+  describe "overrides" do
+    test "merge keeps the on-disk value for every masked field" do
+      let disk = Sx.defaults()
+      let live = Sx.set_index(Sx.set_index(disk, Sx.field_vsync(), 0), Sx.field_precip(), 1)
+      let mask = Sx.bit(Sx.field_vsync())
+      let out = Sx.merge(live, disk, mask)
+      Test.assert_eq_int(Sx.value(out, Sx.field_vsync()), 1, "overridden field comes from disk")
+      Test.assert_eq_int(Sx.value(out, Sx.field_precip()), 1000, "a player change is kept")
+      Test.assert_true(Sx.in_mask(mask, Sx.field_vsync()) && !Sx.in_mask(mask, Sx.field_precip()), "mask bits")
+      Test.assert_eq_int(Sx.first_diff(live, disk), Sx.field_vsync(), "first differing field")
+      Test.assert_eq_int(Sx.first_diff(disk, disk), -1, "no difference")
+      Test.assert_true(Sx.same(Sx.merge(live, disk, 0), live), "an empty mask writes the live settings")
+    end
+  end
+
+  describe "file" do
+    test "encode then parse round-trips every choice" do
+      Test.assert_true(roundtrip_ok(0), "all choices survive")
+    end
+    test "missing keys default, unknown keys are ignored, bad numbers default" do
+      let s = Sx.parse("version 1\nshadow_dist 16\nsomething_new 9\nprecip abc\n")
+      Test.assert_eq_int(Sx.value(s, Sx.field_shadow_dist()), 16, "given")
+      Test.assert_eq_int(Sx.value(s, Sx.field_precip()), 4000, "bad number -> default")
+      Test.assert_eq_int(Sx.value(s, Sx.field_vsync()), 1, "missing -> default")
+      Test.assert_eq_int(Sx.value(Sx.parse(""), Sx.field_shadow_dist()), 64, "empty file")
+      let old = Sx.parse("version 1\nfullscreen 0\nvsync 1\nshadow_dist 64\nsoft_shadows 1\nprecip 4000\n")
+      Test.assert_eq_int(Sx.value(old, Sx.field_master()), 100, "a five-key file plays at full volume")
+      let snd = Sx.parse("master 50\nmusic 0\n")
+      Test.assert_eq_int(Sx.value(snd, Sx.field_master()), 50, "master")
+      Test.assert_eq_int(Sx.value(snd, Sx.field_music()), 0, "music")
+      Test.assert_eq_int(Sx.value(snd, Sx.field_ambience()), 100, "ambience defaults")
+    end
+    test "store then load, and a missing file loads defaults" do
+      let _ = Dir.rm_rf(tmp())
+      Test.assert_eq_int(Sx.value(Sx.load(tmp()), Sx.field_precip()), 4000, "no file yet")
+      let s = Sx.set_index(Sx.set_index(Sx.defaults(), Sx.field_precip(), 1), Sx.field_fullscreen(), 1)
+      Test.assert_true(Sx.store(tmp(), s), "stored")
+      let back = Sx.load(tmp())
+      Test.assert_eq_int(Sx.value(back, Sx.field_precip()), 1000, "LOW")
+      Test.assert_eq_int(Sx.value(back, Sx.field_fullscreen()), 1, "fullscreen")
+      let _ = Dir.rm_rf(tmp())
+      ()
+    end
+  end
+
+end

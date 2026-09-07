@@ -39,6 +39,10 @@ mod CubeForge.Player do
     match p do Player(pos, vel, yaw, _, g) -> Player(pos, vel, yaw, pitch, g) end
   end
   fn position(p : Player) : CubeForge.Math.Vec3.Vec3 do match p do Player(pos, _, _, _, _) -> pos end end
+  doc "The player moved by ([dx], [dz]) blocks: what a window shift does, so the player stays where they are in the world."
+  fn translate(p : Player, dx : Float, dz : Float) : Player do
+    match p do Player(pos, vel, yaw, pitch, g) -> Player(V.new(V.x(pos) +. dx, V.y(pos), V.z(pos) +. dz), vel, yaw, pitch, g) end
+  end
   fn velocity(p : Player) : CubeForge.Math.Vec3.Vec3 do match p do Player(_, vel, _, _, _) -> vel end end
 
   doc "The eight floats a save stores: position, velocity, yaw, pitch."
@@ -150,6 +154,11 @@ mod CubeForge.Player do
 
   -- Advance the player by [dt] seconds under [input] against [world].
   fn update(p : Player, input : Input, w : CubeForge.World.World, dt : Float) : Player do
+    update_with(p, input, w, dt, 1.0, 1.0, 1.0)
+  end
+
+  doc "update, with food multipliers on walk speed, jump speed, and swim speed (see CubeForge.Effects)."
+  fn update_with(p : Player, input : Input, w : CubeForge.World.World, dt : Float, sm : Float, jm : Float, wm : Float) : Player do
     match p do
       Player(pos, vel, yaw0, pitch0, _) ->
         match input do
@@ -162,7 +171,7 @@ mod CubeForge.Player do
         let rx = Math.cos(yaw1)
         let rz = 0.0 -. Math.sin(yaw1)
         let swimming = in_water(p, w)
-        let speed = if swimming do walk_speed() *. 0.6 else walk_speed() end
+        let speed = if swimming do walk_speed() *. 0.6 *. wm else walk_speed() *. sm end
         -- swimming: forward follows the look direction, so the horizontal part shrinks with pitch
         let cp = if swimming do Math.cos(pitch1) else 1.0 end
         let wx = (fx *. mf *. cp +. rx *. mr) *. speed
@@ -173,10 +182,10 @@ mod CubeForge.Player do
         let vy1 = if swimming do
           -- vertical: look-direction component of forward motion, plus Space up / Shift down; idle drifts down slowly
           let look_v = Math.sin(pitch1) *. mf *. speed
-          let target = look_v +. (if jump do swim_speed() else 0.0 end) -. (if sink do swim_speed() else 0.0 end) -. (if jump || sink || mf != 0.0 do 0.0 else 0.5 end)
+          let target = look_v +. (if jump do swim_speed() *. wm else 0.0 end) -. (if sink do swim_speed() *. wm else 0.0 end) -. (if jump || sink || mf != 0.0 do 0.0 else 0.5 end)
           -- ease the current vertical speed toward the target so water feels heavy
           clamp(vy0 +. (target -. vy0) *. clamp(dt *. 10.0, 0.0, 1.0), 0.0 -. water_vmax(), water_vmax())
-        else if jump && grounded0 do jump_speed() else vy0 end end
+        else if jump && grounded0 do jump_speed() *. jm else vy0 end end
         -- sweep x, then y, then z
         let px0 = V.x(pos)
         let py0 = V.y(pos)

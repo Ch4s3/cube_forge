@@ -1,0 +1,16 @@
+-- G79 repro, the library half: a variant with native-array fields, replaced in
+-- a loop INSIDE its own module, where it is named by its bare name.
+mod DropXmod.Cell do
+  type Cell = Cell(NativeU8Arr, NativeU8Arr, Int)
+
+  fn tag(c : Cell) : Int do match c do Cell(_, _, n) -> n end end
+
+  -- Each step allocates two 1 MB arrays in a fresh cell and lets the old cell
+  -- die by a bare decrement.
+  fn churn(c : Cell, i : Int) : Int do
+    if i == 0 do tag(c)
+    else churn(Cell(NativeArray.make_u8(1048576, 0), NativeArray.make_u8(1048576, 0), i), i - 1) end
+  end
+
+  fn fresh() : Cell do Cell(NativeArray.make_u8(16, 0), NativeArray.make_u8(16, 0), 0) end
+end

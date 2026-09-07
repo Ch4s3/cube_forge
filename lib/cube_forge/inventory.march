@@ -86,9 +86,37 @@ mod CubeForge.Inventory do
   fn can_place(i : Inv) : Bool do count_at(i, sel(i) - 1) > 0 end
 
   doc "Consume one of the selected block."
-  fn consume(i : Inv) : Inv do
-    let s = sel(i) - 1
+  fn consume(i : Inv) : Inv do consume_at(i, sel(i) - 1) end
+
+  doc "Consume one from slot [s] (0-based, hotbar then backpack). Out of range or already empty, nothing changes."
+  fn consume_at(i : Inv, s : Int) : Inv do
     set_slot(i, s, item_at(i, s), count_at(i, s) - 1)
+  end
+
+  doc """
+  Is [id] food? Mushroom caps are, and nothing else is: a stem is a building
+  block and a small mushroom yields nothing when broken. The one place that
+  answers this, so the eat key and the inventory's right-click cannot come to
+  different conclusions about the same slot.
+  """
+  fn edible(id : Int) : Bool do C.is_fruit_cap(id) end
+
+  doc """
+  Which slot a bite addresses, or -1 for none.
+
+  A right-click on a slot while the inventory window is open eats that slot --
+  hotbar or backpack, wherever the caps happen to be. The eat key eats the
+  selected hotbar slot, and only while no panel is up: the window has its own
+  gesture, and a key that ate through the escape menu would be its own trap.
+  A right-click in the gap between slots ([hovered] -1) eats nothing.
+
+  Whether the slot holds food is not this function's question -- eat_at
+  decides that, so an inedible slot is a no-op rather than a refused gesture.
+  """
+  fn eat_slot(window_open : Bool, ui_open : Bool, right_click : Bool, hovered : Int, eat_key : Bool, sel : Int) : Int do
+    if window_open && right_click && hovered >= 0 do hovered
+    else if !ui_open && eat_key do sel - 1
+    else 0 - 1 end end
   end
 
   doc "Count held in hotbar slot [slot] (1-based), for the HUD."
@@ -108,7 +136,8 @@ mod CubeForge.Inventory do
     else if C.is_foliage(id) do 0         -- leaves crumble
     else if C.is_fruit_small(id) do 0     -- felling the body pays out, not the block
     else if C.is_myc(id) do C.myc_base(id) -- the network dies with the block; the ground survives
-    else id end end end end end end
+    else if id == C.sandstone() || id == C.shale() do 3   -- strata harvest as stone: no new items
+    else id end end end end end end end
   end
 
   -- First slot in [lo, hi) already holding [item], or -1.
@@ -161,6 +190,12 @@ mod CubeForge.Inventory do
       let s = slot_for(i, item)
       if s < 0 do i else set_slot(i, s, item, count_at(i, s) + n) end
     end
+  end
+
+  doc "Remove one [item] from the first stack holding it; unchanged when there is none."
+  fn take_one(i : Inv, item : Int) : Inv do
+    let s = find_stack(i, item, 0, slots())
+    if s < 0 do i else set_slot(i, s, item, count_at(i, s) - 1) end
   end
 
   -- ── Moving stacks ───────────────────────────────────────────────────────────

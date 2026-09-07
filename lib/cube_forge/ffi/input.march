@@ -51,8 +51,12 @@ mod CubeForge.Ffi.Input do
   fn key_space() : Int do 32 end
   fn key_shift() : Int do 340 end
   fn key_escape() : Int do 256 end
+  fn key_e() : Int do 69 end
   fn key_f() : Int do 70 end
   fn key_m() : Int do 77 end
+  doc "Q toggles the survey; X scans the specimen under the reticle. Not E -- that eats."
+  fn key_q() : Int do 81 end
+  fn key_x() : Int do 88 end
   fn key_i() : Int do 73 end
   fn key_0() : Int do 48 end
   fn key_1() : Int do 49 end
@@ -67,6 +71,8 @@ mod CubeForge.Ffi.Input do
   fn key_r() : Int do 82 end
   fn key_enter() : Int do 257 end
   fn key_backspace() : Int do 259 end
+  fn key_minus() : Int do 45 end
+  fn key_equal() : Int do 61 end
   fn button_left() : Int do 0 end
   fn button_right() : Int do 1 end
 

@@ -39,12 +39,12 @@ mod CubeForge.Test.Myc do
   end
 
 
-  pfn tick_n(f : CubeForge.Myc.Field, n : Int, ta : NativeFloatArr, ma : NativeFloatArr, rate : Float, k : Int) : CubeForge.Myc.Field do
+  pfn tick_n(f : CubeForge.Myc.Net, n : Int, ta : NativeFloatArr, ma : NativeFloatArr, rate : Float, k : Int) : CubeForge.Myc.Net do
     if k <= 0 do f else tick_n(Myc.tick(f, n, ta, ma, rate), n, ta, ma, rate, k - 1) end
   end
 
   -- Chebyshev radius of species [sp] around (cx, cz): the farthest held column.
-  pfn radius_go(f : CubeForge.Myc.Field, n : Int, sp : Int, cx : Int, cz : Int, i : Int, best : Int) : Int do
+  pfn radius_go(f : CubeForge.Myc.Net, n : Int, sp : Int, cx : Int, cz : Int, i : Int, best : Int) : Int do
     if i >= n * n do best
     else
       let x = i % n
@@ -64,7 +64,7 @@ mod CubeForge.Test.Myc do
 
 
   -- Tick [f] both ways for [k] ticks, asserting they agree after every tick.
-  pfn agree_go(a : CubeForge.Myc.Field, b : CubeForge.Myc.Field, n : Int, ta : NativeFloatArr, ma : NativeFloatArr, rate : Float, k : Int, t : Int) : Bool do
+  pfn agree_go(a : CubeForge.Myc.Net, b : CubeForge.Myc.Net, n : Int, ta : NativeFloatArr, ma : NativeFloatArr, rate : Float, k : Int, t : Int) : Bool do
     if k <= 0 do true
     else
       let a1 = Myc.tick(a, n, ta, ma, rate)
@@ -74,7 +74,7 @@ mod CubeForge.Test.Myc do
       else agree_go(a1, b1, n, ta, ma, rate, k - 1, t + 1) end end
     end
   end
-  pfn same_vigour(a : CubeForge.Myc.Field, b : CubeForge.Myc.Field, n : Int, i : Int) : Bool do
+  pfn same_vigour(a : CubeForge.Myc.Net, b : CubeForge.Myc.Net, n : Int, i : Int) : Bool do
     if i >= n * n do true
     else if Myc.vigour_of(a, n, i % n, i / n) != Myc.vigour_of(b, n, i % n, i / n) do false
     else same_vigour(a, b, n, i + 1) end end
@@ -144,7 +144,7 @@ mod CubeForge.Test.Myc do
     test "lists columns whose wanted species differs from what is shown, within the budget" do
       let n = 128
       let f0 = Myc.plant(Myc.plant(Myc.build(n), n, 10, 10, 3), n, 50, 50, 4)
-      let shown = CubeForge.World.shown_new()
+      let shown = CubeForge.World.shown_new(8)
       let picks = Myc.migrations(f0, n, shown, 0, n * n, 10)
       Test.assert_eq_int(List.length(picks), 2, "two plantings, two migrations")
       Test.assert_eq_int(Myc.wanted(f0, n, 10 + n * 10), 3, "column 10,10 wants Meadowbell")
@@ -156,7 +156,7 @@ mod CubeForge.Test.Myc do
     test "a withered column wants nothing, so a shown one migrates back" do
       let n = 128
       let f0 = Myc.plant(Myc.build(n), n, 10, 10, 3)
-      let shown = NativeArray.set_u8(CubeForge.World.shown_new(), 10 + n * 10, 3)
+      let shown = NativeArray.set_u8(CubeForge.World.shown_new(8), 10 + n * 10, 3)
       let f1 = tick_n(f0, n, uniform(n, 0.9), uniform(n, 0.9), 0.1, 50)
       Test.assert_eq_int(Myc.wanted(f1, n, 10 + n * 10), 0, "nothing wanted")
       Test.assert_eq_int(List.length(Myc.migrations(f1, n, shown, 0, n * n, 10)), 1, "one migration back")
@@ -260,6 +260,52 @@ mod CubeForge.Test.Myc do
       Test.assert_true(Myc.active_count(f, n, hot, wet) > 0, "a wetter climate wakes it")
       let woken = tick_n(f, n, hot, wet, 0.1, 200)
       Test.assert_eq_int(Myc.count_species(woken, n, 6), 0, "and the whole patch withers")
+    end
+  end
+
+
+  describe "Myc.bonuses" do
+    test "an empty field pulls nothing" do
+      let n = 32
+      let b = Myc.bonuses(Myc.build(n), n, 1.0)
+      Test.assert_true(near(NativeArray.get_f32(b, 2 * (10 + n * 10)), 0.0) && near(NativeArray.get_f32(b, 2 * (10 + n * 10) + 1), 0.0), "zero")
+    end
+    test "a lone column pulls its 3x3 and nothing two away" do
+      let n = 32
+      let b = Myc.bonuses(Myc.plant(Myc.build(n), n, 10, 10, 4), n, 1.0)
+      Test.assert_true(near(NativeArray.get_f32(b, 2 * (10 + n * 10) + 1), Sp.pull_m(4)), "itself")
+      Test.assert_true(near(NativeArray.get_f32(b, 2 * (11 + n * 11) + 1), Sp.pull_m(4)), "a diagonal neighbour")
+      Test.assert_true(near(NativeArray.get_f32(b, 2 * (12 + n * 10) + 1), 0.0), "two away")
+      Test.assert_true(near(NativeArray.get_f32(b, 2 * (10 + n * 10)), 0.0), "Lanterncap has no temperature pull")
+    end
+    test "distinct species stack, the same species counts once, and the cap holds" do
+      let n = 32
+      let f = Myc.plant(Myc.plant(Myc.plant(Myc.plant(Myc.build(n), n, 10, 10, 2), n, 11, 10, 4), n, 12, 10, 5), n, 11, 11, 4)
+      let b = Myc.bonuses(f, n, 1.0)
+      -- (11, 10) touches all three: Pinewart + Lanterncap + Marshlight, Lanterncap once
+      Test.assert_true(near(NativeArray.get_f32(b, 2 * (11 + n * 10) + 1), Sp.pull_m(2) +. Sp.pull_m(4) +. Sp.pull_m(5)), "three-way sum")
+      Test.assert_true(near(NativeArray.get_f32(b, 2 * (11 + n * 10)), Sp.pull_t(2) +. Sp.pull_t(4) +. Sp.pull_t(5)), "on both axes")
+      let big = Myc.bonuses(f, n, 3.0)
+      Test.assert_true(near(NativeArray.get_f32(big, 2 * (11 + n * 10) + 1), Myc.cap()), "clamped to the cap")
+      Test.assert_true(near(NativeArray.get_f32(Myc.bonuses(f, n, 0.0), 2 * (11 + n * 10) + 1), 0.0), "scale 0 disables")
+    end
+  end
+
+
+  describe "Myc export and import" do
+    test "species, reach and vigour round-trip and the pulls come back" do
+      let n = 32
+      let f0 = Myc.plant_patch(Myc.plant(Myc.build(n), n, 5, 5, 4), n, 20, 20, 3)
+      let f1 = tick_n(f0, n, uniform(n, 0.5), uniform(n, 0.3), 0.01, 7)
+      let bytes = Myc.to_bytes(f1, n, NativeArray.make_u8(3 * n * n + 10, 0), 10)
+      let g = Myc.of_bytes(bytes, 10, n)
+      Test.assert_eq_int(Myc.state_hash(g, n), Myc.state_hash(f1, n), "species and reach")
+      Test.assert_true(Math.abs(Myc.vigour_of(g, n, 5, 5) -. Myc.vigour_of(f1, n, 5, 5)) < 0.005, "vigour within a byte")
+      Test.assert_true(Math.abs(Myc.vigour_of(g, n, 22, 20) -. 1.0) < 0.005, "patch vigour")
+      let pb = Myc.bonuses(g, n, 1.0)
+      let pa = Myc.bonuses(f1, n, 1.0)
+      Test.assert_true(near(NativeArray.get_f32(pb, 2 * (5 + n * 5) + 1), NativeArray.get_f32(pa, 2 * (5 + n * 5) + 1)), "pulls recomputed")
+      Test.assert_eq_int(Myc.dirty_count(g, n), n * n, "everything looked at on the first tick after a load")
     end
   end
 

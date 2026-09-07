@@ -1,0 +1,127 @@
+-- Caves: nothing in a young world; worms carve rock only, above the water
+-- table; the surface holds until the sinkhole age.
+mod CubeForge.Test.Caves do
+
+  import Test
+  alias CubeForge.Caves as Cv
+  alias CubeForge.Noise as N
+  alias CubeForge.Chunk as C
+
+  -- The first cell holding a worm at [seed], packed cx + 4096 * cz, or -1.
+  pfn first_worm(seed : Int, i : Int) : Int do
+    if i >= 16 do -1
+    else if Cv.worm_at_cell(i % 4, i / 4, seed) do i % 4 + 4096 * (i / 4)
+    else first_worm(seed, i + 1) end end
+  end
+  -- Cave air and the lowest air over EVERY worm cell: a worm over lowland
+  -- has no room between the water table and its roof and carves nothing.
+  pfn all_air(seed : Int, i : Int, acc : Int) : Int do
+    if i >= 16 do acc
+    else if Cv.worm_at_cell(i % 4, i / 4, seed) do all_air(seed, i + 1, acc + cell_air(seed, i % 4, i / 4, 0, 0))
+    else all_air(seed, i + 1, acc) end end
+  end
+  pfn all_lowest(seed : Int, i : Int, best : Int) : Int do
+    if i >= 16 do best
+    else if Cv.worm_at_cell(i % 4, i / 4, seed) do all_lowest(seed, i + 1, cell_lowest(seed, i % 4, i / 4, 0, best))
+    else all_lowest(seed, i + 1, best) end end
+  end
+  -- Cave air summed over the four chunks of a 32-block cell.
+  pfn cell_air(seed : Int, cx : Int, cz : Int, k : Int, acc : Int) : Int do
+    if k >= 4 do acc
+    else
+      let wx0 = 32 * cx + 16 * (k % 2)
+      let wz0 = 32 * cz + 16 * (k / 2)
+      cell_air(seed, cx, cz, k + 1, acc + Cv.air_below_surface(C.generate(wx0, wz0, seed), wx0, wz0, seed))
+    end
+  end
+  pfn cell_lowest(seed : Int, cx : Int, cz : Int, k : Int, best : Int) : Int do
+    if k >= 4 do best
+    else
+      let wx0 = 32 * cx + 16 * (k % 2)
+      let wz0 = 32 * cz + 16 * (k / 2)
+      let y = Cv.lowest_air(C.generate(wx0, wz0, seed), wx0, wz0, seed)
+      cell_lowest(seed, cx, cz, k + 1, if y < best do y else best end)
+    end
+  end
+  -- Every column's surface block (the piled height) is still there, and bedrock under it.
+  pfn surface_holds(c : CubeForge.Chunk.Chunk, ps : NativeIntArr, i : Int) : Bool do
+    if i >= 256 do true
+    else
+      let x = i % 16
+      let z = i / 16
+      let top = C.piled_at(ps, x, z)
+      if C.get(c, x, top, z) != 0 && C.get(c, x, 1, z) == C.bedrock() do surface_holds(c, ps, i + 1) else false end
+    end
+  end
+
+  -- Leaks: a lake cell (a source above sea level in a lake column, at or
+  -- under its surface) with an open horizontal neighbour inside the chunk.
+  pfn open(id : Int) : Bool do C.open_for_spring(id) end
+  -- A lake cell beside a notch column is the lake's outlet, not a leak.
+  pfn by_notch(lk : CubeForge.Lakes.Tile, wx : Int, wz : Int) : Bool do
+    CubeForge.Lakes.notch_at(lk, wx + 1, wz) || CubeForge.Lakes.notch_at(lk, wx - 1, wz)
+      || CubeForge.Lakes.notch_at(lk, wx, wz + 1) || CubeForge.Lakes.notch_at(lk, wx, wz - 1)
+  end
+  pfn leaks_col(c : CubeForge.Chunk.Chunk, x : Int, z : Int, y : Int, level : Int, acc : Int) : Int do
+    if y > level do acc
+    else
+      let leak = C.is_source(C.get(c, x, y, z)) && y > C.sea_level()
+                 && ((x + 1 < 16 && open(C.get(c, x + 1, y, z))) || (x > 0 && open(C.get(c, x - 1, y, z)))
+                     || (z + 1 < 16 && open(C.get(c, x, y, z + 1))) || (z > 0 && open(C.get(c, x, y, z - 1))))
+      leaks_col(c, x, z, y + 1, level, if leak do acc + 1 else acc end)
+    end
+  end
+  pfn leaks_chunk(c : CubeForge.Chunk.Chunk, wx0 : Int, wz0 : Int, lk : CubeForge.Lakes.Tile, i : Int, acc : Int) : Int do
+    if i >= 256 do acc
+    else
+      let x = i % 16
+      let z = i / 16
+      let level = CubeForge.Lakes.level_at(lk, wx0 + x, wz0 + z)
+      leaks_chunk(c, wx0, wz0, lk, i + 1, if level == 0 || by_notch(lk, wx0 + x, wz0 + z) do acc else leaks_col(c, x, z, C.sea_level() + 1, level, acc) end)
+    end
+  end
+  pfn leaks_world(seed : Int, lk : CubeForge.Lakes.Tile, ci : Int, acc : Int) : Int do
+    if ci >= 64 do acc
+    else
+      let wx0 = 16 * (ci % 8)
+      let wz0 = 16 * (ci / 8)
+      leaks_world(seed, lk, ci + 1, leaks_chunk(C.generate_lakes(wx0, wz0, seed, lk), wx0, wz0, lk, 0, acc))
+    end
+  end
+
+  describe "caves" do
+    test "no worm breaches a lake: an ancient world has no leaking lake cell" do
+      let seed = N.with_age(1234, 100)
+      let lk = CubeForge.Lakes.levels(seed, 8)
+      Test.assert_true(CubeForge.Lakes.summary(lk) / 1000 > 100, "the seed has lakes to breach")
+      Test.assert_eq_int(leaks_world(seed, lk, 0, 0), 0, "lake cells with an open neighbour")
+    end
+    test "a young world has no caves at all" do
+      let seed = N.with_age(7, 0)
+      Test.assert_eq_int(Cv.air_below_surface(C.generate(32, 32, seed), 32, 32, seed), 0, "no air under the surface at age 0")
+      Test.assert_true(!Cv.worm_at_cell(1, 1, seed), "no worm cells at age 0")
+    end
+    test "an ancient world's worm carves air, all of it above the water table" do
+      let seed = N.with_age(7, 100)
+      let cell = first_worm(seed, 0)
+      Test.assert_true(cell >= 0, "seed 7 at age 100 has a worm")
+      Test.assert_true(all_air(seed, 0, 0) > 100, "the worm cells hold cave air")
+      -- sea_level() + 1: a bog pool leaves air one block above the sea over its water; a worm never goes under + 2
+      Test.assert_true(all_lowest(seed, 0, 999) >= C.sea_level() + 1, "nothing opened under the water table")
+    end
+    test "before the sinkhole age every surface block holds and bedrock is intact" do
+      let seed = N.with_age(7, 50)
+      let cell = first_worm(seed, 0)
+      Test.assert_true(cell >= 0, "seed 7 at age 50 has a worm")
+      let wx0 = 32 * (cell % 4096)
+      let wz0 = 32 * (cell / 4096)
+      let c = C.generate(wx0, wz0, seed)
+      Test.assert_true(surface_holds(c, C.piled(C.heights(wx0, wz0, seed), N.age_frac(seed)), 0), "surface and floor intact")
+    end
+    test "age scales the worms" do
+      Test.assert_true(Cv.karst_density(0.0) == 0.0 && Cv.karst_density(1.0) > 0.5, "none young, most cells ancient")
+      Test.assert_true(Cv.worm_steps(1.0) > Cv.worm_steps(0.0) && Cv.worm_radius(1.0) > Cv.worm_radius(0.0), "longer and wider")
+    end
+  end
+
+end

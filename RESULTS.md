@@ -1528,3 +1528,2201 @@ read.
 
 **Cost.** Nothing on the frame path: the slot listing is read once when the
 page opens, and the save is synchronous on the click (one ~10 ms frame).
+
+## Fungus follow-ups: cap faces, bodies fall with the network, the scan pre-pass (2026-09-05)
+
+| | before | after |
+|---|---|---|
+| fruit candidate scan, 2,048 columns per fruit slot, release, wild world | 0.3-0.6 ms | **0.03-0.05 ms** |
+| `scratch/frame_budget.sh` | 8.85-9.3 ms | 9.35 ms best of 3 (two runs at 11.3, the phase costs unchanged) |
+
+**Small mushrooms** show their cap layer on the top and bottom faces and the
+silhouette on the sides; from the air they read as a cap now, not a splayed
+shape. No new layers: the cap block's texture already existed.
+
+**Bodies fall with the network.** The fruit scan used to read two blocks per
+column to find bodies whose ground had lost their species and list them for
+felling. Now the migration that clears a column's ground fells the body
+standing on it in the same step (its cap glow joins the slot's relight
+anchor), and the scan only grows. That let the scan take a per-row species
+pre-pass like the tick's: an empty row costs one byte, and a column is read
+from the world only after its species, vigour, shown, canonical and roll
+checks all pass. Verified with a mature Lanterncap patch on grassland at
+`CF_MYC_RATE=300 CF_FRUIT_RATE=100000`: three bodies at frame 900 with zero
+orphans; by frame 5000 the patch had withered to the 24 lakeside columns
+still damp enough, one body stood on them, and zero orphans -- the two whose
+ground went were felled with it. `orphans` is now in the dump summary.
+
+**A bug found on the way.** The migration read the surface at the heightmap's
+top, and a body standing on a column IS the heightmap's top there. The cap
+could not carry mycelium, so the column's `shown` was cleared, and the next
+scan saw a body on ground that showed nothing and felled it. Every body
+decayed within a scan window of growing. The migration, `can_plant` and the
+dump diagnostic now read the ground through `Fruit.base_of`.
+
+
+## Fungus climate feedback (2026-09-05)
+
+The network changes the ground it holds. Plan
+`docs/superpowers/plans/2026-09-05-fungus-climate-feedback.md`.
+
+| species | temperature pull | moisture pull |
+|---|---|---|
+| Frostcap | -0.09 | 0 |
+| Pinewart | -0.04 | +0.07 |
+| Meadowbell | 0 | -0.09 |
+| Lanterncap | 0 | +0.09 |
+| Marshlight | +0.03 | +0.12 |
+| Sunshelf | +0.09 | -0.09 |
+
+Distinct species in a column's 3x3 sum, capped at 0.3 per axis; `CF_MYC_FEEDBACK`
+scales. Every pull points at the species' own core, which is the stability
+argument the original spec asked for: a species never weakens its own footing,
+so the loop only reinforces and cannot cycle; where two species pull against
+each other the sum favours one, which then strengthens itself through the
+contest that already resolves mixed ground.
+
+Seed 7, spawn, ground moisture 0.25 (grassland), `CF_BIOME_RATE=100000` so the
+climate eases within the run:
+
+| planting | offset (moisture) | eased moisture | biome |
+|---|---|---|---|
+| a mature Marshlight patch alone | +0.08 (at the first tuning) | 0.33 | grassland |
+| Marshlight + Lanterncap + Pinewart, one interleaved patch (`CF_AUTOPLANT_SPECIES2/3` with `CF_AUTOPLANT_MATURE`) | +0.28 | **0.53** | **forest** |
+
+The first tuning (pulls 0.05-0.08, cap 0.2) reached +0.19 with the three and
+left the ground at 0.44: nothing could cross from a band's middle. The pulls
+went up so that the largest single pull (0.12) is under the 0.25 from
+grassland's centre to the damp threshold and the three damp species together
+(0.28) are over it. Three patches planted three columns apart did NOT mix:
+`plant_patch` overwrites, so the collection only met along thin rings. The
+interleaved patch is what a player would plant on purpose, alternating
+species; it is `Myc.plant_mix`. `docs/fungus-feedback-map.png` is the map at
+frame 1200: the patch, and the forest colour under it where grassland was.
+
+**Cost.** The first version scaled and copied the whole 32k-entry offset array
+every tick and had the biome compare four floats per column: the field slot
+went from 1.7 to 8.7 ms in release and the budget failed at 12.9. Neither pass
+was needed. The field keeps its raw pulls up to date where species change
+(nine columns per change), reports which rows moved, and the biome scales and
+clamps only the columns it evaluates, looking at a whole row when its pulls
+moved. Field slot now: biome tick 2.7 ms (1.7 before feedback; the extra is
+the patch rows it evaluates while their offsets settle), mycelium tick 1.2-1.4
+ms; budget **9.84 ms**.
+
+Two lessons for the next per-column array: a plain 32k `set_f32` pass in March
+costs 1.8 ms in release, so anything per tick must be proportional to change,
+not to the world; and a merge of three scripted plantings is not a mix.
+
+**Save/load, merged in from main during this work.** A load rebuilds the
+mycelium field from the seed (`Myc.wild`), so wild patches return but any
+planted or spread network is lost, and its surface blocks migrate back to
+bare ground; the biome's eased axes are rebuilt at target the same way. Both
+are the "cannot be rebuilt from the voxels" risk the two specs carry. Listed
+in `todos.md`.
+
+
+## Save the fields, and food effects (2026-09-05)
+
+Plan `docs/superpowers/plans/2026-09-05-fungus-save-fields-and-food.md`.
+
+**The fields ride in the save.** One more file per slot, `fields.bin`, 131,072
+bytes for the 128-column world: species, vigour (0..255), reach and shown
+species at one byte per column, then the biome's eased temperature and
+moisture at two bytes each. Written after the chunks and before the header,
+so the header still marks a complete save; a slot without it (an older save)
+loads with a printed note and rebuilds both fields from the seed as before.
+Round trip on seed 7 with a planted patch grown to frame 1500: the `myc`
+state hash and every species count are identical across the load, and the
+climate carries on from its saved position (moisture 0.2433 at the save,
+0.2422 a hundred frames into the loaded session, easing as it was). Load
+cost: 11 ms for the slot including the fields. Hold, claimant, the climate
+memory and the pulls are rebuilt on load and the first tick looks at every
+column once.
+
+`import` is a keyword in March: `fn import(...)` is a parse error with no
+hint that the name is the problem (GAPS G65 has the same shape). The pair is
+`to_bytes` / `of_bytes`.
+
+**Food.** A cap is food. Using one with nothing in reach eats it: one is
+consumed and the species' effect starts, or refreshes, for thirty seconds.
+(That gesture was replaced on 2026-09-06 by an eat key and a right-click in
+the inventory window -- see "Eating from the inventory" below.)
+`CubeForge.Effects` holds four until-times and answers multipliers for a
+clock; `Player.update_with` takes them (walk speed, jump speed, swim speed,
+both horizontal and vertical); the lantern effect forces the flashlight on;
+the ground readout line shows the active effects with seconds left. Species
+to effect: Meadowbell and Sunshelf speed x1.5, Frostcap and Pinewart jump
+x1.35, Marshlight swim x1.6, Lanterncap lantern. Effects are not saved.
+`CF_AUTOEAT=100`: `ate a Frostcap cap: JUMP 30`, and the dump 200 frames
+later shows `JUMP 28`.
+
+Budget: 10.25 ms best of 3 (a 32 ms outlier in one run; the pinned run's own
+worst frame 9.67 ms). The allocation gauge reads 127 live objects per frame;
+the effects summary is rebuilt as a string every frame for the readout
+comparison, which is the obvious thing to make per-second if that number
+ever matters.
+
+
+## Effects summary, stamp-gated (2026-09-05)
+
+`Effects.stamp` packs the whole seconds left on each kind into one integer:
+four float reads, no allocation, and it moves exactly when the summary text
+would (a sweep test over forty seconds with two effects checks every step).
+The frame loop rebuilds the summary only when the stamp at `now` differs
+from the stamp at the previous frame's clock -- which also catches a bite
+this frame, whose timer was a second longer a frame ago -- and the UI keeps
+the last string otherwise. The allocation gauge did not move (127 live
+objects per frame with an effect active, the same as before): the ground
+readout string is the per-frame allocator, not this one. Listed.
+
+
+## The reticle over fungus (2026-09-05)
+
+The crosshair leans 45% of the way from white toward the cap colour of the
+fungus under it: a fruit block's own species, a mycelium block's column
+species from `World.shown`. `Hud.reticle_r/g/b(tint)`; the species is folded
+into the HUD rebuild key, so the bars recolour only when the target's species
+changes and nothing is rebuilt per frame. `docs/fungus-reticle.png`: looking
+straight down at a Lanterncap patch (`CF_PITCH=-140`, a new knob for the
+spawn pitch in hundredths of a radian), the reticle is a warm cream against
+the white it keeps over sky and water. Budget 11.26 ms best of 3 on a machine
+still carrying other sessions' benchmarks.
+
+## The world tick, part two: the fungus era (2026-09-05)
+
+The tick work recorded above was measured against a world without the fungus
+system. When that landed, main measured ~11% slower than the day before --
+252-259 fps to 224-228 at 1920x1200, interleaved against a rebuild of the
+previous tree on the same machine at the same moment. The gap was identical at
+320x240 and with shadows off, so it was CPU, not fragments.
+
+It was not a regression. It was new features doing real work, and they were
+already routed through the machinery this branch had built: the mycelium
+migrations, fruit growth and glow relights all stage into the remesh queue
+without ever having been told it exists. What had grown was the climate tick.
+
+### The dirty set's assumption expired
+
+`Biome.tick` eases only awake columns, and it was built on the observation that
+almost everything settles. The fungus climate feedback moves a row's target by
+more than one ease step, so a column chasing it is never on it: **about four
+thousand of the sixteen thousand columns are permanently awake** where before
+almost none were. The dirty set still earns its keep -- four thousand beats
+sixteen -- but the sweep it guards had grown back into the biggest phase in the
+tick, 1.9 ms before the fungus work and 2.8 ms after, all on one frame.
+
+Split in two. `tick_begin` keeps the whole-map half -- rescan the water flags,
+recompute the distance field, wake what moved -- on one frame, because that is
+O(map) whatever is awake. `tick_slice` sweeps the awake columns of one slice,
+and a slice runs every frame, covering the map once per period. Each column is
+still visited exactly once per period, so the ease rate and the hold counter are
+unchanged.
+
+`Myc.tick` had to move with it: the two fields alternate -- the biome reads the
+network's pulls, the network reads the climate the biome eased -- so the sweep
+must be COMPLETE before it looks. It runs on the frame the last slice lands.
+
+| | fps | worst frame |
+|---|---|---|
+| before | 230-235 | 10.2-19.2 ms |
+| after  | 247-250 | 9.7-10.7 ms |
+
+The field slot fell from 4.6-5.2 ms to 1.57 ms. **The mechanics are proved
+rather than argued: with nothing easing (`CF_BIOME_RATE=0 CF_MYC_RATE=0`) the
+sharded and unsharded builds produce identical hashes on all four fields**,
+which is what says the slices cover every column exactly once, none missed and
+none twice.
+
+### Mining, the last synchronous thing
+
+Everything else had been bounded by the queue and a block edit had not, so it
+became the tallest thing in the game: 11.5 ms mean, 16 ms worst. Measured, it
+split 1.4-2.3 ms of block and occupancy writes, 5.7-6.9 ms of relight, 1.4-5.9
+ms of remesh -- and the relight had doubled when the fungus work gave the world
+a second light field.
+
+- **The block-light pass is a provable no-op in the dark.** With no block light
+  anywhere in the scan box there is nothing to clear, nothing to seed (an
+  emissive block inside the box would have lit its own cell), and nothing
+  outside can reach in without lighting the ring, which the scan box contains.
+  The edit's own block is the one thing that can add light without being in the
+  field yet, so it is tested separately. Where it fires: **1.76-2.57 ms ->
+  0.15-0.23**, the cost of the box scan that proves it.
+- **The remesh splits.** The edited section is rebuilt in the frame the click
+  landed, so the block still vanishes under the cursor with no delay; its
+  neighbours go through the queue. Verified where it matters: with
+  `CF_AUTOBREAK` mining throughout, the drained mesh equals a full rebuild
+  (935674909), so what an edit defers converges on what doing it synchronously
+  produced.
+- **Starting the bounded sweep at the box's brightest voxel** was worth 0.6 ms
+  and did NOT survive: the worklist sweep landed on main the same day and
+  supersedes it outright, since a worklist never visits an empty level at all.
+  The measurement is kept for the reason it was small, which still applies to
+  anything bounding that box: it reaches fifteen blocks ABOVE the edit, so it
+  holds lit sky until the player is more than fifteen deep, and a descent spends
+  most of its time with a full-brightness box.
+
+  block edit   mean 11.5 -> 9.4 ms, worst 16.1 -> 10.8 ms
+
+### Four things measured and NOT done
+
+Each of these looks alarming in the source and is not worth touching. They are
+recorded so the next reader does not spend the day finding out again.
+
+- **Budgeting the water tick.** Planned off a 7.9 ms figure that predated the
+  remesh queue. Re-measured after it: **calls 0.7-1.6 ms, apply 0.07 ms**. The
+  7.9 was the remesh, and the queue had already taken it.
+- **Per-chunk biome field storage.** A whole-array copy per edit looks like the
+  obvious cost -- `note_edits` and `rescan_box` each copy 16,384 entries. They
+  cost **0.28-0.33 ms and 0.14-0.15 ms**, about 0.067 ms a frame. Per-chunk
+  storage would remove nearly all of it and buy nothing at this world size. It
+  is a tidiness change, not a performance one.
+- **A settle tolerance on the climate offsets.** Meant to cut the four thousand
+  awake columns. At 0.002 it does nothing (3213 -> 3288). There is a knee, and
+  it is in the wrong place: 0.02 gives 2338, 0.1 gives 165 -- and 0.1 is a THIRD
+  of the gap between classification thresholds, so a column could settle that
+  far from its target and land in the wrong biome. The deeper reason not to
+  bother: once the sweep is sharded the awake set costs **0.13-0.16 ms a
+  frame**, so cutting it by a third saves 0.04. The 2.8 ms that motivated the
+  work was already stale when the work was proposed.
+- **Parameterizing the world size.** See the world_size_test commit: refinement
+  predicates cannot reference a constant function, and deriving the bounds took
+  the build from 85 unverified obligations to 100.
+
+### On measuring at all
+
+Two things cost more time than any optimization here.
+
+**This machine's background load swings results by 1.5-2x.** The same binary
+measured 95 fps and 198 fps on the same day. Every number in this section is an
+A/B pair taken back to back, interleaved, because nothing else is trustworthy.
+A report of "perf issues on main" was chased to a load average of 72 from three
+other sessions compiling; current main and the pre-merge build measured
+identically.
+
+**A budget test that straddles its threshold is worse than none.** At 12 ms
+`scratch/frame_budget.sh` gave 11.52, 11.88, 11.94, 12.07, 12.17, 12.23 and
+12.82 across one day, on code whose only measured change was elsewhere;
+best-of-6 did not settle it. It now asserts 16 ms -- a frame at 60 Hz, the
+property that survives a busy machine -- and the sharper number lives here,
+where it cannot rot into a false alarm. For the 120 Hz frame run
+`frame_budget.sh 8.3` on an idle box and read it as a measurement, not a gate.
+
+## Oasis and fungal grove (2026-09-05)
+
+`docs/superpowers/specs/2026-09-05-oasis-and-fungal-grove-design.md`, plan
+`docs/superpowers/plans/2026-09-05-oasis-and-fungal-grove.md`. Two biomes the
+field earns: an oasis around a small body of water in a hot region, a grove
+where the mycelium is established.
+
+- **Water bodies.** The water flags are labelled into 8-connected bodies each
+  tick by rounds of min-label propagation (a forward and a backward pass) and
+  pointer jumping over one threaded `NativeIntArr` — a queue is G63 — and a
+  body of at most 48 columns is small. The distance sweep carries a small bit
+  in the distance byte, and a small body's moisture reaches 4 columns instead
+  of 24. Measured with a temporary print: the labelling is **0-1 ms**, the
+  sweep 1 ms, at seed 7.
+- **Distances are reused** when this tick's water flags equal the last tick's
+  and no edit has moved a flag since (`Biome.stale()`, 255, written into the
+  distance byte by `note_edit` and `note_edits`). The first cut compared flags
+  only and the canal test caught it: an edit sets the flag without a sweep, so
+  "flags unchanged" did not mean "distances current".
+- **The grove wake.** The biome tick reads the network's species and vigour
+  and is woken by `Myc.dirty_rows`. Waking every column of a dirty row cost
+  **8 ms a tick against 2.6-3.2** at base (`CF_AUTOFLOW`, seed 7): the wild
+  patches ease vigour for hundreds of ticks, so most rows were dirty. Now a
+  dirty row's columns are looked at only where the grove test disagrees with
+  the stored biome (`Biome.must_look`): **2.1-4.1 ms**, the same as base.
+- **Grove, end to end.** Seed 7, `CF_WILD=0 CF_AUTOPLANT=100
+  CF_AUTOPLANT_SPECIES=4 CF_AUTOPLANT_MATURE=1 CF_BIOME_RATE=100000
+  CF_MYC_RATE=0`, frame 1200: the player's column reads `grove`, two medium
+  Lanterncap bodies stand.
+- **Oasis, end to end.** Seed 199 spawns in desert (`temp 0.67 moist 0.17`).
+  `CF_AUTOCANAL=10 CF_BIOME_RATE=100000 CF_VEG_BUDGET=8`, frame 1400: the
+  player's column reads `oasis`, the ground round the canal has migrated to
+  grass with bushes, and the biome map shows the bright green pocket inside the
+  tan desert (`docs/oasis-grove-map.png`, which also shows a wild grove in
+  violet; `docs/oasis-ground.png`). One tree grew during the run; whether it was
+  the oasis palm was not confirmed from the frame — palm growth goes through the
+  same `Veg` path as oaks and is covered by `veg_test`.
+- **Seed 7's biome map is pixel-identical** before and after the small-body
+  change in the map view's frame around the spawn (`scratch/cmpframe.py`): the
+  coast and the lake's reach did not move. The spring brook at (116, 74) is
+  outside that frame.
+- 349 tests (329 before).
+
+
+## Perf pass over the fungus features, on March origin/main 9ca8a98d (2026-09-05)
+
+**Toolchain.** `.march-version` moves from `watch-ac782d80` to `watch-9ca8a98d`,
+March origin/main at the time: 21 commits, among them aggregate reference
+counting and deep drop, owned aggregate parameters, record FBIP reuse, and a
+scheduler count that follows the CPUs. Built with `make install
+PREFIX=~/.march/versions/watch-9ca8a98d` from a detached checkout; dune puts
+the stdlib under `share/march`, and the toolchain layout forge expects wants
+it at `<version>/stdlib`, so that is a symlink (without it every module fails
+with "Unknown module `Array`", which reads like a project bug). The project
+builds, lints and passes 365 tests on it unchanged. Paired runs on a machine
+carrying other sessions' benchmarks (load average 15-20; every number below
+is from such pairs, back to back): startup, fps, the allocation gauge (132
+live objects per frame) and the budget all within noise of the old pin. The
+new runtime changed nothing this project can measure.
+
+**Where a body's cost was.** A fruit body growing cost 6-8 ms and a tree 7-8;
+instrumented, a body was stamp 0.7 ms, relight 6-10 ms, occupancy sync 0.5,
+biome rescan 0.3. The relight was skylight 4.6 ms + block light 2.5 ms on
+average, and the block pass's "nothing glows here" exit almost never fired
+near a wild patch, because glowing mycelium is everywhere. Both channels ran
+the same sweep: fourteen level passes, each visiting every voxel of the
+33-wide scan box and each preceded by a slice copy.
+
+**The worklist sweep.** Per-level lists of the voxels that hold each level,
+gathered in one pass after seeding and appended to as writes happen, so a
+level costs its own list and not the box; and in place on one buffer, no
+slice copies. `Light.sweep_box_lists`, shared by both relights; the old
+two-buffer sweep is gone. The "incremental equals a full flood" tests for
+both channels are the oracle and pass unchanged.
+
+| | before | after |
+|---|---|---|
+| skylight relight, median of 112 | 4.6 ms | **3.5 ms** |
+| block-light relight, median | 2.5 ms | **1.5 ms** |
+| a body, both relights | ~7 ms | **5.2 ms** |
+| the sweep alone, skylight | ~4 ms | 1.1-2.1 ms |
+| the sweep alone, block light | ~2 ms | 0.15-0.2 ms |
+
+What is left of a relight is the clear, the seed, the before-copy and the
+section diff, each a pass over the box; the sweep is no longer the biggest.
+
+**Two traps on the way, both worth a GAPS entry (G70).** The first version
+returned a two-field pair per level and cost 1.2 s a relight: while that cell
+held both arrays every in-place write copied the 4 MB field. The second
+version, one return at the very end, still cost 2.4 s -- in the GATHER, where
+12-22k pushes each copied the ~700 KB worklist. The push read the free slot
+and the list head and then wrote, in one function. The rule this project
+already had (G21/G67) is sharper than it was written: a NativeArray read
+inside the function that goes on to write the array -- or that hands it to a
+writer -- holds the refcount up until that function returns, and the write
+copies; a read in a leaf callee that only reads is released on return and
+costs nothing. Every read of the pool and of the light field in the walk is
+now a leaf (`wl_head`, `wl_entry_index`, `at_level`, `give_level`), and the
+gather went from 2.7 s to 0.1-0.4 ms.
+
+**The ground readout** is rebuilt only when a key of its inputs moves (the
+target column, its species, its vigour to the byte); the string was built
+every frame the crosshair rested on a block. The allocation gauge did not
+move (132 per frame), so that string was not what the gauge counts either.
+
+Budget on the loaded machine: 13.3 ms best of 3 against 16 (13.9 before the
+pass, same load). fps in the pinned scenario 224 against 207-209.
+
+
+## Micro-voxel models (2026-09-05)
+
+`docs/superpowers/specs/2026-09-05-micro-voxel-models-design.md`, plan
+`docs/superpowers/plans/2026-09-05-micro-voxel-models.md`. Small mushrooms,
+palm fronds and bush leaves are drawn as 8x8x8 sculptures of coloured
+sub-cubes inside their cell: `CubeForge.Model` builds each shape as a grid of
+palette indices, greedy-meshes it once into a template, and the templates ride
+in the `World` beside the shown species; the foliage mesher skips model blocks
+in its greedy pass and stamps their templates afterward, translated to the cell
+and shaded from the cell's own light. Colours come from one palette texture
+layer (89), so no shader or vertex-format change.
+
+- **Twenty templates**, faces under caps of 160 / 120 / 100 (mushroom / frond /
+  bush), asserted by `model_test`. Frond orientation reads the neighbours the
+  mesher already fetches: away from an adjacent palm log, else away from
+  adjacent fronds, else an umbrella over a log below, else a tuft.
+- **Foliage vertices, seed 7, world start:** 47,166 before -> 142,014 after
+  (3.0x; total 234,570 -> 328,000). All of it is bushes -- wild fungus has not
+  fruited at frame 0. The first bush (three 2x3 plates on stems) read as little
+  tables at a distance; the mound (four layers, half-widths 1, 2, 1, 0) reads as
+  a bush and costs this; a five-layer mound was 171,222 (3.6x) and looked no
+  better. Startup meshing 244 -> 270 ms.
+- **Frame budget** (`scratch/frame_budget.sh 16 400 3`): worst frame **10.63 ms**
+  after against 11.62 ms before on the same machine minutes apart -- no
+  movement; the deferred and full-rebuild meshes still agree.
+- **Frames:** `docs/models-mushrooms.png` -- two Meadowbell bodies on their
+  mycelium at seed 7 (`CF_WILD=0 CF_AUTOPLANT=100 CF_AUTOPLANT_SPECIES=3
+  CF_AUTOPLANT_MATURE=1 CF_FRUIT_RATE=2000 CF_PITCH=-140`, frame 850);
+  `docs/models-bushes.png` -- bush mounds on the seed 199 oasis grass. No frame
+  shows a palm: the oasis run grew none in view. Fronds are covered by the
+  mesher tests (orientation on a stamped palm, and the crown stamped as
+  templates rather than cubes).
+- **Language notes:** an alias cannot stand in a type position
+  (`B.F32Buf` fails, `CubeForge.F32Buf.F32Buf` works); a `doc` before a `type`
+  is a parse error; a type named `Set` collides with the stdlib's and reports
+  "expected CubeForge.Model.Set but got Set" -- renamed `Templates`; the
+  alias `M` is taken by `CubeForge.Math.Mat4` across the test binary.
+- 378 tests (365 before).
+
+## Perf pass: the drain, the mesher, the relight's edges (2026-09-05)
+
+Method: a `slow frame` line under `CF_AUTOFLOW` names every frame over 4 ms
+with its phase of the period; a `drain chunk` line times each chunk's remesh
+and upload; `CF_VEG_LOG=1` splits a tree edit into blocks / relight /
+occupancy / rescan; and `sample` on the release binary (outside the sandbox,
+`-mayDie`) gave call graphs -- once on the pinned scenario, twice on
+`CF_WORKERS=1 CF_MESH_REPS=80`, a serial mesher loop that is pure mesher.
+The mesh hash on the `state:` line at frame 30 of the pinned scenario
+(`380281180`) was the oracle for every mesher change: it did not move once.
+
+**What the frame looked like.** The worst frames were the ODD phases at 5-9 ms:
+the mesh drain, four sections a frame, with an opaque section at 0.6-1.0 ms.
+Water sections were 0.05 ms; the cost was retexturing and fungus migration
+owing ~10 opaque sections a period. Phase 6 (a tree or body) was 6-9 ms.
+
+**Where a section's time went** (serial mesher profile): the allocator. Every
+Float in March is a heap object; a rectangle was some sixty of them across
+quad_sized, pack_shade, layer_for (a chain of boxed literal returns, 15% by
+itself) -- `march_alloc` + `march_alloc_float` + `decrc` + free were ~60% of
+mesh time. The six-direction mask fill I rewrote first was a minor term.
+
+| change | measure | before | after |
+|---|---|---|---|
+| per-phase drain budgets (3 odd / 2 retexture / 1 water, field / 0 veg) | worst frame | 10.6 ms | 10.1 |
+| one-pass mask fill (six directions from one cell walk) | opaque section | 0.7 ms | ~0.6 (noise) |
+| `F32Buf.push_vertex`: one cell rebuild per vertex, not nine | serial mesh-all x3 | 788-899 ms | (small) |
+| `cf_mesh_quad`: the rectangle written in C from ints + key + layer table | opaque section | 0.6 | 0.45 |
+| `cf_mesh_slice`: the whole per-slice greedy merge in C, mask read only | opaque section | 0.45 | **0.22-0.29** |
+| `F32Buf.grow` as one blit; section buffers start at 16k floats | serial mesh-all x3 | 788-899 | **398-400 ms** |
+| the same | startup mesh all, 64 chunks | 270 ms | **197 ms** |
+| `cf_gfx_sync_box`: one texture box + exact coarse recount | tree edit, occupancy | 0.6 ms | **0.02** |
+| staged upload: sixteen `glBufferSubData` become one | drain uploads over 1 ms | 7-8 of 44 | **0 of 44** |
+| double-buffered mesh VBOs, capacity kept | (no measurable change on its own; kept for the staging) | | |
+| `cf_u8_zero_box` / `cf_mark_box`: the relight's clear and section diff | tree relight | 2-5 ms | 2-5 ms (no change) |
+| **frame budget** (`frame_budget.sh 16 400 3`) | worst frame | **10.6-11.6 ms** | **8.2 ms** |
+
+Two things that did not pay: the relight's box clear and diff in C (the
+March versions were not where the relight's time is -- the sweep and the
+seed are), and GL_DYNAMIC_DRAW / double buffering for the upload stalls (the
+stall was per call; staging fixed it, the buffers stayed).
+
+**Layout notes for the shim work.** An extern's borrowed array arrives with
+rc 2 (the borrow itself), so a "write through a borrowed reference" guard of
+rc == 1 trips; cf_mesh_slice consumes and returns the buffer and hands the
+count back in the reserved slot past the worst-case region. The relight's
+field is the World's and was silently copy-on-write on its first byte; the
+copy is explicit now (`copy_prefix(la, volume())`) so the shim's clear can
+insist on a unique field, at the cost it always had.
+
+**Left on the table, measured.** A tree edit is now: blocks 0.8-1.3 ms
+(Veg.plant: a 64 KB chunk copy per `set_block`, ~40 of them, and a chunk
+lookup per candidate cell), relight 2-5 ms (the sweep and the seed), rescan
+0.3. And a finding that touches everything: `Array.PVec.get` walks a 32-long
+list at the leaf and computes the tail's length by walking it, so a chunk
+lookup on a 64-chunk world is ~50 pointer hops (`Array.lst_nth` in every
+profile, 2% of the frame); `World.block_at` pays it per voxel in the relight's
+`give_level`. GAPS G82. Phase 6 is the worst frame now: 6.1 ms mean, 8.6 max.
+
+432 tests. `CF_VEG_LOG` and the `slow frame` / `drain chunk` lines stay as
+diagnostics; the shim additions are `cf_f32_stamp`, `cf_mesh_quad`,
+`cf_mesh_slice`, `cf_u8_zero_box`, `cf_mark_box`, `cf_gfx_sync_box`, all under
+the blit's rc == 1 contract.
+
+## G82 followed up: the world's chunks in a binary tree (2026-09-05)
+
+`probes/pvec_get` timed the stdlib vector against a complete binary tree of
+64 leaves, one million gets and a hundred thousand sets each, release build:
+
+| | `Array.PVec` | `CubeForge.Tree` |
+|---|---|---|
+| get, indices spread | 112 ns | 72 ns |
+| get, index 0 / index 63 | 61 / 154 ns | |
+| set | 860 ns | 200 ns |
+
+Per call the gap is modest; the volume is not. `World.chunk_at` is a `get`
+and `World.set_block` a `set`, and the relight, the water scan, the biome's
+water flags, vegetation and fruit all go through `World.block_at` a voxel at a
+time. The world now keeps its chunks in `CubeForge.Tree` (six matches to a
+chunk, six node allocations to replace one; `World.chunks` converts to a PVec
+for the save format). Same seed, same pinned scenario, mesh hash unchanged:
+
+| | before | after |
+|---|---|---|
+| tree edit, relight | 2.3-5.8 ms | **1.8-3.4 ms** |
+| tree edit, blocks | 0.8-1.3 ms | 0.7-0.9 ms |
+| biome field build at startup | 228 ms | **123 ms** |
+| skylight + block-light flood at startup | 150 ms | 141 ms |
+| startup mesh all | 197 ms | 185 ms |
+| **frame budget, worst frame** | 8.2 ms | **5.7-6.6 ms** (two runs) |
+
+The sampler had put `Array.lst_nth` at 2% of the frame. That was the top of
+the stack only: the rest of a `get` -- `trie_get`, `get` itself, the tail
+length walk, and the cache misses a 50-hop list walk means -- did not show
+under one name. A structure change the profile rated at 2% took a third off
+the worst frame. 438 tests.
+## The relight box, and where the frame's memory goes (2026-09-05)
+
+**The relight box is sized to the light around the edit.** `Light.reach`:
+the brightest level at the edit voxel or beside it before the edit, plus the
+new block's emission, capped at 15. Light lost by placing a block was at most
+the voxel's own level; light gained by breaking one is at most a neighbour's
+level less one, and an opening sky shaft shows as the voxel above at 15. A
+level L propagates L - 1 steps, so a box of radius L holds every voxel that
+can move, and the clear, the seed, the before-copy, the section diff and the
+sweep are all passes over that box. Surface edits in daylight still get 15;
+a block-light edit beside mycelium glowing at 3 gets a 5-wide box instead of
+33. Oracle tests for a dim gallery and for a block-light edit beside dim
+mycelium added; all "incremental equals full flood" tests pass.
+
+| | before | after |
+|---|---|---|
+| a fruit body's slot (stamp, both relights, occupancy, rescan), median of 40 | ~6 ms | **3.8 ms** |
+| budget | 10.25 ms | 10.03 ms best of 3 |
+
+**The 139 live objects a frame are a leak, and it is large.** `cf_rss_bytes`
+(the shim, from `task_info`) gives the gauge a byte view: the process grows
+~1.8 MB a frame, 5.7 GB resident after 2,400 frames, identically on the old
+toolchain pin. Stage probes on a frame: the water tick retains 4.6 MB per
+tick, the biome slice ~350 KB every frame, the mycelium tick 480 KB, the
+drain ~100 KB; every stage that replaces part of the world leaves the old
+part alive. The stack pointer does not move between frames, so the loop is a
+true tail call, and making its parameters owned through identity functions
+changed nothing. `MARCH_TRACE_GC=1`'s allocation log (25 GB for 140 frames)
+gives the survivors: 64 KB chunk arrays at 29 a frame, 4 MB light fields,
+0.5 MB relight prefix copies, the field arrays, and thousands of 32-byte
+list cells. Three compiler-side causes, each with a repro:
+
+1. **A library-defined type gets no deep drop (GAPS G79).** Type definitions
+   are registered under qualified names; use sites carry the short name;
+   `Repr.find_variant` is exact. The drop pass found no constructors for
+   essentially every library type, freed each dying cell shallowly and leaked
+   its children. `probes/drop_xmod` (WHICH=1,2): 2.1 GB -> 8 MB with the fix
+   on the March branch `fix/drop-short-type-names` (checkout under the
+   session scratchpad). On this project it freed the field arrays (16 KB
+   survivors 811 -> 247, 131 KB 392 -> 106) but not the chunks.
+2. **A closure environment is freed shallowly (G80).** Every captured value
+   leaks. `probes/drop_xmod` WHICH=5: a thousand closures capturing 1 MB each,
+   called once and dropped, leave 1.07 GB resident. This is the chunk leak:
+   `Array.set`'s two update paths capture the new element in a closure, so
+   every persistent-vector update in every March program leaks the element.
+   WHICH=4 (a 64-element vector, 4,000 replacements of 64 KB arrays): 339 MB
+   resident against 4 MB live. Needs a per-closure-type drop or a runtime
+   release that knows the capture layout; not attempted here.
+3. **A named binding unused in one arm of a lifted closure is never released
+   (G81).** `Array.set`'s `lst_set` bound the replaced element as `h` and left
+   it unused in the replacing arm; the IR has no release for it, where a
+   wildcard gets one. Fixed in the stdlib on the same March branch by matching
+   with `_` in that arm; the probe still leaks through (2).
+
+Until the toolchain carries those fixes the project pins March main
+unchanged (`watch-9ca8a98d`). Two project-side releases added on the way,
+`Biome.release` and `Myc.release`, destructure a replaced field so its arrays
+die as bindings; harmless with the fix, and they cover (1) for those two
+types without it. The four colliding short type names (Field, Relit, Felled,
+Sweep across modules) were renamed unique; a collision also forces Boxed in
+the compiler and is worth avoiding regardless.
+
+
+
+## The relight reads opacity from the occupancy field (2026-09-05)
+
+The sweep's remaining cost was `World.block_at` per neighbour, to learn
+whether the neighbour is air, water (opacity 2), leaves (6) or opaque. The
+occupancy field already held a byte per voxel for the shadow texture; it now
+holds `Light.occ_value`: 255 where the block is opaque (what the shader, the
+AO and the coarse counts read as solid, unchanged), else the block's opacity.
+The sweep reads that byte and never fetches the block.
+
+What made it correct: the field has to be complete. Two attempts said so.
+The first wrote the finer byte only where `set_occupied` was called and read
+water as air wherever the water actors had applied cells or leaf decay had
+run -- the relight-equals-full-flood tests failed and the mesh hash moved. The
+second used the byte only for solid neighbours and gained nothing: the reads
+are on air and water. So every block write now keeps the byte -- there are
+exactly two writers, `World.set_block` and `World.set_cells`, and
+`set_occupied` is gone -- and every World constructor builds the field, so a
+relight never runs against a stale one.
+
+| | before | after |
+|---|---|---|
+| tree edit, relight | 1.8-3.4 ms | **1.3-2.2 ms** |
+| frame budget, worst frame | 5.7-6.6 ms | **5.75 ms** |
+| mesh hash at frame 30 | 380281180 | 380281180 |
+
+A side effect worth knowing: a bush edit now pays ~0.3 ms it did not before.
+Its leaves were written with `set_block` alone and never touched the
+occupancy field; now every edit's first write to that shared 4 MB field is a
+copy-on-write. Trees paid it already through `set_occupied`.
+
+Not kept from this stretch: a VAO per mesh slot (six alternating runs were
+noise, so 192 attribute-pointer sets a frame are not where a quiet frame's
+time is on this driver). Kept: the shim's `getenv("CF_DEBUG")` on every draw
+call is now read once.
+
+## Tree placement in one write; the copy-on-write that remains (2026-09-05)
+
+`World.set_blocks` takes a list of packed cells, splits them by chunk and
+applies each chunk's cells through `set_cells`: one chunk copy per chunk
+touched, one pass over the occupancy bytes. `Veg.plant`, `Veg.fell`,
+`Fruit.stamp` and `Fruit.fell` gather their cells against the world as it
+stands and write once, where each used to call `set_block` per block and copy
+the 64 KB chunk every time.
+
+| | before | after |
+|---|---|---|
+| tree edit, blocks | 0.8-0.9 ms | **0.3-0.45 ms** |
+| a fruit body | 4.2 ms | **~2.0 ms** |
+| bush edit, blocks | 0.3 ms | 0.3 ms |
+
+The bush number is the finding. A bush is nine cells, and with the occupancy
+write skipped as an experiment its blocks cost 0.02 ms: the 0.3 ms is the
+first byte written into the World's 4 MB occupancy field copying it, because
+the field is shared at that moment. `Win.arr_rc` (a new diagnostic, the
+array's refcount word as the shim sees it) reads 2 for the occupancy field and
+5-8 for the light field at the start of a tree edit. Moving the vegetation
+branch into a helper so the old scene is not named in an else arm changed
+nothing. The extra reference is somewhere else in the frame; the same copy is
+what `relight_marked` pays explicitly for the light field. Left open, with
+the diagnostic in place.
+
+Hash at frame 30 unchanged through all of it (103332325 since main's
+relight-box merge). 440 tests.
+
+
+## Pinned to March main 7eb8d76a (2026-09-05)
+
+`watch-7eb8d76a`: March main after the two fixes from the leak work (GAPS G79
+and G81) were merged, built with `make install PREFIX=...` plus the `stdlib`
+symlink, March's own 706 tests green. On this project: 440 tests, budget
+6.47 ms best of 3, the allocation gauge **139 -> 86 objects a frame**. What
+remains is G80, closure captures never released, open in March.
+
+
+## The light oracle: what the mesh hash was saying (2026-09-05)
+
+The frame-30 mesh hash moved on main's relight-box commit (380281180 ->
+103332325). Every change of this pass had held it, so the question was
+whether main's relight was wrong. The dump frame now prints a **light oracle**:
+both light fields against a flood from scratch, as counts of differing voxels
+and the first few with their kept/flooded values. Bisected with the same
+oracle patch on three builds, seed 7, frames 30 and 300:
+
+| build | sky | block |
+|---|---|---|
+| before both changes (14fdab3) | 18 / 43 | 0 / 0 |
+| this pass's occupancy-byte sweep alone (33a555c) | 18 / 43 | 0 / 0 |
+| main's reach-sized box alone (e7029a6) | 44 / 88 | 0 / 19 |
+
+So the occupancy-byte sweep is exact, and main's commit did introduce wrong
+light -- but the 18 and 43 were already there. Two causes, both found:
+
+1. **Water moves without a relight.** Every voxel in the base count is kept at
+   15 where a fresh flood says 13, at y 63-83 -- water (opacity 2) that the
+   actors moved through `set_cells` after the flood. Nine voxels by frame 3,
+   before any other edit. Deliberate: a region relight per changed section
+   would be tens of milliseconds a tick for a one- or two-level shade under
+   moving water. Recorded as an accepted approximation in `todos.md`.
+2. **Multi-block edits were relit from one voxel.** A tree, a fruit body and
+   a batch of mycelium each called the relight at their centre, so a box of
+   radius 15 round the trunk missed the shade a canopy casts four columns out
+   (visible as kept 14 against 15 from frame 6, the first tree), and with
+   main's reach-sized box the mycelium batch's window -- taken within 4 of an
+   anchor on the promise of a radius-15 box -- got a box of the anchor's own
+   dim light and left emitters outside it: the 19 block-light voxels.
+
+`Light.relight_region_marked` / `relight_block_region_marked` take the edited
+region and grow it by a radius; `World.relight_region_marked` uses
+`Light.region_reach` -- the brightest light in and round the region before
+the edit, or the brightest emission in it after -- so a tree in daylight gets
+15 and a glowing patch in a dark wood gets its glow. Trees, bushes, bodies
+and the mycelium anchor use it; a single block still uses `reach` at the
+voxel. A fixed radius 15 for regions was tried first and put the worst frame
+at 11.3 ms through the mycelium batch's 39-wide box; the reach brought it
+back.
+
+| | before | after |
+|---|---|---|
+| light oracle, frame 30 / 300 | sky 44 / 88, block 0 / 19 | **sky 18 / 42 (all water), block 0 / 0** |
+| tree edit, relight | 1.3-2.2 ms (wrong box) | 1.7-2.9 ms |
+| frame budget, worst frame | 5.7-6.7 | 6.46 ms |
+
+A new test plants a tree and checks the region relight against a full flood.
+441 tests. The oracle stays in the dump: a non-zero block count, or a sky
+count whose first voxels are not the 15/13 water pattern, is a relight bug.
+
+## Eating from the inventory (2026-09-06)
+
+Spec `docs/superpowers/specs/2026-09-06-eating-from-the-inventory-design.md`.
+A cap has been food since the effects work, but the only way to eat one was to
+hold it in the selected hotbar slot, aim at **nothing**, and right-click. That
+gesture is gone. Two deliberate ones replace it:
+
+- **E** eats the selected hotbar slot, whatever the player is aiming at, and
+  is inert while the inventory window or the escape menu is up.
+- **A right-click on any slot** while the inventory window is open eats that
+  slot -- hotbar or backpack. Left-click keeps drag and drop, and right-click
+  did nothing in the window before, since `interact` never runs while a panel
+  is open. This is the half that matters: caps pile up in the backpack, and
+  they used to have to be dragged into the hotbar before they could be eaten.
+
+Two functions carry the rules, so the gestures cannot disagree and both are
+unit-testable without a window. `Inventory.edible(id)` is the only answer to
+what is food (caps, and nothing else). `Inventory.eat_slot(window_open,
+ui_open, right_click, hovered, eat_key, sel)` is the only answer to which slot
+a bite addresses, or -1; whether that slot *holds* food is deliberately not its
+question, so an inedible slot is a no-op rather than a refused gesture. The
+frame loop reads both and calls `eat_at`, which consumes one through the new
+`Inventory.consume_at` (consume was hard-wired to the selected hotbar slot) and
+applies the species effect as before -- thirty seconds, refreshing.
+
+`CF_AUTOEAT=<frame>` used to call the bite directly and so tested nothing about
+the gesture. It now puts a Frostcap cap in the inventory and presses the key
+thirty frames later; `CF_AUTOEAT_SLOT=<slot>` puts the cap in that slot and
+eats from there instead. Both print `ate a Frostcap cap: JUMP 30` and the dump
+shows `effects: JUMP 30`, from the hotbar and from backpack slot 20.
+
+448 tests (441 before): what is edible, which slot each gesture addresses,
+consuming from a given slot, and the last one emptying it. Mesh hash, light
+oracle and frame budget unmoved (380281180, sky 18 block 0, 6.42 ms).
+
+The one thing not covered headless is the mouse itself: the scripted knob
+supplies the slot, so the click-to-slot rule is tested through `eat_slot`
+rather than through a real right-click over a real cursor position.
+
+## The mycelium skin, dialled back (2026-09-06)
+
+Mycelium showed too strongly: on grassland the ground read as a change of
+biome rather than a skin over one. `Texture.myc_tint()` is one dial over both
+halves of the texel formula -- how many texels are threads, and how far a
+texel is pulled toward the species colour -- as twelfths, so 100 is exactly
+the old fractions (a third of texels, two-thirds species colour on a thread,
+a sixth elsewhere) and 0 is the bare surface, byte for byte. **The default is
+now 60.** `CF_MYC_TINT` overrides it, which is how the comparison below was
+rendered from one build.
+
+Judged on a mature patch on open grassland (seed 11, `CF_PITCH=-115`), at 100,
+60, 35 and 18, against a control with no fungus: `docs/fungus-tint.png`. At 60
+the ground keeps its own green with a warm cast; at 35 it is nearly plain
+grass; 18 is indistinguishable at a glance.
+
+Two things the comparison settled that guessing would not have:
+
+- **A glowing species' loudness is mostly its light, not its texture.** The
+  first ladder used Lanterncap, whose surface mycelium emits 6, and the
+  panels differed as much in banding as in colour. Repeating it with
+  Meadowbell, which does not glow, isolated the dial. The glow is deliberately
+  untouched: lit ground at night is what glowing fungus is for.
+- **The first scene was worthless and looked fine.** Planting at the seed-7
+  spawn now lands in a grove, where the surface is bush leaves: leaves carry
+  no mycelium, so `wanted 4 shown 0` and four tint settings rendered four
+  identical frames. The readout line at the dumped column is what caught it.
+
+Verification note: a raw `cmp` of two frame dumps always differs, because the
+FPS counter is drawn into the frame. `scratch/cmpframe.py` masks it, and by
+that measure two identical runs match exactly (0 differing pixels) and the
+shipped default matches an explicit `CF_MYC_TINT=60` (0), against 1.79M
+pixels differing from 100. Chunk streaming did not cost reproducibility.
+
+458 tests (three new ones pin the dial: 0 is the bare base, the default shows
+but less than 100, and the thread count thins as it comes down), lint clean,
+budget 6.44 ms.
+
+
+## The black bands under glowing fungus were a vertex-interpolation bug (2026-09-06)
+
+Reported as "those fungal stripes shouldn't be black". They were not the
+texture: a mycelium layer's darkest texel is its base's darkest texel, and
+fungus only ever lightens it (grass 70,140,60; Lanterncap over grass at 60,
+85,145,61). The bands were the sky term of the lighting, destroyed in transit.
+
+Sky and block light shared one vertex float: `2 * round(blk * 255) + sky`,
+unpacked in the fragment shader with `floor` and a subtraction. A varying is
+interpolated across the triangle, and that unpack is not linear, so between
+two corners that are **both fully sunlit** but differ in block light the
+decoded sky ran
+
+    1.0  1.4  1.8  0.2  0.6  1.0  1.4  1.8  0.2  0.6  1.0
+
+a sawtooth. The troughs are the black bands, and the peaks above 1 are the
+blown-out bright bands beside them. It appeared only where a block glowed,
+which is why fungus wore the blame: with a non-glowing species the same
+ground rendered flat and clean, and with a glowing one it looked terraced.
+
+**Fix: the two channels are separate attributes.** The vertex goes 9 floats to
+10 (pos.xyz, uv, layer, sky, face, fx, block light) and the packed word is
+split on the CPU -- in `F32Buf.push_vertex` and the shim's `cf_vert` and
+`cf_f32_stamp` -- so it never reaches a varying. Two channels cannot share one
+interpolated scalar; no encoding fixes that, because interpolation is linear
+and any unpack is not.
+
+`docs/fungus-blockband.png` is the same patch before and after. At midnight the
+glow still does its job: ground luminance median 33 under a glowing species
+against 9 under a non-glowing one, and even, with no banding.
+
+Two things the vertex growing from 9 to 10 turned up, both silent until they
+were not:
+
+- **`cf_f32_stamp` had `n % 9` and `i += 9` of its own**, so every model
+  template (mushrooms, fronds, bushes) aborted the moment the vertex grew.
+- **Floats-per-quad was the literal `54` in four places**, twice in
+  `F32Buf.push_quad`/`push_slice` and twice in the shim's `cf_mesh_slice`,
+  which reserve and write the same buffer. They drifted apart and quads went
+  missing (a six-quad slab meshed as five). Both sides now say it once:
+  `F32Buf.quad_floats()` and `CF_QUAD_FLOATS`.
+
+460 tests, lint clean, budget 6.61 ms with the 11% wider vertex. Two new tests:
+one asserts the old packing is *not* interpolation-safe (both corners decode to
+sky 1.0, three tenths of the way across it decodes to 0.2), the other that
+`push_vertex` lands sky in slot 6 and block light in slot 9. A point test of
+the encode/decode passed throughout and could never have caught this -- the bug
+lives between the vertices, not at them.
+
+
+## Branching filaments, drawn in the shader (2026-09-06)
+
+The tile gives mycelium a warm cast; this gives it threads. They are drawn in
+the fragment shader, not baked into the texture, for one reason: **a tile
+cannot branch across a block boundary.** Sixteen edge-connection variants per
+(base, species) would be 672 layers against the atlas's 92, and the threads
+would still repeat every block. Fed world-space coordinates instead, a
+filament crosses from block to block unbroken and the pattern never tiles.
+
+`hyphae(p)` is ridged, domain-warped value noise: the ridge is where the noise
+crosses its midpoint, and that line wanders and forks, which is what reads as
+branching. Two octaves, one warp, sixteen `hash12` calls per mycelium
+fragment.
+
+The shader needs no new vertex data. The layer index already carries the
+species -- mycelium layers run `myc_first + 6 * base + (species - 1)` -- so
+`(layer - first) % 6` is the species, and the six colours arrive once at
+startup in a uniform, from `Species.colour_*`, the same source the map overlay
+and the tiles use. Guarded on `u_unlit == 0 && u_use_tex == 1`, so overlays and
+the map are untouched.
+
+Defaults `Species.branch_strength` 60, `branch_scale` 500, `branch_sharp` 93,
+each overridable (`CF_MYC_BRANCH`, `CF_MYC_BRANCH_SCALE`, `CF_MYC_BRANCH_SHARP`)
+-- the settings were chosen by sweeping them from one build. Scale is the
+knob that matters: at 100 the threads were blurred smudges several blocks
+wide; from about 450 up they read as filaments.
+`docs/fungus-filaments.png` is the tile alone against the tile with threads.
+
+Cost is under the noise floor. Wild world, 600 frames: 284 fps with, 267
+without. Standing in a patch that fills the screen: 269 with, 259 without --
+the "with" runs measured faster both times, which is how much of a difference
+there is to find. Budget 6.32 ms, 460 tests, lint clean.
+
+## Animals: bodies that read as animals
+
+Slice 1 of the fauna work: a transform stamp, body-plan generators, and the
+first two species.
+
+**The stamp.** `cf_f32_stamp` translates a greedy-meshed template into a cell;
+an animal also needs to turn and to come in sizes. Baking yaws was the obvious
+move — palm fronds already bake eight directions — and it is the wrong one
+twice over: eight steps snap under a banking bird, and `species x poses x yaws`
+multiplies the template table by an order of magnitude. `cf_f32_stamp_xf` adds
+a yaw and a uniform scale to the same copy loop: two multiply-adds per vertex
+on a loop that is already memory-bound. The scale term is what makes "fish of
+multiple sizes" a column in a table rather than a second set of grids.
+
+Face indices rotate with the body, by the nearest quarter turn. Without that a
+turned animal keeps the lighting it had facing east.
+
+**Bodies are generated, not drawn.** A species gets a row — how long, how tall,
+how far the wings reach, whether it flies — and one of two generators builds
+every pose from it, placing each part against the body's own extent. The first
+hand-built bird had its wings two cells clear of its flank, touching nothing,
+and rendered as a bird with two slabs floating beside it.
+
+The invariant is a test, not a hope: a flood fill from one cell must reach every
+filled cell of every pose. Adjacency alone would not do — the broken wing was a
+solid slab whose own cells touched each other perfectly well; only reaching
+every cell from a single seed catches a part that is whole and in the wrong
+place. It has caught three real defects since: a wing tip stepping in z and y at
+once (meeting the wing along an edge, no shared face), a fin hung off the row
+the body-rounding shave removes, and a tail-sweep connector whose z bounds
+arrived descending, which `box_n` counts as an empty range and silently skips.
+
+**16 cells a side, not 8.** Every animal at 8 read as a stack of slabs, and the
+reason is structural: an eighth of a block is the thinnest thing that exists, so
+a wing, a fin and a beak all weigh as much as the body. `Model`'s greedy pass is
+now parameterised on the grid side; the 8-cube path is unchanged and the world
+mesh hash is byte-identical across the refactor (413448066).
+
+**What it costs.** Interleaved A/B, three runs each, 150 bodies stamped and
+uploaded every frame:
+
+| bodies | worst frame | frame rate |
+|---|---|---|
+| none | 5.4-6.6 ms | 214-225 fps |
+| 150 at 8 a side | 6.7-7.0 ms | 207-218 fps |
+| 150 at 16 a side | 6.6-8.0 ms | 189-208 fps |
+
+At 8 the bodies are lost in the noise; at 16 they cost about a millisecond and a
+tenth of the frame rate. Worth paying, and worth knowing: the visible cap is now
+a real budget rather than a formality. This is also the first system whose cost
+is per FRAME rather than per tick, so none of the phase-slot spreading that
+carried the world tick from 55 ms to 11 applies to it.
+
+`CF_FAUNA_DEMO=1` circles a flock and a school on the clock; `=2` stands every
+species in every pose, still and broadside, which is the only way the bodies
+themselves are actually inspectable — at their real size, 0.35 of a block, an
+animal is a few pixels and a screenshot proves only that something was drawn.
+
+## Flocks: a group as one unit of state
+
+Slice 2: the flock actor, its steering, and the interpolation that lets it
+think six times a second and still move smoothly.
+
+**One actor per flock, not per animal.** The literal reading of "animals are
+actors" costs a call/reply pair per animal per tick against a 16 ms frame, and
+then needs actors talking to each other to do what one shared state does for
+free. A `FlockActor` owns 5-20 animals; `Flock.step` is an ordinary function
+over them and the actor is a shell, which is the division `Water` already uses
+between `tick` and `WaterChunk` — and it is why every behaviour here is tested
+without a running actor.
+
+**The flock is told the terrain; it does not regenerate it.** `WaterChunk`
+answers the no-arrays-in-messages rule (G44) by rebuilding its chunk from
+`(cx, cz, seed)`. Copying that would have broken the feature outright:
+regenerated terrain is terrain as it was *generated*, and the point of the
+fauna design is that the player has changed it. A flock gets a 5x5 patch of
+ground heights packed a byte at a time into four Ints, and is therefore correct
+against edits by construction.
+
+**Two corrections the build made to the plan.**
+
+The inputs cannot ride on the call request. `Actor.call(pid, Req(a, b, c))`
+delivers zeros — silently, with no error anywhere (GAPS G84). The flocks read a
+ground of 0 and a water surface of 0, so the fish sank to y 0.5 (its floor,
+ground + 0.5) and the birds set off toward y 9. It was caught only because
+y 0.5 under a lake at y 81 is too specific a number to be anything but
+arithmetic on a zero. Inputs now go by `send`; the call is nullary.
+
+"Ground" turned out to be two questions. `Biome.height_of` is the surface
+*including* water — a sea column reads 62, the water top — which is right for a
+bird and exactly wrong for a fish, whose floor would then sit above its own
+ceiling and push it out through the surface. Fish read the bed via `surface_y`
+instead. Bounding that walk to start at the field's height rather than at y 255
+matters: unbounded, the flock slot was the most frequent slow frame in a
+400-frame run (12 occurrences, more than the vegetation or climate ticks);
+bounded, it left the list entirely.
+
+**What it costs.** Interleaved A/B, three runs each, four flocks and 29 animals:
+
+| | worst frame | frame rate |
+|---|---|---|
+| no flocks | 6.5-7.2 ms | 217-218 fps |
+| four flocks, 29 animals | 6.5-8.1 ms | 205-218 fps |
+
+Within noise once the bed walk is bounded. The AI runs on its own phase slot,
+once per world tick, and the renderer blends the last two ticks — so the
+steering runs at a sixth of the frame rate and the animals still move smoothly.
+That is the trade the biome sweep already makes, and here it is the only one
+available: unlike every other tick in this program, the DRAW cannot be spread
+across frames.
+
+`CF_FAUNA_DEMO=3` puts three flocks of pipits around the player and a school of
+sunfin in the nearest water — which for seed 7 is an upland lake at y 81, not
+the sea, and so a decent test of the case the sea-level assumption would have
+got wrong.
+
+## The roster: eighteen species from a table
+
+Slice 3. The species table is now *generated* from a data file rather than
+hand-written: eighteen rows produce the March if-chains for names, activity,
+size, niche, six plan numbers and a colour. Hand-editing a dozen chains to
+insert a species in the middle is how off-by-one `end` counts get in, and one
+extra `end` silently closes the module — the parse error points at whatever
+follows, not at the chain.
+
+**Finer voxels, and what they cost.** 16 cells a side fixed the slabs; 32 gave
+a head enough cells to round; 64 is what makes a wing one cell against a body of
+sixty. Naively that is 8x the greedy work of 32, and it showed: startup went
+from 1.7 s to 4.2 s.
+
+The fix is that a body fills a fraction of its grid. The greedy pass sweeps 6n
+slices of n x n mask cells, and at 64 most of those slices are past the animal's
+nose or beyond its wingtips. Finding the bounding box once and keeping both the
+fill and the walk inside it took the fauna templates from 2.4 s to ~0.3 s —
+startup 2.3 s against a 1.7-2.1 s baseline. The block models go through the same
+parameterised code and their mesh hash is byte-identical (413448066), which is
+the only reason a refactor of the mesher was safe to make at all.
+
+**Size range.** 0.22 blocks (Cinderfinch) to 4.20 (Mossmoa), about twenty to
+one. The small end has to stay small for the large end to mean anything.
+
+**Three shapes that are branches, not new code.** A penguin is `plan_upright`:
+the head goes on top of the body instead of in front of it, and the pale
+underside becomes a pale front. It already had short wings, legs and a dark back
+from ordinary rows. A shark is `plan_dorsal` at 8 with a swept leading edge — a
+rectangle of the same height reads as a sail. An eel is `plan_pectorals` false,
+which is most of why an eel reads as an eel.
+
+**The connectivity oracle earned its keep twice more.** A penguin's legs stopped
+at `body_y0 - cells(2)`, relying on the belly to bridge to the body — and an
+upright bird has a front instead of a belly, so its legs hung in the air. And
+the wing taper's two ends crossed on a short body with a long span, which
+`box_n` treated as an empty range and silently skipped: three birds lost their
+wings entirely and still built clean.
+
+That was the third time an inverted range vanished, so `box_n` now **sorts** its
+bounds. A caller handing over a reversed range means the box between the two,
+and gets it.
+
+The test itself had to change twice as the grid grew: repeated sweeps until the
+marked count settles is O(cells x rounds), which is fine at 16 and hopeless at
+64 x 54 templates. It is a worklist flood now — pop, mark, push the six
+neighbours — and the suite runs in about 90 s.
+
+**What it costs.** Live flocks against no flocks, interleaved, three runs each:
+worst frame 7.4-8.0 ms against 6.5-7.3, frame rate within noise. The frame
+budget gate is 6.71 ms against 16.
+
+## Detail, not resolution — and then resolution where it shows
+
+The question was whether to spend polygons on detail or take the voxels down
+another size. Measured first, because the intuition is unreliable:
+
+| grid | quads over 54 bodies | largest body |
+|---|---|---|
+| 32 | 7,253 | 183 |
+| 64 | 10,131 | 301 |
+
+Resolution does add some quads -- features pinned at one cell (a wing's
+thickness, an eye) get relatively finer -- but the number that decided it was
+**301 quads for the largest body**, about 600 triangles. An order of magnitude
+under what the frame carries. The bodies read as boxes because the generator
+only knew how to draw boxes.
+
+So the detail went in first: a body built a SLICE at a time with a taper along
+its length, a head built the same way, a notched tail fan, feet. Then the change
+that mattered most -- a **rounded cross-section**. The taper narrows a body along
+its length and does nothing at all for the angle you actually meet an animal
+from; head on, a stack of boxes is a rectangle. Rows taken from an ellipse fixed
+that, and it is the single biggest visual change in the whole feature.
+
+Then resolution, but **per species**. A template is normalised to a unit cube
+whatever grid built it, so different species can be built on different grids at
+no downstream cost: 128 for the five big ones, 64 for the middling, 32 for the
+small. That is not a compromise, it is the measurement -- a Cinderfinch is 0.22
+blocks, so one of its 64 cells is already about a screen pixel at five blocks,
+and halving it again buys a subdivision nobody can resolve while paying for it
+on the commonest animal in the world. A Mossmoa is four blocks and one of its
+cells is seventeen pixels.
+
+| | |
+|---|---|
+| quads over 54 bodies | 43,869 |
+| largest body | 2,524 (Deepmaw, on its 128 grid) |
+| startup | 3.5 s, against 1.7-2.1 s with no fauna |
+| frame budget gate | 10.5 ms against 16 |
+
+The startup cost is the honest price of the 128 grids: about 1.4 s, and worth
+knowing before it grows. Bounding-box culling in the greedy pass is already
+carrying most of it -- without that, 64 alone cost 2.4 s.
+
+**The connectivity oracle found six more defects in this pass**, every one of
+which built and linted clean:
+
+- eyes stuck to the head's side while the head had tapered in past them
+- a wing whose taper crossed itself on a short body (three birds, no wings)
+- a wing reading the body's surface at ITS OWN row, so when the flap's ramp
+  stepped to a new row two neighbouring columns referenced different surface
+  positions and the tip came off
+- a neck starting at `body_y1` while the nose had tapered down below it
+- legs set out to a stance, past the narrow bottom row of a rounded body
+- a penguin's legs stopping where a belly would have bridged them
+
+The lesson worth keeping is not any of those. It is that the oracle was made to
+NAME what broke -- species, pose, the stray piece's size and its first cell --
+after bisecting by hand cost three ninety-second runs. The diagnostic paid for
+itself twice over in the same session.
+
+## Birds and fish, redesigned from the ground up
+
+The previous builder was a box with parts attached, and every improvement to
+it -- rounding, tapering, feet -- made better parts on the wrong skeleton. The
+moa that came out of it had a head the size of a fist glued to a beach ball, a
+plank for a tail, and no neck at all. A bird is a SMALL HEAD ON A THIN NECK over
+a teardrop; a fish is a laterally compressed loft that tapers to a peduncle.
+Neither is a box, and no amount of refining a box gets there.
+
+**Two primitives.** A LOFT is an ellipse swept along a path with its radii
+following a profile: the body, the neck, the beak, a leg. A SHEET is a thin
+plate: a wing, a tail fan, a fin. That is the whole vocabulary. Consecutive loft
+slices overlap by construction, so a loft is connected without anyone checking;
+a sheet's root is buried inside the loft it hangs off, so it cannot detach. The
+connectivity oracle still runs, but on this builder it is a guard rather than a
+bug-finder -- it caught two, both a notch or a sweep stepping in two axes at
+once on a 32-cell grid, the same class as before.
+
+**One profile curve.** Two half-ellipses meeting at a peak: a smooth egg, fat
+where the row says and drawn to a point at both ends. With the peak at 45% it is
+a bird's chest, at 35% a fish's shoulder, at 50% a penguin's belly. A fish's
+width follows the square root of it, which keeps the body deep further aft --
+the peduncle is most of what makes a fish look like it swims.
+
+**The neck is a tube from the shoulder to a small ball.** Head size and neck
+thickness are rows of their own now. A neck as wide as the head is not a neck;
+a head sized to the body makes every bird a duck.
+
+| | before | after |
+|---|---|---|
+| quads over 54 bodies | 43,869 | 83,723 |
+| largest body | 2,524 | 7,160 (Mossmoa, 128 grid) |
+| startup | 3.5 s | 2.8-2.9 s |
+| live flocks, frame rate | within noise | -4% (132-134 vs 138-141) |
+| live flocks, worst frame | +1 ms | +0.5 ms |
+| frame budget gate | 10.5 ms | 5.5 ms |
+
+The quads doubled and the startup FELL: a loft fills fewer cells than the boxes
+it replaces, and the bounding-box greedy pass scales with what is filled. The
+frame budget number is mostly a quieter machine, and is reported as measured.
+
+## Populations: what lives where, and why
+
+Slice 4, the rule that closes the terraforming loop. One count per chunk per
+species, 0..15, eased one step a visit toward a CARRYING CAPACITY read off the
+world: for a fish, how many of the chunk's columns are water of the depth it
+wants (and of the body size -- a Sunfin wants a pond, and the field's own
+`small_body` of 48 columns is what says whether it has one); for a bird, how
+many columns are its biome. Both are numbers the world already maintains and
+the player already changes. Dig a 6x6 pond three deep in grassland and two
+Sunfin arrive over a few visits; fill it in and they go, one a tick. That is the
+whole mechanism, and it is a test.
+
+**Flocks are the visible sample of populations.** The registry counts every
+chunk of the window; a flock is placed only for a species with at least two
+animals in a chunk within two of the player, retired when the count goes or the
+player does, and resized in place when the count moves -- a school grows with
+its pond without every fish jumping back to where it began. Eight slots. In a
+400-frame run on seed 7 that is 792 animals counted and 34 drawn, spanning
+Pinecrest, Duskowl and Mossmoa in the forest chunk and Frostgull, Brinewaddle,
+Shoalback, Kelpjaw and a Bladefin on the coast: the habitat rule doing real
+work, with no species placed by hand.
+
+**Two bugs, both instructive.** The first was `slot >= 0 && have !=
+List.length(Array.get(cur, slot))` -- `&&` does not short-circuit (GAPS G33),
+so the PVec was read at -1 on every chunk with no flock, and the program panicked
+on the first population tick. Found by bisecting the slot's three stages with a
+temporary knob; the diagnostic printlns never showed because a panic drops the
+buffered stdout, which is worth remembering. The second was cost: `capacity`
+walked every column's depth per species, 4,608 walks a chunk, and the frame
+budget gate failed at 18.55 ms with the fauna slot the second most frequent
+slow phase. Profiling each chunk ONCE -- 256 depths and 256 small-water flags --
+and running the species against the profile brought the gate to 7.72 ms.
+
+**Save/load.** The header carries a `pop` line, 278 entries for the seed-7
+window at the save; a session loaded from it reports 340 animals at frame 0,
+before a single tick has run. A save from before there were populations reads
+an empty list and regrows.
+
+## Populations that persist, and the first season
+
+The dense-window registry was the honest simplification for slice 4, and it
+was the wrong shape for what comes next: a bird that leaves in autumn and comes
+back to the SAME lake needs the lake's record to survive the lake leaving the
+window. So the registry now archives every chunk that leaves, under its world
+coordinate with the tick it left at, and restores it on return -- CAUGHT UP,
+each species moved toward the capacity of the world as it now is by the visits
+it missed. A pond that filled while nobody was watching has its two Sunfin when
+you get back; a pond filled IN while you were away has none. Both are tests.
+
+The save carries every record, window and archive alike, keyed by world chunk:
+a load at the same origin puts a school where it was, a load at another origin
+archives it under world chunk (6, 4) until the window reaches it again. 1,281
+integers in the seed-7 header at the save; 302 animals counted at frame 0 of
+the loaded session.
+
+**Seasons** are a capacity that is zero out of season. A year is eight days --
+an hour of play a season at the default half-hour day, long enough to notice a
+bird has gone and short enough to see it come back. The Frostgull holds the
+coast for the second half of the year and the Marshheron the wetland for the
+first. That is migration as the population sees it; the flocks crossing the sky
+are next.
+
+Frame budget 6.83 ms against 16; save/load round trip passes; 500 tests.
+
+## The flyover
+
+Departure is a flock mode: when a migrant's season closes, `mode_of` returns
+`depart` ahead of everything else -- ahead of the player, ahead of the clock --
+and the flock climbs thirty above its cruise, drops the pull home, and pushes
+the way its species leaves at fleeing speed. The loop keeps its slot while the
+count drains underneath it (which would otherwise free it mid-departure) and
+lets it go once the lead is forty-four blocks out.
+
+Arrival needed no behaviour at all. An arriving migrant is placed forty-four
+blocks out and twenty-five up, from the way it leaves; the pull home it has
+past `home_radius` and the altitude spring fly it in over ten seconds or so.
+The test is the same for both: a gull whose season is over ends sixty ticks
+well above where it would cruise and thirty north of home, past the reach; a
+gull started forty-four out and twenty-four up ends a hundred and twenty ticks
+inside its home radius, down at its cruise.
+
+Watched in the game with a two-second day, so the year turns in sixteen: at
+year 0.70 a Marshheron -- whose season closed at 0.5 -- is at y 103 seventeen
+blocks north of its home, on its way out. Nothing placed it there but the
+calendar.
+
+## The survey reads the animals
+
+Slice 5, and the line that closes the loop from the player's side. The survey
+instrument that says what a place IS now also says what could LIVE there and
+what to dig to get it.
+
+Aimed at an animal -- a sphere test along the look ray over every drawn animal,
+run only while the survey is open or the scan key is down -- the panel names it
+and its niche once scanned (`FROSTGULL  BEACH TUNDRA  WINTER`), and prompts
+`UNKNOWN ANIMAL  SCAN` until then. The scan key takes the animal when there is
+one under the reticle and the ground otherwise, so the two catalogues share a
+key without fighting over it. Scanned animals are a bitmask of their own in the
+header, beside `known`: eighteen species beside six, and two catalogues that
+read independently.
+
+Aimed at the ground, for the reticle's chunk and only for species already
+scanned: which would live here, and the first that would not and why -- in
+terms the player can act on. A fish wants a depth (`NEEDS DEEPER WATER  14`),
+a pond, or open water; a bird wants a biome (`PINECREST  NEEDS TAIGA FOREST`);
+a migrant out of season is `AWAY UNTIL WINTER`. On the seed-7 spawn hill with
+everything scanned: `WOULD LIVE HERE  GRASSPIPIT  CINDERFINCH / PINECREST
+NEEDS TAIGA FOREST`. Nothing scanned, nothing said: the gate is the same one
+the fungus half already uses.
+
+The report is per CHUNK, because that is where a flock lives, while the rest
+of the panel is per column; a Cinderfinch reported on a grassland column is a
+desert corner of the same chunk. Honest, and slightly surprising; worth a word
+in the panel if it confuses anyone.
+
+Frame budget 8.29 ms against 16; save/load round trip passes.
+## The window shift, staged over four frames (2026-09-06)
+
+Reported as "big FPS drops and 58 fps most of the time". The 58 fps is vsync:
+uncapped, the same scripted walk (`CF_AUTOWALK`, seed 7) runs at 228 fps with
+a **2.8 ms** mean frame and a 9.9 ms worst quiet frame. Nothing in the steady
+state is near the 16.7 ms budget. What breaks it is the window shift, which
+ran whole on one frame, once every 16 blocks walked (~3 s).
+
+`CF_FRAME_LOG=1` prints one line per frame with its elapsed time; it is what
+these distributions are read off.
+
+### Where a shift's 63-100 ms went
+
+| | ms |
+|---|---|
+| `World.shift` | 45-78 |
+| ├ chunk pmap + tree rebuild | 14-15 |
+| ├ sky light band | 10-12 |
+| ├ block light + occupancy band | 11-12 |
+| ├ shown/dirty/hash + field slides | 5-6 |
+| └ lake tiles + evict | 3.3-3.8 |
+| band mesh (8 chunks) | 6-9 |
+| GL shift + remap | 5.4 |
+| biome / myc / actors / springs | 6-9 |
+
+### The band was lit against occupancy it did not have yet
+
+`Light.sweep_box_lists` reads a neighbour's opacity out of the world's
+occupancy field, and `World.shift` swept both light bands *before* `occ_band`
+filled the incoming band -- which `shift_occ` leaves zeroed. Every freshly
+streamed chunk was lit as if it were air. The light oracle after one shift:
+
+| | sky | block |
+|---|---|---|
+| before | **17 995** | 0 |
+| after (frames 400 / 1200 / 2000) | **42 / 13 / 9** | 0 / 0 / 0 |
+
+The remainder is the accepted 15/13 water pattern already recorded above. The
+same expression also returned the pre-shift `gh` instead of `gh1`, so the
+generation hashes went stale after every shift; both are one edit.
+
+### Parallel bands, then four stages
+
+The two bands are independent once the occupancy is in, so they run as a pair:
+`World.shift` 45-47 -> **31.5 ms**, a whole shift 63-67 -> **45 ms**.
+
+`World.shift` then splits into `shift_blocks` and `shift_light`, and the frame
+loop pays a shift one stage a frame, carried in the `Frame` (never the Scene,
+so every staging frame still renders a coherent world). The world is frozen
+for those frames: water, retexturing, vegetation, fruit and the player's edits
+all sit out, because each stage is computed from the snapshot before it. The
+biome and mycelium field ticks are *not* frozen -- they touch only their own
+fields, which the commit slides from whatever the scene holds -- so they keep
+their "every column once a period" invariant. Nor is the mesh drain.
+
+| stage | ms (median of 3, first shift in brackets) |
+|---|---|
+| blocks | 25.8 (45.2, with the first lake-tile pour) |
+| light | 9.3 |
+| mesh | 5.2 |
+| commit | 9.1 |
+
+### Two spikes that were not the shift
+
+A **20-70 ms frame a few frames after every shift**: the commit makes all 64
+moved chunks owe all 16 sections, and `drain_go` rebaked one whole chunk per
+frame regardless of budget, landing on whichever was dense with foliage. A
+moved chunk does have to be rebaked whole -- its vertices carry the old origin
+and a buffer may never mix two -- but not in one frame. It now rebuilds a
+budget of sections a frame into the March mesh and uploads only once it owes
+nothing; until then the offset old buffer draws, which is correct.
+
+A **35-110 ms frame on the first water slot after a commit**: the eight
+incoming chunks were flagged live, so the tick called eight actors that each
+had a `WLoad` queued ahead of the request and replied with nothing. A freshly
+generated chunk has only sea and lakes at rest, so it is no longer flagged; it
+loads in the background, and a spring (`spring_band`) or water spilling at the
+seam still wakes it. A chunk restored from the cache *is* flagged -- it may
+have been mid-flow when the window dropped it.
+
+### Net
+
+Uncapped, 6000 frames, 3 shifts. Worst frame per shift, before -> after:
+
+| | before | after |
+|---|---|---|
+| the shift's own frame | 74 ms | **26 ms** (blocks stage) |
+| the water slot after it | 90 ms | **36 ms** |
+| mean frame | 2.99 ms | 2.67 ms |
+| p99 | 7.92 ms | 6.68 ms |
+
+456 tests. Light oracle at the accepted baseline through four shifts.
+
+Still over budget, and both named rather than fixed: the `blocks` stage at
+25 ms (of which ~14 is eight parallel chunk generations -- it would have to
+generate the band in halves to fit), and the water reload at 36 ms, which is
+the actors regenerating chunks `shift_blocks` has already generated, because
+a message may not carry a native array (GAPS G44).
+
+
+## The window grows to 12 chunks (2026-09-06)
+
+The pop-in half of the report. The window was 8 chunks and the player is held
+in its central 2x2, so terrain simply ended 48-80 blocks out with clear-weather
+fog at 0.002 -- 9-15% opacity at that range, which hides nothing. The window is
+now **12 chunks, 192 blocks**, and the view distance 80-112 blocks.
+
+`World.size()` is the one number, but it cannot be derived into the places that
+need it: a refinement predicate that calls a function has no SMT translation
+(see the header of `world_size_test`). So the literals moved with it, and
+`world_size_test` asserts they agree. What that test did **not** cover, and now
+partly does, was the four bugs this shook out:
+
+1. **`World.cell_x` kept the old divisor.** `pack_cell` packs
+   `((x * cols + z) * 256 + y) * 256 + id`; `cell_z` was updated to 192 and
+   `cell_x` kept `v / 8388608` (= 128 * 65536). Every multi-block write -- every
+   tree, bush and fruit body -- landed at the wrong x. `Biome.pack_edit` had the
+   same shape and the same latent bug. Both unpackers are now written from
+   `cols()` / `stride()` so the divisor cannot drift from the multiplier.
+2. **The shim kept its own copies of four UI slot numbers.** `CF_PRECIP_SLOT`
+   249, `CF_BIOME_SLOT` 248, `CF_MYC_SLOT` 244 and `CF_SPRAY_SLOT` 246 are bound
+   directly in C as well as being named in March. At 144 chunks those are chunk
+   slots, so the spray upload clobbered a chunk's VBO: a segfault on the first
+   frame. The UI slots are now named functions in March from 500 up, and the C
+   defines carry a comment tying them to that list.
+3. **36 relight clamps were `clampi(..., 0, 127)`.** Nothing searching for `128`
+   finds them. Every incremental relight stopped at x or z 127, so the last
+   chunk column's light was never repaired: 2158 wrong sky voxels by frame 12,
+   all at x >= 180. Now `size_x() - 1` / `size_z() - 1`.
+4. **The light oracle compared only the first 4194304 bytes** -- the old volume,
+   less than half the new field. It now reads `Light.volume()`.
+
+The shift trigger was a fifth: `shift_dx`/`shift_dz` tested `lx < 3 || lx > 4`,
+the central 2x2 of an 8-chunk window. On a 12-chunk window that held the player
+three chunks from one edge and seven from the other -- the whole view distance
+the change was for. Now `World.size() / 2 - 1` and `/ 2`.
+
+`cf_gfx_upload_occupancy` aborts if the dimensions March passes it disagree with
+the shim's `CF_WORLD_SIDE`, so the two halves cannot silently drift again.
+
+### What it costs
+
+Seed 11, release, uncapped, the staged shift of the pass above:
+
+| stage | 8 chunks | 12 chunks |
+|---|---|---|
+| blocks | 25.8 ms | **46.9** |
+| light | 9.3 | **16.2** |
+| mesh | 5.2 | **6.3** |
+| commit | 9.1 | **22.5** |
+| whole shift | 48 | **91** |
+| mean frame | 2.67 | 3.8-5.2 |
+
+144 chunks instead of 64: 529k vertices against 218k, three fields of 9.4 MB
+against 4.2. The shift roughly doubled, as a band of 12 chunks and a field slide
+of 9.4 MB must. Three of the four stages still fit a frame; `blocks` at 47 ms
+does not, and splitting it means generating the band in halves.
+
+### Open: 139 stale block-light voxels
+
+The light oracle at frame 30 reads sky 47, block 139. The sky count is the
+accepted "water moves without a relight" pattern (15/13) and is proportionate to
+2.25x the area and 33 springs against 11. The block count is a regression -- it
+was 0 at 8 chunks -- and is NOT explained. What is known:
+
+- Two clusters, hugging x = 0 and z = 0, kept 1-2 against a flooded 0.
+- They need wild fungus to exist, but the count is identical at
+  `CF_MYC_BUDGET` 0, 1, 8 and 64, so the mycelium migration is not writing them.
+- They still appear with every block-mutating phase frozen (water, retexturing,
+  vegetation, fruit and the player's edits all skipped).
+- Under that freeze `World.state_hash` still changes twice per 10-frame period,
+  after the frames whose phase is 2 and 6 -- and every probe *within* those
+  frames, up to and including the one just before the drain, reads the old hash.
+  So blocks are changing outside every writer the frame loop knows about. That,
+  not the light, is the thing to chase.
+
+
+## The water reload, and the bug underneath it (2026-09-06)
+
+### 144 actors pouring the same four lakes
+
+A water actor cannot be handed its chunk -- a message may not carry a native
+array (GAPS G44) -- so `WLoad` regenerates the chunk from the seed. Timing
+`load_sim` (`CF_WATER_LOG=1`, one line per load) said where that went:
+
+| | per load, 144 loads at startup |
+|---|---|
+| the lake tile | **157-214 ms** (median 555 under contention) |
+| the chunk | 4-20 ms |
+| four neighbours' edges | 9-48 ms |
+
+`Lakes.tile` pours a priority-flood over a 128x128 tile. It is a pure function
+of (seed, tx, tz) and a 12-chunk window plus its apron touches nine of them, so
+144 actors were pouring the same nine tiles: **78 seconds** of summed wall.
+
+Memoised in the shim, because actors share a process and nothing else. One
+call, `cf_lake_get`, with the hit flag in the LAST byte of the caller's buffer
+(sized one longer than the tile for it) so the test and the fetch cannot race;
+`cf_lake_put` keeps the first writer of a key. Both take a mutex -- these run on
+scheduler threads. 32 slots, 32 KB each.
+
+A memo alone did nothing: 144 actors start together, all miss, and all pour.
+So the main thread pours the window's nine tiles first, in parallel, before a
+single `WLoad` goes out (`warm_lake_tiles`, 34 ms), and every actor then hits.
+
+| | before | after |
+|---|---|---|
+| tile, per load | med 555 ms | **0.0 ms** |
+| tile, all 144 loads | 78 325 ms | **42.7 ms** |
+| water tick `calls`, after a commit | 35-110 ms | **2-3 ms** |
+| water tick `calls`, over a whole run | — | med 2.15, p99 3.85, max 23.1 ms |
+
+### The bug: two different lakes
+
+Chasing the last of it turned up what the previous entry left open.
+`World.generate` poured **one `Lakes.levels(seed, n)` over the whole window**;
+`World.shift_blocks` and every water actor use **`Lakes.tile_of_chunk`, a fixed
+128-block grid**. Those two agreed only while the window was itself 128 blocks
+-- `Lakes.levels(seed, 8)` *is* tile (0, 0). At 192 they do not, so the world
+generated one set of lakes and then changed to another at the first shift,
+while the actors had been simulating the second set all along.
+
+`World.generate` now generates against `tile_for` like the shift does, warming
+its four tiles first (the memo makes that cheap) and keeping them so the first
+shifts reuse them. Both symptoms the previous entry recorded as open went with
+it:
+
+| | before | after |
+|---|---|---|
+| light oracle, block, frame 30 | 139 | **2** |
+| `World.state_hash` over frames 0-7, every phase frozen | changed twice | **constant** |
+
+The sky count stays at the accepted water pattern (25 at frame 1 rising to 86
+by 120, against 18-43 at 8 chunks with a third of the springs).
+
+Note this changes world generation: a seed makes different lakes than it did,
+and slots written before this will not match. `Lakes.levels` stays for the
+bounded-world tests and `CF_TERRAIN_STATS`.
+
+### Where the frame budget is now
+
+Seed 7, release, uncapped, 19 899 frames, 11 shifts:
+
+| | ms |
+|---|---|
+| mean frame | 4.08 |
+| p99 | 9.41 |
+| max | 55.3 |
+| frames over 16.67 | 34 (0.17%), all of them shift stages |
+| shift: blocks / light / mesh / commit | 47.3 / 21.6 / 6.0 / 21.8 (medians) |
+
+The shift's own stages are all that break budget now. `blocks` is ~14 ms of
+twelve parallel chunk generations plus the field slides; splitting it means
+generating the band in halves.
+
+
+## The shift's stages split again (2026-09-06)
+
+`blocks` was 47 ms of the staged shift's 91 and the only stage far over budget.
+Timing it (`CF_STREAM_LOG=1`) at twelve chunks:
+
+| | ms |
+|---|---|
+| tiles + evict | 4.0 |
+| **chunk pmap** | **23** |
+| shown/dirty/hash arrays | 4.0 |
+| field slides | 4.5 |
+| occupancy band | 11.5 |
+
+So it split into `StChunks` (tiles, evict, the band's chunks) and `StFields`
+(the arrays, the three field slides, the occupancy band), and the three slides
+run as one pmap with the occupancy band riding inside the occupancy leg -- that
+leg needs only the chunks, which the half-shifted world already has.
+
+`World.shift_blocks` is now `shift_chunks` then `shift_fields`, joined by a
+`HalfShift`: the new chunks and the new origin with every field still at the
+old origin. It is not a world anyone may render or read a field from, and it
+never reaches the Scene -- it lives in the frame loop's staging value.
+
+| stage | before | after |
+|---|---|---|
+| chunks | — | **26.5** |
+| fields | — | **17.1** (22.8 before the slides were paired) |
+| blocks | 47.3 | — |
+| light | 21.6 | 21.5 |
+| mesh | 6.0 | 5.6 |
+| commit | 21.8 | 20.3 |
+| worst stage | **47.3** | **26.5** |
+| max frame | 55.3 | 49.5 |
+| frames over 16.67 (19 899 frames, 11 shifts) | 34 | 43 |
+
+The worst stage nearly halves; the count of over-budget frames rises, because a
+shift is now five frames of which four are over rather than four of which three
+are. That is the trade the split is: no single lurch, a few more small ones.
+
+None of the three remaining stages will yield to more splitting:
+
+- **chunks, 26.5 ms** — the twelve new chunks go through one pmap, so the cost
+  is one chunk generation's LATENCY, not their sum. Half a band costs the same
+  as a whole one. Under this is faster terrain generation.
+- **light, 21.5 ms** — the sky and block bands already run as a pair, so the
+  stage costs one band. Splitting them across frames would make each frame cost
+  what both cost together now.
+- **commit, 20.3 ms** — every GL call of the shift is here and has to be:
+  `gfx_shift`, the occupancy upload and the band's mesh uploads must land on one
+  frame or a buffer mixes two origins.
+
+468 tests. Light oracle at the accepted water baseline (sky 47/142/99 at frames
+30/400/1200, block 2/2/1).
+
+
+## The occupancy texture goes toroidal (2026-09-06)
+
+The commit stage was 20-22 ms and `CF_STREAM_LOG` said where: **13 of it was one
+call**, re-uploading the whole 9.4 MB occupancy texture. Everything else in the
+stage is small (biome+myc slide 3.2, actors+springs 3.3, the band's twelve mesh
+uploads 0.8, `gfx_shift` 5 microseconds, the counts/pending remaps 35).
+
+A shift does not change the world the texture describes -- it changes which part
+of it the window covers. So the texture stops moving and the window's origin
+inside it moves instead: window-local (x, y, z) lives at texel
+((x + g_occ_ox) mod w, y, (z + g_occ_oz) mod d), and the origin advances 16 per
+chunk shifted. The band that comes in lands on exactly the texels the band that
+left was using, so a shift uploads 0.8 MB instead of 9.4.
+
+The shader pays an add. It samples with normalised coordinates, so switching the
+two 3D textures from `GL_CLAMP_TO_EDGE` to `GL_REPEAT` and adding a `u_occ_off`
+uniform gets the wrap **in hardware, for free** -- no modulo in the DDA's hot
+loop, and no need for a power-of-two window (192 is not one). Both DDAs already
+bounds-check before every sample, so a ray leaving the window never reaches the
+wrap. The coarse level rides along: the origin is always a multiple of 16 and
+the cell is 8, so it shifts by a whole number of cells.
+
+`cf_gfx_sync_box` and `cf_gfx_set_voxel` write through the same wrap, splitting a
+box that straddles the seam into at most four `glTexSubImage3D` calls sourced out
+of one staging buffer with unpack strides.
+
+### The oracle
+
+`cf_occ_check` reads both levels back and checks every texel against the world's
+occupancy array through the shader's own wrap; the dump frame prints it beside
+the light oracle. It must read 0 and 0.
+
+It did not at first: 37,310 fine texels differed at frame 30, before any shift.
+That turned out to be a pre-existing disagreement, not the wrap --
+`cf_gfx_upload_occupancy` uploads the array verbatim, so water sits in the
+texture as 2 and leaves as 6, while `cf_gfx_sync_box` normalises to 0/255. The
+shader only ever asks `> 0.5`, so both read as empty and nothing was ever wrong;
+the oracle now compares solidity, which is what has to agree.
+
+| frame (shifts by then) | fine | coarse |
+|---|---|---|
+| 30 (0) | 0 | 0 |
+| 800 (1) | 0 | 0 |
+| 1500 (2) | 0 | 0 |
+| 2500 (3) | 0 | 0 |
+| 4000 (6) | 0 | 0 |
+
+### Result
+
+| | before | after |
+|---|---|---|
+| occupancy upload, per shift | 12.6-14.8 ms | **0.7-2.8 ms** |
+| commit stage | 20.3 | **9.7** |
+| worst frame, 19 899 frames | 49.5 | **36.1** |
+| frames over 16.67 | 43 | 39 |
+| worst frame, the 1500-frame line | 33.7 | **29.6** |
+| mean / p99 | 4.13 / 9.53 | 4.11 / 9.49 |
+
+Commit drops out of the over-budget set. What is left is `chunks` at 27.1 ms
+(one chunk generation's latency) and `light` at 23.4 (one band sweep, the two
+already running as a pair). 468 tests.
+
+
+## Measuring per-fragment smooth lighting (2026-09-06)
+
+A prototype (`CF_GPULIGHT=1`) that samples light per fragment from a 3D texture
+instead of reading it from the vertex, to decide whether moving lighting off the
+mesh is affordable. Not a finished path -- see the caveats.
+
+### What the prototype does
+
+`Mesher.corner_pack`, in the fragment shader. For each of the four corners of the
+voxel face the fragment sits on: average the light of the face-adjacent air voxel
+and the three neighbours round that corner, **skipping the occluded ones**, and
+derive AO from how many were occluded (`0.55 + 0.15 * ao`, exactly the mesher's
+`ao_factor`); then bilinearly blend the four. 25 texture fetches a fragment: one
+shared light tap, then three occupancy and three light taps per corner.
+
+The two light fields go up as one RG8 3D texture (sky in R, block in G, level *
+17 so it samples as level/15) on unit 3, toroidal with the occupancy textures.
+
+### It looks right
+
+Same camera, same frame, sun 45, 2560x1440 framebuffer:
+
+| | |
+|---|---|
+| mean channel delta | **0.50** |
+| channels differing by > 4 | 0.6% |
+| by > 16 | 0.2% |
+| by > 48 | 0.1% |
+
+The residue is where it should be: the quad-flip diagonals (`Mesher.flip`, which
+exists only because per-vertex light interpolates wrong across a merged quad) and
+the chunk seams.
+
+### It costs almost nothing
+
+Wall-clock fps cannot see it -- the game is CPU-bound -- so this is a
+`GL_TIME_ELAPSED` query round the frame, two queries ping-ponged so reading one
+never stalls (`CF_GPU_LOG=1`).
+
+| framebuffer | vertex | per-fragment | cost |
+|---|---|---|---|
+| 1600x1200 | 2.581 ms | 2.591 ms | noise |
+| 3456x2234 | 4.489 ms | 4.475 ms | noise |
+| 5120x2880 | 4.196 ms | 4.535 ms | **+0.34 ms** |
+
+At 14.7 M fragments the 25 dependent fetches cost a third of a millisecond, and
+the CPU frame is ~5 ms, so fps does not move at any resolution. The estimate that
+this would make the game GPU-bound was wrong: the shadow DDA already has these
+textures hot, and the extra taps ride along.
+
+### The false start
+
+The first A/B said the vertex path was FASTER (229 vs 196 fps), which was
+nonsense: with `CF_GPULIGHT=0` nothing was being drawn at all. `u_light` was left
+at its default sampler unit 0, where it collided with `u_tex`, a sampler2DArray
+-- two sampler types on one unit make every draw incomplete, silently. The unit
+is now claimed at init with a 1x1x1 texture on it whether the path is used or
+not. Worth remembering: a blank frame with no error is what a sampler collision
+looks like.
+
+### What this does NOT yet measure
+
+The prototype pays the cost of per-fragment light **without taking the benefit**.
+It still bakes light into the vertex and into the greedy key, so the meshes are
+still fragmented by it. Removing light from `Mesher.key_of` is where the win is,
+and it is measured: **517 098 vertices against 334 878** with corner light forced
+constant, so light costs **35% of the mesh**. Taking that would cut vertex work,
+very likely paying for the 0.34 ms and more.
+
+Also missing: the light texture is uploaded whole on every shift rather than
+band-synced like the occupancy (easy, the machinery exists), the path is gated to
+ordinary geometry (`fx >> 8 == 0`, so not foliage or water), and nothing yet
+stops a light change from remeshing.
+
+### What other engines do
+
+Per-vertex at mesh time is the near-universal answer, and 0fps -- the canonical
+write-up for the method this codebase uses -- gives the reason: AO values have to
+be constant along a greedy edge for the merge to be valid, so AO and greedy
+meshing are designed together. It dismisses SSAO for voxel worlds and does not
+consider a 3D-texture alternative at all.
+
+The volume-sampled alternative is well trodden outside voxel games -- Unreal's
+Volumetric Lightmaps interpolate per pixel from a brick structure -- and its
+documented failure is exactly the one that matters here: light leaking, whose
+only fixes are "decrease the cell size" or "increase the thickness of the wall".
+A voxel game whose walls are routinely one block thick cannot take either. That
+is why naive trilinear sampling is not an option, and why the prototype
+reproduces the occlusion-aware average instead of filtering.
+
+The engines that genuinely move voxel lighting to the GPU do it by abandoning
+meshed geometry: voxel cone tracing and voxel ray tracing march the volume
+directly. That is a different renderer, not a change to this one.
+
+
+## Frustum culling (2026-09-06)
+
+`draw_chunks` submitted every chunk slot every frame, the ones behind the camera
+included: 144 chunks x 3 passes, unconditionally. Backface culling was on, but
+nothing rejected a chunk outside the view.
+
+The six planes come out of the view-projection matrix (Gribb-Hartmann): with
+clip = M * v, the left plane is row 3 + row 0, the right row 3 - row 0, and so
+down the rows. `vp` is column-major, GL's order, so component c of row r is
+`vp[r + 4c]`. A chunk is tested as its 16 x 16 columns over the world's full
+height, by the box corner furthest along each plane's normal.
+
+Never applied in map view -- that camera is the overhead one, not `render_vp`.
+`CF_CULL=0` restores the old behaviour for the A/B; `CF_CULL_LOG=1` prints how
+many of the 144 were drawn.
+
+### How much it culls
+
+Depends entirely on where the camera looks, which is the point:
+
+| camera pitch | chunks drawn | culled |
+|---|---|---|
+| -0.10 rad (ahead, the normal angle) | 54 of 144 | **62%** |
+| -0.25 rad | 66 of 144 | 54% |
+| -0.70 rad (steeply down) | 99 of 144 | 31% |
+
+### What it saves
+
+GPU time by `GL_TIME_ELAPSED` query, standing still at pitch -0.70 -- the
+*least* favourable of the three angles:
+
+| framebuffer | all chunks | culled | |
+|---|---|---|---|
+| 3456x2234 | 4.770 ms | **4.047 ms** | -15% |
+| 5120x2880 | 4.839 ms | **4.152 ms** | -14% |
+
+And end to end, the walking benchmark at 3456x2234, uncapped:
+
+| | fps |
+|---|---|
+| all chunks | 95.7 |
+| culled | **104.4** |
+
+**+9%**, for a plane test. The CPU saving is negligible -- draw submission was
+only 0.58 ms of the frame -- so this is almost entirely vertex work the GPU no
+longer does.
+
+### A note on frame dumps as an oracle
+
+The obvious check -- dump a frame with culling on and off and compare -- does not
+work in this project, and it is worth writing down. Two runs of the SAME build
+with the same seed, `CF_NOMOUSE`, `CF_TIME` pinned and `CF_WEATHER` pinned differ
+by 1.6 M pixels at frame 400, and still differ at frame 5. The water actors load
+and tick asynchronously, so the world state at a given frame is not reproducible
+run to run; the player's position is (it settles), but what the water has done is
+not. `todos.md` already records `CF_NOMOUSE` being needed for this reason; the
+asynchrony is a second, larger one.
+
+So culling was checked by eye instead (no holes, no missing chunks) and measured
+with the GPU timer, which does not care about determinism.
+
+
+## Lighting moves off the mesh (2026-09-07)
+
+Light is sampled per fragment from a 3D texture now; the mesher no longer bakes
+it into the vertex or into the greedy key. `Mesher.corner_pack` lives in the
+fragment shader as `smoothLight` -- for each of the four corners of the voxel
+face, the light of the face-adjacent air voxel and the three neighbours round
+that corner, averaged over the unoccluded ones, AO from how many were occluded,
+bilinearly blended. Occlusion-aware, so it does not leak through a one-block
+wall the way a filtered volume lightmap would.
+
+### What it buys
+
+| | before | after |
+|---|---|---|
+| vertices | 517 098 | **334 878** (-35%) |
+| mesh all | 410 ms | 377 ms |
+| relights that force a remesh | all of them | **none** |
+
+Light is out of `Mesher.key_of`, so two faces that differ only in their light
+merge. That 35% was the whole reason the key carried four 10-bit corners.
+
+Nothing marks a section dirty for a light change any more -- a mesh cannot show
+stale light when it holds none. Only geometry does.
+
+### Keeping the texture current
+
+The two fields go up as one RG8 3D texture, toroidal with the occupancy. A
+relight WIDENS a dirty box; the frame flushes it once before drawing, the way
+the drain batches remeshing. Doing it per relight instead cost more than the
+whole change saved: a retexture slot alone is dozens of single-column edits.
+Flushed box, over a walking run: median 4 096 texels, p90 24 576, 0.02 MB
+staged, 223 flushes in 3 000 frames.
+
+### The measurement that was not a measurement
+
+The first numbers said mean frame 4.11 -> 8.61 ms and 39 -> 142 frames over
+budget, which looked like a bad regression. It was not one, and the way it fell
+apart is worth recording.
+
+Segmenting the whole frame showed **SWAP** carrying it -- 5.08 ms in the first
+quarter of a 20 000-frame run, 0.74 by the third, with every other segment flat.
+Swap blocking is the GPU behind, so the two runs were looking at different
+things: the scripted walk is dt-dependent, my change moved dt, and the camera
+path diverged. The same trap as the frame dumps, one level up.
+
+Against a reference build of HEAD in a second worktree, with a FIXED camera so
+both see the same world:
+
+| | HEAD (vertex light) | now (per fragment) |
+|---|---|---|
+| fps, pitch -0.10 | 121.8 | **122.5** |
+| fps, pitch -0.70 | 104.3 | **103.5** |
+| GPU ms, pitch -0.10 | 3.176 | **3.292** |
+
+Within noise, and the 35% of vertices is free.
+
+**The autowalk benchmark line cannot A/B two builds.** Five runs each: HEAD 89,
+92, 101, 104, 114; this build 42, 86, 104, 106, 126. A ±25% spread on the same
+binary, because the walk's path depends on frame timing. Every "57 -> 109 fps"
+style number in this file is a single sample of that, and only the large ones
+mean anything. Use a fixed camera, or the GPU timer, for anything smaller.
+
+
+## Is a light flood on the GPU worth it? A cost probe (2026-09-07)
+
+`CF_LIGHT_BENCH=1` runs `cf_light_bench` on frame 300: the memory pattern a GPU
+flood would have -- one relaxation pass per light level over a box of a 3D
+texture, each voxel reading its six neighbours and the occupancy, ping-ponged
+between two RG8 textures -- against dummy data, timed with a GL query. It
+measures the mechanism, not the flood: no seeding, no correctness.
+
+Written with **layered rendering**: the 3D texture is attached whole and a
+geometry shader sends the triangle to `gl_Layer`, which is how a 3D texture is
+written at all without compute or image load/store, neither of which GL 4.1 has.
+One *instanced* draw covers every z layer (the instance id is the layer, passed
+VS -> GS because `gl_InstanceID` is not visible in a geometry shader). Drawing a
+layer at a time instead was 192 draws a pass and entirely draw-call bound: 11.7
+ms for a single pass over 1.1 M voxels.
+
+Eight timed repetitions, minimum reported. One is not enough -- unrepeated, it
+measured 13 ms for a band and 7.6 ms for a field eight times its size.
+
+| box | voxels | 15 passes |
+|---|---|---|
+| band 46 x 128 x 192 (what a shift lights) | 1.13 M | **3.39 ms** |
+| edit box 48 x 48 x 48 | 0.11 M | **1.30 ms** |
+| band-tall 192 x 128 x 192 | 4.72 M | 13.06 ms |
+| full field 192 x 256 x 192 | 9.44 M | 7.15 ms |
+
+The band repeats to 2 microseconds across runs (3387, 3389). Measured again at
+16 passes the full field is **7.55 ms**, and it repeats too: 7555, 7553, 7554,
+7575 across four runs. So the full field really is faster than the 192 x 128 x
+192 box half its size, which is still not explained -- most likely the 256-high
+viewport tiles better -- but it is a stable measurement, not noise.
+
+That matters, because **a whole-field flood needs no apron**. Ping-ponging two
+textures over a sub-box is not simply a smaller version of the same thing: each
+pass reads its neighbours, so at the box edge it reads the scratch texture
+outside the box, where nothing has been written. A full-field pass has no edge
+and no such hazard. 7.55 ms for the whole field against 16.7 ms for the CPU's
+band is both faster and very much simpler.
+
+### The verdict
+
+**Worth it for the shift's band: 16.7 ms of CPU against 3.39 ms of GPU, ~5x**,
+and the GPU does sky and block together in one RG texture where the CPU runs two
+sweeps in parallel to get its 16.7. That would take the shift's over-budget
+stages from two to one, leaving only `chunks` at 27 ms.
+
+**Not clearly worth it per edit.** A 48-cube is 1.30 ms on the GPU against a
+tree relight's 1.7-2.9 ms on the CPU -- and the CPU's sweep is a worklist that
+stops when nothing more can change, where the GPU pays 15 passes whatever
+happens. For small edits the CPU may well stay ahead.
+
+**And nothing has to come back.** The light field is read on the CPU in exactly
+two places now, both a single voxel: `Audio.exposure` and the dump's ground
+readout. So a GPU flood writes the texture the shader already samples and the
+readback question -- the objection that made this look hard -- does not arise.
+
+
+## The light flood, on the GPU: the propagation rule, verified (2026-09-07)
+
+Step one of moving lighting to the GPU. `cf_light_flood(passes)` runs the CPU's
+own propagation rule as a relaxation over the whole light field, ping-ponged
+between two RG8 3D textures by layered rendering. `Light.give_level`, exactly: a
+voxel takes `max(own, neighbour - 1 - its own opacity)`, and a solid voxel takes
+nothing. Opacity comes from the occupancy texture, which already holds
+`occ_value` -- 0 air, 2 water, 6 leaves, 255 solid.
+
+An EVEN number of passes leaves the result in `g_lt[0]`, the texture the world
+shader samples and the one every upload writes; `g_lt[1]` is pure scratch. The
+whole field, not a box: ping-ponging over a sub-box is not a smaller version of
+this, because every pass reads its neighbours and at the box edge would read
+scratch nothing has written.
+
+### The oracle, and what it caught
+
+A converged field is a fixed point of the relaxation, so uploading the CPU's own
+light and flooding it must change nothing. `cf_light_check` reads the texture
+back and compares, voxel for voxel, through the toroidal wrap. It went:
+
+| | sky | block |
+|---|---|---|
+| first run | 66 | 1260 |
+| after the opacity fix | 1 | 1260 |
+| after the solid-voxel fix | **1** | **0** |
+| with shifts, before the wrap fix | 360 162 | 20 840 |
+| with shifts, after | **2-282** | **0-2** |
+
+Three real bugs, none of which the rendering could have shown:
+
+1. **`cf_gfx_sync_box` normalised the occupancy to 0/255**, flattening water's 2
+   and leaves' 6. The shadow trace only ever asks `> 0.5` so it could not tell,
+   but the flood subtracts the opacity per step -- light ran straight through
+   water. It now uploads the array verbatim, which also puts it back in
+   agreement with `cf_gfx_upload_occupancy`, a disagreement recorded earlier in
+   this file as harmless. It was harmless only until something read the value.
+   `cf_gfx_set_voxel` took a solid/not-solid flag for the same reason and now
+   takes `occ_value` too.
+2. **A solid voxel was being zeroed.** `Light.give_level` says a solid voxel
+   RECEIVES nothing; it does not say it holds nothing. Glowing mycelium is a
+   solid block holding its own emission, and zeroing it put out every light.
+3. **`cf_gfx_upload_light` wrote at window-local coordinates**, ignoring the
+   toroidal origin every other writer respects. Correct only while the origin
+   was zero; after one shift the upload and every reader disagreed by the
+   origin. Standing still could never show it.
+
+The residue, 2-282 sky voxels out of 9 437 184, tracks the light oracle's own
+count of how far the maintained CPU field has drifted from a true flood (the
+accepted "water moves without a relight"). The GPU arrives at the right answer;
+the CPU field is the one that is stale.
+
+### What is NOT done
+
+The relaxation only ever RAISES a value, so flooding from the current field
+cannot correct light that is too bright -- which is why block light reads 0
+against the CPU field but the CPU field still differs from a fresh flood by 41.
+A real flood starts from the seed: sky columns filled and emitters set,
+everything else zero. **That seed pass is the next piece**, and after it the
+wiring that lets the GPU result replace the CPU sweep, and then the relight
+path. The rule itself is now known to be right.
+
+
+## The occupancy bug was only half fixed (2026-09-07)
+
+Tightening `cf_occ_check` from "solidity agrees" to "the exact byte agrees" --
+which is what the light flood actually reads -- showed the texture still
+disagreeing with the world, and getting worse with time: 47 texels at frame 30,
+148 by frame 800.
+
+**Water.** `World.set_cells`, the path the water tick applies its replies
+through, writes the CPU occupancy byte (air 0, water 2) and nothing ever synced
+that to the GPU. Every water movement diverged the texture a little further.
+Invisible for as long as the only consumer was the shadow trace, which asks
+`> 0.5` and cannot tell 0 from 2; a real defect the moment the flood began
+subtracting the opacity per step.
+
+Fixed by syncing the touched y range of the chunk after the cells are applied --
+a few layers near the surface, not the whole column.
+
+| | before | after |
+|---|---|---|
+| occupancy oracle, exact byte, frames 30 / 400 / 800 | 47 / 130 / 148 | **0 / 0 / 0** |
+| flood oracle, sky | 2 / 17 / 67 | **0 / 0 / 4** |
+
+The flood agrees better too, which is the same fact from the other side: it was
+reading water as transparent.
+
+The lesson is the oracle's, not the bug's. `cf_occ_check` was written to compare
+what the shadow trace could see, so it certified a texture that was wrong in a
+way nothing yet looked at. An oracle only checks what it is asked to check.
+
+
+## Correction: the 57 fps baseline was a bad sample (2026-09-07)
+
+Numbers earlier in this file quote "57 -> 109 fps" for the streaming work. **The
+57 does not reproduce.** Re-measuring the branch's starting commit today, five
+runs of the same line: 111, 111, 111, 111, 111. The session's opening 56.94 is
+almost exactly half of that, which is vsync half-rate on a cold or contended
+machine, not the code.
+
+Measured properly -- five samples each, a reference build of the starting commit
+in a second worktree:
+
+| | start (8 chunks) | after (12 chunks) |
+|---|---|---|
+| fps, vsync on, median | 111 | **120** |
+| samples | 111 111 111 111 111 | 101 102 120 120 122 |
+| worst frame, median | **84 ms** | **35 ms** |
+| samples | 10 76 84 86 93 | 31 34 35 35 35 |
+| view distance | 48-80 blocks | **80-112** |
+| vertices | 218 064 | 334 878 |
+
+So the honest headline is **+8% fps and less than half the worst frame, with
+1.5x the view distance** -- not the near-doubling the bad sample suggested. The
+hitch numbers are the real result: the spread went from 10-93 ms to 31-35.
+
+Uncapped at a fixed camera the starting build is FASTER (351 against 194 fps at
+800x600), as it must be -- it draws 2.25x less world. That throughput was spent
+on view distance deliberately.
+
+## Merging main's fauna, and a stride that was only accidentally right
+
+Main's fauna work (populations, flocks, the survey) merged with six conflicts in
+the frame loop, all of them the same shape: main's new Frame fields plus the
+staging field, and main's population-and-flock slide rekeyed from the frame the
+shift is QUEUED to the frame the commit lands, since the world only moves once.
+
+Five of main's tests then failed, and the cause was mine. `Biome.water_dist_at`,
+`water_reach_at` and `trend_at` indexed the distance array by `stride()`, the
+compile-time width, where every other accessor uses `side_of` -- the array's own
+width. That was correct only while `stride()` happened to equal the world's
+width. Widening the window to twelve chunks made those three read eight columns
+off in any narrower world, which is what a test's eight-chunk world is: a pond
+the fish could not find. They index by `side_of` now, like the rest.
+
+505 tests. fps drops from 120 to 88 with the fauna in, which is the cost of the
+new system rather than anything in this branch.
+
+
+## The seed pass: the GPU derives the light the CPU derives (2026-09-07)
+
+The oracle on the dump frame now runs the whole design end to end: upload the
+SEED -- `Light.seed_all` for the sky columns, `Light.seed_emitters` for the
+emitters, everything else dark -- flood it on the GPU, and compare against
+`Light.flood` / `Light.flood_block`, a from-scratch CPU flood of the same world.
+
+| seed | frame | sky | block |
+|---|---|---|---|
+| 7 | 60 | 0 | 0 |
+| 7 | 400 | 0 | 0 |
+| 11 | 30 | 0 | 0 |
+| 11 | 800 | 0 | 0 |
+| 11 | 1500 | 0 | 0 |
+
+Zero, both channels, 9 437 184 voxels each, across shifts and deep into a run.
+**The CPU sweep is redundant**: given the same seed, the GPU arrives at the same
+light. The seed itself stays on the CPU, where it is cheap -- it is a pure
+function of the blocks with no BFS in it, and the expensive half was always the
+sweep.
+
+### Why this is not yet wired in
+
+Two things stand between the proof and the switch, and both are design rather
+than doubt:
+
+**The CPU field cannot be half-swept.** Every relight reads the field it is
+about to repair (`Light.region_reach` sizes its box from the brightest light
+around the region). If the GPU sweeps and the CPU does not, the next edit works
+from a wrong field. So the CPU field has to stop being a swept field altogether
+and become a SEED field -- zeroed and re-seeded per edited box, never swept --
+and every relight becomes "re-seed the box, then flood". That is coherent, and
+it deletes `sweep_box_lists`, `region_reach`, the relight boxes and the marks
+that serve them. It is not a change that can be made half way.
+
+**A flood is 7.55 ms and edits are frequent.** A retexture slot alone is dozens
+of single-column edits. Flooding per edit is out of the question; the light has
+to be marked dirty and flooded ONCE, with the sixteen passes amortised across
+frames -- four a frame is ~1.9 ms and converges in four. Light changes are
+gradual enough that a frame or two of partial convergence is invisible, which is
+the same trade the mesh drain already makes.
+
+
+## The light switch: the CPU stops sweeping (2026-09-07)
+
+The fields `World` keeps are SEED fields now -- sky columns and emitters, with
+nothing spread. The spreading is `cf_light_flood`'s, four passes a frame while
+it converges. `Light.flood` and the whole incremental relight stay in the file
+as the CPU implementation, and the light tests hold them to the same answer the
+GPU has to reach; the game calls neither.
+
+| | before | after |
+|---|---|---|
+| startup light | 312 ms | **43 ms** |
+| shift `light` stage | 16.7 ms | **7.1 ms** (under budget) |
+| fps, fixed camera, pitch -0.10 | 97.3 | **109.4** (+13%) |
+| fps, fixed camera, pitch -0.70 | 88.7 | 88.1 (-1%) |
+| worst frame, median of 5 | 35 ms | 36 ms |
+
+Seeding is the cheap half and always was: it is a walk down each column with no
+BFS in it, which is why the startup number falls sevenfold.
+
+### Two things the switch needed that the proof did not
+
+**A re-seed has to be GROWN, an upload has to be SENT.** The seed of a column is
+local, so computing it needs no radius. Clearing it does: the flood only ever
+raises a value, so light that should now be dimmer -- a roof built over open
+ground -- has to be zeroed before the flood re-derives it, and stale brightness
+reaches as far as the old sweep did. Re-seeding only the edited column left a
+lit halo nothing could put out.
+
+The shift's band is the case where the two come apart, and it is worth 6 ms: the
+columns either side of the seam still hold the right seed and do not need
+re-seeding, but they do need re-SENDING, because the texture there holds spread
+light from the band that left. `reseed_exact` seeds the band, and the commit
+uploads the band grown by the radius.
+
+**`relight_all` had to keep its meaning.** Making it seed instead of flood broke
+six light tests, correctly: they assert the incremental relight matches a full
+re-flood, which is a statement about the CPU implementation and still true. The
+game calls `seed_all_fields` instead. Changing what a tested function means, to
+avoid adding one, is how a test suite stops meaning anything.
+
+### The measurement trap, for the third time
+
+The first measurement of this change said mean frame 8.6 -> 15.65 ms and 7 339
+frames over budget, and I nearly reverted on it. It was the scripted walk again:
+`dt` differs between builds, so the camera goes somewhere else, and a 20 000
+frame mean is mostly a statement about what the camera happened to look at. The
+per-segment timers said the flood cost 0.21 ms and the phases 3.1, which
+accounts for none of it.
+
+**Fixed camera, uncapped, both builds, same seed** is the only frame-rate
+comparison in this project that means anything. The walking benchmark is for
+worst-frame and for oracles, not for means.
+
+
+## G44, paid off (2026-09-07)
+
+`GAPS.md` G44: `NativeU8Arr` is in the typechecker's `non_sendable_types`, so a
+message cannot carry a chunk. What shipped instead was every `WaterChunk` actor
+regenerating its own chunk from `(cx, cz, seed)` on `WLoad` -- and its four
+neighbours too, for the edge mirrors. Five chunk generations a load, and a
+second implementation of world generation living inside the actor.
+
+The rule is not broken here, and the language is not changed. Only integers
+cross the message, as before. The main thread already holds every chunk, so it
+leaves them in a shim-side store keyed by WORLD chunk coordinate, and an actor
+asks by coordinate. The same shape as the lake tile memo, for the same reason:
+actors share a process and this is the only thing they can share. A miss just
+means the actor generates as it used to, so a neighbour outside the window still
+works.
+
+| per water load | before | after |
+|---|---|---|
+| the chunk itself | 13-39 ms | **0.02 ms** |
+| four neighbours | 119 ms | **25.6 ms** |
+| water tick `calls`, worst over a run | 23.1 ms | **5.2 ms** |
+
+The neighbours are not free because the edge mirrors still have to be copied and
+each fetch allocates a chunk-sized buffer; the fetch itself is a memcpy. Fetching
+only the edge strip rather than the whole neighbour is the obvious next cut.
+
+**A behaviour change worth naming:** an actor now loads the world's CURRENT
+chunk, where it used to regenerate the pristine one. That is more correct -- it
+sees the wild fungus, the vegetation and any edits already applied -- but it is
+a change, and no test covered the difference.
+
+### On fixing G44 properly
+
+The gap itself is a March language limitation and the fix it names -- "a
+linear/moved send for uniquely-owned buffers" -- is a compiler change, not a
+change here. Two things stopped that being the answer today:
+
+- `~/code/march` is on a feature branch with another session's uncommitted work
+  in it. Editing a shared repository someone else is mid-task in is not a thing
+  to do quietly.
+- Native arrays are in `non_sendable_types` *deliberately*, added 2026-08-07 and
+  pinned by reject tests `t164`/`t165`, because they are "flat, in-place-mutable
+  buffers that must stay owned by one actor". Removing that is removing a safety
+  property from every March program, not fixing a defect in one.
+
+If it is wanted, the cheap version is copy-on-send -- allow the array in a
+payload and have the runtime deep-copy it, which is semantically a snapshot and
+needs no linearity. For this project it would save the 64 KB memcpy the store
+already costs, and nothing else: the store is what actually removed the cost.

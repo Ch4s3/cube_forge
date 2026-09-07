@@ -1,0 +1,71 @@
+-- G71: the cost of Array.get / Array.set on a 64-element PVec, against a
+-- complete binary tree of 64 leaves -- six matches to any element, six node
+-- allocations to replace one. Run: forge build && ./.march/build/debug/pvec_get
+mod PvecGet do
+  needs IO
+
+  type T = Leaf(Int) | Node(T, T)
+
+  pfn build(lo : Int, n : Int) : T do
+    if n == 1 do Leaf(lo) else Node(build(lo, n / 2), build(lo + n / 2, n / 2)) end
+  end
+  -- index bits from the top: 64 leaves, six levels
+  pfn tget(t : T, i : Int, half : Int) : Int do
+    match t do
+      Leaf(v) -> v
+      Node(l, r) -> if i < half do tget(l, i, half / 2) else tget(r, i - half, half / 2) end
+    end
+  end
+  pfn tset(t : T, i : Int, half : Int, v : Int) : T do
+    match t do
+      Leaf(_) -> Leaf(v)
+      Node(l, r) -> if i < half do Node(tset(l, i, half / 2, v), r) else Node(l, tset(r, i - half, half / 2, v)) end
+    end
+  end
+
+  pfn ints(i : Int, acc : List(Int)) : List(Int) do if i < 0 do acc else ints(i - 1, Cons(i, acc)) end end
+
+  pfn pv_gets(v : Array.PVec(Int), i : Int, n : Int, acc : Int) : Int do
+    if i >= n do acc else pv_gets(v, i + 1, n, acc + Array.get(v, (i * 37) % 64)) end
+  end
+  pfn t_gets(t : T, i : Int, n : Int, acc : Int) : Int do
+    if i >= n do acc else t_gets(t, i + 1, n, acc + tget(t, (i * 37) % 64, 32)) end
+  end
+  pfn pv_sets(v : Array.PVec(Int), i : Int, n : Int) : Array.PVec(Int) do
+    if i >= n do v else pv_sets(Array.set(v, (i * 37) % 64, i), i + 1, n) end
+  end
+  pfn t_sets(t : T, i : Int, n : Int) : T do
+    if i >= n do t else t_sets(tset(t, (i * 37) % 64, 32, i), i + 1, n) end
+  end
+  -- a 64-element PVec whose last element is looked up: the tail's end
+  pfn pv_gets_last(v : Array.PVec(Int), i : Int, n : Int, acc : Int) : Int do
+    if i >= n do acc else pv_gets_last(v, i + 1, n, acc + Array.get(v, 63)) end
+  end
+  pfn pv_gets_first(v : Array.PVec(Int), i : Int, n : Int, acc : Int) : Int do
+    if i >= n do acc else pv_gets_first(v, i + 1, n, acc + Array.get(v, 0)) end
+  end
+
+  fn main(cap : Cap(IO)) : Unit do
+    let v = Array.from_list(ints(63, Nil))
+    let t = build(0, 64)
+    let n = 1000000
+    let t0 = System.monotonic_time()
+    let s1 = pv_gets(v, 0, n, 0)
+    let t1 = System.monotonic_time()
+    let s2 = t_gets(t, 0, n, 0)
+    let t2 = System.monotonic_time()
+    let s3 = pv_gets_first(v, 0, n, 0)
+    let t3 = System.monotonic_time()
+    let s4 = pv_gets_last(v, 0, n, 0)
+    let t4 = System.monotonic_time()
+    println("get x1M, indices spread: PVec " ++ int_to_string(t1 - t0) ++ " ms, tree " ++ int_to_string(t2 - t1) ++ " ms  (sums " ++ int_to_string(s1) ++ " " ++ int_to_string(s2) ++ ")")
+    println("get x1M, index 0: PVec " ++ int_to_string(t3 - t2) ++ " ms; index 63: PVec " ++ int_to_string(t4 - t3) ++ " ms  (" ++ int_to_string(s3 + s4) ++ ")")
+    let m = 100000
+    let t5 = System.monotonic_time()
+    let v2 = pv_sets(v, 0, m)
+    let t6 = System.monotonic_time()
+    let t2b = t_sets(t, 0, m)
+    let t7 = System.monotonic_time()
+    println("set x100k: PVec " ++ int_to_string(t6 - t5) ++ " ms, tree " ++ int_to_string(t7 - t6) ++ " ms  (" ++ int_to_string(Array.get(v2, 5) + tget(t2b, 5, 32)) ++ ")")
+  end
+end

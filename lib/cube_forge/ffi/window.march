@@ -19,12 +19,15 @@ mod CubeForge.Ffi.Window do
     fn x_win_fb_h(): Int = "cf_win_fb_h"
     fn x_win_close(): Unit = "cf_win_close"
     fn x_win_request_close(): Unit = "cf_win_request_close"
+    fn x_win_set_vsync(flag: Int): Unit = "cf_win_set_vsync"
+    fn x_win_set_fullscreen(flag: Int): Unit = "cf_win_set_fullscreen"
     fn x_gfx_init(): Int = "cf_gfx_init"
     fn x_gfx_upload(slot: Int, verts: NativeF32Arr, nfloats: Int): Unit = "cf_gfx_upload"
     fn x_gfx_upload_begin(slot: Int, nfloats: Int): Unit = "cf_gfx_upload_begin"
     fn x_gfx_upload_part(slot: Int, offset: Int, arr: NativeF32Arr, nfloats: Int): Unit = "cf_gfx_upload_part"
     fn x_gfx_begin_frame(r: Float, g: Float, b: Float): Unit = "cf_gfx_begin_frame"
     fn x_gfx_set_weather(fog: Float, overcast: Float, bolt: Float): Unit = "cf_gfx_set_weather"
+    fn x_gfx_set_myc(first: Int, count: Int, rgb: NativeF32Arr, branch: Float, scale: Float, sharp: Float): Unit = "cf_gfx_set_myc"
     fn x_gfx_set_time(t: Float): Unit = "cf_gfx_set_time"
     fn x_spring_set(x: Int, y: Int, z: Int, flag: Int): Unit = "cf_spring_set"   -- not `on`: reserved (GAPS G65)
     fn x_spring_count(): Int = "cf_spring_count"
@@ -33,7 +36,7 @@ mod CubeForge.Ffi.Window do
     fn x_spray_frame(dt: Float, tick: Int): Int = "cf_spray_frame"
     fn x_gfx_draw_precip(slot: Int, nverts: Int): Unit = "cf_gfx_draw_precip"
     fn x_precip_init(cap: Int): Unit = "cf_precip_init"
-    fn x_biome_map_upload(biomes: NativeU8Arr, n: Int): Unit = "cf_biome_map_upload"
+    fn x_biome_map_upload(biomes: NativeU8Arr, active: NativeU8Arr, n: Int): Unit = "cf_biome_map_upload"
     fn x_myc_map_upload(species: NativeU8Arr, vigour: NativeU8Arr, n: Int): Unit = "cf_myc_map_upload"
     fn x_precip_frame(light: NativeU8Arr, live: Int, snow: Int, ex: Float, ey: Float, ez: Float, rx: Float, rz: Float, dt: Float, tick: Int): Unit = "cf_precip_frame"
     fn x_gfx_set_view_proj(m: NativeF32Arr): Unit = "cf_gfx_set_view_proj"
@@ -42,6 +45,19 @@ mod CubeForge.Ffi.Window do
     fn x_gfx_set_shadow(dist: Float, soft: Int): Unit = "cf_gfx_set_shadow"
     fn x_gfx_upload_occupancy(occ: NativeU8Arr, w: Int, h: Int, d: Int): Unit = "cf_gfx_upload_occupancy"
     fn x_gfx_set_voxel(x: Int, y: Int, z: Int, solid: Int): Unit = "cf_gfx_set_voxel"
+    fn x_gfx_shift(dx: Int, dz: Int): Unit = "cf_gfx_shift"
+    fn x_gfx_sync_box(occ: NativeU8Arr, x0: Int, y0: Int, z0: Int, x1: Int, y1: Int, z1: Int): Unit = "cf_gfx_sync_box"
+    fn x_gfx_shift_occupancy(dx: Int, dz: Int): Unit = "cf_gfx_shift_occupancy"
+    fn x_occ_check(occ: NativeU8Arr): Int = "cf_occ_check"
+    fn x_gfx_upload_light(la: NativeU8Arr, lb: NativeU8Arr, w: Int, h: Int, d: Int): Unit = "cf_gfx_upload_light"
+    fn x_gfx_set_gpulight(flag: Int): Unit = "cf_gfx_set_gpulight"   -- not `on`: reserved (GAPS G65)
+    fn x_gfx_gpu_us(): Int = "cf_gfx_gpu_us"
+    fn x_gfx_sync_light_box(la: NativeU8Arr, lb: NativeU8Arr, x0: Int, y0: Int, z0: Int, x1: Int, y1: Int, z1: Int): Unit = "cf_gfx_sync_light_box"
+    fn x_gfx_light_dirty(x0: Int, y0: Int, z0: Int, x1: Int, y1: Int, z1: Int): Unit = "cf_gfx_light_dirty"
+    fn x_gfx_flush_light(la: NativeU8Arr, lb: NativeU8Arr): Unit = "cf_gfx_flush_light"
+    fn x_light_bench(passes: Int, bw: Int, bh: Int, bd: Int): Int = "cf_light_bench"
+    fn x_light_flood(passes: Int): Int = "cf_light_flood"
+    fn x_light_check(la: NativeU8Arr, lb: NativeU8Arr): Int = "cf_light_check"
     fn x_gfx_draw(slot: Int, nverts: Int): Unit = "cf_gfx_draw"
     fn x_gfx_read_pixel(x: Int, y: Int): Int = "cf_gfx_read_pixel"
     fn x_gfx_draw_hud(slot: Int, nverts: Int, textured: Int): Unit = "cf_gfx_draw_hud"
@@ -50,9 +66,22 @@ mod CubeForge.Ffi.Window do
     fn x_gfx_draw_cutout(slot: Int, nverts: Int): Unit = "cf_gfx_draw_cutout"
     fn x_f32_blit(consume dst: NativeF32Arr, di: Int, src: NativeF32Arr, si: Int, n: Int): NativeF32Arr = "cf_f32_blit"
     fn x_u8_blit(consume dst: NativeU8Arr, di: Int, src: NativeU8Arr, si: Int, n: Int): NativeU8Arr = "cf_u8_blit"
+    fn x_f64_blit(consume dst: NativeFloatArr, di: Int, src: NativeFloatArr, si: Int, n: Int): NativeFloatArr = "cf_f64_blit"
+    fn x_u8_zero_box(consume a: NativeU8Arr, x0: Int, x1: Int, y0: Int, y1: Int, z0: Int, z1: Int): NativeU8Arr = "cf_u8_zero_box"
+    fn x_mark_box(consume marks: NativeIntArr, a: NativeU8Arr, b: NativeU8Arr, x0: Int, x1: Int, y0: Int, y1: Int, z0: Int, z1: Int): NativeIntArr = "cf_mark_box"
+    fn x_f32_stamp(consume dst: NativeF32Arr, di: Int, src: NativeF32Arr, si: Int, n: Int, dx: Float, dy: Float, dz: Float, shade: Float): NativeF32Arr = "cf_f32_stamp"
+    fn x_f32_stamp_xf(consume dst: NativeF32Arr, di: Int, src: NativeF32Arr, si: Int, n: Int, dx: Float, dy: Float, dz: Float, shade: Float, cosv: Float, sinv: Float, scale: Float): NativeF32Arr = "cf_f32_stamp_xf"
+    fn x_mesh_slice(consume dst: NativeF32Arr, at: Int, mask: NativeIntArr, base: Int, d: Int, sy: Int, a: Int, ox: Float, oz: Float, layers: NativeF32Arr): NativeF32Arr = "cf_mesh_slice"
+    fn x_mesh_quad(consume dst: NativeF32Arr, at: Int, d: Int, sy: Int, a: Int, u: Int, v: Int, wd: Int, h: Int, key: Int, ox: Float, oz: Float, layers: NativeF32Arr): NativeF32Arr = "cf_mesh_quad"
     fn x_gfx_draw_lines(slot: Int, nverts: Int): Unit = "cf_gfx_draw_lines"
     fn x_gfx_dump_bmp(path: String): Int = "cf_gfx_dump_bmp"
     fn x_live_allocs(): Int = "march_live_allocs"
+    fn x_arr_rc(a: NativeU8Arr): Int = "cf_arr_rc"
+    fn x_lake_get(consume out: NativeU8Arr, seed: Int, tx: Int, tz: Int): NativeU8Arr = "cf_lake_get"
+    fn x_lake_put(seed: Int, tx: Int, tz: Int, a: NativeU8Arr): Unit = "cf_lake_put"
+    fn x_chunk_put(cx: Int, cz: Int, a: NativeU8Arr): Unit = "cf_chunk_put"
+    fn x_chunk_get(consume out: NativeU8Arr, cx: Int, cz: Int): NativeU8Arr = "cf_chunk_get"
+    fn x_rss_bytes(): Int = "cf_rss_bytes"
     fn x_gfx_upload_texture(pixels: NativeU8Arr, w: Int, h: Int, layers: Int): Unit = "cf_gfx_upload_texture"
   end
 
@@ -66,6 +95,10 @@ mod CubeForge.Ffi.Window do
   fn fb_height() : Int do x_win_fb_h() end
   fn close() : Unit do x_win_close() end
   fn request_close() : Unit do x_win_request_close() end
+  doc "Swap interval 1 or 0. A no-op without a window (headless)."
+  fn set_vsync(flag : Bool) : Unit do x_win_set_vsync(if flag do 1 else 0 end) end
+  doc "Move the window onto the primary monitor, or back to where it was. A no-op without a window or when already there."
+  fn set_fullscreen(flag : Bool) : Unit do x_win_set_fullscreen(if flag do 1 else 0 end) end
 
   doc "Compile the shader program and create the shared VAO. 1 on success."
   fn gfx_init() : Int do x_gfx_init() end
@@ -93,12 +126,14 @@ mod CubeForge.Ffi.Window do
 
   doc "Fog density, overcast 0..1 and the lightning spike. The fog colour is whatever gfx_begin_frame last cleared to, so fog and sky always agree."
   fn gfx_set_weather(fog : Float, overcast : Float, bolt : Float) : Unit do x_gfx_set_weather(fog, overcast, bolt) end
+  doc "Tell the shader which layers are mycelium, the species colours to draw filaments in (3 floats each, 0..1), and how strongly. Startup only."
+  fn gfx_set_myc(first : Int, count : Int, rgb : NativeF32Arr, branch : Float, scale : Float, sharp : Float) : Unit do x_gfx_set_myc(first, count, rgb, branch, scale, sharp) end
 
   doc "Draw a precipitation slot: blended, depth-write off, unlit and untextured."
   fn gfx_draw_precip(slot : Int, nverts : Int) : Unit do x_gfx_draw_precip(slot, nverts) end
 
-  doc "Upload the biome map as a flat coloured quad per column into slot 248, for the map view."
-  fn biome_map_upload(biomes : NativeU8Arr, n : Int) : Unit do x_biome_map_upload(biomes, n) end
+  doc "Upload the biome map as a flat coloured quad per column into slot 248, for the map view. Columns flagged in [active] are drawn lighter, marking what is still changing."
+  fn biome_map_upload(biomes : NativeU8Arr, active : NativeU8Arr, n : Int) : Unit do x_biome_map_upload(biomes, active, n) end
   fn myc_map_upload(species : NativeU8Arr, vigour : NativeU8Arr, n : Int) : Unit do x_myc_map_upload(species, vigour, n) end
 
   doc "Allocate the particle pool for [cap] particles. Once, at startup."
@@ -128,8 +163,34 @@ mod CubeForge.Ffi.Window do
   doc "Upload the world occupancy field (1 byte per voxel) as the shadow ray-marcher's 3D texture."
   fn gfx_upload_occupancy(occ : NativeU8Arr, w : Int, h : Int, d : Int) : Unit do x_gfx_upload_occupancy(occ, w, h, d) end
 
-  doc "Update one voxel of the occupancy field after a block edit."
-  fn gfx_set_voxel(x : Int, y : Int, z : Int, solid : Bool) : Unit do x_gfx_set_voxel(x, y, z, if solid do 1 else 0 end) end
+  doc "Update one voxel of the occupancy field after a block edit. Takes CubeForge.Light.occ_value, not a flag: the GPU light flood subtracts the opacity per step, so water and leaves have to arrive as 2 and 6 rather than as 0."
+  fn gfx_set_voxel(x : Int, y : Int, z : Int, occ : Int) : Unit do x_gfx_set_voxel(x, y, z, occ) end
+  doc "The window slid by (dx, dz) chunks: the chunk mesh slots move with their chunks (a moved slot draws 16 blocks over), and every particle and spring the shim holds moves 16 blocks the other way."
+  fn gfx_shift(dx : Int, dz : Int) : Unit do x_gfx_shift(dx, dz) end
+  doc "Sync a box of the shadow occupancy texture from the world's occupancy array, recounting the coarse cells it touches: see cf_gfx_sync_box."
+  fn gfx_sync_box(occ : NativeU8Arr, x0 : Int, y0 : Int, z0 : Int, x1 : Int, y1 : Int, z1 : Int) : Unit do x_gfx_sync_box(occ, x0, y0, z0, x1, y1, z1) end
+  doc "Slide the shadow occupancy textures by ([dx], [dz]) chunks. They are toroidal: nothing moves, the window's origin inside them does, so the caller need only sync the band that came in -- it lands on the texels the band that left was using. See cf_gfx_shift_occupancy."
+  fn gfx_shift_occupancy(dx : Int, dz : Int) : Unit do x_gfx_shift_occupancy(dx, dz) end
+  doc "Oracle for the toroidal occupancy textures: both levels read back and checked against the world's occupancy array through the shader's own wrap. Returns fine mismatches * 1000000 + coarse mismatches; both must be zero. Stalls the pipeline, so it belongs on the dump frame only."
+  fn occ_check(occ : NativeU8Arr) : Int do x_occ_check(occ) end
+  doc "PROTOTYPE: the two light fields as one RG 3D texture, for the per-fragment smooth-lighting measurement."
+  fn gfx_upload_light(la : NativeU8Arr, lb : NativeU8Arr, w : Int, h : Int, d : Int) : Unit do x_gfx_upload_light(la, lb, w, h, d) end
+  doc "PROTOTYPE: light per fragment from that texture rather than from the vertex."
+  fn gfx_set_gpulight(flag : Bool) : Unit do x_gfx_set_gpulight(if flag do 1 else 0 end) end
+  doc "GPU microseconds for the last completed frame, by timer query. The game is CPU-bound, so fps cannot see what the fragment shader costs; this can."
+  fn gfx_gpu_us() : Int do x_gfx_gpu_us() end
+  doc "Sync a box of the light texture from the two light fields, through the toroidal wrap: what every relight and every shift band calls."
+  fn gfx_sync_light_box(la : NativeU8Arr, lb : NativeU8Arr, x0 : Int, y0 : Int, z0 : Int, x1 : Int, y1 : Int, z1 : Int) : Unit do x_gfx_sync_light_box(la, lb, x0, y0, z0, x1, y1, z1) end
+  doc "Widen the frame's dirty light box. A relight calls this; the frame flushes once before drawing."
+  fn gfx_light_dirty(x0 : Int, y0 : Int, z0 : Int, x1 : Int, y1 : Int, z1 : Int) : Unit do x_gfx_light_dirty(x0, y0, z0, x1, y1, z1) end
+  doc "Sync whatever the frame's relights made dirty, once."
+  fn gfx_flush_light(la : NativeU8Arr, lb : NativeU8Arr) : Unit do x_gfx_flush_light(la, lb) end
+  doc "Cost probe for a GPU light flood: [passes] relaxation passes over a bw x bh x bd box, six neighbour fetches a voxel, ping-ponged. Microseconds, or -1. Measures the mechanism, not the real flood."
+  fn light_bench(passes : Int, bw : Int, bh : Int, bd : Int) : Int do x_light_bench(passes, bw, bh, bd) end
+  doc "Run the light flood on the GPU: [passes] relaxation passes over the whole field, rounded up to even so the result lands in the texture the world shader samples. Returns the passes run."
+  fn light_flood(passes : Int) : Int do x_light_flood(passes) end
+  doc "Oracle: the flooded texture against the CPU's two light fields, voxel for voxel. Returns sky_differences * 10000000 + block_differences; both must be 0."
+  fn light_check(la : NativeU8Arr, lb : NativeU8Arr) : Int do x_light_check(la, lb) end
   fn gfx_draw(slot : Int, nverts : Int) : Unit do x_gfx_draw(slot, nverts) end
   doc "Draw a slot as GL_LINES in world space (untextured, no depth test)."
   fn gfx_draw_lines(slot : Int, nverts : Int) : Unit do x_gfx_draw_lines(slot, nverts) end
@@ -140,6 +201,36 @@ mod CubeForge.Ffi.Window do
 
   doc "memcpy [n] bytes from src[si..] into dst[di..]; dst must be uniquely owned."
   fn u8_blit(dst : NativeU8Arr, di : Int, src : NativeU8Arr, si : Int, n : Int) : NativeU8Arr do x_u8_blit(dst, di, src, si, n) end
+  doc "The f64 twin of f32_blit, for NativeFloatArr: [dst] must be uniquely owned."
+  fn f64_blit(dst : NativeFloatArr, di : Int, src : NativeFloatArr, si : Int, n : Int) : NativeFloatArr do x_f64_blit(dst, di, src, si, n) end
+  doc "Diagnostic: the refcount of a byte array as the shim sees it; a uniquely owned array reads 2 (the call's own borrow)."
+  fn arr_rc(a : NativeU8Arr) : Int do x_arr_rc(a) end
+  doc "Look a poured lake tile up in the shim's cache. [out] is the tile's bytes plus ONE more: that last byte comes back 1 on a hit and 0 on a miss, so the test and the fetch are one call and two threads cannot race between them."
+  fn lake_get(out : NativeU8Arr, seed : Int, tx : Int, tz : Int) : NativeU8Arr do x_lake_get(out, seed, tx, tz) end
+  doc "Remember a poured lake tile. The first writer of a key wins, so two threads pouring the same tile agree."
+  fn lake_put(seed : Int, tx : Int, tz : Int, a : NativeU8Arr) : Unit do x_lake_put(seed, tx, tz, a) end
+  doc "Leave a chunk where the water actors can read it, by world chunk coordinate. Nothing crosses a message: GAPS G44 forbids a native array in a payload, and only the coordinate is sent."
+  fn chunk_put(cx : Int, cz : Int, a : NativeU8Arr) : Unit do x_chunk_put(cx, cz, a) end
+  doc "Fetch a stored chunk. [out] is 65537 bytes: the chunk, then one more that comes back 1 on a hit and 0 on a miss, so the test and the fetch are a single call."
+  fn chunk_get(out : NativeU8Arr, cx : Int, cz : Int) : NativeU8Arr do x_chunk_get(out, cx, cz) end
+  doc "Zero the box of a light field (x + 128 * (z + 128 * y)) in place: see cf_u8_zero_box."
+  fn u8_zero_box(a : NativeU8Arr, x0 : Int, x1 : Int, y0 : Int, y1 : Int, z0 : Int, z1 : Int) : NativeU8Arr do x_u8_zero_box(a, x0, x1, y0, y1, z0, z1) end
+  doc "Mark every chunk section in which light fields [a] and [b] differ inside the box, into the 1024-int marks array: see cf_mark_box."
+  fn mark_box(marks : NativeIntArr, a : NativeU8Arr, b : NativeU8Arr, x0 : Int, x1 : Int, y0 : Int, y1 : Int, z0 : Int, z1 : Int) : NativeIntArr do x_mark_box(marks, a, b, x0, x1, y0, y1, z0, z1) end
+  doc "Copy [n] floats of 9-float vertices from src[si..] to dst[di..], adding (dx, dy, dz) to each position and writing [shade]: a model template stamped into a cell."
+  fn f32_stamp(dst : NativeF32Arr, di : Int, src : NativeF32Arr, si : Int, n : Int, dx : Float, dy : Float, dz : Float, shade : Float) : NativeF32Arr do x_f32_stamp(dst, di, src, si, n, dx, dy, dz, shade) end
+  doc "f32_stamp with a yaw and a uniform scale: the template's unit cell is a body centred on (0.5, 0.5, 0.5), scaled, turned about +y by the angle with cosine [cosv] and sine [sinv], and placed with its centre at (dx, dy, dz). Face indices move by the nearest quarter turn so a turned body is lit as it faces. See cf_f32_stamp_xf."
+  fn f32_stamp_xf(dst : NativeF32Arr, di : Int, src : NativeF32Arr, si : Int, n : Int, dx : Float, dy : Float, dz : Float, shade : Float, cosv : Float, sinv : Float, scale : Float) : NativeF32Arr do
+    x_f32_stamp_xf(dst, di, src, si, n, dx, dy, dz, shade, cosv, sinv, scale)
+  end
+  doc "Greedy-merge one 256-key slice of the mesher's mask (read only) into quads at dst[at..], which must have 256 * 54 + 1 floats of room; the floats written come back in dst[at + 256 * 54]. See cf_mesh_slice."
+  fn mesh_slice(dst : NativeF32Arr, at : Int, mask : NativeIntArr, base : Int, d : Int, sy : Int, a : Int, ox : Float, oz : Float, layers : NativeF32Arr) : NativeF32Arr do
+    x_mesh_slice(dst, at, mask, base, d, sy, a, ox, oz, layers)
+  end
+  doc "Write one merged mesher rectangle (6 vertices, 54 floats) at dst[at..] from its integer description and the packed key; see cf_mesh_quad."
+  fn mesh_quad(dst : NativeF32Arr, at : Int, d : Int, sy : Int, a : Int, u : Int, v : Int, wd : Int, h : Int, key : Int, ox : Float, oz : Float, layers : NativeF32Arr) : NativeF32Arr do
+    x_mesh_quad(dst, at, d, sy, a, u, v, wd, h, key, ox, oz, layers)
+  end
   doc "Draw a slot as alpha-cutout foliage: depth on, no blending, texels below the alpha threshold discarded."
   fn gfx_draw_cutout(slot : Int, nverts : Int) : Unit do x_gfx_draw_cutout(slot, nverts) end
   doc "Draw a slot with vertex colour, using the current view-projection and depth state."
@@ -152,6 +243,8 @@ mod CubeForge.Ffi.Window do
   fn gfx_dump_bmp(path : String) : Int do x_gfx_dump_bmp(path) end
   doc "Runtime leak gauge: net live March heap objects (debug/verification only)."
   fn live_allocs() : Int do x_live_allocs() end
+  doc "Resident set size in bytes, for the allocation gauge's byte view."
+  fn rss_bytes() : Int do x_rss_bytes() end
   doc "Upload an RGBA8 texture array (layer-major) and switch the shader to textured mode."
   fn gfx_upload_texture(pixels : NativeU8Arr, w : Int, h : Int, layers : Int) : Unit do x_gfx_upload_texture(pixels, w, h, layers) end
 

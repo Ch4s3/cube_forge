@@ -1,0 +1,364 @@
+-- Pop — what lives where, and why; and what lived where, while you were away.
+--
+-- One count per chunk per species, 0..15, eased toward a CARRYING CAPACITY read
+-- off the world: for a fish, how many of the chunk's columns are water of the
+-- depth it wants; for a bird, how many are its biome. Both are numbers the
+-- world already maintains and the player already changes -- a shovel moves
+-- depth, the climate field moves biome -- so this is the rule that closes the
+-- terraforming loop: dig a pond in grassland and Sunfin capacity rises from
+-- nothing, and over the next minute a school exists that did not.
+--
+-- ── Persistence ────────────────────────────────────────────────────────────
+--
+-- The window's counts are a dense array, like the spring flags. A chunk that
+-- LEAVES the window is archived under its world coordinate with the tick it
+-- left at; when it comes back it is restored, and CAUGHT UP: its counts move
+-- toward the capacity of the world as it now is by however many visits it
+-- missed. So a school you watched fill in twenty chunks away is there when you
+-- return, grown or thinned by the time between -- and a migrant that left in
+-- autumn comes back to the same lake, because the lake's record is what is kept.
+--
+-- The save carries every record, window and archive alike, keyed by world
+-- chunk, so a load does not care where the window was.
+--
+-- ── Seasons ────────────────────────────────────────────────────────────────
+--
+-- A migrant's capacity is zero outside its season, so its counts drain when the
+-- season ends and refill when it returns. That is migration as the population
+-- sees it; the flocks crossing the sky to do it are a flourish for later.
+mod CubeForge.Pop do
+
+  alias CubeForge.Fauna as Fa
+  alias CubeForge.Biome as Biome
+  alias CubeForge.World as World
+
+  doc "The most of one species a chunk holds."
+  fn cap_max() : Int do 15 end
+  doc "Columns of suitable habitat per animal of capacity: a full chunk of the right biome carries eight birds."
+  fn cols_per_bird() : Int do 32 end
+  doc "Water columns in the band per fish of capacity: a full chunk of the right water carries sixteen fish."
+  fn cols_per_fish() : Int do 16 end
+  doc "Chunks the population tick visits per world tick: four, so a full pass of a 64-chunk window takes under three seconds at six ticks a second, and a dug pond has fish in it inside ten."
+  fn chunks_per_tick() : Int do 4 end
+  doc "Ticks between two visits to the same chunk of a window [n] a side: what catch-up counts missed visits in."
+  fn visit_period(n : Int) : Int do
+    let p = n * n / chunks_per_tick()
+    if p < 1 do 1 else p end
+  end
+
+  -- An archived chunk: its world key, the tick it was archived at, and a count
+  -- per species.
+  type Rec = Rec(Int, Int, NativeU8Arr)
+  fn rec_key(r : Rec) : Int do match r do Rec(k, _, _) -> k end end
+  fn rec_tick(r : Rec) : Int do match r do Rec(_, t, _) -> t end end
+  fn rec_counts(r : Rec) : NativeU8Arr do match r do Rec(_, _, c) -> c end end
+
+  doc "A world chunk's key: the coordinates biased positive and packed. The window origin can be anywhere, so the world coordinate can be negative."
+  fn key_of(wcx : Int, wcz : Int) : Int do (wcx + 32768) * 65536 + (wcz + 32768) end
+  fn key_cx(k : Int) : Int do k / 65536 - 32768 end
+  fn key_cz(k : Int) : Int do k % 65536 - 32768 end
+
+  -- window counts (side * side chunks x Fa.count() species), the side in
+  -- chunks, and the archive of chunks that have left
+  type Reg = Reg(NativeU8Arr, Int, List(Rec))
+
+  fn side(r : Reg) : Int do match r do Reg(_, n, _) -> n end end
+  fn counts(r : Reg) : NativeU8Arr do match r do Reg(c, _, _) -> c end end
+  fn archive(r : Reg) : List(Rec) do match r do Reg(_, _, a) -> a end end
+  fn archived(r : Reg) : Int do List.length(archive(r)) end
+  fn slot(n : Int, cx : Int, cz : Int, sp : Int) : Int do (cx + n * cz) * Fa.count() + (sp - 1) end
+
+  fn new(n : Int) : Reg do Reg(NativeArray.make_u8(n * n * Fa.count(), 0), n, Nil) end
+  fn count_of(r : Reg, cx : Int, cz : Int, sp : Int) : Int do NativeArray.get_u8(counts(r), slot(side(r), cx, cz, sp)) end
+
+  -- ── Capacity ──────────────────────────────────────────────────────────────
+  doc "How deep the water is at column (x, z): the field's surface (water included) less the first solid block under it. 0 on dry land."
+  fn depth_at(w : CubeForge.World.World, bio : CubeForge.Biome.Field, x : Int, z : Int) : Int do
+    if Biome.water_dist_at(bio, x, z) != 0 do 0
+    else
+      let top = Biome.height_of(bio, x, z)
+      let bed = World.surface_y_below(w, x, z, top)
+      if bed < 0 do top else top - bed end
+    end
+  end
+
+  doc "Whether column (x, z) is water fish [sp] would hold: in its depth band, and of the body size it wants."
+  fn fish_column(w : CubeForge.World.World, bio : CubeForge.Biome.Field, sp : Int, x : Int, z : Int) : Bool do
+    let d = depth_at(w, bio, x, z)
+    if d < Fa.depth_lo(sp) do false
+    else if d > Fa.depth_hi(sp) do false
+    else
+      let small = Biome.water_reach_at(bio, x, z) == Biome.small_reach()
+      if Fa.wants_small_water(sp) do small else !small end
+    end end
+  end
+
+  -- ── One pass over the chunk, then every species against it ─────────────
+  -- Depth costs a walk down the column, and there are eighteen species: read
+  -- per species that was 4,608 walks a chunk and the fauna slot was the second
+  -- most frequent slow frame in a run. Measured ONCE into a profile -- 256
+  -- depths and 256 small-water flags -- and the species are then a comparison
+  -- each. Biome is a byte read and needs no profile.
+  type Profile = Profile(NativeIntArr, NativeU8Arr)
+
+  pfn profile_go(w : CubeForge.World.World, bio : CubeForge.Biome.Field, cx : Int, cz : Int, i : Int, d : NativeIntArr, sm : NativeU8Arr) : Profile do
+    if i >= 256 do Profile(d, sm)
+    else
+      let x = 16 * cx + i % 16
+      let z = 16 * cz + i / 16
+      let dep = depth_at(w, bio, x, z)
+      let small = if dep > 0 && Biome.water_reach_at(bio, x, z) == Biome.small_reach() do 1 else 0 end
+      profile_go(w, bio, cx, cz, i + 1, NativeArray.set_int(d, i, dep), NativeArray.set_u8(sm, i, small))
+    end
+  end
+  doc "The chunk's water, measured once: depth per column, and whether that water is a small body."
+  fn profile(w : CubeForge.World.World, bio : CubeForge.Biome.Field, cx : Int, cz : Int) : Profile do
+    profile_go(w, bio, cx, cz, 0, NativeArray.make_int(256, 0), NativeArray.make_u8(256, 0))
+  end
+  pfn prof_fish(pr : Profile, sp : Int, i : Int) : Bool do
+    match pr do
+      Profile(d, sm) ->
+        let dep = NativeArray.get_int(d, i)
+        if dep < Fa.depth_lo(sp) do false
+        else if dep > Fa.depth_hi(sp) do false
+        else if Fa.wants_small_water(sp) do NativeArray.get_u8(sm, i) == 1
+        else NativeArray.get_u8(sm, i) == 0 end end end
+    end
+  end
+  pfn fish_go(pr : Profile, sp : Int, i : Int, acc : Int) : Int do
+    if i >= 256 do acc else fish_go(pr, sp, i + 1, if prof_fish(pr, sp, i) do acc + 1 else acc end) end
+  end
+  pfn bird_go(bio : CubeForge.Biome.Field, sp : Int, cx : Int, cz : Int, i : Int, acc : Int) : Int do
+    if i >= 256 do acc
+    else bird_go(bio, sp, cx, cz, i + 1, if Fa.wants_biome(sp, Biome.biome_of(bio, 16 * cx + i % 16, 16 * cz + i / 16)) do acc + 1 else acc end) end
+  end
+  pfn clamp_cap(v : Int) : Int do if v > cap_max() do cap_max() else v end end
+
+  doc "How many of species [sp] chunk (cx, cz) can hold at [year] (0..1 through the year), against a profile of it. A migrant out of season holds none."
+  fn capacity_of(pr : Profile, bio : CubeForge.Biome.Field, cx : Int, cz : Int, sp : Int, year : Float) : Int do
+    if !Fa.in_season(sp, year) do 0
+    else if Fa.is_fish(sp) do clamp_cap(fish_go(pr, sp, 0, 0) / cols_per_fish())
+    else clamp_cap(bird_go(bio, sp, cx, cz, 0, 0) / cols_per_bird()) end end
+  end
+  doc "capacity_of, profiling the chunk itself. A caller asking about several species should profile once."
+  fn capacity(w : CubeForge.World.World, bio : CubeForge.Biome.Field, cx : Int, cz : Int, sp : Int, year : Float) : Int do
+    capacity_of(profile(w, bio, cx, cz), bio, cx, cz, sp, year)
+  end
+
+  doc "A column in chunk (cx, cz) that suits species [sp] -- somewhere to put a flock's home -- packed as x + 4096 z, or -1."
+  fn sample_column(w : CubeForge.World.World, bio : CubeForge.Biome.Field, cx : Int, cz : Int, sp : Int) : Int do
+    sample_go(w, bio, cx, cz, sp, 0)
+  end
+  pfn sample_go(w : CubeForge.World.World, bio : CubeForge.Biome.Field, cx : Int, cz : Int, sp : Int, i : Int) : Int do
+    if i >= 256 do 0 - 1
+    else
+      -- walk the chunk from its middle outward, so the home is central when it can be
+      let j = (i + 136) % 256
+      let x = 16 * cx + j % 16
+      let z = 16 * cz + j / 16
+      let ok = if Fa.is_fish(sp) do fish_column(w, bio, sp, x, z) else Fa.wants_biome(sp, Biome.biome_of(bio, x, z)) end
+      if ok do x + 4096 * z else sample_go(w, bio, cx, cz, sp, i + 1) end
+    end
+  end
+
+  -- ── The tick ──────────────────────────────────────────────────────────────
+  -- Every species of one chunk, its count moved [steps] toward its capacity --
+  -- one step on an ordinary visit, more when catching up. The array is threaded
+  -- unwrapped so the writes are in place (GAPS G68).
+  pfn toward(have : Int, want : Int, steps : Int) : Int do
+    if have < want do (if have + steps > want do want else have + steps end)
+    else if have > want do (if have - steps < want do want else have - steps end)
+    else have end end
+  end
+  pfn ease_go(c : NativeU8Arr, n : Int, pr : Profile, bio : CubeForge.Biome.Field, cx : Int, cz : Int, year : Float, steps : Int, sp : Int) : NativeU8Arr do
+    if sp > Fa.count() do c
+    else
+      let i = slot(n, cx, cz, sp)
+      let have = NativeArray.get_u8(c, i)
+      let next = toward(have, capacity_of(pr, bio, cx, cz, sp, year), steps)
+      ease_go(if next == have do c else NativeArray.set_u8(c, i, next) end, n, pr, bio, cx, cz, year, steps, sp + 1)
+    end
+  end
+  doc "Move every species of chunk (cx, cz) one step toward its capacity at [year]."
+  fn tick_chunk(r : Reg, w : CubeForge.World.World, bio : CubeForge.Biome.Field, cx : Int, cz : Int, year : Float) : Reg do
+    match r do Reg(c, n, a) -> Reg(ease_go(c, n, profile(w, bio, cx, cz), bio, cx, cz, year, 1, 1), n, a) end
+  end
+
+  -- ── The window moved ──────────────────────────────────────────────────────
+  pfn any_go(c : NativeU8Arr, base : Int, j : Int) : Bool do
+    if j >= Fa.count() do false else if NativeArray.get_u8(c, base + j) != 0 do true else any_go(c, base, j + 1) end end
+  end
+  pfn copy_go(c : NativeU8Arr, base : Int, out : NativeU8Arr, j : Int) : NativeU8Arr do
+    if j >= Fa.count() do out else copy_go(c, base, NativeArray.set_u8(out, j, NativeArray.get_u8(c, base + j)), j + 1) end
+  end
+  -- Drop the record with [key], if there is one.
+  pfn drop_go(a : List(Rec), key : Int, acc : List(Rec)) : List(Rec) do
+    match a do
+      Nil -> acc
+      Cons(r, rest) -> drop_go(rest, key, if rec_key(r) == key do acc else Cons(r, acc) end)
+    end
+  end
+  doc "The archive's record for [key], or a record with tick -1 when there is none."
+  fn lookup(a : List(Rec), key : Int) : Rec do
+    match a do
+      Nil -> Rec(key, 0 - 1, NativeArray.make_u8(Fa.count(), 0))
+      Cons(r, rest) -> if rec_key(r) == key do r else lookup(rest, key) end
+    end
+  end
+  -- Old local chunk d -> new local chunk, or -1 when it left the window.
+  pfn dest_of(d : Int, n : Int, dx : Int, dz : Int) : Int do
+    let nx = d % n - dx
+    let nz = d / n - dz
+    if nx >= 0 && nx < n && nz >= 0 && nz < n do nx + n * nz else 0 - 1 end
+  end
+  -- Every old chunk that stayed, written at its destination's base.
+  pfn move_go(old : NativeU8Arr, out : NativeU8Arr, n : Int, dx : Int, dz : Int, d : Int) : NativeU8Arr do
+    if d >= n * n do out
+    else
+      let dest = dest_of(d, n, dx, dz)
+      move_go(old, if dest < 0 do out else move_counts(old, d * Fa.count(), out, dest * Fa.count(), 0) end, n, dx, dz, d + 1)
+    end
+  end
+  pfn move_counts(old : NativeU8Arr, from : Int, out : NativeU8Arr, to : Int, j : Int) : NativeU8Arr do
+    if j >= Fa.count() do out else move_counts(old, from, NativeArray.set_u8(out, to + j, NativeArray.get_u8(old, from + j)), to, j + 1) end
+  end
+  pfn archive_go(old : NativeU8Arr, a : List(Rec), n : Int, dx : Int, dz : Int, ox : Int, oz : Int, tick : Int, d : Int) : List(Rec) do
+    if d >= n * n do a
+    else
+      let base = d * Fa.count()
+      let a1 = if dest_of(d, n, dx, dz) >= 0 do a
+               else if any_go(old, base, 0) do
+                 let key = key_of(ox + d % n, oz + d / n)
+                 Cons(Rec(key, tick, copy_go(old, base, NativeArray.make_u8(Fa.count(), 0), 0)), drop_go(a, key, Nil))
+               else a end end
+      archive_go(old, a1, n, dx, dz, ox, oz, tick, d + 1)
+    end
+  end
+  doc """
+  The registry after the window slid by (dx, dz) chunks, from origin (ox, oz),
+  at [tick]: chunks that stayed move with it, chunks that left are archived,
+  chunks that came in are empty until `restore_entered` fills them from the
+  archive -- which needs the new world, so it is a second call.
+  """
+  fn shift(r : Reg, dx : Int, dz : Int, ox : Int, oz : Int, tick : Int) : Reg do
+    match r do
+      Reg(c, n, a) -> Reg(move_go(c, NativeArray.make_u8(n * n * Fa.count(), 0), n, dx, dz, 0), n, archive_go(c, a, n, dx, dz, ox, oz, tick, 0))
+    end
+  end
+
+  -- A chunk that came in: its record, if any, restored and caught up -- each
+  -- species moved toward today's capacity by the visits it missed -- and the
+  -- record dropped from the archive.
+  pfn restore_one(r : Reg, w : CubeForge.World.World, bio : CubeForge.Biome.Field, cx : Int, cz : Int, key : Int, year : Float, tick : Int) : Reg do
+    match r do
+      Reg(c, n, a) ->
+        let rec = lookup(a, key)
+        if rec_tick(rec) < 0 do r
+        else
+          let missed = (tick - rec_tick(rec)) / visit_period(n)
+          let c1 = move_counts(rec_counts(rec), 0, c, slot(n, cx, cz, 1), 0)
+          let c2 = if missed <= 0 do c1 else ease_go(c1, n, profile(w, bio, cx, cz), bio, cx, cz, year, missed, 1) end
+          Reg(c2, n, drop_go(a, key, Nil))
+        end
+    end
+  end
+  pfn restore_go(r : Reg, w : CubeForge.World.World, bio : CubeForge.Biome.Field, dx : Int, dz : Int, ox : Int, oz : Int, year : Float, tick : Int, d : Int) : Reg do
+    if d >= side(r) * side(r) do r
+    else
+      let n = side(r)
+      -- a chunk came in if nothing moved into it: its old position was outside
+      let sx = d % n + dx
+      let sz = d / n + dz
+      let came = sx < 0 || sx >= n || sz < 0 || sz >= n
+      let r1 = if came do restore_one(r, w, bio, d % n, d / n, key_of(ox + d % n, oz + d / n), year, tick) else r end
+      restore_go(r1, w, bio, dx, dz, ox, oz, year, tick, d + 1)
+    end
+  end
+  doc "After a shift by (dx, dz) to the new origin (ox, oz): every chunk that came in is restored from the archive and caught up against the world as it now is."
+  fn restore_entered(r : Reg, w : CubeForge.World.World, bio : CubeForge.Biome.Field, dx : Int, dz : Int, ox : Int, oz : Int, year : Float, tick : Int) : Reg do
+    restore_go(r, w, bio, dx, dz, ox, oz, year, tick, 0)
+  end
+
+  -- ── Saving ────────────────────────────────────────────────────────────────
+  -- Every record, window and archive alike, keyed by world chunk: [key, tick,
+  -- count per species] each. A load does not care where the window was.
+  fn rec_len() : Int do 2 + Fa.count() end
+  pfn emit_counts(c : NativeU8Arr, base : Int, j : Int, acc : List(Int)) : List(Int) do
+    if j < 0 do acc else emit_counts(c, base, j - 1, Cons(NativeArray.get_u8(c, base + j), acc)) end
+  end
+  pfn emit_window(c : NativeU8Arr, n : Int, ox : Int, oz : Int, tick : Int, d : Int, acc : List(Int)) : List(Int) do
+    if d < 0 do acc
+    else
+      let base = d * Fa.count()
+      let acc1 = if any_go(c, base, 0) do Cons(key_of(ox + d % n, oz + d / n), Cons(tick, emit_counts(c, base, Fa.count() - 1, acc))) else acc end
+      emit_window(c, n, ox, oz, tick, d - 1, acc1)
+    end
+  end
+  pfn emit_archive(a : List(Rec), acc : List(Int)) : List(Int) do
+    match a do
+      Nil -> acc
+      Cons(r, rest) -> emit_archive(rest, Cons(rec_key(r), Cons(rec_tick(r), emit_counts(rec_counts(r), 0, Fa.count() - 1, acc))))
+    end
+  end
+  doc "Every record as a flat list for the save header: the window's chunks at (ox, oz) as of [tick], then the archive."
+  fn to_list(r : Reg, ox : Int, oz : Int, tick : Int) : List(Int) do
+    match r do Reg(c, n, a) -> emit_window(c, n, ox, oz, tick, n * n - 1, emit_archive(a, Nil)) end
+  end
+  pfn take_counts(l : List(Int), out : NativeU8Arr, j : Int) : List(Int) do
+    if j >= Fa.count() do l
+    else
+      match l do
+        Nil -> l
+        Cons(v, rest) -> take_counts(rest, NativeArray.set_u8(out, j, if v < 0 do 0 else if v > cap_max() do cap_max() else v end end), j + 1)
+      end
+    end
+  end
+  pfn from_go(c : NativeU8Arr, n : Int, a : List(Rec), ox : Int, oz : Int, l : List(Int)) : Reg do
+    match l do
+      Nil -> Reg(c, n, a)
+      Cons(key, rest0) ->
+        match rest0 do
+          Nil -> Reg(c, n, a)
+          Cons(tick, rest1) ->
+            -- the counts are read twice: once to find where the record ends,
+            -- once into the array. Cheaper than returning both from one walk.
+            from_go_place(c, n, a, ox, oz, key, tick, rest1, take_counts(rest1, NativeArray.make_u8(Fa.count(), 0), 0))
+        end
+    end
+  end
+  pfn from_go_place(c : NativeU8Arr, n : Int, a : List(Rec), ox : Int, oz : Int, key : Int, tick : Int, vals : List(Int), rest : List(Int)) : Reg do
+    let cnt = take_counts_fresh(vals, NativeArray.make_u8(Fa.count(), 0), 0)
+    let lx = key_cx(key) - ox
+    let lz = key_cz(key) - oz
+    if lx >= 0 && lx < n && lz >= 0 && lz < n do
+      from_go(move_counts(cnt, 0, c, slot(n, lx, lz, 1), 0), n, a, ox, oz, rest)
+    else
+      from_go(c, n, Cons(Rec(key, tick, cnt), drop_go(a, key, Nil)), ox, oz, rest)
+    end
+  end
+  pfn take_counts_fresh(l : List(Int), out : NativeU8Arr, j : Int) : NativeU8Arr do
+    if j >= Fa.count() do out
+    else
+      match l do
+        Nil -> out
+        Cons(v, rest) -> take_counts_fresh(rest, NativeArray.set_u8(out, j, if v < 0 do 0 else if v > cap_max() do cap_max() else v end end), j + 1)
+      end
+    end
+  end
+  doc "A registry from a saved list, for a window [n] a side at origin (ox, oz): records inside the window fill it, the rest are archived."
+  fn from_list(n : Int, ox : Int, oz : Int, l : List(Int)) : Reg do
+    from_go(NativeArray.make_u8(n * n * Fa.count(), 0), n, Nil, ox, oz, l)
+  end
+
+  doc "A number that changes when any count does."
+  fn state_hash(r : Reg) : Int do hash_go(counts(r), NativeArray.length_u8(counts(r)), 0, 2166136261) end
+  pfn hash_go(c : NativeU8Arr, len : Int, i : Int, acc : Int) : Int do
+    if i >= len do acc else hash_go(c, len, i + 1, int_and(acc * 16777619 + NativeArray.get_u8(c, i), 1073741823)) end
+  end
+  doc "Animals of all species across the window."
+  fn total(r : Reg) : Int do total_go(counts(r), NativeArray.length_u8(counts(r)), 0, 0) end
+  pfn total_go(c : NativeU8Arr, len : Int, i : Int, acc : Int) : Int do
+    if i >= len do acc else total_go(c, len, i + 1, acc + NativeArray.get_u8(c, i)) end
+  end
+
+end

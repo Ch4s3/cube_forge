@@ -43,6 +43,55 @@ mod CubeForge.Test.Terrain do
     end
   end
 
+
+  -- The new layers: masks stay in range, and a terrace is flat where it claims to be.
+  pfn masks_in_range(i : Int) : Bool do
+    if i >= 400 do true
+    else
+      let x = int_to_float(i) *. 1.7
+      let z = int_to_float(i) *. 0.9
+      let a = N.ridged_fbm(x *. 0.028, z *. 0.028, 3)
+      let b = N.plateau_mask(x, z, 3)
+      let c = N.river_mask(x, z, 3)
+      let ok = a >= 0.0 && a <= 1.0 && b >= 0.0 && b <= 1.0 && c >= 0.0 && c <= 1.0
+      if ok do masks_in_range(i + 1) else false end
+    end
+  end
+
+  pfn terrace_bounded(i : Int) : Bool do
+    if i >= 400 do true
+    else
+      let v = int_to_float(i) *. 0.37
+      let d = Math.abs(N.terrace(v, 2.5) -. v)
+      if d <= N.plateau_step() *. 0.5 +. 0.000001 do terrace_bounded(i + 1) else false end
+    end
+  end
+
+  pfn near(a : Float, b : Float) : Bool do Math.abs(a -. b) < 0.000001 end
+
+  -- Age: the same base seed at two ages. The noise underneath is identical; only
+  -- the erosion knobs move, so heights differ but the lattice does not.
+  pfn noise_age_blind(i : Int) : Bool do
+    if i >= 100 do true
+    else
+      let x = int_to_float(i) *. 0.83
+      let z = int_to_float(i) *. 0.29
+      if N.value2(x, z, N.with_age(5, 0)) == N.value2(x, z, N.with_age(5, 90)) do noise_age_blind(i + 1) else false end
+    end
+  end
+  pfn heights_differ_by_age(i : Int) : Bool do
+    if i >= 200 do false
+    else if N.height(i * 3 % 128, i * 7 % 128, N.with_age(7, 0)) != N.height(i * 3 % 128, i * 7 % 128, N.with_age(7, 100)) do true
+    else heights_differ_by_age(i + 1) end end
+  end
+  pfn max_height(i : Int, seed : Int, hi : Int) : Int do
+    if i >= 1024 do hi
+    else
+      let h = N.height(i % 32 * 4, i / 32 * 4, seed)
+      max_height(i + 1, seed, if h > hi do h else hi end)
+    end
+  end
+
   describe "ridged noise" do
     test "stays within [0, 1]" do
       Test.assert_true(ridged_in_range(0, 1.0, 0.0), "ridged noise in range")
@@ -56,6 +105,249 @@ mod CubeForge.Test.Terrain do
     end
     test "spans a range that brackets sea level" do
       Test.assert_true(height_span(0, 999, 0), "terrain reaches above and below sea level")
+    end
+  end
+
+
+  describe "world size" do
+    test "the size rides above the age in the seed and round-trips" do
+      Test.assert_eq_int(N.size_of(7), N.default_size(), "a plain seed is the full size")
+      Test.assert_eq_int(N.size_of(N.with_size(7, 4)), 4, "size back out")
+      Test.assert_eq_int(N.age_of(N.with_size(N.with_age(7, 42), 4)), 42, "the age survives a size")
+      Test.assert_eq_int(N.size_of(N.with_age(N.with_size(7, 6), 42)), 6, "the size survives an age")
+      Test.assert_eq_int(N.base_seed(N.with_age(N.with_size(7, 6), 42)), 7, "and the base")
+      Test.assert_eq_int(N.size_of(N.with_size(7, 2)), N.min_size(), "clamped low")
+      Test.assert_eq_int(N.size_of(N.with_size(7, 20)), N.max_size(), "clamped high")
+      Test.assert_true(N.value2(1.5, 2.5, N.with_size(7, 4)) == N.value2(1.5, 2.5, 7), "the noise ignores the size byte")
+    end
+  end
+
+  describe "world age" do
+    test "the age rides in the seed's high bits and round-trips" do
+      Test.assert_eq_int(N.age_of(N.with_age(12345, 42)), 42, "age back out")
+      Test.assert_eq_int(N.base_seed(N.with_age(12345, 42)), 12345, "base back out")
+      Test.assert_eq_int(N.age_of(7), 0, "a plain seed is age 0")
+      Test.assert_eq_int(N.age_of(N.with_age(7, 500)), N.max_age(), "age is clamped high")
+      Test.assert_eq_int(N.age_of(N.with_age(7, -3)), 0, "and low")
+      Test.assert_eq_int(N.base_seed(N.with_age(N.with_age(9, 10), 20)), 9, "re-aging replaces, it does not stack")
+      Test.assert_eq_int(N.age_of(N.with_age(N.with_age(9, 10), 20)), 20, "the later age wins")
+    end
+    test "the noise underneath is age-blind, the terrain is not" do
+      Test.assert_true(noise_age_blind(0), "value2 ignores the age bits")
+      Test.assert_true(heights_differ_by_age(0), "height does not")
+    end
+    test "erosion grows with age" do
+      Test.assert_true(N.river_depth(1.0) > N.river_depth(0.0), "valleys cut deeper")
+      Test.assert_true(N.river_edge(1.0) < N.river_edge(0.0), "and wider")
+      Test.assert_true(N.mountain_amp(1.0) < N.mountain_amp(0.0), "peaks wear down")
+      Test.assert_true(N.terrace_sharpness(1.0) < N.terrace_sharpness(0.0), "rims slump")
+      Test.assert_true(N.warp_amp(1.0) > N.warp_amp(0.0), "the land bends further")
+      Test.assert_true(N.detail_weight(1.0) < N.detail_weight(0.0), "roughness smooths")
+      Test.assert_true(max_height(0, N.with_age(7, 100), 0) < max_height(0, N.with_age(7, 0), 0), "an ancient world's highest point is lower than a young one's")
+    end
+  end
+
+  -- The floodplain: pairs of neighbouring columns on a river's floor, and how
+  -- many of them step more than one. Along the channel the floor still falls
+  -- with the land, so the test is that an ancient floor steps LESS than a
+  -- young one, not that it is level. Returns pairs * 1000 + steep.
+  pfn floor_pairs(seed : Int, i : Int, pairs : Int, steep : Int) : Int do
+    if i >= 16384 do pairs * 1000 + steep
+    else
+      let wx = i % 128
+      let wz = i / 128
+      if wx >= 127 || N.river_at(wx, wz, seed) < 0.7 || N.river_at(wx + 1, wz, seed) < 0.7 do floor_pairs(seed, i + 1, pairs, steep)
+      else
+        let d = N.height(wx + 1, wz, seed) - N.height(wx, wz, seed)
+        floor_pairs(seed, i + 1, pairs + 1, if d > 1 || d < -1 do steep + 1 else steep end)
+      end
+    end
+  end
+
+  -- A synthetic heightmap: flat at 70 with one column raised by [step] at (8, 8).
+  pfn synth_go(hs : NativeIntArr, i : Int, step : Int) : NativeIntArr do
+    if i >= C.heights_side() * C.heights_side() do hs
+    else
+      let lx = i % C.heights_side() - C.apron()
+      let lz = i / C.heights_side() - C.apron()
+      synth_go(NativeArray.set_int(hs, i, if lx == 8 && lz == 8 do 70 + step else 70 end), i + 1, step)
+    end
+  end
+  pfn synth(step : Int) : NativeIntArr do synth_go(NativeArray.make_int(C.heights_side() * C.heights_side(), 0), 0, step) end
+  pfn top_of(c : CubeForge.Chunk.Chunk, x : Int, z : Int, y : Int) : Int do
+    if y <= 0 do 0 else if C.get(c, x, y, z) != 0 && !C.is_water(C.get(c, x, y, z)) do y else top_of(c, x, z, y - 1) end end
+  end
+  -- In a generated ancient chunk, every gravel-surfaced column stands under
+  -- something higher within talus_reach.
+  pfn gravel_has_cliff(c : CubeForge.Chunk.Chunk, hs : NativeIntArr, i : Int) : Bool do
+    if i >= 256 do true
+    else
+      let x = i % 16
+      let z = i / 16
+      let top = top_of(c, x, z, 200)
+      if C.get(c, x, top, z) != C.gravel() do gravel_has_cliff(c, hs, i + 1)
+      else if C.pile_at(hs, x, z, 1.0) > 0 do gravel_has_cliff(c, hs, i + 1)
+      else false end end
+    end
+  end
+
+  -- Climate ground: find the first column of a kind in a world, packed x + 4096 * z, or -1.
+  pfn first_dune(seed : Int, i : Int) : Int do
+    if i >= 16384 do -1
+    else if N.dune_mask_at(i % 128, i / 128, seed) >= C.dune_min() do i % 128 + 4096 * (i / 128)
+    else first_dune(seed, i + 1) end end
+  end
+  pfn first_glacier(seed : Int, i : Int) : Int do
+    if i >= 16384 do -1
+    else if N.glacier_at(i % 128, i / 128, seed) && !N.moraine_at(i % 128, i / 128, seed) && N.relief(i % 128, i / 128, seed) > N.height(i % 128, i / 128, seed) do i % 128 + 4096 * (i / 128)
+    else first_glacier(seed, i + 1) end end
+  end
+  pfn first_bog(seed : Int, i : Int) : Int do
+    if i >= 16384 do -1
+    else
+      let wx = i % 128
+      let wz = i / 128
+      if C.is_bog(N.height(wx, wz, seed), N.slope(wx, wz, seed), N.river_at(wx, wz, seed), 0, seed) do wx + 4096 * wz
+      else first_bog(seed, i + 1) end
+    end
+  end
+  pfn chunk_of(col : Int, seed : Int) : CubeForge.Chunk.Chunk do
+    C.generate_lakes(col % 4096 / 16 * 16, col / 4096 / 16 * 16, seed, CubeForge.Lakes.levels(seed, 8))
+  end
+
+  describe "climate-shaped ground" do
+    test "the generator's temperature is the biome's" do
+      Test.assert_true(N.temperature(40, 40, 7, 62) == CubeForge.Biome.temp_target(40, 40, 7, 62), "same value at sea level")
+      Test.assert_true(N.temperature(40, 40, 7, 100) == CubeForge.Biome.temp_target(40, 40, 7, 100), "and up a mountain")
+      Test.assert_true(N.temperature(40, 40, 7, 100) < N.temperature(40, 40, 7, 62), "the lapse cools with height")
+    end
+    test "the dune mask needs hot, dry and open ground" do
+      Test.assert_true(N.dune_mask_of(0.9, 90.0, 0.0) == 1.0, "hot, high and out of any valley: a dune field")
+      Test.assert_true(N.dune_mask_of(0.3, 90.0, 0.0) == 0.0, "cold: none")
+      Test.assert_true(N.dune_mask_of(0.9, 63.0, 0.0) == 0.0, "a beach: none")
+      Test.assert_true(N.dune_mask_of(0.9, 90.0, 0.9) == 0.0, "a river valley: none")
+    end
+    test "a dune column is sand through" do
+      let seed = N.with_age(1234, 50)
+      let col = first_dune(seed, 0)
+      Test.assert_true(col >= 0, "seed 1234 at age 50 has a dune field")
+      let c = chunk_of(col, seed)
+      let h = top_of(c, col % 4096 % 16, col / 4096 % 16, 200)
+      Test.assert_eq_int(C.get(c, col % 4096 % 16, h, col / 4096 % 16), C.sand(), "sand on top")
+      Test.assert_eq_int(C.get(c, col % 4096 % 16, h - 3, col / 4096 % 16), C.sand(), "sand three down")
+    end
+    test "a glacier column is ice from its floor to the relief, and the ice retreats with age" do
+      Test.assert_true(N.glacier_temp(1.0) < N.glacier_temp(0.0), "colder threshold when ancient")
+      let seed = N.with_age(11, 0)
+      let col = first_glacier(seed, 0)
+      Test.assert_true(col >= 0, "seed 11 at age 0 has a glacier")
+      let c = chunk_of(col, seed)
+      let x = col % 4096 % 16
+      let z = col / 4096 % 16
+      Test.assert_eq_int(C.get(c, x, N.relief(col % 4096, col / 4096, seed), z), C.ice(), "ice at the relief")
+      Test.assert_eq_int(C.get(c, x, N.height(col % 4096, col / 4096, seed) + 1, z), C.ice(), "ice just above the carved floor")
+    end
+    test "a bog is mud and clay with pools at sea level" do
+      let seed = N.with_age(11, 50)
+      let col = first_bog(seed, 0)
+      Test.assert_true(col >= 0, "seed 11 at age 50 has bog")
+      let c = chunk_of(col, seed)
+      let x = col % 4096 % 16
+      let z = col / 4096 % 16
+      let h = N.height(col % 4096, col / 4096, seed)
+      let top = C.get(c, x, h, z)
+      let pool = C.bog_pool(col % 4096, col / 4096, seed)
+      Test.assert_true(if pool do C.is_water(C.get(c, x, C.sea_level(), z)) else top == C.mud() || top == C.clay() end, "a pool holds water at sea level; the rest is mud or clay")
+    end
+  end
+
+  describe "talus" do
+    test "a four-block face piles gravel at mid-age and nothing in a young world" do
+      Test.assert_eq_int(C.pile_at(synth(4), 9, 8, 0.5), 1, "one block beside a four-block face at mid-age")
+      Test.assert_eq_int(C.pile_at(synth(4), 9, 8, 0.0), 0, "nothing when young")
+      Test.assert_eq_int(C.pile_at(synth(3), 9, 8, 1.0), 0, "a single terrace lip sheds nothing at any age")
+      Test.assert_eq_int(C.pile_at(synth(1), 9, 8, 1.0), 0, "nor a one-block step")
+      Test.assert_eq_int(C.pile_at(synth(8), 9, 8, 1.0), 3, "capped at talus_depth")
+      Test.assert_eq_int(C.pile_at(synth(8), 10, 8, 1.0), 2, "two columns out an eight-block face still gets two")
+      Test.assert_eq_int(C.pile_at(synth(5), 10, 8, 1.0), 0, "two columns out a five-block face is under the angle of rest")
+      Test.assert_eq_int(C.pile_at(synth(8), 10, 8, 0.5), 0, "and at mid-age only the adjacent column piles")
+      Test.assert_eq_int(C.pile_at(synth(12), 10, 8, 1.0), 3, "two columns out a twelve-block face still piles")
+      Test.assert_eq_int(C.pile_at(synth(12), 8, 8, 1.0), 0, "the face itself gets no pile")
+    end
+    test "piles never exceed the depth for the age" do
+      Test.assert_true(C.talus_depth(0.0) == 0 && C.talus_depth(0.5) == 1 && C.talus_depth(1.0) == 3, "0, 1, 3")
+      Test.assert_true(C.talus_reach(0.0) == 1 && C.talus_reach(0.5) == 1 && C.talus_reach(1.0) == 2, "1, 1, 2")
+    end
+    test "in an ancient chunk every gravel column is under a cliff, and the face above stays granite" do
+      let s = N.with_age(7, 100)
+      Test.assert_true(gravel_has_cliff(C.generate(96, 96, s), C.heights(96, 96, s), 0), "gravel only where something sheds onto it")
+    end
+  end
+
+  describe "sediment and floodplains" do
+    test "an ancient river's floor steps less than a young one's" do
+      let young = floor_pairs(N.with_age(1234, 0), 0, 0, 0)
+      let old = floor_pairs(N.with_age(1234, 100), 0, 0, 0)
+      Test.assert_true(young / 1000 > 50 && old / 1000 > 50, "the seed has a river to measure at both ages")
+      -- steep fraction in per mille, so the comparison is between fractions, not counts
+      Test.assert_true((old % 1000) * 1000 / (old / 1000) < (young % 1000) * 1000 / (young / 1000), "fewer steep pairs per pair when ancient")
+    end
+    test "the plain widens and flattens with age" do
+      Test.assert_true(N.plain_edge(1.0) < N.plain_edge(0.0), "wider")
+      Test.assert_true(N.plain_strength(1.0) > N.plain_strength(0.0), "flatter")
+      Test.assert_true(N.plain_mask(1.0, 0.5) == 1.0 && N.plain_mask(0.0, 0.5) == 0.0, "1 on the centreline, 0 outside")
+    end
+    test "sediment lies under a floodplain and nowhere else" do
+      let s = N.with_age(5, 50)
+      Test.assert_eq_int(C.sediment_id(1, 0.9, C.sea_level(), C.sea_level(), s), C.mud(), "wet floor is mud")
+      Test.assert_eq_int(C.sediment_id(1, 0.9, C.sea_level() + 6, C.sea_level(), s), C.clay(), "dry floor is clay")
+      Test.assert_eq_int(C.sediment_id(1, 0.1, C.sea_level() + 6, C.sea_level(), s), 2, "outside the valley is dirt")
+      Test.assert_eq_int(C.sediment_id(C.sand(), 0.9, C.sea_level(), C.sea_level(), s), C.sand(), "a sand shore stays sand")
+      Test.assert_eq_int(C.sediment_id(C.granite(), 0.9, 80, C.sea_level(), s), C.granite(), "a cliff stays granite")
+      Test.assert_eq_int(C.sediment_id(1, 0.9, 81, 80, s), C.mud(), "a lake's floor is wet against the lake's level")
+    end
+  end
+
+  describe "plateaus and rivers" do
+    test "ridged_fbm and the plateau and river masks stay within [0, 1]" do
+      Test.assert_true(masks_in_range(0), "every layer mask in range")
+    end
+    test "a terrace never moves a height more than half a step" do
+      Test.assert_true(terrace_bounded(0), "terrace stays within half a step of the input")
+    end
+    test "a terrace is flat across the middle of a step and rises to the next one at its edge" do
+      let s = N.plateau_step()
+      Test.assert_true(near(N.terrace(3.0 *. s, 2.5), 3.0 *. s), "a step multiple is its own terrace")
+      Test.assert_true(near(N.terrace(3.0 *. s +. 0.1 *. s, 2.5), 3.0 *. s), "just above the multiple is still flat")
+      Test.assert_true(near(N.terrace(3.0 *. s +. 0.29 *. s, 2.5), 3.0 *. s), "flat for the first 30% of the step")
+      Test.assert_true(near(N.terrace(3.0 *. s +. 0.75 *. s, 2.5), 4.0 *. s), "the top 30% has already reached the next terrace")
+      Test.assert_true(N.terrace(3.5 *. s, 2.5) > 3.0 *. s && N.terrace(3.5 *. s, 2.5) < 4.0 *. s, "the middle is the ramp between them")
+    end
+  end
+
+  -- The apron: chunk (0, 0)'s column at lx = 16 is chunk (16, 0)'s column at lx = 0.
+  pfn seam_agrees(a : NativeIntArr, b : NativeIntArr, lz : Int) : Bool do
+    if lz >= 16 + C.apron() do true
+    else if C.hmap_at(a, 16, lz) == C.hmap_at(b, 0, lz) && C.hmap_at(a, 15, lz) == C.hmap_at(b, -1, lz) do seam_agrees(a, b, lz + 1)
+    else false end end
+  end
+  pfn interior_matches(hs : NativeIntArr, i : Int) : Bool do
+    if i >= 256 do true
+    else if C.hmap_at(hs, i % 16, i / 16) == N.height(32 + i % 16, 48 + i / 16, 11) do interior_matches(hs, i + 1)
+    else false end end
+  end
+
+  describe "chunk heightmap" do
+    test "the interior is Noise.height, column for column" do
+      Test.assert_true(interior_matches(C.heights(32, 48, 11), 0), "every column is its height")
+    end
+    test "the apron agrees with the neighbour's interior across the seam" do
+      Test.assert_true(seam_agrees(C.heights(0, 0, 11), C.heights(16, 0, 11), 0 - C.apron()), "x seam, both directions")
+    end
+    test "slope over the array is Noise.slope" do
+      let hs = C.heights(32, 48, 11)
+      Test.assert_eq_int(C.slope_at(hs, 5, 7), N.slope(37, 55, 11), "an interior column")
+      Test.assert_eq_int(C.slope_at(hs, 0, 15), N.slope(32, 63, 11), "a corner column reads the apron")
     end
   end
 
@@ -81,6 +373,50 @@ mod CubeForge.Test.Terrain do
       Test.assert_eq_int(C.subsurface_id(C.granite()), C.granite(), "granite over granite")
       Test.assert_eq_int(C.subsurface_id(1), 2, "grass over dirt")
       Test.assert_eq_int(C.subsurface_id(C.snow()), 2, "snow over dirt")
+    end
+  end
+
+  -- Strata: walk a column from the deep band up to the subsurface and check
+  -- every block is a rock, each band is contiguous and band_thickness() tall
+  -- (the first and last may be cut), and the column matches rock_id.
+  pfn rocks_ok(c : CubeForge.Chunk.Chunk, wx : Int, wz : Int, seed : Int, y : Int, top : Int) : Bool do
+    if y > top do true
+    else
+      let id = C.get(c, wx % 16, y, wz % 16)
+      let rock = id == 3 || id == C.basalt() || id == C.granite() || id == C.sandstone() || id == C.shale()
+      if rock && id == C.rock_id(wx, y, wz, seed) do rocks_ok(c, wx, wz, seed, y + 1, top) else false end
+    end
+  end
+  pfn runs_ok(wx : Int, wz : Int, seed : Int, y : Int, run : Int, band : Int) : Bool do
+    if y >= 200 do true
+    else
+      let k = C.band_of(y, C.band_offset(wx, wz, seed))
+      if k == band do runs_ok(wx, wz, seed, y + 1, run + 1, band)
+      else if run == 0 || run == C.band_thickness() || y < C.band_thickness() + 1 do runs_ok(wx, wz, seed, y + 1, 1, k)
+      else false end end
+    end
+  end
+
+  describe "rock strata" do
+    test "a generated column is bedded rock between the deep band and the subsurface" do
+      let c = C.generate(32, 48, 5)
+      let h = N.height(37, 55, 5)
+      Test.assert_true(rocks_ok(c, 37, 55, 5, C.deep_stone_depth(), h - 4), "rock only, and rock_id's rock")
+      Test.assert_eq_int(C.get(c, 5, C.deep_stone_depth() - 1, 7), C.basalt(), "the deep basalt band is still under it")
+      Test.assert_eq_int(C.get(c, 5, 1, 7), C.bedrock(), "and bedrock under that")
+    end
+    test "bands are contiguous runs of band_thickness() in a column" do
+      Test.assert_true(runs_ok(37, 55, 5, 0, 0, -1), "every full band is band_thickness() tall")
+    end
+    test "rock_id is a function of the world column, the same from any chunk" do
+      Test.assert_eq_int(C.rock_id(40, 30, 40, 9), C.rock_id(40, 30, 40, 9), "deterministic")
+      Test.assert_true(C.band_material(3, 0, 0, 9) != C.bedrock(), "never bedrock")
+    end
+    test "sandstone and shale have their own layers and harvest as stone" do
+      Test.assert_true(CubeForge.Texture.layer_for(C.sandstone()) == 89.0, "sandstone layer")
+      Test.assert_true(CubeForge.Texture.layer_for(C.shale()) == 90.0, "shale layer")
+      Test.assert_eq_int(CubeForge.Inventory.yield_of(C.sandstone()), 3, "sandstone yields stone")
+      Test.assert_eq_int(CubeForge.Inventory.yield_of(C.shale()), 3, "shale yields stone")
     end
   end
 
@@ -113,8 +449,27 @@ mod CubeForge.Test.Terrain do
     test "a spring column has slope and height, and a generated chunk holds it" do
       let n = count_springs(0, 0, 7, 0, 0)
       Test.assert_true(n >= 0, "ran")
-      Test.assert_true(all_springs_ok(0, 7), "every spring cell is a mountainside")
+      Test.assert_true(all_springs_ok(0, 7), "every spring cell is a mountainside or a valley centreline")
     end
+    test "valley springs sit on the centreline, above the rise, and exist somewhere" do
+      Test.assert_true(valley_springs_ok(0, 0, 0) > 0, "some seed in 0..7 has a valley spring")
+      Test.assert_true(CubeForge.Noise.spring_rise(1.0) < CubeForge.Noise.spring_rise(0.0), "an old valley runs lower")
+    end
+  end
+  -- Every valley spring (kind 2) across seeds 0..7 is on the centreline and above
+  -- the rise; returns how many were seen, or -1 when one is misplaced.
+  pfn valley_springs_ok(seed : Int, i : Int, seen : Int) : Int do
+    if seed >= 8 do seen
+    else if i >= 256 do valley_springs_ok(seed + 1, 0, seen)
+    else if CubeForge.Trees.spring_kind(i % 16, i / 16, seed) != 2 do valley_springs_ok(seed, i + 1, seen)
+    else
+      let col = CubeForge.Trees.spring_at_cell(i % 16, i / 16, seed)
+      let wx = col % 4096
+      let wz = col / 4096
+      let ok = CubeForge.Noise.river_at(wx, wz, seed) >= CubeForge.Noise.spring_mask()
+               && CubeForge.Noise.height(wx, wz, seed) > CubeForge.Chunk.sea_level() + CubeForge.Noise.spring_rise(0.0)
+      if ok do valley_springs_ok(seed, i + 1, seen + 1) else 0 - 1 end
+    end end end
   end
   pfn count_springs(cx : Int, cz : Int, seed : Int, i : Int, acc : Int) : Int do
     if i >= 256 do acc else count_springs(cx, cz, seed, i + 1, if CubeForge.Trees.spring_at_cell(i % 16, i / 16, seed) >= 0 do acc + 1 else acc end) end
@@ -131,7 +486,11 @@ mod CubeForge.Test.Terrain do
         let ch = CubeForge.Chunk.generate(wx - wx % 16, wz - wz % 16, seed)
         let block = CubeForge.Chunk.get(ch, wx % 16, h, wz % 16)
         let is_valid_spring = if h >= CubeForge.Noise.snow_line() do block == CubeForge.Chunk.ice() else CubeForge.Chunk.is_source(block) end
-        if CubeForge.Noise.slope(wx, wz, seed) >= 2 && h >= 72 && is_valid_spring do all_springs_ok(i + 1, seed) else false end
+        let mountainside = CubeForge.Noise.slope(wx, wz, seed) >= 2 && h >= 72
+        let valley = CubeForge.Noise.river_at(wx, wz, seed) >= CubeForge.Noise.spring_mask()
+                     && h > CubeForge.Chunk.sea_level() + CubeForge.Noise.spring_rise(CubeForge.Noise.age_frac(seed))
+                     && CubeForge.Noise.slope(wx, wz, seed) >= 1
+        if (mountainside || valley) && is_valid_spring do all_springs_ok(i + 1, seed) else false end
       end
     end
   end

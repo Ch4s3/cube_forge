@@ -51,14 +51,12 @@ mod CubeForge.F32Buf do
     end
   end
 
-  -- Copy [n] floats from src into dst (dst must be unique for in-place set).
-  pfn copy_into(src : NativeF32Arr, dst : NativeF32Arr, i : Int, n : Int) : NativeF32Arr do
-    if i >= n do dst
-    else copy_into(src, NativeArray.set_f32(dst, i, NativeArray.get_f32(src, i)), i + 1, n) end
-  end
-
+  -- One memcpy into the fresh array (cf_f32_blit), not a March loop: that was a
+  -- March-level set per float, and a section mesh of 27k floats grows three
+  -- times on its way up, so the copies were costing more than the mesh.
   pfn grow(d : NativeF32Arr, n : Int, new_cap : {Int | _ >= 0}) : NativeF32Arr do
-    copy_into(d, NativeArray.make_f32(new_cap, 0.0), 0, n)
+    if n <= 0 do NativeArray.make_f32(new_cap, 0.0)
+    else CubeForge.Ffi.Window.f32_blit(NativeArray.make_f32(new_cap, 0.0), 0, d, 0, n) end
   end
 
   -- Append one float. Amortized O(1); in place when the buffer is uniquely owned.
@@ -79,6 +77,31 @@ mod CubeForge.F32Buf do
     push(push(push(b, x), y), z)
   end
 
+  doc """
+  Append one vertex (Vertex.floats() floats) with one capacity check and one
+  cell rebuild, where ten pushes cost ten of each: the profile once put a third
+  of a section's mesh time in those pushes.
+
+  [shade] arrives packed (CubeForge.Vertex.pack_shade) and is
+  split here into the two light attributes: sky in slot 6, block light in slot 9.
+  They must reach the GPU separately -- a varying is interpolated, and unpacking
+  after interpolation is not the same as interpolating the two channels, which
+  painted black bands over lit ground wherever a block glowed (see the vertex
+  layout note in native/cf_shim.c).
+  """
+  fn push_vertex(b : F32Buf, x : Float, y : Float, z : Float, u : Float, v : Float, layer : Float, shade : Float, face : Float, fx : Float) : F32Buf do
+    match b do
+      F32Buf(d, n, cap) ->
+        let cap1 = if n + 10 <= cap do cap else grow_to(cap, n + 10) end
+        let d1 = if n + 10 <= cap do d else grow(d, n, cap1) end
+        let blk = Math.floor(shade /. 2.0)
+        let d2 = NativeArray.set_f32(NativeArray.set_f32(NativeArray.set_f32(d1, n, x), n + 1, y), n + 2, z)
+        let d3 = NativeArray.set_f32(NativeArray.set_f32(NativeArray.set_f32(d2, n + 3, u), n + 4, v), n + 5, layer)
+        let d4 = NativeArray.set_f32(NativeArray.set_f32(NativeArray.set_f32(d3, n + 6, shade -. 2.0 *. blk), n + 7, face), n + 8, fx)
+        F32Buf(NativeArray.set_f32(d4, n + 9, blk /. 255.0), n + 10, cap1)
+    end
+  end
+
   doc "Append the live prefix of [src] to [b] with one memcpy (grows first if needed)."
   fn append(b : F32Buf, src : F32Buf) : F32Buf do
     match src do
@@ -92,6 +115,54 @@ mod CubeForge.F32Buf do
               F32Buf(CubeForge.Ffi.Window.f32_blit(grow(d, n, new_cap), n, sd, 0, sn), n + sn, new_cap)
             end
         end
+    end
+  end
+
+  doc "Floats in one merged rectangle: six vertices. The shim reserves and writes in the same unit (CF_QUAD_FLOATS); a literal on either side drifts the moment the vertex grows."
+  fn quad_floats() : Int do 6 * CubeForge.Vertex.floats() end
+
+  doc "Append one greedy rectangle (six vertices) written by the shim (cf_mesh_quad): grows first if needed."
+  fn push_quad(b : F32Buf, d : Int, sy : Int, a : Int, u : Int, v : Int, wd : Int, h : Int, key : Int, ox : Float, oz : Float, layers : NativeF32Arr) : F32Buf do
+    match b do
+      F32Buf(dd, n, cap) ->
+        let cap1 = if n + quad_floats() <= cap do cap else grow_to(cap, n + quad_floats()) end
+        let d1 = if n + quad_floats() <= cap do dd else grow(dd, n, cap1) end
+        F32Buf(CubeForge.Ffi.Window.mesh_quad(d1, n, d, sy, a, u, v, wd, h, key, ox, oz, layers), n + quad_floats(), cap1)
+    end
+  end
+
+  doc "Append every rectangle of one greedy slice, merged and written by the shim (cf_mesh_slice): reserves room for the worst case (256 quads), then adopts the count the shim wrote."
+  fn push_slice(b : F32Buf, mask : NativeIntArr, base : Int, d : Int, sy : Int, a : Int, ox : Float, oz : Float, layers : NativeF32Arr) : F32Buf do
+    match b do
+      F32Buf(dd, n, cap) ->
+        let need = n + 256 * quad_floats() + 1
+        let cap1 = if need <= cap do cap else grow_to(cap, need) end
+        let d1 = if need <= cap do dd else grow(dd, n, cap1) end
+        let d2 = CubeForge.Ffi.Window.mesh_slice(d1, n, mask, base, d, sy, a, ox, oz, layers)
+        -- the count sits past the written quads; reading it here is a read
+        -- with no write after it in this function, so the buffer stays unique
+        let k = float_to_int(NativeArray.get_f32(d2, n + 256 * quad_floats()))
+        F32Buf(d2, n + k, cap1)
+    end
+  end
+
+  doc "Append [n] floats of vertices from [src] at [si], translated by (dx, dy, dz) with [shade] on every vertex (cf_f32_stamp): a model template into a cell."
+  fn stamp(b : F32Buf, src : NativeF32Arr, si : Int, n : Int, dx : Float, dy : Float, dz : Float, shade : Float) : F32Buf do
+    match b do
+      F32Buf(d, len, cap) ->
+        let cap1 = if len + n <= cap do cap else grow_to(cap, len + n) end
+        let d1 = if len + n <= cap do d else grow(d, len, cap1) end
+        F32Buf(CubeForge.Ffi.Window.f32_stamp(d1, len, src, si, n, dx, dy, dz, shade), len + n, cap1)
+    end
+  end
+
+  doc "stamp with a yaw and a uniform scale (cf_f32_stamp_xf): the template is a body centred on (0.5, 0.5, 0.5), placed with its centre at (dx, dy, dz). For animals, which turn continuously and come in sizes."
+  fn stamp_xf(b : F32Buf, src : NativeF32Arr, si : Int, n : Int, dx : Float, dy : Float, dz : Float, shade : Float, cosv : Float, sinv : Float, scale : Float) : F32Buf do
+    match b do
+      F32Buf(d, len, cap) ->
+        let cap1 = if len + n <= cap do cap else grow_to(cap, len + n) end
+        let d1 = if len + n <= cap do d else grow(d, len, cap1) end
+        F32Buf(CubeForge.Ffi.Window.f32_stamp_xf(d1, len, src, si, n, dx, dy, dz, shade, cosv, sinv, scale), len + n, cap1)
     end
   end
 
