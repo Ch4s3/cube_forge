@@ -2758,3 +2758,34 @@ Watched in the game with a two-second day, so the year turns in sixteen: at
 year 0.70 a Marshheron -- whose season closed at 0.5 -- is at y 103 seventeen
 blocks north of its home, on its way out. Nothing placed it there but the
 calendar.
+
+## The survey reads the animals
+
+Slice 5, and the line that closes the loop from the player's side. The survey
+instrument that says what a place IS now also says what could LIVE there and
+what to dig to get it.
+
+Aimed at an animal -- a sphere test along the look ray over every drawn animal,
+run only while the survey is open or the scan key is down -- the panel names it
+and its niche once scanned (`FROSTGULL  BEACH TUNDRA  WINTER`), and prompts
+`UNKNOWN ANIMAL  SCAN` until then. The scan key takes the animal when there is
+one under the reticle and the ground otherwise, so the two catalogues share a
+key without fighting over it. Scanned animals are a bitmask of their own in the
+header, beside `known`: eighteen species beside six, and two catalogues that
+read independently.
+
+Aimed at the ground, for the reticle's chunk and only for species already
+scanned: which would live here, and the first that would not and why -- in
+terms the player can act on. A fish wants a depth (`NEEDS DEEPER WATER  14`),
+a pond, or open water; a bird wants a biome (`PINECREST  NEEDS TAIGA FOREST`);
+a migrant out of season is `AWAY UNTIL WINTER`. On the seed-7 spawn hill with
+everything scanned: `WOULD LIVE HERE  GRASSPIPIT  CINDERFINCH / PINECREST
+NEEDS TAIGA FOREST`. Nothing scanned, nothing said: the gate is the same one
+the fungus half already uses.
+
+The report is per CHUNK, because that is where a flock lives, while the rest
+of the panel is per column; a Cinderfinch reported on a grassland column is a
+desert corner of the same chunk. Honest, and slightly surprising; worth a word
+in the panel if it confuses anyone.
+
+Frame budget 8.29 ms against 16; save/load round trip passes.

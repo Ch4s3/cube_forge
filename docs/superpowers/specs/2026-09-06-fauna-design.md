@@ -312,8 +312,15 @@ Each slice is independently verifiable and independently useful.
    fill the pond and the count goes to nothing, one a tick. Flocks are given
    only to chunks within two of the player: populations exist everywhere in
    the window, flocks are the visible sample.
-5. **Survey integration.** The fauna bitmask, the animal ray test, the habitat
-   report, and the save round-trip.
+5. **Survey integration.** *(done)* The fauna bitmask (its own header field,
+   `fauna`), the animal ray test (a sphere test over every drawn animal, run
+   only while the survey is open or the scan key is down), the habitat report,
+   and the save round-trip. The scan key goes to the animal under the reticle
+   when there is one and to the ground otherwise. Aimed at a known animal the
+   panel names it and its niche -- and its season, if it has one; aimed at the
+   ground it says which known species this chunk would hold and what the
+   nearest miss needs, in terms a shovel can act on: a depth, a pond, open
+   water, a biome, or a season to wait for.
 6. **Day and night.** Roosting, the nocturnal shift, crepuscular depth changes.
 
 ## Seasons, and the migrants to come

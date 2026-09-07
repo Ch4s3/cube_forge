@@ -315,6 +315,30 @@ mod CubeForge.Fauna do
   doc "Pectoral fins. An eel has none, which is most of why an eel reads as one."
   fn plan_pectorals(sp : Int) : Bool do sp == 11 || sp == 12 || sp == 13 || sp == 14 || sp == 15 || sp == 17 || sp == 18 end
 
+  -- ── What the survey says ─────────────────────────────────────────────────
+  doc "The niche in the survey's words: a fish's depth band and water, a bird's biomes."
+  fn niche_name(sp : Int) : String do
+    if is_fish(sp) do
+      "DEPTH " ++ int_to_string(depth_lo(sp)) ++ "-" ++ int_to_string(depth_hi(sp)) ++ (if wants_small_water(sp) do "  PONDS" else "  OPEN WATER" end)
+    else biome_names(sp, 0, "") end
+  end
+  pfn biome_names(sp : Int, b : Int, acc : String) : String do
+    if b > 9 do acc
+    else biome_names(sp, b + 1, if wants_biome(sp, b) do (if acc == "" do "" else acc ++ " " end) ++ upper_biome(b) else acc end) end
+  end
+  pfn upper_biome(b : Int) : String do
+    if b == 0 do "TUNDRA" else if b == 1 do "TAIGA" else if b == 2 do "GRASSLAND" else if b == 3 do "FOREST"
+    else if b == 4 do "DESERT" else if b == 5 do "WETLAND" else if b == 6 do "BEACH" else if b == 7 do "ALPINE"
+    else if b == 8 do "OASIS" else if b == 9 do "GROVE" else "" end end end end end end end end end end
+  end
+  doc "When a migrant is here, in the survey's words; empty for a resident."
+  fn season_name(sp : Int) : String do
+    if !migrant(sp) do ""
+    else if season_lo(sp) == 0 do "SUMMER" else "WINTER" end end
+  end
+  doc "The name in capitals, as the survey prints everything."
+  fn upper_name(sp : Int) : String do String.to_uppercase(name(sp)) end
+
   doc "A bird that does not fly."
   fn flightless(sp : Int) : Bool do if is_fish(sp) do false else plan_span(sp) <= 0 || plan_upright(sp) end end
 

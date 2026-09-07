@@ -84,7 +84,7 @@ mod CubeForge do
     end
   end
 
-  type Frame = Frame(Int, Float, CubeForge.Player.Player, Int, NativeFloatArr, NativeF32Arr, Bool, CubeForge.F32Buf.F32Buf, Bool, Float, Float, Bool, Int, CubeForge.Menu.Menu, CubeForge.F32Buf.F32Buf, Start, Float, Int, CubeForge.Audio.Sched, Bool, Int, CubeForge.Fauna.Poses, CubeForge.F32Buf.F32Buf, CubeForge.Flocks.Snap, CubeForge.Pop.Reg)   -- ..., inventory open, slot a stack was lifted from (-1 = not dragging), menu, its vertex buffer, what the next session starts from (NoStart = keep playing), worst frame seen after warmup, the frame it was, the note schedule, whether the survey is open, the species scanned so far as a bitmask, the animal bodies (greedy-meshed once), the buffer they are stamped into each frame, the two ticks of flock transforms the renderer blends between, and the populations: what lives in each chunk of the window
+  type Frame = Frame(Int, Float, CubeForge.Player.Player, Int, NativeFloatArr, NativeF32Arr, Bool, CubeForge.F32Buf.F32Buf, Bool, Float, Float, Bool, Int, CubeForge.Menu.Menu, CubeForge.F32Buf.F32Buf, Start, Float, Int, CubeForge.Audio.Sched, Bool, Int, CubeForge.Fauna.Poses, CubeForge.F32Buf.F32Buf, CubeForge.Flocks.Snap, CubeForge.Pop.Reg, Int)   -- ..., inventory open, slot a stack was lifted from (-1 = not dragging), menu, its vertex buffer, what the next session starts from (NoStart = keep playing), worst frame seen after warmup, the frame it was, the note schedule, whether the survey is open, the species scanned so far as a bitmask, the animal bodies (greedy-meshed once), the buffer they are stamped into each frame, the two ticks of flock transforms the renderer blends between, the populations: what lives in each chunk of the window, and the animals scanned so far as a bitmask
   -- Frames before this are not counted toward the worst frame: the first few
   -- carry one-time costs (the first draw of each buffer, the first time down
   -- every path) that no steady-state budget should be measured against.
@@ -182,6 +182,57 @@ mod CubeForge do
     let thrive = if best > 0 do "WOULD THRIVE  " ++ Species.name(best) ++ " " ++ int_to_string(pct_of(Species.fitness(best, t, m))) else "" end
     let short = shortfall_go(known, t, m, 1)
     keep_nonempty(Cons(thrive, Cons(short, Cons(prompt, Nil))))
+  end
+
+  doc "How far an animal can be scanned from."
+  fn scan_reach() : Float do 40.0 end
+  pfn fauna_known(k : Int, sp : Int) : Bool do int_and(k, pow2(sp - 1)) != 0 end
+
+  -- ── The survey's animal half ──────────────────────────────────────────────
+  -- Aimed at an animal: its name and niche if scanned, a prompt if not. Aimed
+  -- at the ground: which KNOWN species could live in this chunk, and what the
+  -- nearest miss would need. This is the line that closes the loop -- the
+  -- instrument that says what a place IS now also says what could live there
+  -- and what to dig to get it.
+  pfn fauna_lines(sc, x : Int, z : Int, kfauna : Int, aimed : Int, year : Float) : List(String) do
+    if aimed > 0 do
+      if fauna_known(kfauna, aimed) do
+        Cons(Fauna.upper_name(aimed) ++ "  " ++ Fauna.niche_name(aimed) ++ (if Fauna.season_name(aimed) == "" do "" else "  " ++ Fauna.season_name(aimed) end), Nil)
+      else Cons("UNKNOWN ANIMAL  SCAN", Nil) end
+    else if kfauna == 0 do Nil
+    else
+      let w = scene_world(sc)
+      let bio = scene_biome(sc)
+      let cx = x / 16
+      let cz = z / 16
+      let pr = Pop.profile(w, bio, cx, cz)
+      keep_nonempty(Cons(viable_go(pr, bio, cx, cz, kfauna, year, 1, "", 0), Cons(fauna_short_go(w, bio, pr, cx, cz, x, z, kfauna, year, 1), Nil)))
+    end end
+  end
+  -- Up to two known species this chunk would hold.
+  pfn viable_go(pr : CubeForge.Pop.Profile, bio : CubeForge.Biome.Field, cx : Int, cz : Int, kfauna : Int, year : Float, sp : Int, acc : String, n : Int) : String do
+    if sp > Fauna.count() do (if acc == "" do "" else "WOULD LIVE HERE  " ++ acc end)
+    else if n >= 2 do "WOULD LIVE HERE  " ++ acc
+    else if !fauna_known(kfauna, sp) do viable_go(pr, bio, cx, cz, kfauna, year, sp + 1, acc, n)
+    else if Pop.capacity_of(pr, bio, cx, cz, sp, year) <= 0 do viable_go(pr, bio, cx, cz, kfauna, year, sp + 1, acc, n)
+    else viable_go(pr, bio, cx, cz, kfauna, year, sp + 1, (if acc == "" do "" else acc ++ "  " end) ++ Fauna.upper_name(sp), n + 1) end end end end
+  end
+  -- The first known species that could NOT live here, and why -- in the terms
+  -- the player can act on: a depth to dig to, a body of water to make, a
+  -- biome to grow, or a season to wait for.
+  pfn fauna_short_go(w : CubeForge.World.World, bio : CubeForge.Biome.Field, pr : CubeForge.Pop.Profile, cx : Int, cz : Int, x : Int, z : Int, kfauna : Int, year : Float, sp : Int) : String do
+    if sp > Fauna.count() do ""
+    else if !fauna_known(kfauna, sp) do fauna_short_go(w, bio, pr, cx, cz, x, z, kfauna, year, sp + 1)
+    else if Pop.capacity_of(pr, bio, cx, cz, sp, year) > 0 do fauna_short_go(w, bio, pr, cx, cz, x, z, kfauna, year, sp + 1)
+    else if !Fauna.in_season(sp, year) do Fauna.upper_name(sp) ++ "  AWAY UNTIL " ++ Fauna.season_name(sp)
+    else if Fauna.is_fish(sp) do
+      let d = Pop.depth_at(w, bio, x, z)
+      if d == 0 do Fauna.upper_name(sp) ++ "  NEEDS WATER"
+      else if d < Fauna.depth_lo(sp) do Fauna.upper_name(sp) ++ "  NEEDS DEEPER WATER  " ++ int_to_string(Fauna.depth_lo(sp))
+      else if d > Fauna.depth_hi(sp) do Fauna.upper_name(sp) ++ "  NEEDS SHALLOWER WATER  " ++ int_to_string(Fauna.depth_hi(sp))
+      else if Fauna.wants_small_water(sp) do Fauna.upper_name(sp) ++ "  NEEDS A POND"
+      else Fauna.upper_name(sp) ++ "  NEEDS OPEN WATER" end end end end
+    else Fauna.upper_name(sp) ++ "  NEEDS " ++ Fauna.niche_name(sp) end end end end end
   end
 
   pfn keep_nonempty(ls : List(String)) : List(String) do
@@ -2130,13 +2181,13 @@ mod CubeForge do
     end
   end
 
-  pfn save_game(slot : Int, w : CubeForge.World.World, p : CubeForge.Player.Player, inv : CubeForge.Inventory.Inv, seed : Int, day : Float, wxpid, bio : CubeForge.Biome.Field, myc : CubeForge.Myc.Net, known : Int, pop : List(Int)) : Bool do
+  pfn save_game(slot : Int, w : CubeForge.World.World, p : CubeForge.Player.Player, inv : CubeForge.Inventory.Inv, seed : Int, day : Float, wxpid, bio : CubeForge.Biome.Field, myc : CubeForge.Myc.Net, known : Int, pop : List(Int), kfauna : Int) : Bool do
     let ts0 = Win.time()
     let wx = match Weather.call_snapshot(wxpid) do
       Ok(l) -> Weather.phase_to_floats(Weather.unpack_phase(l))
       Err(_) -> Weather.phase_to_floats(Weather.start())
     end
-    let h = Save.header_new(seed, DateTime.now(), Player.to_floats(p), Inv.to_ints(inv), day, wx, known, pop)
+    let h = Save.header_new(seed, DateTime.now(), Player.to_floats(p), Inv.to_ints(inv), day, wx, known, pop, kfauna)
     match Save.write_world(Save.dir(), slot, World.chunks(w), World.side(w), World.origin_x(w), World.origin_z(w), World.cache(w), World.gen_hashes(w), h, fields_blob(w, bio, myc)) do
       Ok(_) ->
         println("saved slot " ++ int_to_string(slot) ++ " in " ++ ms(Win.time() -. ts0) ++ ", world hash " ++ int_to_string(World.state_hash(w)))
@@ -2182,11 +2233,11 @@ mod CubeForge do
   -- [t0]: the clock at session start; [day0]: seconds into the day at that moment, so the sun continues from a save.
   fn frame_loop(f : Frame, k : Knobs, sc_in, nchunks : Int, proj : NativeFloatArr, map_proj : NativeFloatArr, fps : Fps, wxpid, fpids, seed : Int, first : Bool, t0 : Float, day0 : Float) : Frame do
     match f do
-      Frame(frame, last_t, player_in, sample, view, vp, map_mode, marker, flash, wcache, bcache, inv_open, drag_from, menu, menubuf, next_seed, worst, worst_at, sched, survey, known, faunap, faunab, herd, pop) ->
+      Frame(frame, last_t, player_in, sample, view, vp, map_mode, marker, flash, wcache, bcache, inv_open, drag_from, menu, menubuf, next_seed, worst, worst_at, sched, survey, known, faunap, faunab, herd, pop, kfauna) ->
         match k do
         Knobs(max_frames, dump_frame, dump_path, autowalk, autospin, autoedit, autoswim, autoflow, workers, automap, day_len, sun_deg, autoinv, autobreak, weather_pin, precip_cap, biome_rate, biome_map, autocanal, biome_budget, veg_budget, time_pin, remesh_all_at, automenu, audio_mode, audio_log, autodive, autoglow, myc_rate, myc_map, autoplant, myc_budget, autoplant_species, autospore, fruit_budget, fruit_rate, autostart, autosave, autosave_slot, autoload, autoload_slot, autoslots, myc_feedback, autosettings, settings_disk, settings_mask, autopage, autosurvey, autoscan, fauna_demo) ->
         if Win.should_close() || (max_frames >= 0 && frame >= max_frames) || !is_no_start(next_seed) do
-          Frame(frame, last_t, player_in, sample, view, vp, map_mode, marker, flash, wcache, bcache, inv_open, drag_from, menu, menubuf, next_seed, worst, worst_at, sched, survey, known, faunap, faunab, herd, pop)
+          Frame(frame, last_t, player_in, sample, view, vp, map_mode, marker, flash, wcache, bcache, inv_open, drag_from, menu, menubuf, next_seed, worst, worst_at, sched, survey, known, faunap, faunab, herd, pop, kfauna)
         else
           In.poll()
           -- Streaming: one chunk of shift a frame, toward the player, while
@@ -2369,7 +2420,7 @@ mod CubeForge do
           let load_slot = if first && autoload >= 0 && frame == autoload do autoload_slot
                           else if slot_click > 0 && Menu.is_start(menu3) do slot_click else 0 end end
           let menu4 = if save_slot > 0 do
-                        let saved = save_game(save_slot, scene_world(sc_drag), player, ui_inv(scene_ui(sc_drag)), seed, now -. t0 +. day0, wxpid, scene_biome(sc_drag), scene_myc(sc_drag), known, Pop.to_list(pop, World.origin_x(scene_world(sc_drag)), World.origin_z(scene_world(sc_drag)), frame / tick_period()))
+                        let saved = save_game(save_slot, scene_world(sc_drag), player, ui_inv(scene_ui(sc_drag)), seed, now -. t0 +. day0, wxpid, scene_biome(sc_drag), scene_myc(sc_drag), known, Pop.to_list(pop, World.origin_x(scene_world(sc_drag)), World.origin_z(scene_world(sc_drag)), frame / tick_period()), kfauna)
                         Menu.set_slots(Menu.set_status(menu3, save_slot, if saved do Menu.status_saved() else Menu.status_failed() end, frame), Save.list(Save.dir(), -1))
                       else menu3 end
           -- A slot is validated while this world still runs, so a bad slot never leaves you without one.
@@ -2792,14 +2843,29 @@ mod CubeForge do
               Myc.species_of(scene_myc(sc1), World.side(scene_world(sc1)) * 16,
                              float_to_int(Math.floor(V.x(ppos))) + 3, float_to_int(Math.floor(V.z(ppos))))
             else 0 end
-          let scan_sp = if auto_scan_now do auto_sp else (if In.key_pressed(In.key_x()) do tint else 0 end) end
+          -- An animal under the reticle: found only while the survey is open or
+          -- the scan key is down, so the sphere tests cost nothing otherwise.
+          let want_aim = survey1 || In.key_pressed(In.key_x())
+          let aimed = if want_aim && !map_mode1 do
+            let eye_a = Player.eye(player1)
+            let look_a = Player.forward(Player.yaw(player1), Player.pitch(player1))
+            CubeForge.Flocks.aim(herd1, V.x(eye_a), V.y(eye_a), V.z(eye_a), V.x(look_a), V.y(look_a), V.z(look_a), scan_reach())
+          else 0 end
+          let scan_key = In.key_pressed(In.key_x())
+          let kfauna1 = if scan_key && aimed > 0 do int_or(kfauna, pow2(aimed - 1)) else kfauna end
+          if kfauna1 != kfauna do println("scanned " ++ Fauna.name(aimed)) else () end
+          -- the key goes to the animal when there is one; the ground otherwise
+          let scan_sp = if auto_scan_now do auto_sp else (if scan_key && aimed == 0 do tint else 0 end) end
           let known1 = if scan_sp > 0 do int_or(known, pow2(scan_sp - 1)) else known end
           if known1 != known do println("scanned " ++ Species.name(scan_sp)) else () end
           -- Survey: the column under the reticle, or the one the player stands
           -- on when nothing is targeted, so the panel always has a subject.
           let sx = if Ray.is_hit(hit_now) do Ray.bx(hit_now) else float_to_int(V.x(Player.position(player1))) end
           let sz = if Ray.is_hit(hit_now) do Ray.bz(hit_now) else float_to_int(V.z(Player.position(player1))) end
-          let slines = if survey1 && !map_mode1 do survey_lines(sc1, sx, sz, int_to_float(myc_feedback) /. 100.0, known1, tint) else Nil end
+          let slines = if survey1 && !map_mode1 do
+            List.append(survey_lines(sc1, sx, sz, int_to_float(myc_feedback) /. 100.0, known1, tint),
+                        fauna_lines(sc1, sx, sz, kfauna1, aimed, year_now))
+          else Nil end
           let panel_on = if survey1 do !map_mode1 else false end
           let hud_text = if panel_on do join_lines(slines, "") else readout end
           let sc2 = scene_with_ui(sc1, refresh_hud(scene_ui(sc1), inv_open2, drag2, ndc_x, ndc_y, hud_text, slines, panel_on, fx_line, tint, gkey, ground))
@@ -2854,7 +2920,7 @@ mod CubeForge do
             let scq = drain(sc1, 4096, false)
             println("  fauna: " ++ int_to_string(Pop.total(pop1)) ++ " animals counted in the window, " ++ int_to_string(Pop.archived(pop1)) ++ " chunks archived, year " ++ float_to_string(year_now) ++ ", " ++ int_to_string(CubeForge.Flocks.in_use(herd1)) ++ " flocks, " ++ int_to_string(CubeForge.Flocks.drawn(herd1)) ++ " animals drawn, " ++ int_to_string(F32Buf.len(faunab1) / Vx.floats()) ++ " vertices")
             println(flock_report(herd1, 0, ""))
-            println("  survey: " ++ join_lines(survey_lines(sc1, sx, sz, int_to_float(myc_feedback) /. 100.0, known1, tint), ""))
+            println("  survey: " ++ join_lines(List.append(survey_lines(sc1, sx, sz, int_to_float(myc_feedback) /. 100.0, known1, tint), fauna_lines(sc1, sx, sz, kfauna1, aimed, year_now)), ""))
             println("  state: biome " ++ int_to_string(Biome.state_hash(scene_biome(scq), World.side(scene_world(scq)) * 16)) ++ " myc " ++ int_to_string(Myc.state_hash(scene_myc(scq), World.side(scene_world(scq)) * 16))
                     ++ " world " ++ int_to_string(World.state_hash(scene_world(scq)))
                     ++ " mesh " ++ int_to_string(mesh_hash(scene_meshes(scq), World.side(scene_world(scq)))))
@@ -2868,7 +2934,7 @@ mod CubeForge do
           if frame == 200 do
             println("live-object delta over frames 100..200: " ++ int_to_string(Win.live_allocs() - sample1) ++ " (" ++ int_to_string((Win.live_allocs() - sample1) / 100) ++ " per frame); resident " ++ int_to_string(Win.rss_bytes() / 1048576) ++ " MB")
           else () end
-          frame_loop(Frame(frame + 1, now, player1, sample1, view1, vp1, map_mode1, marker1, flash1, wnow, bnow, inv_open2, drag2, menu5, menubuf1, next_seed1, worst1, worst_at1, sched1, survey1, known1, faunap, faunab1, herd1, pop1), k, sc2, nchunks, proj, map_proj, fps1, wxpid, fpids, seed, first, t0, day0)
+          frame_loop(Frame(frame + 1, now, player1, sample1, view1, vp1, map_mode1, marker1, flash1, wnow, bnow, inv_open2, drag2, menu5, menubuf1, next_seed1, worst1, worst_at1, sched1, survey1, known1, faunap, faunab1, herd1, pop1, kfauna1), k, sc2, nchunks, proj, map_proj, fps1, wxpid, fpids, seed, first, t0, day0)
         end
         end
     end
@@ -3478,6 +3544,10 @@ mod CubeForge do
         Loaded(h, _, _) -> Pop.from_list(n, Save.h_origin_x(h), Save.h_origin_z(h), Save.h_pop(h))
         NoLoad -> Pop.new(n)
       end
+      let kfauna0 = match loaded do
+        Loaded(h, _, _) -> Save.h_fauna(h)
+        NoLoad -> Env.get_int("CF_KNOWN_FAUNA", 0)
+      end
       let known0 = match loaded do
         Loaded(h, _, _) -> Save.h_known(h)
         NoLoad -> Env.get_int("CF_KNOWN", 0)
@@ -3510,8 +3580,8 @@ mod CubeForge do
       -- The flock pool is loaded per session, from the world this session has:
       -- the actors outlive the game, their contents do not.
       if Env.get_int("CF_FAUNA_STATS", 0) == 1 do println(Fauna.stats()) else () end
-      match frame_loop(Frame(0, t4, player, 0, NativeArray.make_float(16, 0.0), NativeArray.make_f32(16, 0.0), false, F32Buf.new(64), Env.get_int("CF_FLASH", 0) == 1, 0.0, 0.0, false, -1, menu0, F32Buf.new(2048), NoStart, 0.0, -1, Audio.sched_start(0), false, known0, Fauna.build(), F32Buf.new(4096), CubeForge.Flocks.new(), pop0), k, scene, n * n, proj, map_proj, fps0, wxpid, fpids, seed, first, t4, day0) do
-        Frame(frames, _, p, _, _, _, _, _, _, _, _, _, _, mfin, _, ns, worst, worst_at, _, _, _, _, _, _, _) ->
+      match frame_loop(Frame(0, t4, player, 0, NativeArray.make_float(16, 0.0), NativeArray.make_f32(16, 0.0), false, F32Buf.new(64), Env.get_int("CF_FLASH", 0) == 1, 0.0, 0.0, false, -1, menu0, F32Buf.new(2048), NoStart, 0.0, -1, Audio.sched_start(0), false, known0, Fauna.build(), F32Buf.new(4096), CubeForge.Flocks.new(), pop0, kfauna0), k, scene, n * n, proj, map_proj, fps0, wxpid, fpids, seed, first, t4, day0) do
+        Frame(frames, _, p, _, _, _, _, _, _, _, _, _, _, mfin, _, ns, worst, worst_at, _, _, _, _, _, _, _, _) ->
           let t5 = Win.time()
           println("ran " ++ int_to_string(frames) ++ " frames in " ++ ms(t5 -. t4) ++ " (" ++ float_to_string(int_to_float(frames) /. (t5 -. t4)) ++ " fps, vsync on); player ended at " ++ V.to_string(Player.position(p)))
           println("worst frame after warmup: " ++ ms(worst) ++ " at frame " ++ int_to_string(worst_at))

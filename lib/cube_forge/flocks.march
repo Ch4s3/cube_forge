@@ -98,6 +98,44 @@ mod CubeForge.Flocks do
     end
   end
 
+  -- ── Aiming at an animal ───────────────────────────────────────────────────
+  -- A sphere test along the aim ray over every drawn animal: the nearest one
+  -- whose body the ray passes through. Run only while the survey is open or
+  -- the scan key is down, so it costs nothing the rest of the time -- and a
+  -- few hundred sphere tests is nothing even then.
+  pfn aim_list(sp : Int, hx : Float, hz : Float, ts : List(Int), ox : Float, oy : Float, oz : Float, dx : Float, dy : Float, dz : Float, max : Float, best_t : Float, best_sp : Int) : Int do
+    match ts do
+      Nil -> best_sp * 65536 + float_to_int(best_t *. 8.0)
+      Cons(v, rest) ->
+        let px = Fl.un_x(v, hx) -. ox
+        let py = Fl.un_y(v) -. oy
+        let pz = Fl.un_z(v, hz) -. oz
+        let t = px *. dx +. py *. dy +. pz *. dz
+        let r = Fa.body_scale(sp) *. 0.5 +. 0.5
+        let cx = px -. t *. dx
+        let cy = py -. t *. dy
+        let cz = pz -. t *. dz
+        let miss = cx *. cx +. cy *. cy +. cz *. cz
+        if t < 0.0 do aim_list(sp, hx, hz, rest, ox, oy, oz, dx, dy, dz, max, best_t, best_sp)
+        else if t > max do aim_list(sp, hx, hz, rest, ox, oy, oz, dx, dy, dz, max, best_t, best_sp)
+        else if miss > r *. r do aim_list(sp, hx, hz, rest, ox, oy, oz, dx, dy, dz, max, best_t, best_sp)
+        else if t >= best_t do aim_list(sp, hx, hz, rest, ox, oy, oz, dx, dy, dz, max, best_t, best_sp)
+        else aim_list(sp, hx, hz, rest, ox, oy, oz, dx, dy, dz, max, t, sp) end end end end
+    end
+  end
+  pfn aim_go(s : Snap, ox : Float, oy : Float, oz : Float, dx : Float, dy : Float, dz : Float, max : Float, i : Int, best_t : Float, best_sp : Int) : Int do
+    if i >= cap() do best_sp
+    else if species_of(s, i) == 0 do aim_go(s, ox, oy, oz, dx, dy, dz, max, i + 1, best_t, best_sp)
+    else
+      let packed = aim_list(species_of(s, i), home_x(s, i), home_z(s, i), Array.get(cur(s), i), ox, oy, oz, dx, dy, dz, max, best_t, best_sp)
+      aim_go(s, ox, oy, oz, dx, dy, dz, max, i + 1, int_to_float(packed % 65536) /. 8.0, packed / 65536)
+    end end
+  end
+  doc "The species of the nearest animal the ray from (ox, oy, oz) along the unit (dx, dy, dz) passes through within [max] blocks, or 0."
+  fn aim(s : Snap, ox : Float, oy : Float, oz : Float, dx : Float, dy : Float, dz : Float, max : Float) : Int do
+    aim_go(s, ox, oy, oz, dx, dy, dz, max, 0, max +. 1.0, 0)
+  end
+
   doc "Live flocks: slots holding a species."
   fn in_use(s : Snap) : Int do use_go(s, 0, 0) end
   pfn use_go(s : Snap, i : Int, acc : Int) : Int do

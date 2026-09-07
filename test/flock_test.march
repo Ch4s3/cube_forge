@@ -152,6 +152,37 @@ mod CubeForge.Test.Flock do
     else mean_z(f, i + 1, acc +. Fl.pos_z(Fl.bodies(f), i)) end
   end
 
+  -- A unit direction from the eye to (x, y, z).
+  pfn dir_x(ex : Float, ey : Float, ez : Float, x : Float, y : Float, z : Float) : Float do (x -. ex) /. dist3(ex, ey, ez, x, y, z) end
+  pfn dir_y(ex : Float, ey : Float, ez : Float, x : Float, y : Float, z : Float) : Float do (y -. ey) /. dist3(ex, ey, ez, x, y, z) end
+  pfn dir_z(ex : Float, ey : Float, ez : Float, x : Float, y : Float, z : Float) : Float do (z -. ez) /. dist3(ex, ey, ez, x, y, z) end
+  pfn dist3(ex : Float, ey : Float, ez : Float, x : Float, y : Float, z : Float) : Float do
+    Math.sqrt((x -. ex) *. (x -. ex) +. (y -. ey) *. (y -. ey) +. (z -. ez) *. (z -. ez))
+  end
+
+  describe "aiming at an animal" do
+    test "the ray finds the animal it is pointed at, and not one behind the eye" do
+      let pip = Fl.new(Fa.sp_grasspipit(), 1, 1, 110.0, 80.0, 100.0)
+      let sun = Fl.new(Fa.sp_sunfin(), 1, 1, 90.0, 80.0, 100.0)
+      let s0 = CubeForge.Flocks.with_flock(CubeForge.Flocks.new(), 0, Fa.sp_grasspipit(), 110.0, 80.0, 100.0)
+      let s1 = CubeForge.Flocks.with_flock(s0, 1, Fa.sp_sunfin(), 90.0, 80.0, 100.0)
+      let both = CubeForge.Flocks.advance(CubeForge.Flocks.advance(s1, 0, Fl.transforms(pip)), 1, Fl.transforms(sun))
+      -- new() scatters an animal up to a block and a half off its home, and
+      -- a pipit is a third of a block: aim at where it actually is
+      let px = Fl.pos_x(Fl.bodies(pip), 0)
+      let py = Fl.pos_y(Fl.bodies(pip), 0)
+      let pz = Fl.pos_z(Fl.bodies(pip), 0)
+      let sx = Fl.pos_x(Fl.bodies(sun), 0)
+      let sy = Fl.pos_y(Fl.bodies(sun), 0)
+      let sz = Fl.pos_z(Fl.bodies(sun), 0)
+      let e = 100.0
+      Test.assert_eq_int(CubeForge.Flocks.aim(both, e, 80.0, e, dir_x(e, 80.0, e, px, py, pz), dir_y(e, 80.0, e, px, py, pz), dir_z(e, 80.0, e, px, py, pz), 40.0), Fa.sp_grasspipit(), "aimed at the pipit, the pipit")
+      Test.assert_eq_int(CubeForge.Flocks.aim(both, e, 80.0, e, dir_x(e, 80.0, e, sx, sy, sz), dir_y(e, 80.0, e, sx, sy, sz), dir_z(e, 80.0, e, sx, sy, sz), 40.0), Fa.sp_sunfin(), "aimed at the sunfin, the sunfin")
+      Test.assert_eq_int(CubeForge.Flocks.aim(both, e, 80.0, e, 0.0, 1.0, 0.0, 40.0), 0, "looking up sees nothing")
+      Test.assert_eq_int(CubeForge.Flocks.aim(both, e, 80.0, e, dir_x(e, 80.0, e, px, py, pz), dir_y(e, 80.0, e, px, py, pz), dir_z(e, 80.0, e, px, py, pz), 5.0), 0, "and not past the reach")
+    end
+  end
+
   describe "migration" do
     test "a flock whose season is over climbs and leaves the way its species goes" do
       let p = flat_patch(70)

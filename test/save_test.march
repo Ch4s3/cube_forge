@@ -24,7 +24,7 @@ mod CubeForge.Test.Save do
     let p = floats(Cons(1.5, Cons(70.25, Cons(-3.0, Cons(0.0, Cons(-2.5, Cons(0.0, Cons(3.1, Cons(-0.7, Nil)))))))), 8)
     let inv = NativeArray.set_int(NativeArray.set_int(NativeArray.set_int(NativeArray.make_int(73, 0), 0, 3), 1, 12), 72, 4)
     let wx = floats(Cons(2.0, Cons(150.0, Cons(0.7, Cons(0.3, Nil)))), 4)
-    Save.header_new(424242, 1757000000, p, inv, 812.5, wx, 0, Nil)
+    Save.header_new(424242, 1757000000, p, inv, 812.5, wx, 0, Nil, 0)
   end
 
   pfn drop_go(ls : List(String), key : String, acc : String) : String do
