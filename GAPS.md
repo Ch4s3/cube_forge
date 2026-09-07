@@ -1530,35 +1530,32 @@ so this is specific to the call path, not to messages.
   error saying it cannot. Silently substituting zeros for a message's payload is
   the worst of the three options.
 
-### G85. A test module that fails to parse is dropped, and the suite passes
-
-- **Seen:** `test/poi_test.march` gained a binding named `on` -- a keyword, like
-  `by` (G-less, noted in `Poi.seg_d2`) -- and failed to parse. `forge test`
-  printed the parse error among the refinement hints, dropped the module, ran
-  the other 465 of 486 defined tests and finished with `0 failures`. Twenty-one
-  tests, the whole point-of-interest suite, silently stopped running; the drop
-  was noticed only because the total in the summary line went down.
-- **Would need:** a parse error in any test file to fail the run, or at least
-  the summary to say `N modules skipped`. Until then, the number on the
-  `Finished:` line is the check: it must not go down.
-
-### G85. `doc` before an attribute lints as a parse error; attribute before `doc` fails to compile
+### G85. `forge lint` parsed with a different parser than `forge build` compiled with
 
     doc "Face [yaw] radians."
     @[no_alloc]
     fn with_yaw(p : Player, yaw : Float) : Player do ... end
 
-builds and runs. `forge lint` reports `player.march:1:0: error [parse/error]
-parse error` — the file's first line, not the offending one. Swapping the two
-lines satisfies the linter and then the compiler rejects it with a typecheck
-error. No order of a doc string and an attribute on the same function is
-accepted by both tools.
+built and ran; `forge lint` reported `player.march:1:0: error [parse/error]
+parse error`, pointing at the file's first line. Not a grammar disagreement:
+the project pins `watch-7eb8d76a` in `.march-version`, and `forge build`
+routes `march` through the pin, but `forge lint` parses with the parser
+compiled INTO whichever `forge` is on PATH — here the opam install from
+2026-08-30, four days older than the production that lets a doc string and
+an attribute share a declaration. Swapping the two lines "fixed" lint and
+broke the build, which was the same disagreement seen from the other side.
 
-- **How it showed:** `forge lint` failing on main with a location that pointed
-  at nothing. Found by deleting the attribute, which made lint pass.
-- **Done instead:** the doc became a `--` comment and the attribute stayed,
-  since `@[no_alloc]` is a checked assertion and its sibling `with_pitch` has
-  the same shape. The function loses its rendered documentation.
-- **Would need:** the linter and compiler to share a parser, or at least one
-  agreed order, and a lint location that names the line it stopped on.
-
+- **How it showed:** a lint failure on main at a location that named
+  nothing. Found by deleting the attribute (lint passed), then by running the
+  same file through every installed `march` — every build from 2026-09-04
+  on accepted it, every older one did not.
+- **Cost:** an afternoon, most of it spent believing the compiler and the
+  linter shared a parser, which they do — just not the same build of it.
+- **Done instead:** forge now hands every subcommand except `toolchain`,
+  `upgrade`, `help` and `completions` to the pinned toolchain's own forge
+  when that is a different binary (`Toolchain.forge_exe_for`, march
+  2026-09-07), rustup-style, so lint, format and build agree by
+  construction; `forge toolchain which` says which forge will run. The doc
+  string went back on `with_yaw`.
+- **Would need:** nothing further here; a lint parse error that names the
+  line it stopped on would have halved the search.
