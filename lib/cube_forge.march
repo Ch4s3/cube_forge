@@ -3221,12 +3221,18 @@ mod CubeForge do
             -- fixed point of the relaxation, so uploading the CPU's own light
             -- and flooding it must change nothing: any difference is the rule,
             -- the edge handling or the wrap being wrong.
-            Win.gfx_upload_light(World.light(scene_world(sc1)), World.block_light(scene_world(sc1)), 192, 256, 192)
-            let lpre = Win.light_check(World.light(scene_world(sc1)), World.block_light(scene_world(sc1)))
+            -- The whole design, end to end: upload the SEED -- sky columns
+            -- filled, emitters set, everything else dark -- flood it on the
+            -- GPU, and compare against a from-scratch CPU flood of the same
+            -- world. Zero means the GPU can derive the light the CPU derives,
+            -- from the same starting point, and the CPU sweep is redundant.
+            let sw = scene_world(sc1)
+            Win.gfx_upload_light(CubeForge.Light.seed_all(CubeForge.Light.new(), sw),
+                                 CubeForge.Light.seed_emitters(CubeForge.Light.new(), sw), 192, 256, 192)
             let _lf = Win.light_flood(16)
-            let lpost = Win.light_check(World.light(scene_world(sc1)), World.block_light(scene_world(sc1)))
-            println("  gpu flood oracle: upload sky " ++ int_to_string(lpre / 10000000) ++ " block " ++ int_to_string(lpre % 10000000)
-                    ++ " -> after 16 passes sky " ++ int_to_string(lpost / 10000000) ++ " block " ++ int_to_string(lpost % 10000000) ++ " (all must be 0)")
+            let lpost = Win.light_check(CubeForge.Light.flood(sw), CubeForge.Light.flood_block(sw))
+            println("  gpu flood from seed vs a CPU flood: sky " ++ int_to_string(lpost / 10000000)
+                    ++ " block " ++ int_to_string(lpost % 10000000) ++ " voxels differ (both must be 0)")
             let occbad = Win.occ_check(World.occupancy(scene_world(sc1)))
             println("  occupancy oracle: fine " ++ int_to_string(occbad / 1000000) ++ " coarse " ++ int_to_string(occbad % 1000000) ++ " texels differ from the world (both must be 0)")
             println("  light oracle: sky " ++ int_to_string(count_diff_u8(World.light(scene_world(sc1)), CubeForge.Light.flood(scene_world(sc1)), 0, CubeForge.Light.volume(), 0))

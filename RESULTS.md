@@ -3578,3 +3578,46 @@ the fish could not find. They index by `side_of` now, like the rest.
 
 505 tests. fps drops from 120 to 88 with the fauna in, which is the cost of the
 new system rather than anything in this branch.
+
+
+## The seed pass: the GPU derives the light the CPU derives (2026-09-07)
+
+The oracle on the dump frame now runs the whole design end to end: upload the
+SEED -- `Light.seed_all` for the sky columns, `Light.seed_emitters` for the
+emitters, everything else dark -- flood it on the GPU, and compare against
+`Light.flood` / `Light.flood_block`, a from-scratch CPU flood of the same world.
+
+| seed | frame | sky | block |
+|---|---|---|---|
+| 7 | 60 | 0 | 0 |
+| 7 | 400 | 0 | 0 |
+| 11 | 30 | 0 | 0 |
+| 11 | 800 | 0 | 0 |
+| 11 | 1500 | 0 | 0 |
+
+Zero, both channels, 9 437 184 voxels each, across shifts and deep into a run.
+**The CPU sweep is redundant**: given the same seed, the GPU arrives at the same
+light. The seed itself stays on the CPU, where it is cheap -- it is a pure
+function of the blocks with no BFS in it, and the expensive half was always the
+sweep.
+
+### Why this is not yet wired in
+
+Two things stand between the proof and the switch, and both are design rather
+than doubt:
+
+**The CPU field cannot be half-swept.** Every relight reads the field it is
+about to repair (`Light.region_reach` sizes its box from the brightest light
+around the region). If the GPU sweeps and the CPU does not, the next edit works
+from a wrong field. So the CPU field has to stop being a swept field altogether
+and become a SEED field -- zeroed and re-seeded per edited box, never swept --
+and every relight becomes "re-seed the box, then flood". That is coherent, and
+it deletes `sweep_box_lists`, `region_reach`, the relight boxes and the marks
+that serve them. It is not a change that can be made half way.
+
+**A flood is 7.55 ms and edits are frequent.** A retexture slot alone is dozens
+of single-column edits. Flooding per edit is out of the question; the light has
+to be marked dirty and flooded ONCE, with the sixteen passes amortised across
+frames -- four a frame is ~1.9 ms and converges in four. Light changes are
+gradual enough that a frame or two of partial convergence is invisible, which is
+the same trade the mesh drain already makes.
