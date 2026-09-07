@@ -157,6 +157,31 @@ mod CubeForge.Test.Poi do
     end
   end
 
+  describe "a delta" do
+    test "is a field that only reshapes the coast" do
+      Test.assert_eq_int(Pi.class_of(Pi.k_delta()), Pi.cls_field(), "field")
+      Test.assert_true(Pi.raises(Pi.k_delta()), "a height term")
+      Test.assert_eq_int(Pi.vol_of(Pi.k_delta()), Pi.vol_none(), "and no volume")
+      let sea = int_to_float(CubeForge.Noise.sea_level())
+      Test.assert_eq_int(Pi.delta_at(seed(), 10, 10, sea +. 40.0, 1.0, 1.0), 0, "high ground is not the coast")
+      Test.assert_eq_int(Pi.delta_at(seed(), 10, 10, sea +. 10.0, 1.0, 0.0), 0, "outside great-river country nothing happens")
+    end
+    test "the trunk is cut below the sea on the crease and not off it" do
+      let sea = int_to_float(CubeForge.Noise.sea_level())
+      -- `on` is a keyword, like `by`: a binding named that is a parse error with no hint
+      let bed = Pi.delta_at(seed(), 10, 10, sea +. 10.0, 1.0, 1.0)
+      Test.assert_true(bed < 0, "the channel's centre is cut")
+      Test.assert_true(float_to_int(sea +. 10.0) + bed < CubeForge.Noise.sea_level(), "below the sea, so it holds water")
+      Test.assert_eq_int(Pi.delta_at(seed(), 10, 10, sea +. 10.0, 0.3, 1.0), 0, "off the crease the bank is untouched")
+    end
+    test "the mouth is flattened toward a block above the sea" do
+      let sea = int_to_float(CubeForge.Noise.sea_level())
+      let low = Pi.delta_at(seed(), 40, 40, sea -. 3.0, 0.9, 1.0)
+      let high = Pi.delta_at(seed(), 41, 40, sea +. 4.0, 0.9, 1.0)
+      Test.assert_true(low >= 0 || high <= 0, "the lobe is pulled toward one level from both sides")
+    end
+  end
+
   describe "an atoll" do
     test "is a landmark with a ceiling on its ground, and absolute levels" do
       Test.assert_eq_int(Pi.class_of(Pi.k_atoll()), Pi.cls_landmark(), "landmark")

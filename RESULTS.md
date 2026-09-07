@@ -2632,5 +2632,55 @@ out identical, twice. `set -- $pos` does not word-split in zsh, so every run got
 spawn. `${=pos}`.
 
 483 tests. `CF_POI=0` is bit-identical (mesh 484802240). Seed 7 now has a
-canyon, so the pinned scenario's mesh with POIs on is **839500821** -- the
-baseline moves once, deliberately. Worst frame 6.69 ms.
+canyon, so the pinned scenario's mesh with POIs on moves -- to 839500821 at
+the 0.60 threshold and **796267894** at 0.66, which is the baseline now. Worst
+frame 6.69 ms.
+
+## Points of interest, phase 3b: the delta, and a test suite that lied (2026-09-07)
+
+**The delta** is the second field. Where great-river country meets the coast:
+inland, the **trunk** -- the raw crease read against a far lower edge than the
+ordinary river uses, so the channel is 20-40 across instead of 3, with its bed
+cut below the sea so it holds water its whole length; at the mouth, the
+**fan** -- the lobe flattened to a block above the sea and a braid of channels
+cut across it. The sediment pass already puts mud and clay under a floodplain,
+so the land between reads as delta without new rules. The honest limit stands:
+with no flow routing, the river is great only where its country is.
+
+**The crease is a band, not a line.** The river's raw crease is a ridged field,
+`1 - |2n - 1|`, so it is above 0.6 wherever the noise is within 0.2 of a half.
+The ordinary river's edge of 0.86 slices a 0.07-wide band off that; the delta's
+first edge of 0.55 took a band three times wider than intended. Measured by
+transect: forty-five columns across at 0.55, up to seventy-eight at 0.60,
+twenty to forty at 0.72. Read *across* a river a transect gives its width;
+read *along* one it gives its length, which is how a sixty-six-column band at
+seed 13 turned out to be a channel and not a bug.
+
+**The fan flattened whole coasts.** Gated on the crease, the fan fired on every
+coastal column in great-river country: 11,353 of a window's 16,384 columns
+moved at seed 13, fifty-eight columns of seabed raised into land in one row. A
+fan is the mouth of *its own* channel and nothing else, so it is now gated on
+the trunk's width. Great-river country went from 0.62 to 0.74 as well: nine
+seeds in forty have a delta in the spawn window, and one of those has both a
+delta and a canyon.
+
+**A mask should gate a field, not scale it.** Both fields multiplied their cut
+by the raw country value, so at the country's fringe -- which is most of it,
+since a smooth mask is mostly fringe -- the channel was half-dug: the delta's
+trunk at seed 13 read as one bench along its whole length, a dry trough with
+its bed still above the sea, because the mask there was 0.4. `strength` now
+takes the mask to full over most of the country and eases only at the edge,
+and the same trunk reads two benches with its bed under water. The canyon had
+the same defect and the same fix; seed 7's canyon went back to full depth, so
+the pinned scenario's POI-on mesh is **839500821** after all.
+
+**The suite passed with twenty-one tests missing.** `poi_test.march` gained a
+binding named `on` -- a keyword, like `by` -- and failed to parse. `forge test`
+printed the parse error among four hundred lines of refinement hints, dropped
+the module, ran the other 465 of 486 and said `0 failures`. It was caught
+because the total on the `Finished:` line went down. GAPS G83; until the runner
+fails on a parse error, that number is the check and it must not fall.
+
+486 tests. `CF_POI=0` bit-identical (484802240); the pinned scenario with POIs
+on is 839500821 (seed 7 has a canyon and no delta). Worst frame 6.20 ms. Phase 3 is complete: all seven kinds from the original request
+are in.

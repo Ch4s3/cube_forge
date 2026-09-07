@@ -70,11 +70,12 @@ mod CubeForge.Poi do
   fn k_tree() : Int do 3 end
   fn k_canyon() : Int do 4 end
   fn k_atoll() : Int do 5 end
+  fn k_delta() : Int do 6 end
   doc "How many kinds there are: the rules test walks 0 .. kinds() - 1."
-  fn kinds() : Int do 6 end
+  fn kinds() : Int do 7 end
   fn kind_name(k : Int) : String do
     if k == k_butte() do "butte" else if k == k_arch() do "arch" else if k == k_cavern() do "cavern"
-    else if k == k_tree() do "giant tree" else if k == k_canyon() do "canyon" else "atoll" end end end end end
+    else if k == k_tree() do "giant tree" else if k == k_canyon() do "canyon" else if k == k_atoll() do "atoll" else "delta" end end end end end end
   end
 
   -- ── What a kind does to the world ────────────────────────────────────────
@@ -89,7 +90,7 @@ mod CubeForge.Poi do
   fn vol_stamp() : Int do 2 end
   doc "What kind [k] does to the volume."
   fn vol_of(k : Int) : Int do
-    if k == k_butte() || k == k_atoll() || k == k_canyon() do vol_none()
+    if k == k_butte() || k == k_atoll() || k == k_canyon() || k == k_delta() do vol_none()
     else if k == k_tree() do vol_stamp()
     else vol_carve() end end
   end
@@ -99,7 +100,7 @@ mod CubeForge.Poi do
   feature that is not terrain (a cavern in the rock, a tree standing on it)
   must not, and is kept out of the per-column scan entirely.
   """
-  fn raises(k : Int) : Bool do k == k_butte() || k == k_arch() || k == k_canyon() || k == k_atoll() end
+  fn raises(k : Int) : Bool do k == k_butte() || k == k_arch() || k == k_canyon() || k == k_atoll() || k == k_delta() end
 
   fn cls_scatter() : Int do 0 end
   fn cls_landmark() : Int do 1 end
@@ -114,7 +115,7 @@ mod CubeForge.Poi do
   doc "Scatter, landmark or field: see the module header. This decides where a kind's rules are read and whether it may be carved."
   fn class_of(k : Int) : Int do
     if k == k_butte() do cls_scatter()
-    else if k == k_canyon() do cls_field()
+    else if k == k_canyon() || k == k_delta() do cls_field()
     else cls_landmark() end end
   end
 
@@ -125,30 +126,32 @@ mod CubeForge.Poi do
 
   doc "Side of the kind's cell in blocks: one instance at most per cell."
   fn cell(k : Int) : Int do
-    if k == k_butte() do 24 else if k == k_cavern() do 128 else if k == k_atoll() do 256 else if k == k_canyon() do 1 else 160 end end end end
+    if k == k_butte() do 24 else if k == k_cavern() do 128 else if k == k_atoll() do 256 else if class_of(k) == cls_field() do 1 else 160 end end end end
   end
   doc "Fraction of cells in full country holding one."
   fn density(k : Int) : Float do
     if k == k_butte() do 0.35 else if k == k_arch() do 0.5 else if k == k_cavern() do 0.65
-    else if k == k_atoll() do 0.85 else if k == k_canyon() do 1.0 else 0.4 end end end end end
+    else if k == k_atoll() do 0.85 else if class_of(k) == cls_field() do 1.0 else 0.4 end end end end end
   end
   doc "Frequency of the kind's country octave: how wide a region of them is."
   fn cty_freq(k : Int) : Float do
     if k == k_butte() do 0.0075 else if k == k_arch() do 0.0035 else if k == k_cavern() do 0.0040
     -- a canyon SYSTEM runs for hundreds of blocks, so its country is the broadest octave here
-    else if k == k_canyon() do 0.0025 else if k == k_atoll() do 0.0030 else 0.0060 end end end end end
+    else if k == k_canyon() do 0.0025 else if k == k_atoll() do 0.0030
+    -- a great river is a regional thing: the broadest octave of all
+    else if k == k_delta() do 0.0020 else 0.0060 end end end end end end
   end
   doc "Where the country octave has to reach before the kind appears at all: its rarity."
   fn cty_lo(k : Int) : Float do
     if k == k_butte() do 0.62 else if k == k_arch() do 0.56 else if k == k_cavern() do 0.52
-    else if k == k_canyon() do 0.66 else if k == k_atoll() do 0.38 else 0.60 end end end end end
+    else if k == k_canyon() do 0.66 else if k == k_atoll() do 0.38 else if k == k_delta() do 0.74 else 0.60 end end end end end end
   end
   doc "How wide the country's edge band is."
   fn cty_band(k : Int) : Float do 0.10 end
   doc "How far outside a chunk an instance may sit and still write into it."
   fn reach(k : Int) : Int do
     if k == k_butte() do 12 else if k == k_arch() do 26 else if k == k_cavern() do 54
-    else if k == k_atoll() do 90 else if k == k_canyon() do 0 else 58 end end end end end
+    else if k == k_atoll() do 90 else if class_of(k) == cls_field() do 0 else 58 end end end end end
   end
   doc "The least a landmark's ground must stand above sea level."
   fn min_ground(k : Int) : Int do
@@ -161,7 +164,7 @@ mod CubeForge.Poi do
     else if k == k_cavern() do N.sea_level() + 18
     -- an atoll's ground rule is a CEILING, not a floor: see max_ground
     else if k == k_atoll() do 0
-    else if k == k_canyon() do 0
+    else if class_of(k) == cls_field() do 0
     else N.sea_level() + 3 end end end end end
   end
   doc """
@@ -201,7 +204,7 @@ mod CubeForge.Poi do
     else if k == k_cavern() do (if i == p_len() do 16 else if i == p_wide() do 12 else if i == p_depth() do 30 else 0 end end end)
     -- atoll: len is the ring's radius, wide half its width, top the reef flat, depth the lagoon floor below the sea
     else if k == k_atoll() do (if i == p_len() do 26 else if i == p_wide() do 5 else if i == p_top() do N.sea_level() + 1 else if i == p_depth() do 22 else 0 end end end end)
-    else if k == k_canyon() do 0
+    else if class_of(k) == cls_field() do 0
     -- tree: len is the crown's radius, wide the trunk's, rise the trunk's height
     else (if i == p_len() do 26 else if i == p_wide() do 4 else if i == p_rise() do 14 else 0 end end end) end end end end end
   end
@@ -210,7 +213,7 @@ mod CubeForge.Poi do
     else if k == k_arch() do (if i == p_len() do 36 else if i == p_wide() do 8 else if i == p_rise() do 40 else 0 end end end)
     else if k == k_cavern() do (if i == p_len() do 26 else if i == p_wide() do 20 else if i == p_depth() do 44 else 0 end end end)
     else if k == k_atoll() do (if i == p_len() do 44 else if i == p_wide() do 9 else if i == p_top() do N.sea_level() + 3 else if i == p_depth() do 30 else 0 end end end end)
-    else if k == k_canyon() do 0
+    else if class_of(k) == cls_field() do 0
     else (if i == p_len() do 38 else if i == p_wide() do 6 else if i == p_rise() do 22 else 0 end end end) end end end end end
   end
 
@@ -470,7 +473,8 @@ mod CubeForge.Poi do
   fn canyon_rise_above() : Int do 20 end
 
   doc "Blocks the canyon term removes at a column: a negative number, or 0. [cty] is the canyon country there -- the caller reads it, so the preview can hand in 1 and draw the shape without a placement in it."
-  fn canyon_at(seed : Int, hd : Float, river : Float, rug : Float, cty : Float) : Int do
+  fn canyon_at(seed : Int, hd : Float, river : Float, rug : Float, cty0 : Float) : Int do
+    let cty = strength(cty0)
     let above = hd -. int_to_float(N.sea_level() + canyon_rise_above())
     if above <= 0.0 do 0
     else if river <= 0.05 do 0
@@ -487,6 +491,71 @@ mod CubeForge.Poi do
         0 - (if cut > most do most else cut end)
       end
     end end end
+  end
+
+  -- ── The delta: a field ───────────────────────────────────────────────────
+  -- Where great-river country meets the coast, two things happen to the
+  -- river. Inland, the TRUNK: the raw crease is read against a far lower edge
+  -- than the ordinary river uses, so the channel is 20-40 across instead of 3,
+  -- and its bed is cut below the sea so it holds water its whole length. At
+  -- the mouth, the FAN: the lobe is flattened to a block above the sea and a
+  -- braid of channels cut across it, and the sediment pass already puts mud
+  -- and clay under a floodplain, so the land between reads as delta unasked.
+  --
+  -- The honest limit, from the design: with no flow routing the great river is
+  -- great only where its country is, and fades to an ordinary river upstream.
+
+  doc """
+  Where the trunk's channel starts on the raw crease, against the ordinary
+  river's 0.66..0.86. The crease is a RIDGED field, 1 - |2n - 1|, so it is
+  above 0.6 wherever the noise is within 0.2 of a half -- a band, not a line:
+  at 0.55 the trunk was forty-five columns across, at 0.60 up to seventy-eight.
+  0.72 is a channel twenty to forty wide, which is what a great river is.
+  """
+  fn delta_edge() : Float do 0.72 end
+  doc "The highest ground the delta touches: above this it is not the coast."
+  fn delta_rise_above() : Int do 16 end
+  doc "How far below the sea the trunk's bed is cut at the channel's centre."
+  fn delta_bed() : Float do 4.0 end
+
+  doc """
+  A country mask as a field should use it: full strength over nearly all of
+  the country and easing only at the very edge. Scaling a cut by the raw mask
+  gave half-dug channels -- a delta's trunk at seed 13 read as one bench along
+  its whole length, a dry trough with its bed still above the sea, because the
+  mask there was 0.4.
+  """
+  fn strength(cty : Float) : Float do N.smooth(N.clamp01(cty *. 2.5)) end
+
+  doc "Blocks the delta term adds or removes at a column: [rv] is the raw crease, [cty0] the great-river country there. The preview hands in 1."
+  fn delta_at(seed : Int, wx : Int, wz : Int, hd : Float, rv : Float, cty0 : Float) : Int do
+    let sea = int_to_float(N.sea_level())
+    let cty = strength(cty0)
+    if hd > sea +. int_to_float(delta_rise_above()) do 0
+    else if cty <= 0.0 do 0
+    else
+      -- 1 at the mouth (at or under the sea), 0 six blocks up
+      let coast = N.smooth(N.clamp01((sea +. 6.0 -. hd) /. 8.0))
+      let wide = N.smooth(N.clamp01((rv -. delta_edge()) /. (1.0 -. delta_edge())))
+      -- the fan is the MOUTH of this channel and nothing else: it is gated on
+      -- the trunk's own width. Gated on the raw crease it flattened every
+      -- coastal column in great-river country -- 11,000 of a window's 16,384
+      -- at seed 13, fifty-eight columns of seabed raised into land in one row
+      -- -- because the crease is high across half the world.
+      let lobe = wide
+      if coast < 0.2 do
+        -- the trunk: cut the wide channel's bed below the sea
+        let bed = sea -. delta_bed() *. wide
+        if wide <= 0.0 || bed >= hd do 0 else float_to_int((bed -. hd) *. cty) end
+      else if lobe <= 0.0 do 0
+      else
+        -- the fan: flatten the lobe to a block above the sea, and braid it
+        let flat = (sea +. 1.0 -. hd) *. 0.85 *. coast *. lobe
+        let braid = N.ridged(int_to_float(wx) *. 0.045 +. 1.7, int_to_float(wz) *. 0.045 +. 4.1, seed + 2600)
+        let channel = if braid > 0.80 do ((sea -. 2.0) -. (hd +. flat)) *. lobe else 0.0 end
+        float_to_int((flat +. channel) *. cty)
+      end end
+    end end
   end
 
   pfn pick(best : Int, cand : Int) : Int do
@@ -553,7 +622,11 @@ mod CubeForge.Poi do
               else canyon_at(seed, hd, river, rug, country(k_canyon(), wx, wz, seed)) end
     -- the atoll lowers as well as raises, and nothing else raises under the
     -- sea, so where it speaks it is the answer
-    (if at != 0 do at else Math.max_int(b, a) end) + cut
+    -- the delta, a field too, disjoint from the canyon by height: a canyon
+    -- wants sea + 20 and above, a delta sea + 16 and below
+    let dl = if hd > int_to_float(N.sea_level() + delta_rise_above()) || rv <= 0.45 do 0
+             else delta_at(seed, wx, wz, hd, rv, country(k_delta(), wx, wz, seed)) end
+    (if at != 0 do at else Math.max_int(b, a) end) + cut + dl
   end
 
   -- ── The volume pass ────────────────────────────────────────────────────
@@ -1037,14 +1110,17 @@ mod CubeForge.Poi do
     if k == k_cavern() do min_ground(k) + 6
     else if k == k_atoll() do N.sea_level() - 12
     else if k == k_canyon() do N.sea_level() + 34
-    else 70 end end end
+    else if k == k_delta() do N.sea_level() + 4
+    else 70 end end end end
   end
 
   -- A field has no shape of its own to draw, so the preview hands it a valley:
   -- a river crease running along u, 22 blocks wide, in rugged country.
   pfn pv_field(k : Int, v : Int, g : Int) : Int do
     let river = N.smooth(N.clamp01(1.0 -. Math.abs(int_to_float(v)) /. 22.0))
-    if k == k_canyon() do canyon_at(1, int_to_float(g), river, 0.7, 1.0) else 0 end
+    if k == k_canyon() do canyon_at(1, int_to_float(g), river, 0.7, 1.0)
+    else if k == k_delta() do delta_at(1, v * 3, 0, int_to_float(g), N.clamp01(1.0 -. Math.abs(int_to_float(v)) /. 30.0), 1.0)
+    else 0 end end
   end
 
   -- World column of frame offset (u, v).
@@ -1099,7 +1175,7 @@ mod CubeForge.Poi do
     -- how high the ring is gets a negative number
     let hi = Math.max_int(Math.max_int(g + shape_at(k, cx, cz, sx(k, cx, cz, seed), sz(k, cx, cz, seed), seed, int_to_float(g)) + 2, vol_y1(k, cx, cz, seed, g) + 2),
                           param(k, cx, cz, seed, p_top()) + 4)
-    println("poi preview: " ++ kind_name(k) ++ "  (" ++ (if class_of(k) == cls_scatter() do "scatter" else "landmark" end)
+    println("poi preview: " ++ kind_name(k) ++ "  (" ++ (if class_of(k) == cls_scatter() do "scatter" else if class_of(k) == cls_field() do "field" else "landmark" end end)
             ++ ", " ++ (if raises(k) do "raises" else "no height" end)
             ++ ", " ++ (if vol_of(k) == vol_none() do "no volume" else if vol_of(k) == vol_carve() do "carves" else "stamps" end end) ++ ")")
     println("  cell " ++ int_to_string(cell(k)) ++ "  density " ++ int_to_string(float_to_int(density(k) *. 100.0)) ++ "%"

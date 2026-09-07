@@ -364,3 +364,16 @@ rock at both ends.
 - `CF_POI_TRANSECT=<z>` reads a landform across the world in one line, and
   `CF_POI_GATE=1` says which placement rule refuses a kind. Both found bugs
   that screenshots had not.
+
+## 13. As built, phase 3b: the delta (2026-09-07)
+
+- The delta is a field like the canyon, split by height into a trunk (the
+  crease against edge 0.72, bed cut below the sea) and a fan (flattened to
+  sea + 1 and braided), the fan gated on the trunk's own width so it is the
+  mouth of that channel and not the whole coast.
+- The crease is a band, not a line: the delta's edge was set by measuring its
+  width by transect (45 -> 78 -> 20-40 columns at 0.55 / 0.60 / 0.72), not by
+  guessing.
+- All seven kinds from the request are in. The census over forty seeds: buttes
+  and canyons regional, arches and giant trees one in eight, caverns one in
+  five, deltas nine in forty, atolls two in a hundred and forty.
