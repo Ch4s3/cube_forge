@@ -1526,6 +1526,29 @@ mod CubeForge do
     end
   end
 
+  -- Leave every chunk of the window where the water actors can read it, by
+  -- world coordinate. They used to regenerate their own -- five chunks and a
+  -- lake pour per load, and a second copy of world generation living inside the
+  -- actor -- because GAPS.md G44 forbids a native array in a message payload.
+  -- It still does; only the coordinate is sent, and the chunk is fetched by it.
+  pfn store_chunks_go(w : CubeForge.World.World, n : Int, i : Int) : Unit do
+    if i >= n * n do ()
+    else
+      Win.chunk_put(World.origin_x(w) + i % n, World.origin_z(w) + i / n,
+                    Chunk.raw(World.chunk_at(w, i % n, i / n)))
+      store_chunks_go(w, n, i + 1)
+    end
+  end
+  pfn store_band_go(w : CubeForge.World.World, n : Int, band : List(Int)) : Unit do
+    match band do
+      Nil -> ()
+      Cons(d, rest) ->
+        Win.chunk_put(World.origin_x(w) + d % n, World.origin_z(w) + d / n,
+                      Chunk.raw(World.chunk_at(w, d % n, d / n)))
+        store_band_go(w, n, rest)
+    end
+  end
+
   -- Every source above sea level: told to the shim, and its chunk flagged so the
   -- water actor ticks from the first frame (a chunk with a spring is always live).
   -- ── A shift in flight ──────────────────────────────────────────────────
@@ -1793,6 +1816,7 @@ mod CubeForge do
         let band = band_indices(n, dx, dz, n * n - 1, Nil)
         let rm = remap_meshes_go(meshes, w1, n, dx, dz, n * n - 1, counts1, Chunk.new(), band, fresh, Nil)
         let c5 = Win.time()
+        store_band_go(w1, n, band)
         let pids1 = Array.from_list(remap_pids_go(pids, w1, n, dx, dz, n * n - 1, freed_pids_go(pids, n, dx, dz, n * n - 1, Nil), seed, Nil))
         let flags2 = spring_band(w1, bio1, n, band, flags1)
         match rm do
@@ -3961,6 +3985,7 @@ mod CubeForge do
       -- WLoad goes out, every actor hits instead. The apron is one tile wide
       -- because load_sim mirrors the four neighbouring chunks, which can be in
       -- the next tile over.
+      store_chunks_go(world, n, 0)
       let tl0 = Win.time()
       let ntiles = warm_lake_tiles(seed, World.origin_x(world), World.origin_z(world), n, workers)
       println("  lake tiles poured for the water actors: " ++ int_to_string(ntiles) ++ " in " ++ ms(Win.time() -. tl0))

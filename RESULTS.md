@@ -3675,3 +3675,54 @@ accounts for none of it.
 **Fixed camera, uncapped, both builds, same seed** is the only frame-rate
 comparison in this project that means anything. The walking benchmark is for
 worst-frame and for oracles, not for means.
+
+
+## G44, paid off (2026-09-07)
+
+`GAPS.md` G44: `NativeU8Arr` is in the typechecker's `non_sendable_types`, so a
+message cannot carry a chunk. What shipped instead was every `WaterChunk` actor
+regenerating its own chunk from `(cx, cz, seed)` on `WLoad` -- and its four
+neighbours too, for the edge mirrors. Five chunk generations a load, and a
+second implementation of world generation living inside the actor.
+
+The rule is not broken here, and the language is not changed. Only integers
+cross the message, as before. The main thread already holds every chunk, so it
+leaves them in a shim-side store keyed by WORLD chunk coordinate, and an actor
+asks by coordinate. The same shape as the lake tile memo, for the same reason:
+actors share a process and this is the only thing they can share. A miss just
+means the actor generates as it used to, so a neighbour outside the window still
+works.
+
+| per water load | before | after |
+|---|---|---|
+| the chunk itself | 13-39 ms | **0.02 ms** |
+| four neighbours | 119 ms | **25.6 ms** |
+| water tick `calls`, worst over a run | 23.1 ms | **5.2 ms** |
+
+The neighbours are not free because the edge mirrors still have to be copied and
+each fetch allocates a chunk-sized buffer; the fetch itself is a memcpy. Fetching
+only the edge strip rather than the whole neighbour is the obvious next cut.
+
+**A behaviour change worth naming:** an actor now loads the world's CURRENT
+chunk, where it used to regenerate the pristine one. That is more correct -- it
+sees the wild fungus, the vegetation and any edits already applied -- but it is
+a change, and no test covered the difference.
+
+### On fixing G44 properly
+
+The gap itself is a March language limitation and the fix it names -- "a
+linear/moved send for uniquely-owned buffers" -- is a compiler change, not a
+change here. Two things stopped that being the answer today:
+
+- `~/code/march` is on a feature branch with another session's uncommitted work
+  in it. Editing a shared repository someone else is mid-task in is not a thing
+  to do quietly.
+- Native arrays are in `non_sendable_types` *deliberately*, added 2026-08-07 and
+  pinned by reject tests `t164`/`t165`, because they are "flat, in-place-mutable
+  buffers that must stay owned by one actor". Removing that is removing a safety
+  property from every March program, not fixing a defect in one.
+
+If it is wanted, the cheap version is copy-on-send -- allow the array in a
+payload and have the runtime deep-copy it, which is semantically a snapshot and
+needs no linearity. For this project it would save the 64 KB memcpy the store
+already costs, and nothing else: the store is what actually removed the cost.

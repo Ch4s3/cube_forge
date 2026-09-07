@@ -2353,6 +2353,66 @@ void *cf_mark_box(void *marks, void *a, void *b, int64_t x0, int64_t x1, int64_t
     return marks;
 }
 
+/* ── Chunk store: how an actor gets a chunk without one crossing a message ───
+ * GAPS.md G44: NativeU8Arr is in the typechecker's non_sendable_types, so a
+ * message cannot carry a chunk and every WaterChunk actor regenerated its own
+ * from (cx, cz, seed) -- and its four neighbours too, for the edge mirrors.
+ * Five chunk generations per load, and a second implementation of world
+ * generation living inside the actor.
+ *
+ * Nothing here violates the rule: only integers cross the message. The main
+ * thread, which already has every chunk, leaves them where the actors can read
+ * them, and an actor asks by coordinate. The same shape as the lake tile memo
+ * above, and the same reason -- actors share a process and this is the only
+ * thing they can share.
+ *
+ * Keyed by WORLD chunk coordinate, so a chunk keeps its identity across a
+ * window shift. Enough slots for a 12-chunk window and its apron; the oldest
+ * entry is evicted, and a miss just means the actor generates as it used to. */
+#define CF_CHUNK_SLOTS 256
+#define CF_CHUNK_BYTES 65536
+static struct { int64_t cx, cz; unsigned char *bytes; int used; } g_chunks[CF_CHUNK_SLOTS];
+static int64_t g_chunk_next = 0;
+static pthread_mutex_t g_chunk_mu = PTHREAD_MUTEX_INITIALIZER;
+
+void cf_chunk_put(int64_t cx, int64_t cz, void *arr) {
+    if (narr_len(arr) < CF_CHUNK_BYTES) return;
+    const unsigned char *src = (const unsigned char *)narr_data(arr);
+    pthread_mutex_lock(&g_chunk_mu);
+    int slot = -1;
+    for (int i = 0; i < CF_CHUNK_SLOTS; i++)
+        if (g_chunks[i].used && g_chunks[i].cx == cx && g_chunks[i].cz == cz) { slot = i; break; }
+    if (slot < 0) {
+        slot = (int)(g_chunk_next % CF_CHUNK_SLOTS);
+        g_chunk_next++;
+    }
+    if (!g_chunks[slot].bytes) g_chunks[slot].bytes = (unsigned char *)malloc(CF_CHUNK_BYTES);
+    if (g_chunks[slot].bytes) {
+        memcpy(g_chunks[slot].bytes, src, CF_CHUNK_BYTES);
+        g_chunks[slot].cx = cx; g_chunks[slot].cz = cz; g_chunks[slot].used = 1;
+    }
+    pthread_mutex_unlock(&g_chunk_mu);
+}
+
+/* Fill [out] -- CF_CHUNK_BYTES plus ONE, the last byte coming back 1 on a hit
+ * and 0 on a miss, so the test and the fetch are one call and cannot race. */
+void *cf_chunk_get(void *out, int64_t cx, int64_t cz) {
+    int64_t rc = *(int64_t *)out;
+    if (rc != 1) { fprintf(stderr, "cf_chunk_get: destination is shared (rc=%lld)\n", (long long)rc); abort(); }
+    if (narr_len(out) < CF_CHUNK_BYTES + 1) { fprintf(stderr, "cf_chunk_get: destination too small\n"); abort(); }
+    unsigned char *d = (unsigned char *)narr_data(out);
+    d[CF_CHUNK_BYTES] = 0;
+    pthread_mutex_lock(&g_chunk_mu);
+    for (int i = 0; i < CF_CHUNK_SLOTS; i++)
+        if (g_chunks[i].used && g_chunks[i].cx == cx && g_chunks[i].cz == cz) {
+            memcpy(d, g_chunks[i].bytes, CF_CHUNK_BYTES);
+            d[CF_CHUNK_BYTES] = 1;
+            break;
+        }
+    pthread_mutex_unlock(&g_chunk_mu);
+    return out;
+}
+
 /* ── Lake tile cache ─────────────────────────────────────────────────────────
  * CubeForge.Lakes.tile pours a priority-flood over a 128x128 tile: 157-214 ms
  * measured. Every water actor called it on WLoad, so 144 actors poured the

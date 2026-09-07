@@ -506,13 +506,27 @@ mod CubeForge.Water do
     let t = if CubeForge.Lakes.same_tile(x, z, cx, cz) do lk else CubeForge.Lakes.tile_of_chunk(seed, x, z) end
     C.generate_lakes(16 * x, 16 * z, seed, t)
   end
+  -- A chunk by WORLD coordinate: from the store the main thread left it in, or
+  -- generated as before on a miss. This is what GAPS.md G44 costs and how it is
+  -- paid without breaking the rule -- a native array may not cross a message,
+  -- so none does; only (cx, cz) is sent, and the chunk is fetched by it.
+  --
+  -- The buffer is one byte longer than a chunk: chunk_get answers hit or miss
+  -- in that last byte. Chunk only ever indexes below 65536, so the spare byte
+  -- is invisible to it, and an actor's chunk is never saved.
+  pfn stored_chunk(x : Int, z : Int, cx : Int, cz : Int, seed : Int, lk : CubeForge.Lakes.Tile) : CubeForge.Chunk.Chunk do
+    let buf = CubeForge.Ffi.Window.chunk_get(NativeArray.make_u8(65537, 0), x, z)
+    if NativeArray.get_u8(buf, 65536) == 1 do C.of_raw(buf)
+    else nb_chunk(x, z, cx, cz, seed, lk) end
+  end
+
   pfn load_sim(cx : Int, cz : Int, n : Int, seed : Int) : Sim do
     let t0 = CubeForge.Ffi.Window.time()
     let lk = CubeForge.Lakes.tile_of_chunk(seed, cx, cz)
     let t1 = CubeForge.Ffi.Window.time()
-    let c = C.generate_lakes(16 * cx, 16 * cz, seed, lk)
+    let c = stored_chunk(cx, cz, cx, cz, seed, lk)
     let t2 = CubeForge.Ffi.Window.time()
-    let nb = fn (x, z) -> nb_chunk(x, z, cx, cz, seed, lk)
+    let nb = fn (x, z) -> stored_chunk(x, z, cx, cz, seed, lk)
     let e0 = load_edge(empty_edges(), 0, nb(cx, cz - 1))
     let e1 = load_edge(e0, 1, nb(cx, cz + 1))
     let e2 = load_edge(e1, 2, nb(cx + 1, cz))
