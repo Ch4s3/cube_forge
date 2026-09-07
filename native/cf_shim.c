@@ -227,6 +227,18 @@ static const char *VS =
     /* The slot's offset: a chunk mesh is baked at the window-local origin it
      * had when meshed, and the window has since slid (cf_gfx_shift). */
     "uniform vec2 u_off;\n"
+    /* Model mode (cf_gfx_draw_model): the vertices are a template in the unit
+     * cube, a body centred on (0.5, 0.5, 0.5), and the transform arrives as
+     * uniforms -- placed at u_mpos, turned about +y by u_mrot (cos, sin),
+     * scaled by u_mscale, lit by u_msky / u_mblk. The normal turns with the
+     * body. This is what lets an animal's template be uploaded ONCE and drawn
+     * with six floats a frame instead of re-stamped and re-uploaded whole. */
+    "uniform int u_model;\n"
+    "uniform vec3 u_mpos;\n"
+    "uniform vec2 u_mrot;\n"
+    "uniform float u_mscale;\n"
+    "uniform float u_msky;\n"
+    "uniform float u_mblk;\n"
     "out vec2 v_uv; out float v_layer; out float v_shade; out float v_blk;\n"
     "out vec3 v_world; out vec3 v_normal; out float v_fx;\n"
     "const vec3 NORMALS[6] = vec3[6](vec3(0,1,0), vec3(0,-1,0), vec3(1,0,0), vec3(-1,0,0), vec3(0,0,1), vec3(0,0,-1));\n"
@@ -237,8 +249,15 @@ static const char *VS =
      * fog see the block the game logic sees. */
     "  int fe = int(a_fx + 0.5) >> 8;\n"
     "  vec3 p = a_pos;\n"
-    "  p.xz += u_off;\n"
-    "  if (fe >= 2) p.y += 0.03 * sin(u_time * 1.7 + p.x * 1.3 + p.z * 0.9);\n"
+    "  vec3 n = NORMALS[f];\n"
+    "  if (u_model == 1) {\n"
+    "    vec3 q = (a_pos - vec3(0.5)) * u_mscale;\n"
+    "    p = vec3(q.x * u_mrot.x - q.z * u_mrot.y, q.y, q.x * u_mrot.y + q.z * u_mrot.x) + u_mpos;\n"
+    "    n = vec3(n.x * u_mrot.x - n.z * u_mrot.y, n.y, n.x * u_mrot.y + n.z * u_mrot.x);\n"
+    "  } else {\n"
+    "    p.xz += u_off;\n"
+    "    if (fe >= 2) p.y += 0.03 * sin(u_time * 1.7 + p.x * 1.3 + p.z * 0.9);\n"
+    "  }\n"
     "  gl_Position = u_vp * vec4(p,1.0);\n"
     "  v_uv=a_uv; v_layer=a_layer;\n"
     /* v_shade is the packed shade word (see Vertex.pack_shade): sky x AO in
@@ -246,9 +265,9 @@ static const char *VS =
      * the fragment shader unpacks it. The per-face directional constant that
      * used to be folded in here is replaced by a real N.L against a sun that
      * moves, computed per fragment. */
-    "  v_shade = a_shade;\n"
-    "  v_blk = a_blk;\n"
-    "  v_world = a_pos + vec3(u_off.x, 0.0, u_off.y); v_normal = NORMALS[f];\n"
+    "  v_shade = (u_model == 1) ? u_msky : a_shade;\n"
+    "  v_blk = (u_model == 1) ? u_mblk : a_blk;\n"
+    "  v_world = (u_model == 1) ? p : a_pos + vec3(u_off.x, 0.0, u_off.y); v_normal = n;\n"
     "  v_fx = a_fx;\n"
     "}\n";
 static const char *FS =
@@ -588,6 +607,7 @@ static GLint  g_u_sundir = -1, g_u_moondir = -1, g_u_unlit = -1;
 static GLint  g_u_time = -1;
 static GLint  g_u_fog_density = -1, g_u_fog_color = -1, g_u_overcast = -1, g_u_bolt = -1;
 static GLint  g_u_off = -1;
+static GLint  g_u_model = -1, g_u_mpos = -1, g_u_mrot = -1, g_u_mscale = -1, g_u_msky = -1, g_u_mblk = -1;
 /* Per-slot window offset (blocks, x and z): zero for a slot uploaded since the
  * last shift, -16 per chunk the window has slid since for one that was not. */
 static float  g_off[CF_MAX_MESHES][2];
@@ -633,6 +653,12 @@ int64_t cf_gfx_init(void) {
     g_u_sundir = glGetUniformLocation(g_prog, "u_sundir");
     g_u_moondir = glGetUniformLocation(g_prog, "u_moondir");
     g_u_unlit = glGetUniformLocation(g_prog, "u_unlit");
+    g_u_model = glGetUniformLocation(g_prog, "u_model");
+    g_u_mpos = glGetUniformLocation(g_prog, "u_mpos");
+    g_u_mrot = glGetUniformLocation(g_prog, "u_mrot");
+    g_u_mscale = glGetUniformLocation(g_prog, "u_mscale");
+    g_u_msky = glGetUniformLocation(g_prog, "u_msky");
+    g_u_mblk = glGetUniformLocation(g_prog, "u_mblk");
     g_u_occ = glGetUniformLocation(g_prog, "u_occ");
     g_u_shadow = glGetUniformLocation(g_prog, "u_shadow");
     g_u_soft = glGetUniformLocation(g_prog, "u_soft");
@@ -726,6 +752,39 @@ void cf_gfx_set_view_proj(void *arr) {
     if (narr_len(arr) < 16) return;
     glUniformMatrix4fv(g_u_vp, 1, GL_FALSE, (const float *)narr_data(arr));
     if (cf_debug()) { const float *f = narr_data(arr); fprintf(stderr, "cf: vp loc=%d diag=%g %g %g %g glerr=%d\n", g_u_vp, f[0], f[5], f[10], f[15], (int)glGetError()); }
+}
+
+static void cf_bind_slot(int64_t slot) {
+    glUniform2f(g_u_off, g_off[slot][0], g_off[slot][1]);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo_of(slot));
+    GLsizei stride = CF_VERT_FLOATS * sizeof(float);
+    glEnableVertexAttribArray(0); glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void *)0);
+    glEnableVertexAttribArray(1); glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, stride, (void *)(3 * 4));
+    glEnableVertexAttribArray(2); glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, stride, (void *)(5 * 4));
+    glEnableVertexAttribArray(3); glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, stride, (void *)(6 * 4));
+    glEnableVertexAttribArray(4); glVertexAttribPointer(4, 1, GL_FLOAT, GL_FALSE, stride, (void *)(7 * 4));
+    glEnableVertexAttribArray(5); glVertexAttribPointer(5, 1, GL_FLOAT, GL_FALSE, stride, (void *)(8 * 4));
+    glEnableVertexAttribArray(6); glVertexAttribPointer(6, 1, GL_FLOAT, GL_FALSE, stride, (void *)(9 * 4));
+}
+
+/* Draw [count] vertices from [first] of a STATIC slot as one body: the
+ * template in the unit cube placed at (x, y, z), turned by (c, s), scaled by
+ * [scale], lit by (sky, blk). The fauna path: the whole template blob is
+ * uploaded once at startup and every animal is one of these a frame. Before
+ * this, 23 animals were re-stamped into a buffer and ~10 MB re-uploaded every
+ * frame -- a tenth of the frame rate, for six floats' worth of change. */
+void cf_gfx_draw_model(int64_t slot, int64_t first, int64_t count, double x, double y, double z,
+                       double c, double s, double scale, double sky, double blk) {
+    if (slot < 0 || slot >= CF_MAX_MESHES || count <= 0 || first < 0) return;
+    cf_bind_slot(slot);
+    glUniform1i(g_u_model, 1);
+    glUniform3f(g_u_mpos, (float)x, (float)y, (float)z);
+    glUniform2f(g_u_mrot, (float)c, (float)s);
+    glUniform1f(g_u_mscale, (float)scale);
+    glUniform1f(g_u_msky, (float)sky);
+    glUniform1f(g_u_mblk, (float)blk);
+    glDrawArrays(GL_TRIANGLES, (GLint)first, (GLsizei)count);
+    glUniform1i(g_u_model, 0);
 }
 
 void cf_gfx_draw(int64_t slot, int64_t nverts) {

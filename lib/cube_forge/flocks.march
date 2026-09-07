@@ -172,44 +172,49 @@ mod CubeForge.Flocks do
 
   -- Walk one flock's two transform lists together. They are the same length and
   -- in the same order -- both are built by Flock.transforms over the same
-  -- animals -- so this is a parallel walk, not a lookup.
-  pfn draw_go(b : CubeForge.F32Buf.F32Buf, m : CubeForge.Fauna.Poses, sp : Int, hx : Float, hz : Float,
-              ps : List(Int), cs : List(Int), t : Float, shade : Float) : CubeForge.F32Buf.F32Buf do
+  -- animals -- so this is a parallel walk, not a lookup. Each animal is ONE
+  -- draw call from the static template blob, its transform as uniforms; the
+  -- interpolation is the only per-frame arithmetic there is.
+  pfn draw_go(m : CubeForge.Fauna.Poses, sp : Int, hx : Float, hz : Float,
+              ps : List(Int), cs : List(Int), t : Float, sky : Float, blk : Float) : Unit do
     match cs do
-      Nil -> b
+      Nil -> ()
       Cons(cv, crest) ->
         match ps do
-          Nil -> b
+          Nil -> ()
           Cons(pv, prest) ->
             let x = lerp(Fl.un_x(pv, hx), Fl.un_x(cv, hx), t)
             let y = lerp(Fl.un_y(pv), Fl.un_y(cv), t)
             let z = lerp(Fl.un_z(pv, hz), Fl.un_z(cv, hz), t)
             let yaw = lerp_yaw8(Fl.un_yaw8(pv), Fl.un_yaw8(cv), t)
-            draw_go(Fa.stamp(b, m, sp, Fl.un_pose(cv), x, y, z, yaw, shade), m, sp, hx, hz, prest, crest, t, shade)
+            let k = Fa.template_of(sp, Fl.un_pose(cv))
+            CubeForge.Ffi.Window.gfx_draw_model(Fa.slot(), Fa.first_vertex(m, k), Fa.vertex_span(m, k), x, y, z, Math.cos(yaw), Math.sin(yaw), Fa.body_scale(sp), sky, blk)
+            draw_go(m, sp, hx, hz, prest, crest, t, sky, blk)
         end
     end
   end
 
-  pfn build_go(b : CubeForge.F32Buf.F32Buf, m : CubeForge.Fauna.Poses, s : Snap, t : Float, shade : Float, i : Int) : CubeForge.F32Buf.F32Buf do
-    if i >= cap() do b
-    else if species_of(s, i) == 0 do build_go(b, m, s, t, shade, i + 1)
-    else build_go(draw_go(b, m, species_of(s, i), home_x(s, i), home_z(s, i), Array.get(prev(s), i), Array.get(cur(s), i), t, shade),
-                  m, s, t, shade, i + 1)
+  pfn draw_flocks(m : CubeForge.Fauna.Poses, s : Snap, t : Float, sky : Float, blk : Float, i : Int) : Unit do
+    if i >= cap() do ()
+    else if species_of(s, i) == 0 do draw_flocks(m, s, t, sky, blk, i + 1)
+    else
+      draw_go(m, species_of(s, i), home_x(s, i), home_z(s, i), Array.get(prev(s), i), Array.get(cur(s), i), t, sky, blk)
+      draw_flocks(m, s, t, sky, blk, i + 1)
     end end
   end
 
   doc """
-  Rebuild [b] (cleared in place) with every animal of every flock, [t] of the
-  way from the last tick to this one.
+  Draw every animal of every flock, [t] of the way from the last tick to this
+  one: one draw call each from the static template blob.
 
-  [shade] is one packed light value for the lot. An animal is a third of a block
-  and moves every frame, so sampling the light field per animal would cost a
-  lookup a frame for a difference nobody can see; the sky above is what a flying
-  thing is lit by anyway. A fish under water is the case this is wrong for, and
-  the case to fix first if it shows.
+  (sky, blk) is one light for the lot. An animal is a third of a block and
+  moves every frame, so sampling the light field per animal would cost a lookup
+  a frame for a difference nobody can see; the sky above is what a flying thing
+  is lit by anyway. A fish under water is the case this is wrong for, and the
+  case to fix first if it shows.
   """
-  fn build(b : CubeForge.F32Buf.F32Buf, m : CubeForge.Fauna.Poses, s : Snap, t : Float, shade : Float) : CubeForge.F32Buf.F32Buf do
-    build_go(B.clear(b), m, s, t, shade, 0)
+  fn draw(m : CubeForge.Fauna.Poses, s : Snap, t : Float, sky : Float, blk : Float) : Unit do
+    draw_flocks(m, s, t, sky, blk, 0)
   end
 
   doc "Animals drawn: the transforms in the current snapshot."

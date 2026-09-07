@@ -967,8 +967,15 @@ mod CubeForge.Fauna do
   end
 
   -- ── Drawing ───────────────────────────────────────────────────────────────
-  doc "Mesh slot for the fauna buffer. 192..243 are free; the chunk meshes end at 191 and the overlays start at 244."
+  doc "Mesh slot the template blob lives in, uploaded ONCE at startup and never touched again: every animal is drawn from it with its transform as uniforms (cf_gfx_draw_model). 192..243 are free; the chunk meshes end at 191 and the overlays start at 244."
   fn slot() : Int do 243 end
+  doc "Mesh slot the demo modes stamp into and re-upload each frame: their own, so the static blob is never clobbered."
+  fn demo_slot() : Int do 242 end
+  doc "Floats in the whole blob."
+  fn blob_len(s : Poses) : Int do offset(s, template_count()) end
+  doc "First vertex of template [k] in the blob, and its vertex count: what a draw call takes."
+  fn first_vertex(s : Poses, k : Int) : Int do offset(s, k) / Vx.floats() end
+  fn vertex_span(s : Poses, k : Int) : Int do floats(s, k) / Vx.floats() end
 
   doc "Stamp species [sp] in pose [p] with its CENTRE at (x, y, z), heading [yaw] radians (0 is +x), at [shade] (Vertex.pack_shade), at an explicit size."
   fn stamp_s(b : CubeForge.F32Buf.F32Buf, s : Poses, sp : Int, p : Int, x : Float, y : Float, z : Float, yaw : Float, shade : Float, scale : Float) : CubeForge.F32Buf.F32Buf do
@@ -1068,15 +1075,6 @@ mod CubeForge.Fauna do
                           Vx.pack_shade(1.0, 0.0), specimen_scale()),
                   s, cx, cy, cz, fx, fz, i + 1)
     end
-  end
-
-  doc "One species alone, close and large: the only way to actually judge a body, since a roster board is 25 pixels an animal."
-  fn demo_one(b : CubeForge.F32Buf.F32Buf, s : Poses, sp : Int, p : Int, cx : Float, cy : Float, cz : Float, fx : Float, fz : Float, t : Float) : CubeForge.F32Buf.F32Buf do
-    let ahead = 6.0
-    -- turning slowly, because a body that only ever faces one way hides half of
-    -- whatever is wrong with it
-    stamp_s(B.clear(b), s, sp, p, cx +. ahead *. fx, cy +. 1.0, cz +. ahead *. fz,
-            t *. 0.5, Vx.pack_shade(1.0, 0.0), 5.0)
   end
 
   doc """
