@@ -463,6 +463,46 @@ mod CubeForge.World do
       Cons(e, rest) -> uncache_go(rest, cx, cz, if ev_cx(e) == cx && ev_cz(e) == cz do acc else Cons(e, acc) end)
     end
   end
+  -- The local indices the band brought in, ascending.
+  pfn band_indices_of(n : Int, dx : Int, dz : Int) : List(Int) do band_idx_go(n, dx, dz, n * n - 1, Nil) end
+  pfn band_idx_go(n : Int, dx : Int, dz : Int, i : Int, acc : List(Int)) : List(Int) do
+    if i < 0 do acc
+    else
+      let sx = i % n + dx
+      let sz = i / n + dz
+      band_idx_go(n, dx, dz, i - 1, if sx >= 0 && sx < n && sz >= 0 && sz < n do acc else Cons(i, acc) end)
+    end
+  end
+  -- The chunk list after the shift, built from n*n-1 down: a chunk that moved is
+  -- taken straight from the old tree, one that came in from [fresh], in the same
+  -- ascending order band_indices_of produced them.
+  pfn shifted_list(cs : CubeForge.Tree.Tree(CubeForge.Chunk.Chunk), fresh : List(CubeForge.Chunk.Chunk), n : Int, dx : Int, dz : Int, i : Int, acc : List(CubeForge.Chunk.Chunk)) : List(CubeForge.Chunk.Chunk) do
+    if i < 0 do acc
+    else
+      let sx = i % n + dx
+      let sz = i / n + dz
+      if sx >= 0 && sx < n && sz >= 0 && sz < n do
+        shifted_list(cs, fresh, n, dx, dz, i - 1, Cons(CubeForge.Tree.get(cs, sx + n * sz), acc))
+      else
+        shifted_list(cs, drop_last(fresh), n, dx, dz, i - 1, Cons(last_of(fresh, C.new()), acc))
+      end
+    end
+  end
+  pfn last_of(l : List(CubeForge.Chunk.Chunk), d : CubeForge.Chunk.Chunk) : CubeForge.Chunk.Chunk do
+    match l do
+      Nil -> d
+      Cons(h, Nil) -> h
+      Cons(_, rest) -> last_of(rest, d)
+    end
+  end
+  pfn drop_last(l : List(CubeForge.Chunk.Chunk)) : List(CubeForge.Chunk.Chunk) do
+    match l do
+      Nil -> Nil
+      Cons(_, Nil) -> Nil
+      Cons(h, rest) -> Cons(h, drop_last(rest))
+    end
+  end
+
   pfn shifted_chunk(cs : CubeForge.Tree.Tree(CubeForge.Chunk.Chunk), n : Int, i : Int, dx : Int, dz : Int, ox1 : Int, oz1 : Int, seed : Int,
                     ta : CubeForge.Lakes.Tile, tb : CubeForge.Lakes.Tile, ca : List(Evicted)) : CubeForge.Chunk.Chunk do
     let lx = i % n
@@ -624,7 +664,14 @@ mod CubeForge.World do
         let tl2 = remember_tile(tl1, tb)
         let ca1 = evict_go(cs, dt, n, dx, dz, ox, oz, blobs, 0, ca, gh)
         let rs = restored_go(ca1, n, dx, dz, ox1, oz1, 0, Nil)
-        let cs1 = CubeForge.Tree.from_list(List.pmap_n(coords(n), fn i -> shifted_chunk(cs, n, i, dx, dz, ox1, oz1, seed, ta, tb, ca1), workers), C.new())
+        -- Only the band is generated, and only the band goes through pmap. It
+        -- used to fan all n*n indices out, so 132 of the 144 tasks existed to
+        -- copy a chunk reference the tree already had -- and the task overhead,
+        -- not the generation, was most of the stage: an in-window chunk
+        -- generates in ~2 ms, twelve of them over fourteen workers is a couple
+        -- of milliseconds, and the stage measured 27.
+        let fresh = List.pmap_n(band_indices_of(n, dx, dz), fn i -> shifted_chunk(cs, n, i, dx, dz, ox1, oz1, seed, ta, tb, ca1), workers)
+        let cs1 = CubeForge.Tree.from_list(shifted_list(cs, fresh, n, dx, dz, n * n - 1, Nil), C.new())
         -- the new chunks and the new origin; every field is still the old one
         HalfShift(World(cs1, la, lb, o, sh, n, mo, ox1, oz1, dt, ca1, rs, tl2, gh), ca1)
     end
