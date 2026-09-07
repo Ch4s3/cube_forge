@@ -1,0 +1,120 @@
+-- Populations: capacity is read off the world, a shovel changes it, and the
+-- counts follow. This is the rule that closes the terraforming loop, so it is
+-- tested on a world that gets dug.
+mod CubeForge.Test.Pop do
+
+  needs IO.Spawn
+  import Test
+  alias CubeForge.Pop as Pop
+  alias CubeForge.Fauna as Fa
+  alias CubeForge.Biome as Biome
+  alias CubeForge.World as W
+  alias CubeForge.Chunk as C
+
+  -- A flat world of stone to height [h], eight chunks a side.
+  pfn flat_cells(c : CubeForge.Chunk.Chunk, i : Int, h : Int) : CubeForge.Chunk.Chunk do
+    if i >= 256 * h do c else flat_cells(C.set(c, i % 16, i / 256, (i / 16) % 16, 3), i + 1, h) end
+  end
+  pfn flat_chunks(i : Int, h : Int, acc : List(CubeForge.Chunk.Chunk)) : List(CubeForge.Chunk.Chunk) do
+    if i < 0 do acc else flat_chunks(i - 1, h, Cons(flat_cells(C.new(), 0, h), acc)) end
+  end
+  pfn flat_world(h : Int) : CubeForge.World.World do W.of_chunk_list(flat_chunks(63, h, Nil), 8) end
+
+  -- Dig a square pond [d] deep with its corner at (x0, z0), [s] a side, and
+  -- fill it with water sources: the surface stays at [h].
+  pfn pond_go(w : CubeForge.World.World, x0 : Int, z0 : Int, s : Int, h : Int, d : Int, i : Int) : CubeForge.World.World do
+    if i >= s * s * d do w
+    else
+      let x = x0 + i % s
+      let z = z0 + (i / s) % s
+      let y = h - 1 - i / (s * s)
+      pond_go(W.set_block(w, x, y, z, C.water()), x0, z0, s, h, d, i + 1)
+    end
+  end
+  pfn pond(w : CubeForge.World.World, x0 : Int, z0 : Int, s : Int, h : Int, d : Int) : CubeForge.World.World do pond_go(w, x0, z0, s, h, d, 0) end
+
+  -- Force every column of chunk (cx, cz) to biome [b].
+  pfn force_chunk(f : CubeForge.Biome.Field, cx : Int, cz : Int, b : Int, i : Int) : CubeForge.Biome.Field do
+    if i >= 256 do f else force_chunk(Biome.force_biome(f, 128, 16 * cx + i % 16, 16 * cz + i / 16, b), cx, cz, b, i + 1) end
+  end
+
+  pfn run(r : CubeForge.Pop.Reg, w : CubeForge.World.World, f : CubeForge.Biome.Field, cx : Int, cz : Int, n : Int) : CubeForge.Pop.Reg do
+    if n <= 0 do r else run(Pop.tick_chunk(r, w, f, cx, cz), w, f, cx, cz, n - 1) end
+  end
+
+  describe "capacity from habitat" do
+    test "a dry chunk holds no fish, and a pond in it holds Sunfin" do
+      let w = flat_world(70)
+      let f = Biome.build(w, 7)
+      Test.assert_eq_int(Pop.capacity(w, f, 1, 1, Fa.sp_sunfin()), 0, "nothing to swim in")
+      -- A 6x6 pond, three deep: thirty-six columns in the Sunfin band (1..4).
+      -- Six, not eight: the field calls a body of up to 48 columns small
+      -- (Biome.small_body), and a Sunfin wants a pond, not a lake. An 8x8 pond
+      -- is a lake to it, and it was right to say so.
+      let w2 = pond(w, 20, 20, 6, 70, 3)
+      let f2 = Biome.build(w2, 7)
+      Test.assert_eq_int(Pop.depth_at(w2, f2, 22, 22), 3, "three blocks of water over the bed")
+      Test.assert_true(Pop.fish_column(w2, f2, Fa.sp_sunfin(), 22, 22), "in the Sunfin band, and a small body")
+      Test.assert_eq_int(Pop.capacity(w2, f2, 1, 1, Fa.sp_sunfin()), 36 / Pop.cols_per_fish(), "thirty-six columns is two fish")
+      Test.assert_eq_int(Pop.capacity(w2, f2, 1, 1, Fa.sp_deepmaw()), 0, "and nothing for a deep-water fish")
+    end
+
+    test "a deeper pond is somebody else's water" do
+      let w = pond(flat_world(70), 20, 20, 6, 70, 7)
+      let f = Biome.build(w, 7)
+      Test.assert_eq_int(Pop.depth_at(w, f, 22, 22), 7, "seven deep")
+      Test.assert_eq_int(Pop.capacity(w, f, 1, 1, Fa.sp_sunfin()), 0, "too deep for Sunfin (1..4)")
+      Test.assert_true(Pop.capacity(w, f, 1, 1, Fa.sp_reedcarp()) == 0, "and Reedcarp (2..6) too -- but a pond is small water and Reedcarp wants that; the depth alone excludes it")
+    end
+
+    test "a bird's capacity is its biome" do
+      let w = flat_world(70)
+      let f = force_chunk(Biome.build(w, 7), 2, 2, Biome.b_grassland(), 0)
+      Test.assert_eq_int(Pop.capacity(w, f, 2, 2, Fa.sp_grasspipit()), 256 / Pop.cols_per_bird(), "a whole chunk of grassland is eight pipits")
+      Test.assert_eq_int(Pop.capacity(w, f, 2, 2, Fa.sp_pinecrest()), 0, "and no forest birds")
+      let f2 = force_chunk(f, 2, 2, Biome.b_forest(), 0)
+      Test.assert_eq_int(Pop.capacity(w, f2, 2, 2, Fa.sp_grasspipit()), 0, "grow the forest and the pipits' capacity goes")
+      Test.assert_true(Pop.capacity(w, f2, 2, 2, Fa.sp_pinecrest()) > 0, "and the Pinecrests' arrives")
+    end
+
+    test "a sample column is one the species would actually hold" do
+      let w = pond(flat_world(70), 20, 20, 6, 70, 3)
+      let f = Biome.build(w, 7)
+      let c = Pop.sample_column(w, f, 1, 1, Fa.sp_sunfin())
+      Test.assert_true(c >= 0, "there is one")
+      Test.assert_true(Pop.fish_column(w, f, Fa.sp_sunfin(), c % 4096, c / 4096), "and it is in the pond")
+      Test.assert_eq_int(Pop.sample_column(w, f, 1, 1, Fa.sp_deepmaw()), 0 - 1, "and there is none for a fish the pond cannot hold")
+    end
+  end
+
+  describe "the counts follow capacity" do
+    test "dig a pond and a school fills in; fill it and the school goes" do
+      let w = pond(flat_world(70), 20, 20, 6, 70, 3)
+      let f = Biome.build(w, 7)
+      let r0 = Pop.new(8)
+      Test.assert_eq_int(Pop.count_of(r0, 1, 1, Fa.sp_sunfin()), 0, "nothing at first")
+      let r1 = run(r0, w, f, 1, 1, 1)
+      Test.assert_eq_int(Pop.count_of(r1, 1, 1, Fa.sp_sunfin()), 1, "one a tick, on its way up")
+      let r2 = run(r1, w, f, 1, 1, 10)
+      Test.assert_eq_int(Pop.count_of(r2, 1, 1, Fa.sp_sunfin()), 2, "and settled at the capacity")
+      -- fill the pond back in
+      let wd = flat_world(70)
+      let fd = Biome.build(wd, 7)
+      let r3 = run(r2, wd, fd, 1, 1, 1)
+      Test.assert_eq_int(Pop.count_of(r3, 1, 1, Fa.sp_sunfin()), 1, "thinning, one a tick")
+      let r4 = run(r3, wd, fd, 1, 1, 5)
+      Test.assert_eq_int(Pop.count_of(r4, 1, 1, Fa.sp_sunfin()), 0, "gone")
+    end
+
+    test "the registry survives the save format, and the hash sees a change" do
+      let w = pond(flat_world(70), 20, 20, 6, 70, 3)
+      let f = Biome.build(w, 7)
+      let r = run(Pop.new(8), w, f, 1, 1, 6)
+      let back = Pop.from_list(8, Pop.to_list(r))
+      Test.assert_eq_int(Pop.state_hash(back), Pop.state_hash(r), "round trip")
+      Test.assert_eq_int(Pop.total(back), Pop.total(r), "same animals")
+      Test.assert_true(Pop.state_hash(r) != Pop.state_hash(Pop.new(8)), "and an empty registry hashes differently")
+    end
+  end
+
+end

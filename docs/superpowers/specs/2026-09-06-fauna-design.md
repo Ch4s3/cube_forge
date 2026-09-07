@@ -300,9 +300,15 @@ Each slice is independently verifiable and independently useful.
    seconds of startup until the greedy pass was restricted to each shape's
    bounding box; it is now ~0.3 s, and the world mesh hash is byte-identical
    across the change.
-4. **Populations.** Capacity from habitat, the ease, the sparse registry,
-   save/load. Oracle: dig a pond headlessly (`CF_AUTOCANAL`'s trick) and assert
-   a school exists a fixed number of ticks later; drain it and assert it goes.
+4. **Populations.** *(done)* Capacity from habitat, the ease, the registry,
+   save/load, and flocks placed and retired from the counts. The registry is
+   dense over the window rather than sparse over the world -- a chunk that
+   leaves the window regrows from its capacity on return, since habitat is
+   what persists -- and rides in the save header as a `pop` line. Oracle: a
+   flat world with a 6x6 pond dug into it holds two Sunfin and no Deepmaw;
+   fill the pond and the count goes to nothing, one a tick. Flocks are given
+   only to chunks within two of the player: populations exist everywhere in
+   the window, flocks are the visible sample.
 5. **Survey integration.** The fauna bitmask, the animal ray test, the habitat
    report, and the save round-trip.
 6. **Day and night.** Roosting, the nocturnal shift, crepuscular depth changes.

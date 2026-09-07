@@ -305,6 +305,29 @@ mod CubeForge.Flock do
     end
   end
 
+  doc "The flock moved by (dx, dz) blocks: the window slid under it. Home and every animal move together; nothing about the flock's behaviour changes."
+  fn translate(f : Flock, dx : Float, dz : Float) : Flock do
+    match f do
+      Flock(sp, n, t, seed, hx, hy, hz, b) -> Flock(sp, n, t, seed, hx +. dx, hy, hz +. dz, translate_go(b, n, dx, dz, 0))
+    end
+  end
+  pfn translate_go(b : NativeFloatArr, n : Int, dx : Float, dz : Float, i : Int) : NativeFloatArr do
+    if i >= n do b
+    else
+      let b1 = NativeArray.set_float(b, i * stride(), pos_x(b, i) +. dx)
+      translate_go(NativeArray.set_float(b1, i * stride() + 2, pos_z(b1, i) +. dz), n, dx, dz, i + 1)
+    end
+  end
+
+  doc "The flock at [n] animals: the ones it has keep their places, newcomers start at home, and the surplus is dropped from the end. So a school can grow with its pond without every fish jumping back to where it began."
+  fn resize(f : Flock, n : Int) : Flock do
+    match f do
+      Flock(sp, m, t, seed, hx, hy, hz, b) ->
+        let k = clampi(n, 0, cap())
+        Flock(sp, k, t, seed, hx, hy, hz, if k > m do place_go(b, k, m, seed, hx, hy, hz) else b end)
+    end
+  end
+
   doc "A flock of [n] animals of [sp] around (hx, hy, hz)."
   fn new(sp : Int, n : Int, seed : Int, hx : Float, hy : Float, hz : Float) : Flock do
     let m = clampi(n, 0, cap())
@@ -441,6 +464,14 @@ mod CubeForge.Flock do
     on FInputs(p0 : Int, p1 : Int, p2 : Int, p3 : Int, water8 : Int, sun1000 : Int, px8 : Int, py8 : Int, pz8 : Int) do
       { state with inp: Inputs(p0, p1, p2, p3, water8, sun1000, px8, py8, pz8) }
     end
+
+    on FResize(n : Int) do
+      { state with f: resize(state.f, n) }
+    end
+
+    on FShift(dx8 : Int, dz8 : Int) do
+      { state with f: translate(state.f, int_to_float(dx8) /. fx8(), int_to_float(dz8) /. fx8()) }
+    end
   end
 
   -- Message constructors are in scope only inside this module and only after
@@ -449,6 +480,16 @@ mod CubeForge.Flock do
   fn spawn_flock() do spawn(FlockActor) end
   fn send_load(pid, sp : Int, n : Int, seed : Int, hx : Float, hy : Float, hz : Float) : Unit do
     let _ = send(pid, FLoad(sp, n, seed, float_to_int(hx *. fx8()), float_to_int(hy *. fx8()), float_to_int(hz *. fx8())))
+    ()
+  end
+  doc "Bring the flock to [n] animals."
+  fn send_resize(pid, n : Int) : Unit do
+    let _ = send(pid, FResize(n))
+    ()
+  end
+  doc "The window slid: move the flock by (dx, dz) blocks."
+  fn send_shift(pid, dx : Float, dz : Float) : Unit do
+    let _ = send(pid, FShift(float_to_int(dx *. fx8()), float_to_int(dz *. fx8())))
     ()
   end
   doc "Tell the flock what the world looks like around it. Sent before every tick."

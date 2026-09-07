@@ -47,6 +47,7 @@ mod CubeForge do
   alias CubeForge.Fauna as Fauna
   alias CubeForge.Flocks as Flocks
   alias CubeForge.Flock as Flock
+  alias CubeForge.Pop as Pop
 
   fn ms(seconds : Float) : String do float_to_string(seconds *. 1000.0) ++ "ms" end
 
@@ -83,7 +84,7 @@ mod CubeForge do
     end
   end
 
-  type Frame = Frame(Int, Float, CubeForge.Player.Player, Int, NativeFloatArr, NativeF32Arr, Bool, CubeForge.F32Buf.F32Buf, Bool, Float, Float, Bool, Int, CubeForge.Menu.Menu, CubeForge.F32Buf.F32Buf, Start, Float, Int, CubeForge.Audio.Sched, Bool, Int, CubeForge.Fauna.Poses, CubeForge.F32Buf.F32Buf, CubeForge.Flocks.Snap)   -- ..., inventory open, slot a stack was lifted from (-1 = not dragging), menu, its vertex buffer, what the next session starts from (NoStart = keep playing), worst frame seen after warmup, the frame it was, the note schedule, whether the survey is open, the species scanned so far as a bitmask, the animal bodies (greedy-meshed once), the buffer they are stamped into each frame, and the two ticks of flock transforms the renderer blends between
+  type Frame = Frame(Int, Float, CubeForge.Player.Player, Int, NativeFloatArr, NativeF32Arr, Bool, CubeForge.F32Buf.F32Buf, Bool, Float, Float, Bool, Int, CubeForge.Menu.Menu, CubeForge.F32Buf.F32Buf, Start, Float, Int, CubeForge.Audio.Sched, Bool, Int, CubeForge.Fauna.Poses, CubeForge.F32Buf.F32Buf, CubeForge.Flocks.Snap, CubeForge.Pop.Reg)   -- ..., inventory open, slot a stack was lifted from (-1 = not dragging), menu, its vertex buffer, what the next session starts from (NoStart = keep playing), worst frame seen after warmup, the frame it was, the note schedule, whether the survey is open, the species scanned so far as a bitmask, the animal bodies (greedy-meshed once), the buffer they are stamped into each frame, the two ticks of flock transforms the renderer blends between, and the populations: what lives in each chunk of the window
   -- Frames before this are not counted toward the worst frame: the first few
   -- carry one-time costs (the first draw of each buffer, the first time down
   -- every path) that no steady-state budget should be measured against.
@@ -328,70 +329,102 @@ mod CubeForge do
     end
   end
 
-  -- Where a hand-placed flock goes. Slice 2 spawns by hand; the population tick
-  -- will decide this from habitat.
-  pfn flock_off_x(i : Int) : Int do if i == 0 do 0 - 20 else if i == 1 do 22 else 4 end end end
-  pfn flock_off_z(i : Int) : Int do if i == 0 do 6 else if i == 1 do 0 - 14 else 24 end end end
+  -- ── Populations drive the flocks ──────────────────────────────────────────
+  doc "Chunks the population tick visits per world tick: four, so a full pass of a 64-chunk window takes under three seconds at six ticks a second, and a dug pond has fish in it inside ten."
+  fn pop_chunks_per_tick() : Int do 4 end
+  doc "Animals of a species a chunk needs before a flock is put there."
+  fn spawn_min() : Int do 2 end
+  doc "Chunks from the player's within which a population is given a flock. Populations exist everywhere in the window; flocks are the sample of them near enough to see, and a slot spent on a school four chunks away is a slot not spent on the one beside you."
+  fn flock_radius() : Int do 2 end
+  pfn chunk_near(cx : Int, cz : Int, pcx : Int, pcz : Int) : Bool do
+    let dx = if cx > pcx do cx - pcx else pcx - cx end
+    let dz = if cz > pcz do cz - pcz else pcz - cz end
+    dx <= flock_radius() && dz <= flock_radius()
+  end
 
-  -- A column under water within wet_span() / 2 of the player, or -1. A school
-  -- needs water to be in, and a hand-placed one has to go and find some: the
-  -- spawn point is chosen to be a high flat column, which is close to the
-  -- opposite of a lake.
-  fn wet_span() : Int do 81 end
-  -- The NEAREST water column in range, by squared distance.
-  pfn wet_col_go(bio : CubeForge.Biome.Field, ncols : Int, px : Int, pz : Int, i : Int, best : Int, best_h : Int) : Int do
-    if i >= wet_span() * wet_span() do best
+  pfn pop_tick_go(pop : CubeForge.Pop.Reg, w : CubeForge.World.World, bio : CubeForge.Biome.Field, n : Int, tick : Int, j : Int) : CubeForge.Pop.Reg do
+    if j >= pop_chunks_per_tick() do pop
     else
-      let x = px + i % wet_span() - wet_span() / 2
-      let z = pz + i / wet_span() - wet_span() / 2
-      if x < 0 do wet_col_go(bio, ncols, px, pz, i + 1, best, best_h)
-      else if z < 0 do wet_col_go(bio, ncols, px, pz, i + 1, best, best_h)
-      else if x >= ncols do wet_col_go(bio, ncols, px, pz, i + 1, best, best_h)
-      else if z >= ncols do wet_col_go(bio, ncols, px, pz, i + 1, best, best_h)
-      else
-        -- Water is the field's own answer, not a height test: height_of reports
-        -- the surface including the water on top of it, so a sea column reads
-        -- sea level and no height threshold can find one. water_dist_at is 0
-        -- exactly on water.
-        if Biome.water_dist_at(bio, x, z) == 0 do
-          let d = (x - px) * (x - px) + (z - pz) * (z - pz)
-          (if d < best_h do wet_col_go(bio, ncols, px, pz, i + 1, x + 4096 * z, d) else wet_col_go(bio, ncols, px, pz, i + 1, best, best_h) end)
-        else wet_col_go(bio, ncols, px, pz, i + 1, best, best_h) end
-      end end end end
+      let d = (tick * pop_chunks_per_tick() + j) % (n * n)
+      pop_tick_go(Pop.tick_chunk(pop, w, bio, d % n, d / n), w, bio, n, tick, j + 1)
     end
   end
 
-  pfn place_birds(s : CubeForge.Flocks.Snap, bio : CubeForge.Biome.Field, ncols : Int, fpids, px : Int, pz : Int, seed : Int, i : Int) : CubeForge.Flocks.Snap do
-    if i >= 3 do s
-    else
-      let x = clamp_col(px + flock_off_x(i), ncols)
-      let z = clamp_col(pz + flock_off_z(i), ncols)
-      let hy = int_to_float(Biome.height_of(bio, x, z)) +. Flock.cruise()
-      let fx = int_to_float(x) +. 0.5
-      let fz = int_to_float(z) +. 0.5
-      Flock.send_load(Array.get(fpids, i), Fauna.sp_grasspipit(), 6 + i, seed * 31 + i, fx, hy, fz)
-      place_birds(CubeForge.Flocks.with_flock(s, i, Fauna.sp_grasspipit(), fx, hy, fz), bio, ncols, fpids, px, pz, seed, i + 1)
-    end
+  -- Where a flock of [sp] lives at column (x, z): a bird cruises above the
+  -- ground, a fish holds under the surface the field reports -- the sea's, or
+  -- an upland lake's.
+  pfn flock_home_y(bio : CubeForge.Biome.Field, sp : Int, x : Int, z : Int) : Float do
+    let top = int_to_float(Biome.height_of(bio, x, z))
+    if Fauna.is_fish(sp) do top -. Flock.fish_depth() else top +. Flock.cruise() end
   end
 
-  doc "Load the flock pool for this world: three flocks of pipits around the player, and a school of sunfin if there is water near enough to hold one."
-  pfn place_flocks(bio : CubeForge.Biome.Field, ncols : Int, fpids, px : Int, pz : Int, seed : Int, enabled : Bool) : CubeForge.Flocks.Snap do
-    if !enabled do CubeForge.Flocks.new()
+  -- For one chunk the tick just visited: a species with enough animals and no
+  -- flock gets one, in a free slot, at a column it would actually hold; a
+  -- species whose count has gone to nothing loses its flock. A flock's size is
+  -- its count when it was placed -- it does not grow with the count, which is
+  -- a simplification and the first thing to revisit.
+  pfn assign_go(herd : CubeForge.Flocks.Snap, pop : CubeForge.Pop.Reg, w : CubeForge.World.World, bio : CubeForge.Biome.Field, fpids, n : Int, cx : Int, cz : Int, near : Bool, seed : Int, sp : Int) : CubeForge.Flocks.Snap do
+    if sp > Fauna.count() do herd
     else
-      let s = place_birds(CubeForge.Flocks.new(), bio, ncols, fpids, px, pz, seed, 0)
-      let wet = wet_col_go(bio, ncols, px, pz, 0, 0 - 1, 999999)
-      if wet < 0 do
-        println("fauna: no water within " ++ int_to_string(wet_span() / 2) ++ " columns; three flocks, no school")
-        s
+      let have = Pop.count_of(pop, cx, cz, sp)
+      let slot = CubeForge.Flocks.find(herd, cx, cz, sp)
+      let wanted = near && have >= spawn_min()
+      let herd1 = if wanted && slot < 0 do place_flock(herd, w, bio, fpids, n, cx, cz, seed, sp, have)
+                  else if !wanted && slot >= 0 do
+                    -- the count has gone, or the player has: the slot is freed
+                    Flock.send_load(Array.get(fpids, slot), 0, 0, 0, 0.0, 0.0, 0.0)
+                    CubeForge.Flocks.free(herd, slot)
+                  else if slot < 0 do herd
+                  -- Nested, not `&&`-ed with the line above: && does not
+                  -- short-circuit (GAPS G33), and Array.get on slot -1 panics.
+                  else if have != List.length(Array.get(CubeForge.Flocks.cur(herd), slot)) do
+                    -- the count moved: the flock follows it, in place
+                    Flock.send_resize(Array.get(fpids, slot), have)
+                    herd
+                  else herd end end end end
+      assign_go(herd1, pop, w, bio, fpids, n, cx, cz, near, seed, sp + 1)
+    end
+  end
+  pfn place_flock(herd : CubeForge.Flocks.Snap, w : CubeForge.World.World, bio : CubeForge.Biome.Field, fpids, n : Int, cx : Int, cz : Int, seed : Int, sp : Int, have : Int) : CubeForge.Flocks.Snap do
+    let free = CubeForge.Flocks.free_slot(herd)
+    if free < 0 do herd
+    else
+      let col = Pop.sample_column(w, bio, cx, cz, sp)
+      if col < 0 do herd
       else
-        let wx = int_to_float(wet % 4096) +. 0.5
-        let wz = int_to_float(wet / 4096) +. 0.5
-        let surf = Biome.height_of(bio, wet % 4096, wet / 4096)
-        let wy = int_to_float(surf) -. Flock.fish_depth()
-        Flock.send_load(Array.get(fpids, 3), Fauna.sp_sunfin(), 8, seed * 31 + 3, wx, wy, wz)
-        println("fauna: three flocks of pipits, a school of sunfin at " ++ int_to_string(wet % 4096) ++ ", " ++ int_to_string(wet / 4096) ++ " (surface " ++ int_to_string(surf) ++ ")")
-        CubeForge.Flocks.with_flock(s, 3, Fauna.sp_sunfin(), wx, wy, wz)
+        let x = col % 4096
+        let z = col / 4096
+        let hx = int_to_float(x) +. 0.5
+        let hz = int_to_float(z) +. 0.5
+        let hy = flock_home_y(bio, sp, x, z)
+        Flock.send_load(Array.get(fpids, free), sp, have, seed * 31 + free + 7 * (cx + n * cz), hx, hy, hz)
+        CubeForge.Flocks.with_flock(herd, free, sp, hx, hy, hz)
       end
+    end
+  end
+  pfn assign_flocks(herd : CubeForge.Flocks.Snap, pop : CubeForge.Pop.Reg, w : CubeForge.World.World, bio : CubeForge.Biome.Field, fpids, n : Int, tick : Int, seed : Int, pcx : Int, pcz : Int, j : Int) : CubeForge.Flocks.Snap do
+    if j >= pop_chunks_per_tick() do herd
+    else
+      let d = (tick * pop_chunks_per_tick() + j) % (n * n)
+      assign_flocks(assign_go(herd, pop, w, bio, fpids, n, d % n, d / n, chunk_near(d % n, d / n, pcx, pcz), seed, 1),
+                    pop, w, bio, fpids, n, tick, seed, pcx, pcz, j + 1)
+    end
+  end
+
+  -- The window slid by (sdx, sdz) chunks: every home moves the other way, the
+  -- actors are told, and a flock whose home left the window is emptied.
+  pfn shift_herd(herd : CubeForge.Flocks.Snap, fpids, sdx : Int, sdz : Int, n : Int) : CubeForge.Flocks.Snap do
+    let dx = int_to_float(0 - 16 * sdx)
+    let dz = int_to_float(0 - 16 * sdz)
+    shift_actors_go(herd, CubeForge.Flocks.shift(herd, dx, dz, n), fpids, dx, dz, 0)
+  end
+  pfn shift_actors_go(before : CubeForge.Flocks.Snap, after : CubeForge.Flocks.Snap, fpids, dx : Float, dz : Float, i : Int) : CubeForge.Flocks.Snap do
+    if i >= CubeForge.Flocks.cap() do after
+    else
+      if CubeForge.Flocks.species_of(before, i) == 0 do ()
+      else if CubeForge.Flocks.species_of(after, i) == 0 do Flock.send_load(Array.get(fpids, i), 0, 0, 0, 0.0, 0.0, 0.0)
+      else Flock.send_shift(Array.get(fpids, i), dx, dz) end end
+      shift_actors_go(before, after, fpids, dx, dz, i + 1)
     end
   end
 
@@ -2057,7 +2090,7 @@ mod CubeForge do
 
   -- Frame loop. `max_frames < 0` means run until the window closes.
   -- Run-time knobs read once, outside the frame loop (an Env read allocates).
-  type Knobs = Knobs(Int, Int, String, Bool, Float, Int, Bool, Int, Int, Int, Float, Int, Int, Int, Int, Int, Int, Bool, Int, Int, Int, Int, Int, Int, Int, Bool, Bool, Int, Int, Bool, Int, Int, Int, Int, Int, Int, Bool, Int, Int, Int, Int, Int, Int, Int, CubeForge.Settings.Settings, Int, Int, Int, Int, Int)   -- max_frames, dump_frame, dump_path, autowalk, autospin, autoedit frame (<0 = off), autoswim, autoflow frame (<0 = off), workers, automap frame (<0 = off; forces map view on from this frame, for headless verification), day length in seconds, sun angle override in degrees (<0 = follow the clock), autobreak frame (<0 = off): break the column under the player every 20 frames, for a repeatable edit benchmark, weather pin 0..100 (<0 = follow the actor), CF_PRECIP raw cap override (<0 = the precipitation setting), biome ease rate in percent (100 = one CF_DAY per full swing), draw the biome map in map view, autocanal frame (<0 = off): lay a 9-block line of water three columns east of the player, aim-independent, for the biome end-to-end test, biome migration budget: surface columns retextured per tick, vegetation budget: trees grown or felled per tick, time pin in seconds (<0 = live clock) for the water animation, remesh-all frame (<0 = off): rebuild every section of every chunk at that frame, a ground truth for stale-mesh hunts, automenu frame (<0 = off): open the escape menu at that frame and start a new game five frames later, for the restart test, audio mode (0 off, 1 device, 2 null device -- render a tick per push straight into the WAV, for reproducible headless dumps), audio log, autodive, autoglow frame (<0 = off): place a glow cap three columns east of the player, through edit_block, for the block-light end-to-end check, myc rate in percent, draw the mycelium map overlay in map view, autoplant frame (<0 = off): plant the fittest species three columns east of the player, myc migration budget (surface columns per retexture slot; glow changes batch under one relight per slot), autoplant species override (0 = fittest), autospore frame (<0 = off): give three spores and plant one through the item path thirty frames later, fruit budget (bodies per fruit slot), fruit rate in percent, autostart (skip the start screen), autosave frame (<0 = off) and slot, autoload frame (<0 = off, first session only) and slot, autoslots frame (<0 = off): open the slots page at that frame, for a headless look at it, climate feedback from the network in percent (0 = none), autosettings frame (<0 = off): open the settings page at that frame and click the shadow row's right arrow five frames later, for the settings file end-to-end check, the settings as read from disk and the mask of fields an environment variable overrides (both for writing the file, see Settings.merge), autopage: which menu page CF_AUTOSETTINGS opens (2 hub, 3 graphics, 4 sound), autosurvey frame (<0 = off): open the survey panel from that frame, autoscan frame (<0 = off): scan the column three east of the player, fauna demo (CF_FAUNA_DEMO: 1 the circling flock and school, 2 the whole roster still and broadside, 3 live flocks driven by their actors, 100 + n one species alone, close and turning, which is the only size a body can actually be judged at), which is slice 1's proof that the body stamp works before any AI exists to be blamed for what they do
+  type Knobs = Knobs(Int, Int, String, Bool, Float, Int, Bool, Int, Int, Int, Float, Int, Int, Int, Int, Int, Int, Bool, Int, Int, Int, Int, Int, Int, Int, Bool, Bool, Int, Int, Bool, Int, Int, Int, Int, Int, Int, Bool, Int, Int, Int, Int, Int, Int, Int, CubeForge.Settings.Settings, Int, Int, Int, Int, Int)   -- max_frames, dump_frame, dump_path, autowalk, autospin, autoedit frame (<0 = off), autoswim, autoflow frame (<0 = off), workers, automap frame (<0 = off; forces map view on from this frame, for headless verification), day length in seconds, sun angle override in degrees (<0 = follow the clock), autobreak frame (<0 = off): break the column under the player every 20 frames, for a repeatable edit benchmark, weather pin 0..100 (<0 = follow the actor), CF_PRECIP raw cap override (<0 = the precipitation setting), biome ease rate in percent (100 = one CF_DAY per full swing), draw the biome map in map view, autocanal frame (<0 = off): lay a 9-block line of water three columns east of the player, aim-independent, for the biome end-to-end test, biome migration budget: surface columns retextured per tick, vegetation budget: trees grown or felled per tick, time pin in seconds (<0 = live clock) for the water animation, remesh-all frame (<0 = off): rebuild every section of every chunk at that frame, a ground truth for stale-mesh hunts, automenu frame (<0 = off): open the escape menu at that frame and start a new game five frames later, for the restart test, audio mode (0 off, 1 device, 2 null device -- render a tick per push straight into the WAV, for reproducible headless dumps), audio log, autodive, autoglow frame (<0 = off): place a glow cap three columns east of the player, through edit_block, for the block-light end-to-end check, myc rate in percent, draw the mycelium map overlay in map view, autoplant frame (<0 = off): plant the fittest species three columns east of the player, myc migration budget (surface columns per retexture slot; glow changes batch under one relight per slot), autoplant species override (0 = fittest), autospore frame (<0 = off): give three spores and plant one through the item path thirty frames later, fruit budget (bodies per fruit slot), fruit rate in percent, autostart (skip the start screen), autosave frame (<0 = off) and slot, autoload frame (<0 = off, first session only) and slot, autoslots frame (<0 = off): open the slots page at that frame, for a headless look at it, climate feedback from the network in percent (0 = none), autosettings frame (<0 = off): open the settings page at that frame and click the shadow row's right arrow five frames later, for the settings file end-to-end check, the settings as read from disk and the mask of fields an environment variable overrides (both for writing the file, see Settings.merge), autopage: which menu page CF_AUTOSETTINGS opens (2 hub, 3 graphics, 4 sound), autosurvey frame (<0 = off): open the survey panel from that frame, autoscan frame (<0 = off): scan the column three east of the player, fauna demo (CF_FAUNA_DEMO: 0 the game -- flocks placed by the populations; 1 a circling flock and school on the clock; 2 the whole roster still and broadside; 100 + n one species alone, close and turning, the only size a body can be judged at), which is slice 1's proof that the body stamp works before any AI exists to be blamed for what they do
 
   doc "Write the session into [slot]. Prints the outcome; true on success."
   -- The fields blob: species, vigour, reach, shown, then the eased axes.
@@ -2077,13 +2110,13 @@ mod CubeForge do
     end
   end
 
-  pfn save_game(slot : Int, w : CubeForge.World.World, p : CubeForge.Player.Player, inv : CubeForge.Inventory.Inv, seed : Int, day : Float, wxpid, bio : CubeForge.Biome.Field, myc : CubeForge.Myc.Net, known : Int) : Bool do
+  pfn save_game(slot : Int, w : CubeForge.World.World, p : CubeForge.Player.Player, inv : CubeForge.Inventory.Inv, seed : Int, day : Float, wxpid, bio : CubeForge.Biome.Field, myc : CubeForge.Myc.Net, known : Int, pop : List(Int)) : Bool do
     let ts0 = Win.time()
     let wx = match Weather.call_snapshot(wxpid) do
       Ok(l) -> Weather.phase_to_floats(Weather.unpack_phase(l))
       Err(_) -> Weather.phase_to_floats(Weather.start())
     end
-    let h = Save.header_new(seed, DateTime.now(), Player.to_floats(p), Inv.to_ints(inv), day, wx, known)
+    let h = Save.header_new(seed, DateTime.now(), Player.to_floats(p), Inv.to_ints(inv), day, wx, known, pop)
     match Save.write_world(Save.dir(), slot, World.chunks(w), World.side(w), World.origin_x(w), World.origin_z(w), World.cache(w), World.gen_hashes(w), h, fields_blob(w, bio, myc)) do
       Ok(_) ->
         println("saved slot " ++ int_to_string(slot) ++ " in " ++ ms(Win.time() -. ts0) ++ ", world hash " ++ int_to_string(World.state_hash(w)))
@@ -2129,11 +2162,11 @@ mod CubeForge do
   -- [t0]: the clock at session start; [day0]: seconds into the day at that moment, so the sun continues from a save.
   fn frame_loop(f : Frame, k : Knobs, sc_in, nchunks : Int, proj : NativeFloatArr, map_proj : NativeFloatArr, fps : Fps, wxpid, fpids, seed : Int, first : Bool, t0 : Float, day0 : Float) : Frame do
     match f do
-      Frame(frame, last_t, player_in, sample, view, vp, map_mode, marker, flash, wcache, bcache, inv_open, drag_from, menu, menubuf, next_seed, worst, worst_at, sched, survey, known, faunap, faunab, herd) ->
+      Frame(frame, last_t, player_in, sample, view, vp, map_mode, marker, flash, wcache, bcache, inv_open, drag_from, menu, menubuf, next_seed, worst, worst_at, sched, survey, known, faunap, faunab, herd, pop) ->
         match k do
         Knobs(max_frames, dump_frame, dump_path, autowalk, autospin, autoedit, autoswim, autoflow, workers, automap, day_len, sun_deg, autoinv, autobreak, weather_pin, precip_cap, biome_rate, biome_map, autocanal, biome_budget, veg_budget, time_pin, remesh_all_at, automenu, audio_mode, audio_log, autodive, autoglow, myc_rate, myc_map, autoplant, myc_budget, autoplant_species, autospore, fruit_budget, fruit_rate, autostart, autosave, autosave_slot, autoload, autoload_slot, autoslots, myc_feedback, autosettings, settings_disk, settings_mask, autopage, autosurvey, autoscan, fauna_demo) ->
         if Win.should_close() || (max_frames >= 0 && frame >= max_frames) || !is_no_start(next_seed) do
-          Frame(frame, last_t, player_in, sample, view, vp, map_mode, marker, flash, wcache, bcache, inv_open, drag_from, menu, menubuf, next_seed, worst, worst_at, sched, survey, known, faunap, faunab, herd)
+          Frame(frame, last_t, player_in, sample, view, vp, map_mode, marker, flash, wcache, bcache, inv_open, drag_from, menu, menubuf, next_seed, worst, worst_at, sched, survey, known, faunap, faunab, herd, pop)
         else
           In.poll()
           -- Streaming: one chunk of shift a frame, toward the player, while
@@ -2141,6 +2174,9 @@ mod CubeForge do
           let sdx = shift_dx(player_in)
           let sdz = if sdx != 0 do 0 else shift_dz(player_in) end
           let sc = if sdx != 0 || sdz != 0 do shift_scene(sc_in, sdx, sdz, seed, workers) else sc_in end
+          -- the populations and the flocks slide with the window
+          let pop_s = if sdx != 0 || sdz != 0 do Pop.shift(pop, sdx, sdz) else pop end
+          let herd_s = if sdx != 0 || sdz != 0 do shift_herd(herd, fpids, sdx, sdz, World.side(scene_world(sc))) else herd end
           let player = if sdx != 0 || sdz != 0 do Player.translate(player_in, int_to_float(0 - 16 * sdx), int_to_float(0 - 16 * sdz)) else player_in end
           -- I toggles the inventory. While it is open the cursor is released and no
           -- input reaches the player; the world keeps ticking, as in the map view.
@@ -2302,7 +2338,7 @@ mod CubeForge do
           let load_slot = if first && autoload >= 0 && frame == autoload do autoload_slot
                           else if slot_click > 0 && Menu.is_start(menu3) do slot_click else 0 end end
           let menu4 = if save_slot > 0 do
-                        let saved = save_game(save_slot, scene_world(sc_drag), player, ui_inv(scene_ui(sc_drag)), seed, now -. t0 +. day0, wxpid, scene_biome(sc_drag), scene_myc(sc_drag), known)
+                        let saved = save_game(save_slot, scene_world(sc_drag), player, ui_inv(scene_ui(sc_drag)), seed, now -. t0 +. day0, wxpid, scene_biome(sc_drag), scene_myc(sc_drag), known, Pop.to_list(pop))
                         Menu.set_slots(Menu.set_status(menu3, save_slot, if saved do Menu.status_saved() else Menu.status_failed() end, frame), Save.list(Save.dir(), -1))
                       else menu3 end
           -- A slot is validated while this world still runs, so a bad slot never leaves you without one.
@@ -2616,28 +2652,39 @@ mod CubeForge do
           -- a circling school on the clock, which is enough to prove the stamp,
           -- the yaw, the poses and the slot before there is any behaviour to
           -- blame for what they do. CF_FAUNA_DEMO.
-          let fauna_on = fauna_demo > 0 && !map_mode1
+          let fauna_on = !map_mode1
           -- The flocks step on their own phase slot, once a world tick, and the
           -- renderer blends the last two ticks -- so the AI runs at a sixth of
           -- the frame rate and the animals still move smoothly. It is the trade
           -- the biome sweep already makes, and the only one available here:
           -- unlike every other tick, the DRAW cannot be spread across frames.
-          let herd1 = if fauna_demo == 3 && phase == fauna_slot() do
-            tick_flocks(herd, scene_world(sc1), scene_biome(sc1), World.side(scene_world(sc1)) * 16, fpids, sun,
+          -- The population tick: a few chunks a world tick, their counts eased
+          -- toward what the world can hold, and flocks placed or retired to
+          -- match. Then the flocks themselves step. All on one slot, so the
+          -- animals a dug pond earns appear on the tick that counts them.
+          let pop1 = if phase == fauna_slot() do
+            pop_tick_go(pop_s, scene_world(sc1), scene_biome(sc1), World.side(scene_world(sc1)), frame / tick_period(), 0)
+          else pop_s end
+          let herd_a = if phase == fauna_slot() do
+            assign_flocks(herd_s, pop1, scene_world(sc1), scene_biome(sc1), fpids, World.side(scene_world(sc1)), frame / tick_period(), seed,
+                          float_to_int(V.x(Player.position(player1))) / 16, float_to_int(V.z(Player.position(player1))) / 16, 0)
+          else herd_s end
+          let herd1 = if phase == fauna_slot() do
+            tick_flocks(herd_a, scene_world(sc1), scene_biome(sc1), World.side(scene_world(sc1)) * 16, fpids, sun,
                         V.x(Player.position(player1)), V.y(Player.position(player1)), V.z(Player.position(player1)), 0)
-          else herd end
+          else herd_a end
           let faunab1 = if fauna_on do
             let fwd = Player.forward(Player.yaw(player1), 0.0)
             if fauna_demo >= 100 do
               Fauna.demo_one(faunab, faunap, fauna_demo - 100, V.x(Player.position(player1)), V.y(Player.position(player1)), V.z(Player.position(player1)),
                              V.x(fwd), V.z(fwd), if time_pin >= 0 do int_to_float(time_pin) else now -. t0 end)
-            else if fauna_demo == 3 do
-              Flocks.build(faunab, faunap, herd1, fauna_alpha(phase), Vx.pack_shade(1.0, 0.0))
             else if fauna_demo == 2 do
               Fauna.demo_specimens(faunab, faunap, V.x(Player.position(player1)), V.y(Player.position(player1)), V.z(Player.position(player1)), V.x(fwd), V.z(fwd))
-            else
+            else if fauna_demo == 1 do
               Fauna.demo_build(faunab, faunap, V.x(Player.position(player1)), V.y(Player.position(player1)), V.z(Player.position(player1)),
                                V.x(fwd), V.z(fwd), if time_pin >= 0 do int_to_float(time_pin) else now -. t0 end)
+            else
+              Flocks.build(faunab, faunap, herd1, fauna_alpha(phase), Vx.pack_shade(1.0, 0.0))
             end end end
           else faunab end
           if fauna_on do
@@ -2774,7 +2821,7 @@ mod CubeForge do
             -- "the mesh always equals a full rebuild" but "what the queue
             -- finishes equals a full rebuild", so the oracle settles it first.
             let scq = drain(sc1, 4096, false)
-            println("  fauna: " ++ int_to_string(CubeForge.Flocks.live(herd1)) ++ " flocks, " ++ int_to_string(CubeForge.Flocks.drawn(herd1)) ++ " animals drawn, " ++ int_to_string(F32Buf.len(faunab1) / Vx.floats()) ++ " vertices")
+            println("  fauna: " ++ int_to_string(Pop.total(pop1)) ++ " animals counted in the window, " ++ int_to_string(CubeForge.Flocks.in_use(herd1)) ++ " flocks, " ++ int_to_string(CubeForge.Flocks.drawn(herd1)) ++ " animals drawn, " ++ int_to_string(F32Buf.len(faunab1) / Vx.floats()) ++ " vertices")
             println(flock_report(herd1, 0, ""))
             println("  survey: " ++ join_lines(survey_lines(sc1, sx, sz, int_to_float(myc_feedback) /. 100.0, known1, tint), ""))
             println("  state: biome " ++ int_to_string(Biome.state_hash(scene_biome(scq), World.side(scene_world(scq)) * 16)) ++ " myc " ++ int_to_string(Myc.state_hash(scene_myc(scq), World.side(scene_world(scq)) * 16))
@@ -2790,7 +2837,7 @@ mod CubeForge do
           if frame == 200 do
             println("live-object delta over frames 100..200: " ++ int_to_string(Win.live_allocs() - sample1) ++ " (" ++ int_to_string((Win.live_allocs() - sample1) / 100) ++ " per frame); resident " ++ int_to_string(Win.rss_bytes() / 1048576) ++ " MB")
           else () end
-          frame_loop(Frame(frame + 1, now, player1, sample1, view1, vp1, map_mode1, marker1, flash1, wnow, bnow, inv_open2, drag2, menu5, menubuf1, next_seed1, worst1, worst_at1, sched1, survey1, known1, faunap, faunab1, herd1), k, sc2, nchunks, proj, map_proj, fps1, wxpid, fpids, seed, first, t0, day0)
+          frame_loop(Frame(frame + 1, now, player1, sample1, view1, vp1, map_mode1, marker1, flash1, wnow, bnow, inv_open2, drag2, menu5, menubuf1, next_seed1, worst1, worst_at1, sched1, survey1, known1, faunap, faunab1, herd1, pop1), k, sc2, nchunks, proj, map_proj, fps1, wxpid, fpids, seed, first, t0, day0)
         end
         end
     end
@@ -3394,6 +3441,12 @@ mod CubeForge do
       -- before scanning existed has no such line and reads 0: nothing known.
       -- CF_KNOWN overrides it, so the gated lines can be exercised headlessly
       -- without walking the world to find six species.
+      -- The populations come back with the save; a new world's regrow from
+      -- habitat over the first pass of the population tick.
+      let pop0 = match loaded do
+        Loaded(h, _, _) -> Pop.from_list(n, Save.h_pop(h))
+        NoLoad -> Pop.new(n)
+      end
       let known0 = match loaded do
         Loaded(h, _, _) -> Save.h_known(h)
         NoLoad -> Env.get_int("CF_KNOWN", 0)
@@ -3426,11 +3479,8 @@ mod CubeForge do
       -- The flock pool is loaded per session, from the world this session has:
       -- the actors outlive the game, their contents do not.
       if Env.get_int("CF_FAUNA_STATS", 0) == 1 do println(Fauna.stats()) else () end
-      let herd0 = place_flocks(scene_biome(scene), n * 16, fpids,
-                               float_to_int(V.x(Player.position(player))), float_to_int(V.z(Player.position(player))),
-                               seed, Env.get_int("CF_FAUNA_DEMO", 0) == 3)
-      match frame_loop(Frame(0, t4, player, 0, NativeArray.make_float(16, 0.0), NativeArray.make_f32(16, 0.0), false, F32Buf.new(64), Env.get_int("CF_FLASH", 0) == 1, 0.0, 0.0, false, -1, menu0, F32Buf.new(2048), NoStart, 0.0, -1, Audio.sched_start(0), false, known0, Fauna.build(), F32Buf.new(4096), herd0), k, scene, n * n, proj, map_proj, fps0, wxpid, fpids, seed, first, t4, day0) do
-        Frame(frames, _, p, _, _, _, _, _, _, _, _, _, _, mfin, _, ns, worst, worst_at, _, _, _, _, _, _) ->
+      match frame_loop(Frame(0, t4, player, 0, NativeArray.make_float(16, 0.0), NativeArray.make_f32(16, 0.0), false, F32Buf.new(64), Env.get_int("CF_FLASH", 0) == 1, 0.0, 0.0, false, -1, menu0, F32Buf.new(2048), NoStart, 0.0, -1, Audio.sched_start(0), false, known0, Fauna.build(), F32Buf.new(4096), CubeForge.Flocks.new(), pop0), k, scene, n * n, proj, map_proj, fps0, wxpid, fpids, seed, first, t4, day0) do
+        Frame(frames, _, p, _, _, _, _, _, _, _, _, _, _, mfin, _, ns, worst, worst_at, _, _, _, _, _, _, _) ->
           let t5 = Win.time()
           println("ran " ++ int_to_string(frames) ++ " frames in " ++ ms(t5 -. t4) ++ " (" ++ float_to_string(int_to_float(frames) /. (t5 -. t4)) ++ " fps, vsync on); player ended at " ++ V.to_string(Player.position(p)))
           println("worst frame after warmup: " ++ ms(worst) ++ " at frame " ++ int_to_string(worst_at))

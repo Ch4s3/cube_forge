@@ -20,7 +20,7 @@ mod CubeForge.Flocks do
   alias CubeForge.Vertex as Vx
 
   doc "Flocks the world runs at once. Slice 2 spawns these by hand; the population tick will decide them."
-  fn cap() : Int do 6 end
+  fn cap() : Int do 8 end
 
   -- homes (3 floats each), species per flock, the previous tick's transforms,
   -- this tick's, and how many flocks are live.
@@ -42,7 +42,7 @@ mod CubeForge.Flocks do
   end
   doc "No flocks yet."
   fn new() : Snap do
-    Snap(NativeArray.make_float(3 * 6, 0.0), NativeArray.make_int(6, 0),
+    Snap(NativeArray.make_float(3 * cap(), 0.0), NativeArray.make_int(cap(), 0),
          Array.from_list(empty_lists(cap(), Nil)), Array.from_list(empty_lists(cap(), Nil)), 0)
   end
 
@@ -53,6 +53,44 @@ mod CubeForge.Flocks do
         let h1 = NativeArray.set_float(NativeArray.set_float(NativeArray.set_float(h, 3 * i, x), 3 * i + 1, y), 3 * i + 2, z)
         Snap(h1, NativeArray.set_int(spa, i, sp), p, c, if i + 1 > n do i + 1 else n end)
     end
+  end
+
+  doc "Slot [i] is empty again: species 0, nothing to draw. The actor is emptied by its caller."
+  fn free(s : Snap, i : Int) : Snap do
+    match s do Snap(h, sp, p, c, n) -> Snap(h, NativeArray.set_int(sp, i, 0), Array.set(p, i, Nil), Array.set(c, i, Nil), n) end
+  end
+  doc "An empty slot, or -1."
+  fn free_slot(s : Snap) : Int do free_go(s, 0) end
+  pfn free_go(s : Snap, i : Int) : Int do
+    if i >= cap() do 0 - 1 else if species_of(s, i) == 0 do i else free_go(s, i + 1) end end
+  end
+  doc "The slot holding a flock of [sp] whose home is in chunk (cx, cz), or -1."
+  fn find(s : Snap, cx : Int, cz : Int, sp : Int) : Int do find_go(s, cx, cz, sp, 0) end
+  pfn find_go(s : Snap, cx : Int, cz : Int, sp : Int, i : Int) : Int do
+    if i >= cap() do 0 - 1
+    else if species_of(s, i) != sp do find_go(s, cx, cz, sp, i + 1)
+    else if float_to_int(home_x(s, i)) / 16 != cx do find_go(s, cx, cz, sp, i + 1)
+    else if float_to_int(home_z(s, i)) / 16 != cz do find_go(s, cx, cz, sp, i + 1)
+    else i end end end end
+  end
+  doc "Every home moved by (dx, dz) blocks: the window slid. The transforms are home-relative, so only the homes move. A flock whose home left the window is freed."
+  fn shift(s : Snap, dx : Float, dz : Float, side : Int) : Snap do shift_go(s, dx, dz, side, 0) end
+  pfn shift_go(s : Snap, dx : Float, dz : Float, side : Int, i : Int) : Snap do
+    if i >= cap() do s
+    else if species_of(s, i) == 0 do shift_go(s, dx, dz, side, i + 1)
+    else
+      let nx = home_x(s, i) +. dx
+      let nz = home_z(s, i) +. dz
+      let lim = int_to_float(16 * side)
+      let s1 = if nx < 0.0 || nz < 0.0 || nx >= lim || nz >= lim do free(s, i)
+               else match s do Snap(h, sp, p, c, n) -> Snap(NativeArray.set_float(NativeArray.set_float(h, 3 * i, nx), 3 * i + 2, nz), sp, p, c, n) end end
+      shift_go(s1, dx, dz, side, i + 1)
+    end end
+  end
+  doc "Live flocks: slots holding a species."
+  fn in_use(s : Snap) : Int do use_go(s, 0, 0) end
+  pfn use_go(s : Snap, i : Int, acc : Int) : Int do
+    if i >= cap() do acc else use_go(s, i + 1, if species_of(s, i) != 0 do acc + 1 else acc end) end
   end
 
   doc """
@@ -104,10 +142,11 @@ mod CubeForge.Flocks do
   end
 
   pfn build_go(b : CubeForge.F32Buf.F32Buf, m : CubeForge.Fauna.Poses, s : Snap, t : Float, shade : Float, i : Int) : CubeForge.F32Buf.F32Buf do
-    if i >= live(s) do b
+    if i >= cap() do b
+    else if species_of(s, i) == 0 do build_go(b, m, s, t, shade, i + 1)
     else build_go(draw_go(b, m, species_of(s, i), home_x(s, i), home_z(s, i), Array.get(prev(s), i), Array.get(cur(s), i), t, shade),
                   m, s, t, shade, i + 1)
-    end
+    end end
   end
 
   doc """
@@ -127,7 +166,7 @@ mod CubeForge.Flocks do
   doc "Animals drawn: the transforms in the current snapshot."
   fn drawn(s : Snap) : Int do drawn_go(s, 0, 0) end
   pfn drawn_go(s : Snap, i : Int, acc : Int) : Int do
-    if i >= live(s) do acc else drawn_go(s, i + 1, acc + List.length(Array.get(cur(s), i))) end
+    if i >= cap() do acc else drawn_go(s, i + 1, acc + List.length(Array.get(cur(s), i))) end
   end
 
 end

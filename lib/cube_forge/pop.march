@@ -1,0 +1,202 @@
+-- Pop — what lives where, and why.
+--
+-- One count per chunk per species, 0..15, eased toward a CARRYING CAPACITY that
+-- is read off the world: for a fish, how many of the chunk's columns are water
+-- of the depth it wants; for a bird, how many are its biome. Both are numbers
+-- the world already maintains and the player already changes -- a shovel moves
+-- depth, the climate field moves biome -- so this is the rule that closes the
+-- terraforming loop: dig a pond in grassland and Sunfin capacity rises from
+-- nothing, and over the next minute or two a school exists that did not.
+--
+-- The registry is dense over the window, like the spring flags and the biome
+-- field, and is remapped when the window shifts. A chunk that leaves the window
+-- is forgotten and regrows from its capacity on return -- populations are
+-- derived from habitat, and habitat is what persists. What the save carries is
+-- the window's counts, so a school you watched fill in is there when you load.
+mod CubeForge.Pop do
+
+  alias CubeForge.Fauna as Fa
+  alias CubeForge.Biome as Biome
+  alias CubeForge.World as World
+
+  doc "The most of one species a chunk holds."
+  fn cap_max() : Int do 15 end
+  doc "Columns of suitable habitat per animal of capacity: a full chunk of the right biome carries eight birds."
+  fn cols_per_bird() : Int do 32 end
+  doc "Water columns in the band per fish of capacity: a full chunk of the right water carries sixteen fish."
+  fn cols_per_fish() : Int do 16 end
+
+  -- counts (side * side chunks x Fa.count() species), the side in chunks
+  type Reg = Reg(NativeU8Arr, Int)
+
+  fn side(r : Reg) : Int do match r do Reg(_, n) -> n end end
+  fn counts(r : Reg) : NativeU8Arr do match r do Reg(c, _) -> c end end
+  fn slot(n : Int, cx : Int, cz : Int, sp : Int) : Int do (cx + n * cz) * Fa.count() + (sp - 1) end
+
+  fn new(n : Int) : Reg do Reg(NativeArray.make_u8(n * n * Fa.count(), 0), n) end
+  fn count_of(r : Reg, cx : Int, cz : Int, sp : Int) : Int do NativeArray.get_u8(counts(r), slot(side(r), cx, cz, sp)) end
+
+  -- ── Capacity ──────────────────────────────────────────────────────────────
+  doc "How deep the water is at column (x, z): the field's surface (water included) less the first solid block under it. 0 on dry land."
+  fn depth_at(w : CubeForge.World.World, bio : CubeForge.Biome.Field, x : Int, z : Int) : Int do
+    if Biome.water_dist_at(bio, x, z) != 0 do 0
+    else
+      let top = Biome.height_of(bio, x, z)
+      let bed = World.surface_y_below(w, x, z, top)
+      if bed < 0 do top else top - bed end
+    end
+  end
+
+  doc "Whether column (x, z) is water fish [sp] would hold: in its depth band, and of the body size it wants."
+  fn fish_column(w : CubeForge.World.World, bio : CubeForge.Biome.Field, sp : Int, x : Int, z : Int) : Bool do
+    let d = depth_at(w, bio, x, z)
+    if d < Fa.depth_lo(sp) do false
+    else if d > Fa.depth_hi(sp) do false
+    else
+      let small = Biome.water_reach_at(bio, x, z) == Biome.small_reach()
+      if Fa.wants_small_water(sp) do small else !small end
+    end end
+  end
+
+  -- ── One pass over the chunk, then every species against it ─────────────
+  -- Depth costs a walk down the column, and there are eighteen species: read
+  -- per species that was 4,608 walks a chunk and the fauna slot was the second
+  -- most frequent slow frame in a run. Measured ONCE into a profile -- 256
+  -- depths and 256 small-water flags -- and the species are then a comparison
+  -- each. Biome is a byte read and needs no profile.
+  type Profile = Profile(NativeIntArr, NativeU8Arr)
+
+  pfn profile_go(w : CubeForge.World.World, bio : CubeForge.Biome.Field, cx : Int, cz : Int, i : Int, d : NativeIntArr, sm : NativeU8Arr) : Profile do
+    if i >= 256 do Profile(d, sm)
+    else
+      let x = 16 * cx + i % 16
+      let z = 16 * cz + i / 16
+      let dep = depth_at(w, bio, x, z)
+      let small = if dep > 0 && Biome.water_reach_at(bio, x, z) == Biome.small_reach() do 1 else 0 end
+      profile_go(w, bio, cx, cz, i + 1, NativeArray.set_int(d, i, dep), NativeArray.set_u8(sm, i, small))
+    end
+  end
+  doc "The chunk's water, measured once: depth per column, and whether that water is a small body."
+  fn profile(w : CubeForge.World.World, bio : CubeForge.Biome.Field, cx : Int, cz : Int) : Profile do
+    profile_go(w, bio, cx, cz, 0, NativeArray.make_int(256, 0), NativeArray.make_u8(256, 0))
+  end
+  pfn prof_fish(pr : Profile, sp : Int, i : Int) : Bool do
+    match pr do
+      Profile(d, sm) ->
+        let dep = NativeArray.get_int(d, i)
+        if dep < Fa.depth_lo(sp) do false
+        else if dep > Fa.depth_hi(sp) do false
+        else if Fa.wants_small_water(sp) do NativeArray.get_u8(sm, i) == 1
+        else NativeArray.get_u8(sm, i) == 0 end end end
+    end
+  end
+  pfn fish_go(pr : Profile, sp : Int, i : Int, acc : Int) : Int do
+    if i >= 256 do acc else fish_go(pr, sp, i + 1, if prof_fish(pr, sp, i) do acc + 1 else acc end) end
+  end
+  pfn bird_go(bio : CubeForge.Biome.Field, sp : Int, cx : Int, cz : Int, i : Int, acc : Int) : Int do
+    if i >= 256 do acc
+    else bird_go(bio, sp, cx, cz, i + 1, if Fa.wants_biome(sp, Biome.biome_of(bio, 16 * cx + i % 16, 16 * cz + i / 16)) do acc + 1 else acc end) end
+  end
+  pfn clamp_cap(v : Int) : Int do if v > cap_max() do cap_max() else v end end
+
+  doc "How many of species [sp] chunk (cx, cz) can hold, against a profile of it."
+  fn capacity_of(pr : Profile, bio : CubeForge.Biome.Field, cx : Int, cz : Int, sp : Int) : Int do
+    if Fa.is_fish(sp) do clamp_cap(fish_go(pr, sp, 0, 0) / cols_per_fish())
+    else clamp_cap(bird_go(bio, sp, cx, cz, 0, 0) / cols_per_bird()) end
+  end
+  doc "How many of species [sp] chunk (cx, cz) can hold, from the world as it is now. Profiles the chunk itself; a caller asking about several species should profile once and use capacity_of."
+  fn capacity(w : CubeForge.World.World, bio : CubeForge.Biome.Field, cx : Int, cz : Int, sp : Int) : Int do
+    capacity_of(profile(w, bio, cx, cz), bio, cx, cz, sp)
+  end
+
+  doc "A column in chunk (cx, cz) that suits species [sp] -- somewhere to put a flock's home -- packed as x + 4096 z, or -1."
+  fn sample_column(w : CubeForge.World.World, bio : CubeForge.Biome.Field, cx : Int, cz : Int, sp : Int) : Int do
+    sample_go(w, bio, cx, cz, sp, 0)
+  end
+  pfn sample_go(w : CubeForge.World.World, bio : CubeForge.Biome.Field, cx : Int, cz : Int, sp : Int, i : Int) : Int do
+    if i >= 256 do 0 - 1
+    else
+      -- walk the chunk from its middle outward, so the home is central when it can be
+      let j = (i + 136) % 256
+      let x = 16 * cx + j % 16
+      let z = 16 * cz + j / 16
+      let ok = if Fa.is_fish(sp) do fish_column(w, bio, sp, x, z) else Fa.wants_biome(sp, Biome.biome_of(bio, x, z)) end
+      if ok do x + 4096 * z else sample_go(w, bio, cx, cz, sp, i + 1) end
+    end
+  end
+
+  -- ── The tick ──────────────────────────────────────────────────────────────
+  -- Every species of one chunk, its count moved one step toward its capacity.
+  -- The array is threaded unwrapped so the writes are in place (GAPS G68).
+  pfn ease_go(c : NativeU8Arr, n : Int, pr : Profile, bio : CubeForge.Biome.Field, cx : Int, cz : Int, sp : Int) : NativeU8Arr do
+    if sp > Fa.count() do c
+    else
+      let i = slot(n, cx, cz, sp)
+      let have = NativeArray.get_u8(c, i)
+      let want = capacity_of(pr, bio, cx, cz, sp)
+      let next = if have < want do have + 1 else if have > want do have - 1 else have end end
+      ease_go(if next == have do c else NativeArray.set_u8(c, i, next) end, n, pr, bio, cx, cz, sp + 1)
+    end
+  end
+  doc "Move every species of chunk (cx, cz) one step toward its capacity."
+  fn tick_chunk(r : Reg, w : CubeForge.World.World, bio : CubeForge.Biome.Field, cx : Int, cz : Int) : Reg do
+    match r do Reg(c, n) -> Reg(ease_go(c, n, profile(w, bio, cx, cz), bio, cx, cz, 1), n) end
+  end
+
+  -- ── The window moved ──────────────────────────────────────────────────────
+  -- New chunk (cx, cz) held old chunk (cx + dx, cz + dz); a chunk that came in
+  -- starts empty and regrows from its capacity.
+  pfn shift_go(old : NativeU8Arr, out : NativeU8Arr, n : Int, dx : Int, dz : Int, i : Int) : NativeU8Arr do
+    if i >= n * n * Fa.count() do out
+    else
+      let d = i / Fa.count()
+      let sx = d % n + dx
+      let sz = d / n + dz
+      let v = if sx < 0 do 0 else if sz < 0 do 0 else if sx >= n do 0 else if sz >= n do 0
+              else NativeArray.get_u8(old, (sx + n * sz) * Fa.count() + i % Fa.count()) end end end end
+      shift_go(old, if v == 0 do out else NativeArray.set_u8(out, i, v) end, n, dx, dz, i + 1)
+    end
+  end
+  doc "The registry after the window slid by (dx, dz) chunks."
+  fn shift(r : Reg, dx : Int, dz : Int) : Reg do
+    match r do Reg(c, n) -> Reg(shift_go(c, NativeArray.make_u8(n * n * Fa.count(), 0), n, dx, dz, 0), n) end
+  end
+
+  -- ── Saving ────────────────────────────────────────────────────────────────
+  -- Non-zero entries only, packed (slot * 16 + count), the shape the header's
+  -- other lists take.
+  pfn to_list_go(c : NativeU8Arr, i : Int, acc : List(Int)) : List(Int) do
+    if i < 0 do acc
+    else
+      let v = NativeArray.get_u8(c, i)
+      to_list_go(c, i - 1, if v == 0 do acc else Cons(i * 16 + v, acc) end)
+    end
+  end
+  doc "The registry as a list for the save header."
+  fn to_list(r : Reg) : List(Int) do to_list_go(counts(r), NativeArray.length_u8(counts(r)) - 1, Nil) end
+  pfn from_go(c : NativeU8Arr, len : Int, l : List(Int)) : NativeU8Arr do
+    match l do
+      Nil -> c
+      Cons(v, rest) ->
+        let i = v / 16
+        from_go(if i < 0 || i >= len do c else NativeArray.set_u8(c, i, v % 16) end, len, rest)
+    end
+  end
+  doc "A registry from a saved list; entries outside the window are dropped."
+  fn from_list(n : Int, l : List(Int)) : Reg do
+    let len = n * n * Fa.count()
+    Reg(from_go(NativeArray.make_u8(len, 0), len, l), n)
+  end
+
+  doc "A number that changes when any count does."
+  fn state_hash(r : Reg) : Int do hash_go(counts(r), NativeArray.length_u8(counts(r)), 0, 2166136261) end
+  pfn hash_go(c : NativeU8Arr, len : Int, i : Int, acc : Int) : Int do
+    if i >= len do acc else hash_go(c, len, i + 1, int_and(acc * 16777619 + NativeArray.get_u8(c, i), 1073741823)) end
+  end
+  doc "Animals of all species across the window."
+  fn total(r : Reg) : Int do total_go(counts(r), NativeArray.length_u8(counts(r)), 0, 0) end
+  pfn total_go(c : NativeU8Arr, len : Int, i : Int, acc : Int) : Int do
+    if i >= len do acc else total_go(c, len, i + 1, acc + NativeArray.get_u8(c, i)) end
+  end
+
+end

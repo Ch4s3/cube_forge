@@ -2672,3 +2672,41 @@ a head sized to the body makes every bird a duck.
 The quads doubled and the startup FELL: a loft fills fewer cells than the boxes
 it replaces, and the bounding-box greedy pass scales with what is filled. The
 frame budget number is mostly a quieter machine, and is reported as measured.
+
+## Populations: what lives where, and why
+
+Slice 4, the rule that closes the terraforming loop. One count per chunk per
+species, 0..15, eased one step a visit toward a CARRYING CAPACITY read off the
+world: for a fish, how many of the chunk's columns are water of the depth it
+wants (and of the body size -- a Sunfin wants a pond, and the field's own
+`small_body` of 48 columns is what says whether it has one); for a bird, how
+many columns are its biome. Both are numbers the world already maintains and
+the player already changes. Dig a 6x6 pond three deep in grassland and two
+Sunfin arrive over a few visits; fill it in and they go, one a tick. That is the
+whole mechanism, and it is a test.
+
+**Flocks are the visible sample of populations.** The registry counts every
+chunk of the window; a flock is placed only for a species with at least two
+animals in a chunk within two of the player, retired when the count goes or the
+player does, and resized in place when the count moves -- a school grows with
+its pond without every fish jumping back to where it began. Eight slots. In a
+400-frame run on seed 7 that is 792 animals counted and 34 drawn, spanning
+Pinecrest, Duskowl and Mossmoa in the forest chunk and Frostgull, Brinewaddle,
+Shoalback, Kelpjaw and a Bladefin on the coast: the habitat rule doing real
+work, with no species placed by hand.
+
+**Two bugs, both instructive.** The first was `slot >= 0 && have !=
+List.length(Array.get(cur, slot))` -- `&&` does not short-circuit (GAPS G33),
+so the PVec was read at -1 on every chunk with no flock, and the program panicked
+on the first population tick. Found by bisecting the slot's three stages with a
+temporary knob; the diagnostic printlns never showed because a panic drops the
+buffered stdout, which is worth remembering. The second was cost: `capacity`
+walked every column's depth per species, 4,608 walks a chunk, and the frame
+budget gate failed at 18.55 ms with the fauna slot the second most frequent
+slow phase. Profiling each chunk ONCE -- 256 depths and 256 small-water flags --
+and running the species against the profile brought the gate to 7.72 ms.
+
+**Save/load.** The header carries a `pop` line, 278 entries for the seed-7
+window at the save; a session loaded from it reports 340 animals at frame 0,
+before a single tick has run. A save from before there were populations reads
+an empty list and regrows.
