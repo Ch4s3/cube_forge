@@ -3053,3 +3053,66 @@ happens. For small edits the CPU may well stay ahead.
 two places now, both a single voxel: `Audio.exposure` and the dump's ground
 readout. So a GPU flood writes the texture the shader already samples and the
 readback question -- the objection that made this look hard -- does not arise.
+
+
+## The light flood, on the GPU: the propagation rule, verified (2026-09-07)
+
+Step one of moving lighting to the GPU. `cf_light_flood(passes)` runs the CPU's
+own propagation rule as a relaxation over the whole light field, ping-ponged
+between two RG8 3D textures by layered rendering. `Light.give_level`, exactly: a
+voxel takes `max(own, neighbour - 1 - its own opacity)`, and a solid voxel takes
+nothing. Opacity comes from the occupancy texture, which already holds
+`occ_value` -- 0 air, 2 water, 6 leaves, 255 solid.
+
+An EVEN number of passes leaves the result in `g_lt[0]`, the texture the world
+shader samples and the one every upload writes; `g_lt[1]` is pure scratch. The
+whole field, not a box: ping-ponging over a sub-box is not a smaller version of
+this, because every pass reads its neighbours and at the box edge would read
+scratch nothing has written.
+
+### The oracle, and what it caught
+
+A converged field is a fixed point of the relaxation, so uploading the CPU's own
+light and flooding it must change nothing. `cf_light_check` reads the texture
+back and compares, voxel for voxel, through the toroidal wrap. It went:
+
+| | sky | block |
+|---|---|---|
+| first run | 66 | 1260 |
+| after the opacity fix | 1 | 1260 |
+| after the solid-voxel fix | **1** | **0** |
+| with shifts, before the wrap fix | 360 162 | 20 840 |
+| with shifts, after | **2-282** | **0-2** |
+
+Three real bugs, none of which the rendering could have shown:
+
+1. **`cf_gfx_sync_box` normalised the occupancy to 0/255**, flattening water's 2
+   and leaves' 6. The shadow trace only ever asks `> 0.5` so it could not tell,
+   but the flood subtracts the opacity per step -- light ran straight through
+   water. It now uploads the array verbatim, which also puts it back in
+   agreement with `cf_gfx_upload_occupancy`, a disagreement recorded earlier in
+   this file as harmless. It was harmless only until something read the value.
+   `cf_gfx_set_voxel` took a solid/not-solid flag for the same reason and now
+   takes `occ_value` too.
+2. **A solid voxel was being zeroed.** `Light.give_level` says a solid voxel
+   RECEIVES nothing; it does not say it holds nothing. Glowing mycelium is a
+   solid block holding its own emission, and zeroing it put out every light.
+3. **`cf_gfx_upload_light` wrote at window-local coordinates**, ignoring the
+   toroidal origin every other writer respects. Correct only while the origin
+   was zero; after one shift the upload and every reader disagreed by the
+   origin. Standing still could never show it.
+
+The residue, 2-282 sky voxels out of 9 437 184, tracks the light oracle's own
+count of how far the maintained CPU field has drifted from a true flood (the
+accepted "water moves without a relight"). The GPU arrives at the right answer;
+the CPU field is the one that is stale.
+
+### What is NOT done
+
+The relaxation only ever RAISES a value, so flooding from the current field
+cannot correct light that is too bright -- which is why block light reads 0
+against the CPU field but the CPU field still differs from a fresh flood by 41.
+A real flood starts from the seed: sky columns filled and emitters set,
+everything else zero. **That seed pass is the next piece**, and after it the
+wiring that lets the GPU result replace the CPU sweep, and then the relight
+path. The rule itself is now known to be right.

@@ -844,7 +844,7 @@ mod CubeForge do
         let is_spring = is_world_spring(w0, x, y, z)
         if was_spring != is_spring do Win.spring_set(x, y, z, is_spring) else () end
         if is_spring && !was_spring do Win.spray_at(x, y, z, 40) else () end
-        Win.gfx_set_voxel(x, y, z, CubeForge.Light.occludes(id))
+        Win.gfx_set_voxel(x, y, z, CubeForge.Light.occ_value(id))
         let n = World.side(w0)
         -- accessors, not a match: a dotted constructor pattern does not parse (GAPS.md G24/G25)
         let relit = World.relight_marked(w0, x, y, z)
@@ -2854,6 +2854,16 @@ mod CubeForge do
             -- The light oracle: the incrementally maintained fields against a
             -- flood from scratch, as voxel counts that differ. Both must be 0;
             -- a non-zero count is a relight that missed something.
+            -- The GPU flood against the CPU's fields. A converged field is a
+            -- fixed point of the relaxation, so uploading the CPU's own light
+            -- and flooding it must change nothing: any difference is the rule,
+            -- the edge handling or the wrap being wrong.
+            Win.gfx_upload_light(World.light(scene_world(sc1)), World.block_light(scene_world(sc1)), 192, 256, 192)
+            let lpre = Win.light_check(World.light(scene_world(sc1)), World.block_light(scene_world(sc1)))
+            let _lf = Win.light_flood(16)
+            let lpost = Win.light_check(World.light(scene_world(sc1)), World.block_light(scene_world(sc1)))
+            println("  gpu flood oracle: upload sky " ++ int_to_string(lpre / 10000000) ++ " block " ++ int_to_string(lpre % 10000000)
+                    ++ " -> after 16 passes sky " ++ int_to_string(lpost / 10000000) ++ " block " ++ int_to_string(lpost % 10000000) ++ " (all must be 0)")
             let occbad = Win.occ_check(World.occupancy(scene_world(sc1)))
             println("  occupancy oracle: fine " ++ int_to_string(occbad / 1000000) ++ " coarse " ++ int_to_string(occbad % 1000000) ++ " texels differ from the world (both must be 0)")
             println("  light oracle: sky " ++ int_to_string(count_diff_u8(World.light(scene_world(sc1)), CubeForge.Light.flood(scene_world(sc1)), 0, CubeForge.Light.volume(), 0))

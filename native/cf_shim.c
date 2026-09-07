@@ -660,7 +660,7 @@ static GLint  g_u_time = -1;
 static int64_t g_occ_ox = 0, g_occ_oz = 0;
 static GLint  g_u_occ_off = -1;
 static GLint  g_u_light = -1, g_u_gpulight = -1;
-static GLuint g_lt = 0;
+static GLuint g_lt[2] = {0, 0};
 static void occ_push_off(void);
 static GLint  g_u_fog_density = -1, g_u_fog_color = -1, g_u_overcast = -1, g_u_bolt = -1;
 static GLint  g_u_off = -1;
@@ -739,9 +739,9 @@ int64_t cf_gfx_init(void) {
     glUniform1i(g_u_light, 3);
     {
         unsigned char dummy[2] = {0, 0};
-        glGenTextures(1, &g_lt);
+        glGenTextures(2, g_lt);
         glActiveTexture(GL_TEXTURE3);
-        glBindTexture(GL_TEXTURE_3D, g_lt);
+        glBindTexture(GL_TEXTURE_3D, g_lt[0]);
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
         glTexImage3D(GL_TEXTURE_3D, 0, GL_RG8, 1, 1, 1, 0, GL_RG, GL_UNSIGNED_BYTE, dummy);
         glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
@@ -1061,20 +1061,32 @@ void cf_gfx_upload_light(void *la, void *lb, int64_t w, int64_t h, int64_t d) {
     unsigned char *rg = (unsigned char *)malloc(n * 2);
     if (!rg) return;
     /* light is x + w * (z + d * y); the texture wants x fastest, then y, then z,
-     * matching the occupancy layout the shader already addresses */
+     * matching the occupancy layout the shader already addresses -- and THROUGH
+     * THE TOROIDAL WRAP, like every other writer. Writing at window-local
+     * coordinates instead was right only while the origin was zero: after one
+     * shift this upload and every reader disagreed by the origin, which the
+     * flood oracle caught as 350 000 differing voxels. */
     for (int64_t z = 0; z < d; z++)
         for (int64_t y = 0; y < h; y++)
             for (int64_t x = 0; x < w; x++) {
                 size_t src = (size_t)x + w * ((size_t)z + d * (size_t)y);
-                size_t dst = ((size_t)x + w * ((size_t)y + h * (size_t)z)) * 2;
+                size_t dst = ((size_t)occ_tx(x) + w * ((size_t)y + h * (size_t)occ_tz(z))) * 2;
                 rg[dst] = (unsigned char)(a[src] * 17);   /* 0..15 -> 0..255 */
                 rg[dst + 1] = (unsigned char)(b[src] * 17);
             }
-    if (!g_lt) glGenTextures(1, &g_lt);
+    if (!g_lt[0]) glGenTextures(2, g_lt);
     glActiveTexture(GL_TEXTURE3);
-    glBindTexture(GL_TEXTURE_3D, g_lt);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    glTexImage3D(GL_TEXTURE_3D, 0, GL_RG8, (GLsizei)w, (GLsizei)h, (GLsizei)d, 0, GL_RG, GL_UNSIGNED_BYTE, rg);
+    /* both: [1] is the flood's scratch and has to exist at the same size */
+    for (int i = 1; i >= 0; i--) {
+        glBindTexture(GL_TEXTURE_3D, g_lt[i]);
+        glTexImage3D(GL_TEXTURE_3D, 0, GL_RG8, (GLsizei)w, (GLsizei)h, (GLsizei)d, 0, GL_RG, GL_UNSIGNED_BYTE, rg);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_REPEAT);
+    }
     glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_REPEAT);
@@ -1116,7 +1128,7 @@ void cf_gfx_flush_light(void *la, void *lb) {
 }
 
 void cf_gfx_sync_light_box(void *la, void *lb, int64_t x0, int64_t y0, int64_t z0, int64_t x1, int64_t y1, int64_t z1) {
-    if (!g_lt || !g_occ_w) return;
+    if (!g_lt[0] || !g_occ_w) return;
     if (narr_len(la) < g_occ_w * g_occ_h * g_occ_d || narr_len(lb) < g_occ_w * g_occ_h * g_occ_d) return;
     if (x0 < 0) x0 = 0; if (y0 < 0) y0 = 0; if (z0 < 0) z0 = 0;
     if (x1 >= g_occ_w) x1 = g_occ_w - 1; if (y1 >= g_occ_h) y1 = g_occ_h - 1; if (z1 >= g_occ_d) z1 = g_occ_d - 1;
@@ -1135,7 +1147,7 @@ void cf_gfx_sync_light_box(void *la, void *lb, int64_t x0, int64_t y0, int64_t z
                 stage[dst + 1] = (unsigned char)(b[src] * 17);
             }
     glActiveTexture(GL_TEXTURE3);
-    glBindTexture(GL_TEXTURE_3D, g_lt);
+    glBindTexture(GL_TEXTURE_3D, g_lt[0]);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
     glPixelStorei(GL_UNPACK_ROW_LENGTH, (GLint)bw);
     glPixelStorei(GL_UNPACK_IMAGE_HEIGHT, (GLint)bh);
@@ -1171,10 +1183,12 @@ void cf_gfx_shift_occupancy(int64_t dx, int64_t dz) {
 }
 
 /* One voxel changed: a single texel beats rebuilding 4 MB. */
-void cf_gfx_set_voxel(int64_t x, int64_t y, int64_t z, int64_t solid) {
+/* [occ] is CubeForge.Light.occ_value: 0 air, 2 water, 6 leaves, 255 solid --
+ * not a flag, because the light flood subtracts it per step. */
+void cf_gfx_set_voxel(int64_t x, int64_t y, int64_t z, int64_t occ) {
     if (!g_occ) return;
     if (x < 0 || y < 0 || z < 0 || x >= g_occ_w || y >= g_occ_h || z >= g_occ_d) return;
-    unsigned char v = solid ? 255 : 0;   /* normalized R8: 255 samples as 1.0 */
+    unsigned char v = (unsigned char)occ;   /* normalized R8: 255 samples as 1.0 */
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_3D, g_occ);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
@@ -1188,7 +1202,7 @@ void cf_gfx_set_voxel(int64_t x, int64_t y, int64_t z, int64_t solid) {
                   + (size_t)g_occ_cw * ((size_t)(y / CF_OCC_CS)
                   + (size_t)g_occ_ch * (size_t)(occ_tz(z) / CF_OCC_CS));
         uint16_t before = g_occ_count[ci];
-        if (solid) g_occ_count[ci]++;
+        if (occ == 255) g_occ_count[ci]++;
         else if (g_occ_count[ci]) g_occ_count[ci]--;
         if ((before > 0) != (g_occ_count[ci] > 0)) {
             unsigned char cv = g_occ_count[ci] ? 255 : 0;
@@ -1214,15 +1228,19 @@ void cf_gfx_sync_box(void *arr, int64_t x0, int64_t y0, int64_t z0, int64_t x1, 
     if (x1 >= g_occ_w) x1 = g_occ_w - 1; if (y1 >= g_occ_h) y1 = g_occ_h - 1; if (z1 >= g_occ_d) z1 = g_occ_d - 1;
     if (x0 > x1 || y0 > y1 || z0 > z1) return;
     const unsigned char *a = (const unsigned char *)narr_data(arr);
-    /* the fine texture: the box straight out of the array. The array holds
-     * 0 / occ_solid; the texture wants 0 / 255, so stage the box. */
+    /* The box straight out of the array, VERBATIM -- 0 air, 2 water, 6 leaves,
+     * 255 solid. This used to normalise to 0/255, which the shadow trace could
+     * not tell apart (it only asks `> 0.5`) but the GPU light flood can: it
+     * subtracts the opacity per step, so flattening water to 0 let light run
+     * straight through it. That also puts this writer back in agreement with
+     * cf_gfx_upload_occupancy, which never normalised. */
     int64_t bw = x1 - x0 + 1, bh = y1 - y0 + 1, bd = z1 - z0 + 1;
     unsigned char *stage = (unsigned char *)malloc((size_t)(bw * bh * bd));
     if (!stage) return;
     for (int64_t z = z0; z <= z1; z++)
         for (int64_t y = y0; y <= y1; y++)
             for (int64_t x = x0; x <= x1; x++)
-                stage[(x - x0) + bw * ((y - y0) + bh * (z - z0))] = a[x + g_occ_w * (y + g_occ_h * z)] == 255 ? 255 : 0;
+                stage[(x - x0) + bw * ((y - y0) + bh * (z - z0))] = a[x + g_occ_w * (y + g_occ_h * z)];
     glActiveTexture(GL_TEXTURE1);
     occ_sub_wrapped(g_occ, stage, occ_tx(x0), y0, occ_tz(z0), bw, bh, bd, g_occ_w, g_occ_d);
     free(stage);
@@ -1304,6 +1322,140 @@ int64_t cf_occ_check(void *arr) {
     }
     glActiveTexture(GL_TEXTURE0);
     return bad * 1000000 + cbad;
+}
+
+/* ── The light flood, on the GPU ─────────────────────────────────────────────
+ * One relaxation pass per light level over the WHOLE field, ping-ponged between
+ * the two light textures. The CPU's rule, exactly: a voxel takes
+ * max(own, neighbour - 1 - its own opacity), and a solid voxel takes nothing
+ * (Light.give_level). Opacity comes from the occupancy texture, which already
+ * stores occ_value -- 0 air, 2 water, 6 leaves, 255 solid.
+ *
+ * Whole field rather than a box on purpose: ping-ponging over a sub-box is not
+ * a smaller version of this, because every pass reads its neighbours and at the
+ * box edge would read scratch nothing has written. A full pass has no edge.
+ * Measured 7.55 ms for sixteen passes, against 16.7 ms for the CPU's band sweep.
+ *
+ * An EVEN number of passes leaves the result in g_lt[0], which is the texture
+ * the world shader samples and the one uploads and box syncs write; g_lt[1] is
+ * pure scratch and is never read except by the next pass.
+ *
+ * The textures are toroidal, so a neighbour that leaves the window wraps to the
+ * far side. The CPU treats outside the window as dark, so the shader converts
+ * each texel back to window-local coordinates through u_occ_off and drops any
+ * neighbour that falls outside -- otherwise light would crawl in from the
+ * opposite edge of the world. */
+static GLuint lb_compile(GLenum k, const char *src);   /* defined with the cost probe below */
+static GLuint g_lf_fbo = 0, g_lf_prog = 0, g_lf_vao = 0;
+static const char *LF_VS =
+    "#version 330 core\n"
+    "flat out int v_lay;\n"
+    "void main(){ vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);\n"
+    "  v_lay = gl_InstanceID;\n"
+    "  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0); }\n";
+static const char *LF_GS =
+    "#version 330 core\n"
+    "layout(triangles) in; layout(triangle_strip, max_vertices = 3) out;\n"
+    "flat in int v_lay[]; flat out int g_lay;\n"
+    "void main(){ for (int i = 0; i < 3; i++) { gl_Layer = v_lay[0]; g_lay = v_lay[0]; gl_Position = gl_in[i].gl_Position; EmitVertex(); } EndPrimitive(); }\n";
+static const char *LF_FS =
+    "#version 330 core\n"
+    "uniform sampler3D u_src;\n"
+    "uniform sampler3D u_occ_f;\n"
+    "uniform vec3 u_dim;\n"
+    "uniform vec2 u_off;\n"
+    "flat in int g_lay;\n"
+    "out vec2 o_light;\n"
+    /* the window-local x, z of a texel, through the toroidal origin */
+    "vec2 localOf(vec2 texel){ return mod(texel - u_off + u_dim.xz, u_dim.xz); }\n"
+    "vec2 lightAt(vec3 texel){ return texture(u_src, (texel + 0.5) / u_dim).rg; }\n"
+    "void main(){\n"
+    "  vec3 t = vec3(floor(gl_FragCoord.xy), float(g_lay));\n"
+    "  float op = texture(u_occ_f, (t + 0.5) / u_dim).r * 255.0;\n"
+    "  vec2 me = lightAt(t);\n"
+        /* A solid voxel RECEIVES nothing (Light.give_level returns 0 for it) but
+     * KEEPS what it was seeded with: a glowing mycelium block is solid and
+     * holds its own emission, and zeroing it here put out every light. */
+    "  if (op > 254.5) { o_light = me; return; }\n"
+    "  vec2 loc = localOf(t.xz);\n"
+    "  vec2 m = vec2(0.0);\n"
+    /* the four horizontal neighbours, dropped when they leave the window */
+    "  if (loc.x > 0.5)            m = max(m, lightAt(t + vec3(-1, 0, 0)));\n"
+    "  if (loc.x < u_dim.x - 1.5)  m = max(m, lightAt(t + vec3( 1, 0, 0)));\n"
+    "  if (loc.y > 0.5)            m = max(m, lightAt(t + vec3(0, 0, -1)));\n"
+    "  if (loc.y < u_dim.z - 1.5)  m = max(m, lightAt(t + vec3(0, 0,  1)));\n"
+    "  if (t.y > 0.5)              m = max(m, lightAt(t + vec3(0, -1, 0)));\n"
+    "  if (t.y < u_dim.y - 1.5)    m = max(m, lightAt(t + vec3(0,  1, 0)));\n"
+    "  vec2 gave = max(m - (1.0 + op) / 15.0, vec2(0.0));\n"
+    "  o_light = max(me, gave);\n"
+    "}\n";
+int64_t cf_light_flood(int64_t passes) {
+    if (!g_lt[0] || !g_occ_w) return -1;
+    if (!g_lf_prog) {
+        GLuint vs = lb_compile(GL_VERTEX_SHADER, LF_VS);
+        GLuint gs = lb_compile(GL_GEOMETRY_SHADER, LF_GS);
+        GLuint fs = lb_compile(GL_FRAGMENT_SHADER, LF_FS);
+        if (!vs || !gs || !fs) return -1;
+        g_lf_prog = glCreateProgram();
+        glAttachShader(g_lf_prog, vs); glAttachShader(g_lf_prog, gs); glAttachShader(g_lf_prog, fs);
+        glLinkProgram(g_lf_prog);
+        GLint ok = 0; glGetProgramiv(g_lf_prog, GL_LINK_STATUS, &ok);
+        if (!ok) { char log[1024]; glGetProgramInfoLog(g_lf_prog, 1024, NULL, log); fprintf(stderr, "cf: light flood link: %s\n", log); return -1; }
+        glGenVertexArrays(1, &g_lf_vao);
+        glGenFramebuffers(1, &g_lf_fbo);
+    }
+    if (passes % 2 != 0) passes++;   /* even, so the result lands back in g_lt[0] */
+    glUseProgram(g_lf_prog);
+    glUniform1i(glGetUniformLocation(g_lf_prog, "u_src"), 4);
+    glUniform1i(glGetUniformLocation(g_lf_prog, "u_occ_f"), 1);
+    glUniform3f(glGetUniformLocation(g_lf_prog, "u_dim"), (float)g_occ_w, (float)g_occ_h, (float)g_occ_d);
+    glUniform2f(glGetUniformLocation(g_lf_prog, "u_off"), (float)g_occ_ox, (float)g_occ_oz);
+    glBindVertexArray(g_lf_vao);
+    glBindFramebuffer(GL_FRAMEBUFFER, g_lf_fbo);
+    glViewport(0, 0, (GLsizei)g_occ_w, (GLsizei)g_occ_h);
+    glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE); glDisable(GL_BLEND);
+    for (int64_t k = 0; k < passes; k++) {
+        int src = (int)(k & 1), dst = 1 - src;
+        glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_3D, g_lt[src]);
+        glFramebufferTexture(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, g_lt[dst], 0);
+        glDrawArraysInstanced(GL_TRIANGLES, 0, 3, (GLsizei)g_occ_d);
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glEnable(GL_DEPTH_TEST); glEnable(GL_CULL_FACE);
+    glUseProgram(g_prog);
+    glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_3D, g_lt[0]);
+    glActiveTexture(GL_TEXTURE0);
+    glViewport(0, 0, cf_win_fb_w(), cf_win_fb_h());
+    return passes;
+}
+
+/* Oracle: read the flooded texture back and compare it with the CPU's fields,
+ * voxel for voxel, through the toroidal wrap. Returns how many sky and block
+ * levels differ, packed sky * 10000000 + block. Diagnostic; it stalls. */
+int64_t cf_light_check(void *la, void *lb) {
+    if (!g_lt[0] || !g_occ_w) return -1;
+    if (narr_len(la) < g_occ_w * g_occ_h * g_occ_d) return -2;
+    const unsigned char *a = (const unsigned char *)narr_data(la);
+    const unsigned char *b = (const unsigned char *)narr_data(lb);
+    size_t n = (size_t)g_occ_w * g_occ_h * g_occ_d;
+    unsigned char *tex = (unsigned char *)malloc(n * 2);
+    if (!tex) return -3;
+    glActiveTexture(GL_TEXTURE3);
+    glBindTexture(GL_TEXTURE_3D, g_lt[0]);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glGetTexImage(GL_TEXTURE_3D, 0, GL_RG, GL_UNSIGNED_BYTE, tex);
+    int64_t bad_s = 0, bad_b = 0;
+    for (int64_t z = 0; z < g_occ_d; z++)
+        for (int64_t y = 0; y < g_occ_h; y++)
+            for (int64_t x = 0; x < g_occ_w; x++) {
+                size_t src = (size_t)x + g_occ_w * ((size_t)z + g_occ_d * (size_t)y);
+                size_t t = ((size_t)occ_tx(x) + g_occ_w * ((size_t)y + g_occ_h * (size_t)occ_tz(z))) * 2;
+                if ((int)a[src] != (tex[t] + 8) / 17) bad_s++;
+                if ((int)b[src] != (tex[t + 1] + 8) / 17) bad_b++;
+            }
+    free(tex);
+    glActiveTexture(GL_TEXTURE0);
+    return bad_s * 10000000 + bad_b;
 }
 
 /* ── Light flood on the GPU: a cost probe ────────────────────────────────────
