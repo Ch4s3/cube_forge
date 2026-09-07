@@ -2736,6 +2736,11 @@ mod CubeForge do
             println("light bench: full 192x256x192, 15 passes = " ++ int_to_string(b2) ++ " us")
             println("light bench: edit box 48x48x48, 15 passes = " ++ int_to_string(b5) ++ " us")
             println("light bench: band again (repeat of the first) = " ++ int_to_string(b6) ++ " us")
+            let _w7 = Win.light_bench(16, 192, 256, 192)
+            let b7 = Win.light_bench(16, 192, 256, 192)
+            let _w8 = Win.light_bench(16, 192, 256, 192)
+            let b8 = Win.light_bench(16, 192, 256, 192)
+            println("light bench: FULL 192x256x192 x16, twice = " ++ int_to_string(b7) ++ " / " ++ int_to_string(b8) ++ " us")
           else () end
           -- Everything this frame's relights made dirty, in one upload.
           Win.gfx_flush_light(World.light(scene_world(sc1)), World.block_light(scene_world(sc1)))

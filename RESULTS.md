@@ -3024,9 +3024,18 @@ measured 13 ms for a band and 7.6 ms for a field eight times its size.
 | band-tall 192 x 128 x 192 | 4.72 M | 13.06 ms |
 | full field 192 x 256 x 192 | 9.44 M | 7.15 ms |
 
-The band repeats to 2 microseconds across runs (3387, 3389). The full-field row
-is anomalous -- faster than a box half its size -- and is not explained; it does
-not bear on the decision.
+The band repeats to 2 microseconds across runs (3387, 3389). Measured again at
+16 passes the full field is **7.55 ms**, and it repeats too: 7555, 7553, 7554,
+7575 across four runs. So the full field really is faster than the 192 x 128 x
+192 box half its size, which is still not explained -- most likely the 256-high
+viewport tiles better -- but it is a stable measurement, not noise.
+
+That matters, because **a whole-field flood needs no apron**. Ping-ponging two
+textures over a sub-box is not simply a smaller version of the same thing: each
+pass reads its neighbours, so at the box edge it reads the scratch texture
+outside the box, where nothing has been written. A full-field pass has no edge
+and no such hazard. 7.55 ms for the whole field against 16.7 ms for the CPU's
+band is both faster and very much simpler.
 
 ### The verdict
 
