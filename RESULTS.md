@@ -3726,3 +3726,42 @@ If it is wanted, the cheap version is copy-on-send -- allow the array in a
 payload and have the runtime deep-copy it, which is semantically a snapshot and
 needs no linearity. For this project it would save the 64 KB memcpy the store
 already costs, and nothing else: the store is what actually removed the cost.
+
+
+## Toolchain updated, and the water seed drift priced (2026-09-07)
+
+**March 0.3.0 from `origin/main` (680790da)**, built and installed. It carries
+`march-language/march#424` (native arrays finally have a header tag, so a
+generic walker no longer reads their payload as pointers) and, more usefully
+here, **G80** -- a closure's captures are released when its environment dies.
+505 tests, fixed-camera 109.8 fps, worst frame 32.3 ms: no change either way
+that this project can measure.
+
+### The water seed drift: fixed, measured, reverted
+
+Water moves through `set_cells`, which changes a column's sunlight -- air is
+clear, water attenuates by two -- and nothing re-seeded those columns, so the
+seed the GPU floods was stale by 64-134 sky voxels. The documented "water moves
+without a relight" approximation, in its new clothes.
+
+Re-seeding the touched chunks each water tick fixes it exactly:
+
+| | before | after |
+|---|---|---|
+| seed vs a fresh seed | sky 64-100 | **0** |
+| live texture vs a CPU flood, fully converged | sky 65-134 | **sky 0, block 0** |
+| **fixed-camera fps** | **109.8** | **80.5** |
+| water tick apply | ~2 ms | 13.2 ms med, 21 max |
+
+**Reverted.** 27% of the frame rate to correct 0.001% of the voxels, none of
+them anywhere a player looks, is not a trade worth making. The approximation
+stays, now with a number on it.
+
+The cost is not the seeding itself but its shape: re-seeding is per COLUMN and
+cheap, while the copy-on-write copy is per CALL and 9.4 MB. Batching the whole
+tick into one copy (which this did) still re-seeds every flagged chunk, most of
+which ticked without changing a cell. The affordable version collects the
+columns that actually took a write -- `apply_reply` already has them, it is what
+`sync_water_occ` is handed -- and re-seeds exactly those in one batch. That is
+the shape to build if the drift ever matters; it is not worth building for a
+defect nobody can see.
