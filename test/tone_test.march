@@ -1,42 +1,23 @@
--- The pentatonic row: every form is a permutation of the set's positions,
--- inversion really inverts, transposition shifts the whole row, every pitch it
--- can ever produce is in the scale, and the frequency map is standard equal
--- temperament.
+-- The twelve-tone row: every form is a permutation of the twelve pitch
+-- classes, inversion really inverts, transposition is a rotation of the
+-- pitch space, and the frequency map is standard equal temperament.
 mod CubeForge.Test.Tone do
 
   needs IO.Spawn   -- capability ceiling, as in test/weather_test.march
   import Test
   alias CubeForge.Tone as Tone
 
-  -- How many of the row's positions land on set position [v].
+  -- How many of the twelve positions carry pitch class [v].
   pfn count_of(seed : Int, form : Int, t : Int, v : Int, i : Int, acc : Int) : Int do
-    if i >= Tone.steps() do acc
-    else count_of(seed, form, t, v, i + 1, if Tone.position(seed, form, i) == v do acc + 1 else acc end) end
+    if i >= 12 do acc
+    else count_of(seed, form, t, v, i + 1, if Tone.at(seed, form, t, i) == v do acc + 1 else acc end) end
   end
 
-  -- -1 when every set position appears exactly once, else the offending one.
+  -- -1 when every pitch class appears exactly once, else the offending class.
   pfn not_a_permutation(seed : Int, form : Int, t : Int, v : Int) : Int do
-    if v >= Tone.steps() do -1
+    if v >= 12 do -1
     else if count_of(seed, form, t, v, 0, 0) != 1 do v
     else not_a_permutation(seed, form, t, v + 1) end end
-  end
-
-  -- -1 when every position of the row sounds a degree of the pentatonic set:
-  -- 0, 3, 5, 7 or 10 semitones above the tonic, in whatever octave. This is
-  -- the property the whole module exists for -- no minor second, no tritone,
-  -- so any two of these held together agree.
-  pfn off_the_scale(seed : Int, form : Int, t : Int, i : Int) : Int do
-    if i >= Tone.steps() do -1
-    else
-      let pc = (((Tone.at(seed, form, t, i) - t) % 12) + 12) % 12
-      let ok = pc == 0 || pc == 3 || pc == 5 || pc == 7 || pc == 10
-      if ok do off_the_scale(seed, form, t, i + 1) else i end
-    end
-  end
-  pfn bad_scale_seed(form : Int, s : Int, n : Int) : Int do
-    if s >= n do -1
-    else if off_the_scale(s, form, 0, 0) >= 0 do s
-    else bad_scale_seed(form, s + 1, n) end end
   end
 
   -- Scan many seeds; -1 when all of them give permutations.
@@ -46,50 +27,28 @@ mod CubeForge.Test.Tone do
     else bad_seed(form, t, s + 1, n) end end
   end
 
-  -- Step from position i to i+1, in SET positions rather than semitones: the
-  -- scale is where the inversion lives (see Tone.position).
+  -- Interval from position i to i+1, as 0..11.
   pfn step(seed : Int, form : Int, i : Int) : Int do
-    let d = Tone.position(seed, form, i + 1) - Tone.position(seed, form, i)
-    ((d % Tone.steps()) + Tone.steps()) % Tone.steps()
+    let d = Tone.at(seed, form, 0, i + 1) - Tone.at(seed, form, 0, i)
+    ((d % 12) + 12) % 12
   end
 
   -- -1 when every step of the inversion is the negated step of the prime.
   pfn inversion_break(seed : Int, i : Int) : Int do
-    if i >= Tone.steps() - 1 do -1
-    else if step(seed, Tone.form_i(), i) != (Tone.steps() - step(seed, Tone.form_p(), i)) % Tone.steps() do i
+    if i >= 11 do -1
+    else if step(seed, Tone.form_i(), i) != (12 - step(seed, Tone.form_p(), i)) % 12 do i
     else inversion_break(seed, i + 1) end end
   end
 
-  -- -1 when transposing by [t] shifts every position by exactly t semitones.
+  -- -1 when transposing by [t] shifts every position by exactly t.
   pfn transpose_break(seed : Int, form : Int, t : Int, i : Int) : Int do
-    if i >= Tone.steps() do -1
-    else if Tone.at(seed, form, t, i) != Tone.at(seed, form, 0, i) + t do i
+    if i >= 12 do -1
+    else if Tone.at(seed, form, t, i) != (Tone.at(seed, form, 0, i) + t) % 12 do i
     else transpose_break(seed, form, t, i + 1) end end
   end
 
-  -- -1 when no two degrees of the set are 1 or 6 semitones apart, in any
-  -- octave -- the minor second and the tritone.
-  pfn interval_break(a : Int, b : Int) : Int do
-    if a >= Tone.degrees() do -1
-    else if b >= Tone.degrees() do interval_break(a + 1, a + 2)
-    else
-      let d = ((Tone.degree(b) - Tone.degree(a)) % 12 + 12) % 12
-      let bad = d == 1 || d == 11 || d == 6
-      if bad do a else interval_break(a, b + 1) end
-    end end
-  end
-
-  -- -1 when folding never changes a note's pitch class.
-  pfn pc_break(lo : Int, hi : Int, m : Int) : Int do
-    if m > 108 do -1
-    else if Tone.fold(m, lo, hi) % 12 != m % 12 do m
-    else if Tone.fold(m, lo, hi) < lo do m
-    else if Tone.fold(m, lo, hi) > hi do m
-    else pc_break(lo, hi, m + 1) end end end end
-  end
-
   describe "Tone.at" do
-    test "the prime row is a permutation of the set's positions" do
+    test "the prime row is a permutation of the twelve pitch classes" do
       Test.assert_eq_int(bad_seed(Tone.form_p(), 0, 0, 200), -1, "every seed gives a permutation")
     end
 
@@ -105,21 +64,8 @@ mod CubeForge.Test.Tone do
     end
 
     test "retrograde reads the prime row backwards" do
-      Test.assert_eq_int(Tone.at(42, Tone.form_r(), 0, 0), Tone.at(42, Tone.form_p(), 0, Tone.steps() - 1), "first of R is last of P")
-      Test.assert_eq_int(Tone.at(42, Tone.form_r(), 0, Tone.steps() - 1), Tone.at(42, Tone.form_p(), 0, 0), "last of R is first of P")
-    end
-
-    test "every note of every form is in the pentatonic set" do
-      Test.assert_eq_int(bad_scale_seed(Tone.form_p(), 0, 120), -1, "prime")
-      Test.assert_eq_int(bad_scale_seed(Tone.form_r(), 0, 60), -1, "retrograde")
-      Test.assert_eq_int(bad_scale_seed(Tone.form_i(), 0, 60), -1, "inversion")
-      Test.assert_eq_int(bad_scale_seed(Tone.form_ri(), 0, 60), -1, "retrograde-inversion")
-    end
-
-    test "the set has no minor second and no tritone in it" do
-      -- the whole reason for the change: these are the intervals that beat
-      -- when two notes are held under each other
-      Test.assert_eq_int(interval_break(0, 1), -1, "no pair of degrees is 1 or 6 semitones apart")
+      Test.assert_eq_int(Tone.at(42, Tone.form_r(), 0, 0), Tone.at(42, Tone.form_p(), 0, 11), "first of R is last of P")
+      Test.assert_eq_int(Tone.at(42, Tone.form_r(), 0, 11), Tone.at(42, Tone.form_p(), 0, 0), "last of R is first of P")
     end
 
     test "inversion negates every interval of the prime row" do
@@ -127,7 +73,7 @@ mod CubeForge.Test.Tone do
       Test.assert_eq_int(inversion_break(7, 0), -1, "seed 7")
     end
 
-    test "transposition shifts every pitch by the same amount" do
+    test "transposition shifts every pitch class by the same amount" do
       Test.assert_eq_int(transpose_break(42, Tone.form_p(), 5, 0), -1, "prime by 5")
       Test.assert_eq_int(transpose_break(42, Tone.form_i(), 8, 0), -1, "inversion by 8")
     end
@@ -156,27 +102,13 @@ mod CubeForge.Test.Tone do
   end
 
   describe "Tone.midi" do
-    test "octave 4 and nine semitones is concert A" do
+    test "octave 4 pitch class 9 is concert A" do
       Test.assert_eq_int(Tone.midi(9, 4), 69, "A4")
     end
-  end
 
-  describe "Tone.fold" do
-    test "a note already in the window is left alone" do
-      Test.assert_eq_int(Tone.fold(64, 60, 78), 64, "inside")
-    end
-
-    test "a note above the window comes down by octaves" do
-      Test.assert_eq_int(Tone.fold(96, 60, 78), 72, "96 -> 72")
-      Test.assert_eq_int(Tone.fold(88, 60, 78), 76, "88 -> 76")
-    end
-
-    test "a note below the window goes up by octaves" do
-      Test.assert_eq_int(Tone.fold(36, 60, 78), 60, "36 -> 60")
-    end
-
-    test "folding keeps the pitch class, so the line is unchanged musically" do
-      Test.assert_eq_int(pc_break(60, 78, 24), -1, "every note 24..108 keeps its class")
+    test "the octaves the biome table uses stay in audible range" do
+      Test.assert_true(Tone.hz(Tone.midi(0, 3)) > 100.0, "lowest octave is above 100 Hz")
+      Test.assert_true(Tone.hz(Tone.midi(11, 6)) < 4000.0, "highest octave is below 4 kHz")
     end
   end
 

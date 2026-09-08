@@ -1,17 +1,23 @@
 -- Audio — the mixer policy. What should be heard, never how to make it.
 --
 -- This module decides six numbers per tick: four bed gains, the master filter
--- cutoff, and the music level. The synthesis that turns them into samples is
--- in native/cf_audio.c, running at 48 kHz on miniaudio's own thread, for the
--- reason `Precip` gives: March's per-element NativeArray writes are O(n) on a
--- shared array (GAPS G68), so a per-sample loop here would be O(n^2) and
--- 48,000 of them a second is not a thing this language will do.
+-- cutoff, and the music level. It also decides, once a bar, which biome the
+-- score is in and how the notes `Score` lays out should be shaped -- the
+-- envelopes, the gains and the stereo placement that make a melody note a
+-- pluck, a pad note a pad, and a bass note the floor under both.
+--
+-- The synthesis that turns any of it into samples is in native/cf_audio.c,
+-- running at 48 kHz on miniaudio's own thread, for the reason `Precip` gives:
+-- March's per-element NativeArray writes are O(n) on a shared array (GAPS
+-- G68), so a per-sample loop here would be O(n^2) and 48,000 of them a second
+-- is not a thing this language will do.
 --
 -- Everything here is pure, so all of it is testable without a sound device.
 mod CubeForge.Audio do
 
   alias CubeForge.Biome as Biome
   alias CubeForge.Tone as Tone
+  alias CubeForge.Score as Score
   alias CubeForge.Noise as N
 
   -- rain, wind, leaves, underwater, cutoff Hz, music
@@ -93,21 +99,21 @@ mod CubeForge.Audio do
   -- and transposition are the harmonic shift and only move at a row boundary;
   -- octave, timbre and rate are the colour and pacing and ease continuously.
 
-  doc "Which form of the row this biome states."
-  fn form_of(b : Int) : Int do
-    if b == Biome.b_tundra() do Tone.form_p()
-    else if b == Biome.b_taiga() do Tone.form_i()
-    else if b == Biome.b_grassland() do Tone.form_p()
-    else if b == Biome.b_forest() do Tone.form_i()
-    else if b == Biome.b_desert() do Tone.form_r()
-    else if b == Biome.b_wetland() do Tone.form_ri()
-    else if b == Biome.b_beach() do Tone.form_p()
-    else if b == Biome.b_oasis() do Tone.form_r()
-    else if b == Biome.b_grove() do Tone.form_ri()
-    else Tone.form_r() end end end end end end end end end
+  doc "The mode this biome states. Most of what makes a biome sound like itself: the flat second of phrygian is a desert, the sharp fourth of lydian is an oasis, and a pentatonic has no semitone in it to grate at all, which is why the two emptiest biomes get one."
+  fn mode_of(b : Int) : Int do
+    if b == Biome.b_tundra() do Score.mode_pent_major()
+    else if b == Biome.b_taiga() do Score.mode_aeolian()
+    else if b == Biome.b_grassland() do Score.mode_ionian()
+    else if b == Biome.b_forest() do Score.mode_dorian()
+    else if b == Biome.b_desert() do Score.mode_phrygian()
+    else if b == Biome.b_wetland() do Score.mode_aeolian()
+    else if b == Biome.b_beach() do Score.mode_mixolydian()
+    else if b == Biome.b_oasis() do Score.mode_lydian()
+    else if b == Biome.b_grove() do Score.mode_pent_minor()
+    else Score.mode_pent_major() end end end end end end end end end
   end
 
-  doc "Semitones this biome transposes the row by."
+  doc "Semitones this biome transposes the key by. Walking from a grassland into a forest is a modulation, and it happens at a phrase boundary so it is heard as one."
   fn transpose_of(b : Int) : Int do
     if b == Biome.b_tundra() do 0
     else if b == Biome.b_taiga() do 3
@@ -121,30 +127,26 @@ mod CubeForge.Audio do
     else 0 end end end end end end end end end
   end
 
-  doc "Octave the voice sits in: the BOTTOM of its register, not its centre. Alpine sings above the treeline and forests sit under it, but the whole table came down an octave when the pitches stopped being bare pitch classes -- a row now spans two octaves of its own (Tone.steps) and a biome transposes it by up to ten semitones besides, so an octave that used to name the only note there was now names the floor of a two-octave window. Alpine was the loudest offender at 6: its row topped out near 2 kHz."
+  doc "Octave the melody sits in. Alpine sings above the treeline and forests sit under it. It stops at 5: this is the top of a three-voice texture now, not a lone sine, and an octave higher puts the reach of the register above 3 kHz, where a melody is a whistle."
   fn octave_of(b : Int) : Int do
-    if b == Biome.b_tundra() do 4
-    else if b == Biome.b_taiga() do 3
-    else if b == Biome.b_grassland() do 3
-    else if b == Biome.b_forest() do 3
-    else if b == Biome.b_desert() do 4
-    else if b == Biome.b_wetland() do 3
-    else if b == Biome.b_beach() do 3
-    else if b == Biome.b_oasis() do 3
-    else if b == Biome.b_grove() do 2
-    else 4 end end end end end end end end end
+    if b == Biome.b_tundra() do 5
+    else if b == Biome.b_taiga() do 4
+    else if b == Biome.b_grassland() do 5
+    else if b == Biome.b_forest() do 4
+    else if b == Biome.b_desert() do 5
+    else if b == Biome.b_wetland() do 4
+    else if b == Biome.b_beach() do 5
+    else if b == Biome.b_oasis() do 5
+    else if b == Biome.b_grove() do 4
+    else 5 end end end end end end end end end
   end
 
-  doc "Semitones a biome's register spans above its own octave. Nineteen is an octave and a fifth: room for the line to move without the top of it turning shrill."
-  fn register_span() : Int do 18 end
+  doc "Octave the chord sits in: under the melody. Wide enough apart that the pad supports the line rather than crowding it."
+  fn pad_octave(b : Int) : Int do octave_of(b) - 1 end
+  doc "Octave the bass root is reckoned from. Fixed, not the biome's: `Score.bass_degree` drops the chord root into the octave under the tonic inside it, and the floor of the piece then lands between about 45 and 175 Hz in every key, in every biome, on every degree the progression can reach. A biome moves the melody and the chord; the floor stays where a floor is."
+  fn bass_octave() : Int do 3 end
 
-  doc "The MIDI note a [semitones]-above-the-tonic row degree actually sounds at in biome [b]: the note folded by octaves into the biome's register. Every pitch the score can ask for lands between the biome's floor and a fifth above the octave over it, whatever the row and the transposition do."
-  fn note_midi(b : Int, semitones : Int) : Int do
-    let lo = Tone.midi(0, octave_of(b))
-    Tone.fold(Tone.midi(semitones, octave_of(b)), lo, lo + register_span())
-  end
-
-  doc "Waveform id for the voice: 0 glass, 1 triangle, 2 filtered saw, 3 sine, 4 hollow square. Read by the synthesiser in cf_audio.c."
+  doc "Waveform id for the melody: 0 glass, 1 triangle, 2 filtered saw, 3 sine, 4 hollow square. Read by the synthesiser in cf_audio.c."
   fn timbre_of(b : Int) : Int do
     if b == Biome.b_tundra() do 0
     else if b == Biome.b_taiga() do 1
@@ -158,70 +160,141 @@ mod CubeForge.Audio do
     else 0 end end end end end end end end end
   end
 
-  doc "Notes per minute. A desert is sparse and a wetland busy, which is the pacing half of the biome shift."
-  fn rate_of(b : Int) : Int do
-    if b == Biome.b_tundra() do 6
-    else if b == Biome.b_taiga() do 8
-    else if b == Biome.b_grassland() do 10
-    else if b == Biome.b_forest() do 10
-    else if b == Biome.b_desert() do 5
-    else if b == Biome.b_wetland() do 12
-    else if b == Biome.b_beach() do 8
-    else if b == Biome.b_oasis() do 10
-    else if b == Biome.b_grove() do 4
-    else 5 end end end end end end end end end
+  doc "Waveform id for the chord voice: three detuned saws under a soft lowpass."
+  fn pad_timbre() : Int do 5 end
+  doc "Waveform id for the bass: a sine with a soft octave over it."
+  fn bass_timbre() : Int do 6 end
+
+  doc "Ticks a bar of this biome lasts. Given in ticks rather than in beats per minute because the frame loop only reaches the score once a tick: a bar of 3.4 ticks would leave the downbeat drifting by up to a sixth of a second, and a wandering downbeat is the one thing an ear will not forgive. At six ticks a second these run from 80 down to 45 beats a minute."
+  fn bar_ticks_of(b : Int) : Int do
+    if b == Biome.b_tundra() do 30
+    else if b == Biome.b_taiga() do 24
+    else if b == Biome.b_grassland() do 20
+    else if b == Biome.b_forest() do 22
+    else if b == Biome.b_desert() do 30
+    else if b == Biome.b_wetland() do 18
+    else if b == Biome.b_beach() do 20
+    else if b == Biome.b_oasis() do 20
+    else if b == Biome.b_grove() do 32
+    else 28 end end end end end end end end end
+  end
+
+  doc "How readily the offbeats take a note, 0..1. A desert is sparse and a wetland busy, which is the pacing half of the biome shift. It is not the whole of it: the rests are what phrase the line, so this never reaches 1."
+  fn density_of(b : Int) : Float do
+    if b == Biome.b_tundra() do 0.4
+    else if b == Biome.b_taiga() do 0.55
+    else if b == Biome.b_grassland() do 0.7
+    else if b == Biome.b_forest() do 0.65
+    else if b == Biome.b_desert() do 0.35
+    else if b == Biome.b_wetland() do 0.8
+    else if b == Biome.b_beach() do 0.6
+    else if b == Biome.b_oasis() do 0.65
+    else if b == Biome.b_grove() do 0.35
+    else 0.4 end end end end end end end end end
   end
 
   -- ── The schedule ──────────────────────────────────────────────────────────
+  --
+  -- A bar at a time, not a note at a time. The frame loop asks once a tick; on
+  -- the tick a bar is due it reads a whole bar's worth of notes out of `Score`
+  -- and hands every one of them to the synthesiser at once, each with the delay
+  -- that places it on its eighth. That is what buys rhythm: the pulse is no
+  -- longer limited to the six-hertz grid the frame loop happens to run on.
 
   doc "Ticks per second: the frame loop asks once every tick_period() frames at 60 fps."
   fn ticks_per_second() : Int do 6 end
-  doc "Closest two notes may fall: four seconds."
-  fn min_gap() : Int do 4 * ticks_per_second() end
-  doc "Furthest two notes may fall: twelve seconds."
-  fn max_gap() : Int do 12 * ticks_per_second() end
 
-  doc "Ticks until the next note at [rate] notes per minute, jittered a quarter either way so the line breathes rather than ticking like a metronome."
-  fn gap_ticks(rate : Int, tick : Int, seed : Int) : Int do
-    let nominal = int_to_float(60 * ticks_per_second()) /. int_to_float(rate)
-    let jittered = float_to_int(nominal *. (0.75 +. 0.5 *. N.hash2(tick, 17, seed)))
-    if jittered < min_gap() do min_gap()
-    else if jittered > max_gap() do max_gap()
-    else jittered end end
-  end
+  doc "Seconds a bar of [b] lasts."
+  fn bar_seconds(b : Int) : Float do Score.bar_seconds(bar_ticks_of(b), ticks_per_second()) end
+  doc "Seconds an eighth note of [b] lasts."
+  fn eighth_seconds(b : Int) : Float do bar_seconds(b) /. int_to_float(Score.slots()) end
 
-  doc "How long a note sounds at full level before its release, for a gap of [gap] ticks: most of the way to the next note, so the tails overlap a little and the line is never quite empty."
-  fn note_seconds(gap : Int) : Float do 0.6 *. int_to_float(gap) /. int_to_float(ticks_per_second()) end
-
-  doc "Level a note is struck at. The music sits under the world, not over it."
+  doc "Level the score is struck at. The music sits under the world, not over it."
   fn note_gain() : Float do 0.8 end
 
-  -- tick the next note is due, position in the row, form and transposition in force
+  -- The three voices, shaped. These four numbers per role -- attack, the level
+  -- the held part decays to, release and gain -- are the whole difference
+  -- between a melody and a held key, and the reason the synthesiser takes them
+  -- as parameters instead of having one envelope baked into it.
+
+  doc "Melody attack: a pluck. Twelve milliseconds is an edge you hear as an articulation rather than as a click."
+  fn mel_attack() : Float do 0.012 end
+  doc "Melody sustain: a struck note falls to about a third while it is held, the way anything struck does."
+  fn mel_sustain() : Float do 0.35 end
+  doc "Melody release."
+  fn mel_release() : Float do 0.9 end
+  doc "How much of the way to the next onset a melody note is held. Just short, so consecutive eighths are two notes and not one."
+  fn mel_hold() : Float do 0.92 end
+  doc "Level of a melody note at [slot] of [bar]: the metric accent."
+  fn mel_gain(seed : Int, bar : Int, slot : Int) : Float do
+    note_gain() *. clamp01(Score.accent(seed, bar, slot))
+  end
+  doc "Where in the stereo field a melody note sits. Narrow -- the line is the thing being followed and it should stay put -- but not dead centre, where the bass already is."
+  fn mel_pan(seed : Int, bar : Int, slot : Int) : Float do
+    0.5 *. (N.hash2(bar * 64 + slot, 71, seed) -. 0.5)
+  end
+
+  doc "Pad attack: a third of a bar, so the chord arrives under the melody instead of with it."
+  fn pad_attack(b : Int) : Float do 0.35 *. bar_seconds(b) end
+  doc "Pad sustain: a chord voice holds."
+  fn pad_sustain() : Float do 0.85 end
+  doc "Pad release: half a bar, so one chord is still fading as the next arrives and the harmony never has a seam in it. Longer and three chords are sounding at once, which is not a richer harmony, it is a blur."
+  fn pad_release(b : Int) : Float do 0.55 *. bar_seconds(b) end
+  doc "How long the pad is held before its release: just to the bar line, for the same reason."
+  fn pad_hold(b : Int) : Float do 0.98 *. bar_seconds(b) end
+  doc "Level of one of the three chord tones. Three of these sound at once and the melody has to be heard over all of them."
+  fn pad_gain() : Float do note_gain() *. 0.26 end
+  doc "Where chord tone [i] of three sits. Spread wide: the pad is the room the melody is in."
+  fn pad_pan(i : Int) : Float do
+    if i == 0 do 0.0 -. 0.6 else if i == 1 do 0.12 else 0.62 end end
+  end
+
+  doc "Bass attack: softer than the melody's, so the low end does not click."
+  fn bass_attack() : Float do 0.03 end
+  fn bass_sustain() : Float do 0.45 end
+  fn bass_release() : Float do 0.6 end
+  doc "How long the bass note is held: a little under half a bar, which leaves the second half of the bar to the chord and stops the low end droning."
+  fn bass_hold(b : Int) : Float do 0.45 *. bar_seconds(b) end
+  doc "Level of the bass. Dead centre, and the loudest single voice: everything else is heard against it."
+  fn bass_gain() : Float do note_gain() *. 0.48 end
+
+  doc "The bass restates on beat three when the bar is busy enough to want the push. Sparse biomes get one note a bar and the space around it."
+  fn bass_twice(b : Int) : Bool do density_of(b) >= 0.55 end
+
+  -- tick the next bar is due, bar number, mode and key transposition in force
   type Sched = Sched(Int, Int, Int, Int)
 
   fn next_of(s : Sched) : Int do match s do Sched(v, _, _, _) -> v end end
-  fn index_of(s : Sched) : Int do match s do Sched(_, v, _, _) -> v end end
-  fn form_of_sched(s : Sched) : Int do match s do Sched(_, _, v, _) -> v end end
+  fn bar_of(s : Sched) : Int do match s do Sched(_, v, _, _) -> v end end
+  fn mode_of_sched(s : Sched) : Int do match s do Sched(_, _, v, _) -> v end end
   fn transpose_of_sched(s : Sched) : Int do match s do Sched(_, _, _, v) -> v end end
 
-  doc "A schedule whose first note is due at [tick], opening on the prime row untransposed."
-  fn sched_start(tick : Int) : Sched do Sched(tick, 0, Tone.form_p(), 0) end
-
-  doc "Is a note due at [tick]?"
-  fn due(s : Sched, tick : Int) : Bool do tick >= next_of(s) end
-
-  doc "Semitones above the tonic of the note this schedule is holding, for the world's row. [note_midi] puts it in a register."
-  fn pitch_class(s : Sched, seed : Int) : Int do
-    Tone.at(seed, form_of_sched(s), transpose_of_sched(s), index_of(s))
+  doc "A schedule whose first bar falls at [tick], opening in the mode and key of [biome] -- the score should be in the world it starts in, not modulate into it four bars later."
+  fn sched_start(tick : Int, biome : Int) : Sched do
+    Sched(tick, 0, mode_of(biome), transpose_of(biome))
   end
 
-  doc "Fire the held note and set up the next one. The biome's [want_form] and [want_t] are adopted only when the row wraps, so walking into a forest never cuts a row in half -- the harmonic shift waits for every position of the row to have sounded, up to a row later."
-  fn advance(s : Sched, tick : Int, rate : Int, want_form : Int, want_t : Int, seed : Int) : Sched do
-    let i = index_of(s)
-    let wrapped = i == Tone.steps() - 1
-    let form1 = if wrapped do want_form else form_of_sched(s) end
-    let t1 = if wrapped do want_t else transpose_of_sched(s) end
-    Sched(tick + gap_ticks(rate, tick, seed), (i + 1) % Tone.steps(), form1, t1)
+  doc "Is a bar due at [tick]?"
+  fn due(s : Sched, tick : Int) : Bool do tick >= next_of(s) end
+
+  doc "Is the bar this schedule is holding the first of a phrase?"
+  fn phrase_start(s : Sched) : Bool do bar_of(s) % Score.phrase_bars() == 0 end
+
+  doc "The key the bar this schedule is holding is in: the world's own key, transposed by whatever biome was in force when the phrase began."
+  fn key_of(s : Sched, seed : Int) : Int do
+    (Score.key_of(seed) + transpose_of_sched(s)) % 12
+  end
+
+  doc "The key the bass reckons from: the same key, folded so it never rides most of an octave above the tonic. See Score.fold_key."
+  fn bass_key(s : Sched, seed : Int) : Int do Score.fold_key(key_of(s, seed)) end
+
+  doc "Play the held bar out and set up the next one. The biome's [want_mode] and [want_t] are adopted only at a phrase boundary, so walking into a forest never modulates halfway through a cadence -- the harmonic shift waits for the progression to come home, up to four bars later."
+  fn advance(s : Sched, bt : Int, want_mode : Int, want_t : Int) : Sched do
+    let b1 = bar_of(s) + 1
+    let boundary = b1 % Score.phrase_bars() == 0
+    let mode1 = if boundary do want_mode else mode_of_sched(s) end
+    let t1 = if boundary do want_t else transpose_of_sched(s) end
+    Sched(next_of(s) + bt, b1, mode1, t1)
   end
 
 end

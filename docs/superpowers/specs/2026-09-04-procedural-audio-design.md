@@ -23,11 +23,12 @@ design adds none — every bed is filtered noise, every note is an oscillator.
 
 | Module | Owns |
 |---|---|
-| `CubeForge.Tone` | The twelve-tone row: seeded generation, the four transformations, transposition, pitch class to Hz |
+| `CubeForge.Tone` | The twelve-tone row: seeded generation, the four transformations, transposition, pitch class to Hz. The score states the prime only, for the world's key and its chord progression |
+| `CubeForge.Score` | Musical structure: modes, the bar's metre and rhythm, the chord progression, the melodic line |
 | `CubeForge.Wind` | Gust strength and direction as a pure function of `(tick, seed, weather)` |
-| `CubeForge.Audio` | Mixer policy: world state to bed gains, master cutoff, and the next-note decision |
+| `CubeForge.Audio` | Mixer policy: world state to bed gains, master cutoff, the biome table, and the envelope, gain and pan of every voice |
 | `CubeForge.Ffi.Audio` | Thin extern wrappers; a new `Audio` capability domain |
-| `native/cf_audio.c` | The miniaudio device and the 48 kHz callback: one voice, four beds, one filter |
+| `native/cf_audio.c` | The miniaudio device and the 48 kHz callback: 24 scheduled voices on a stereo delay bus, four beds, one filter |
 
 `miniaudio.h` is vendored under `native/` (single header, public-domain/MIT
 dual-licensed, no new link dependencies beyond the system frameworks it already
@@ -54,9 +55,11 @@ frame_loop
   |          nearby-leaf fraction
   |- Wind.at(tick, seed, wx)                      -- pure
   |- Audio.mix(that lot) -> Mix                   -- pure, six floats
-  |- Audio.next_note(tick, biome, row) -> Note?   -- pure, usually none
+  |- Audio.due(sched, tick)                      -- pure; true once a bar
   |- Ffi.Audio.set_mix(...)   -- one extern call per tick
-  `- Ffi.Audio.note(...)      -- only when a note is due, every 4-12s
+  `- Ffi.Audio.note(...) x N  -- a whole bar at once, when a bar falls due:
+                                 3 pad + 1-2 bass + 1-8 melody, each with the
+                                 delay that places it on its eighth
 ```
 
 Nine frames in ten cost nothing. The tenth costs one extern call, occasionally
@@ -70,39 +73,111 @@ called from the frame loop except to write that struct.
 
 ## The music
 
-**Sparse ambient drift.** One voice, notes of 3–8 seconds with 1–4 seconds of
-gap, so a new note lands every 4 to 12 seconds and the previous note's release
-tail occasionally overlaps it. That overlap is the only polyphony the score has.
-The biome sets the rate inside that range (the table below); a full row takes
-between one and two and a half minutes to state.
+*Rewritten 2026-09-08. What is described here replaced a first version whose
+score was one voice playing a twelve-tone row, a note every four to twelve
+seconds, each with a 1.2 s attack and a 2 s release. Every one of those choices
+is defensible alone; together they guarantee the one thing music is not, which
+is a sequence of unrelated sustained pitches. There was no pulse to hear the
+notes against, no harmony to hear them in, and no shape to any single one. The
+section below is what it takes for a generative score to sound like a score.*
 
-**The row.** `Tone.row(seed)` is a Fisher-Yates shuffle of pitch classes 0..11
-driven by `Noise.hash2`, so one world has one row for its whole lifetime. All
-twelve classes are used before any repeats — that is the technique, and it is
-also what keeps the drift from settling into a key.
+**The unit is a bar, not a note.** The frame loop asks the score once a tick;
+on the tick a bar falls due it reads a whole bar out of `Score` and pushes every
+note of it at once, each carrying the delay that places it on its eighth. The
+synthesiser counts that delay down per sample, so the pulse is exact even though
+the loop that emitted it runs at 6 Hz. Without this the rhythmic grid could only
+ever be the tick grid, which is the deeper reason the first version had no
+rhythm at all.
 
-**Transformations.** `Tone.transform(row, form, t)` returns prime, retrograde,
-inversion or retrograde-inversion at transposition `t`. The biome chooses the
-form and the transposition:
+**A bar holds three voices.**
 
-| Biome | Form | Transpose | Octave | Timbre | Notes/min |
-|---|---|---|---|---|---|
-| Tundra | Prime | 0 | 5 | glass (sine + high partial) | 6 |
-| Taiga | Inversion | 3 | 4 | soft triangle | 8 |
-| Grassland | Prime | 5 | 4 | warm triangle | 10 |
-| Forest | Inversion | 7 | 3 | filtered saw, low | 10 |
-| Desert | Retrograde | 2 | 5 | thin sine | 5 |
-| Wetland | Retrograde-inversion | 10 | 3 | hollow square, heavy filter | 12 |
-| Beach | Prime | 8 | 4 | soft sine | 8 |
-| Alpine | Retrograde | 0 | 6 | glass, sparse | 5 |
+| Voice | What it plays | Envelope | Register |
+|---|---|---|---|
+| Pad | the bar's triad, three detuned saws under a lowpass | attack ⅓ bar, holds, releases over ½ bar | one octave above the tonic, biome octave − 1 |
+| Bass | the chord root on the downbeat, and on beat three when the biome is busy | attack 30 ms, decays to 0.45, releases over 0.6 s | octave 3, fixed — a floor does not move with the biome |
+| Melody | up to eight eighths on the bar's grid | attack 12 ms, decays to 0.35, releases over 0.9 s | about 1½ octaves from the biome's octave |
 
-**Crossing a border.** The form and transposition change only at a row boundary,
-after all twelve notes have sounded. Walking into a forest therefore never cuts
-a row in half; the harmonic shift arrives within at most one row, up to about a
-minute later. Octave, timbre and note density ease continuously, over roughly
-the same window, so the immediate audible change is one of colour and pacing
-rather than of material. That is the "subtle" in the requirement: the shift is
-real, but it arrives as a morph, not a cue.
+Three envelopes rather than one is the single change that most decides whether
+a note is heard as a note or as a key being held.
+
+**Metre.** Eight eighth-note slots to a bar, four beats. A bar's length is given
+in *ticks*, not in beats per minute, so that it is a whole number of them: at 6
+ticks a second a bar of 3.4 ticks would leave the downbeat drifting by up to a
+sixth of a second, and a wandering downbeat is the one rhythmic error an ear
+will not forgive. 18 to 32 ticks is 80 down to 45 bpm.
+
+**Rhythm.** The downbeat is always struck. Every other slot is struck with a
+probability of its metric weight (1.0, 0.48, 0.72, 0.48, 0.9 …) times the
+biome's density. A note is held to the next onset and no further, so two notes
+on consecutive eighths are two notes. The last bar of every second phrase is a
+cadence and thins to the strong beats: the rests are what phrase the line.
+
+**Harmony.** A chord is a scale degree with two more stacked on it in thirds
+*of the mode*, so it is in key by construction with no chord table: stack thirds
+on the tonic of aeolian and a minor triad falls out, on ionian a major one, on a
+pentatonic a stacked fourth that sits under either. Both the chord and the bass
+are voiced by pitch class into a fixed octave rather than stacked upward from
+wherever the progression is — otherwise a chord on the sixth degree lands a
+sixth above the one on the tonic, and the "bass" becomes a tenor.
+
+**The progression.** Four bars to a phrase. Bar 0 is always the tonic and the
+last bar leans on the fifth degree; the two between come from the world's
+twelve-tone row, one phrase at a time. That is the row's job now — it still
+gives every world its own harmonic identity, over degrees that cannot be out of
+key. `Tone` itself is unchanged.
+
+**Melody.** Slots 0 and 4 take a chord tone: slot 0 the one nearest the phrase's
+arc, slot 4 the one nearest where a step would have gone, so the line lands on
+the harmony without standing still to reach it. Everything between moves by one
+or two scale degrees, biased toward an arc that rises across the phrase and
+comes home. The bias is the point: a random walk of equal steps has no shape,
+because every step is as likely as its opposite — it wanders to whichever end of
+the register it reaches first and stays there, which is what the first pass at
+this melody did, and it is visible in `test/score_test.march` as the "is a line
+rather than one note repeated" case. At the edge of the register the line is
+displaced by an octave rather than clamped; clamping makes a line that has run
+to the top sit on the top note repeating itself.
+
+**The biome table.** The mode is most of what makes a biome sound like itself:
+the flat second of phrygian is a desert and the sharp fourth of lydian is not.
+
+| Biome | Mode | Key + | Octave | Melody timbre | Bar (ticks) | Density |
+|---|---|---|---|---|---|---|
+| Tundra | major pentatonic | 0 | 5 | glass | 30 | 0.40 |
+| Taiga | aeolian | 3 | 4 | triangle | 24 | 0.55 |
+| Grassland | ionian | 5 | 5 | triangle | 20 | 0.70 |
+| Forest | dorian | 7 | 4 | filtered saw | 22 | 0.65 |
+| Desert | phrygian | 2 | 5 | sine | 30 | 0.35 |
+| Wetland | aeolian | 10 | 4 | hollow square | 18 | 0.80 |
+| Beach | mixolydian | 8 | 5 | sine | 20 | 0.60 |
+| Oasis | lydian | 2 | 5 | sine | 20 | 0.65 |
+| Grove | minor pentatonic | 10 | 4 | hollow square | 32 | 0.35 |
+| Alpine | major pentatonic | 0 | 5 | glass | 28 | 0.40 |
+
+The melody octave stops at 5. This is the top of a three-voice texture now, not
+a lone sine, and an octave higher puts the reach of the register above 3 kHz,
+where a melody is a whistle. `test/audio_test.march` pins that: bass, chord and
+melody all in register, in every mode, in every key, on every degree the
+progression can reach — the check that caught the bass climbing with the chord
+and the pad stacking itself out of the top of the mix.
+
+**Crossing a border.** The mode and the key change only at a phrase boundary,
+after the progression has come home — walking into a forest never modulates
+halfway through a cadence, and the shift arrives within at most four bars. The
+octave, timbre, tempo and density are the colour and pacing, and they take
+effect at the next bar. That is the "subtle" in the requirement: the shift is
+real, and it arrives as a modulation rather than as a cue.
+
+**The world's key.** `Score.key_of(seed)` is the first note of the world's row,
+so two worlds standing in the same biome are still in different keys. It is
+folded to the nearer tonic for the bass, which would otherwise sit most of an
+octave higher in a world in B than in a world in C.
+
+**On the bus.** The three voices are panned — the chord spread wide, the bass
+dead centre, the melody near the middle — and go through a ping-pong delay whose
+feedback is lowpassed, so the repeats darken as they fade and drift across the
+field. Notes this sparse need a tail to sound like they are in a place rather
+than in a list. The ambience beds are mono and do not go through it.
 
 **Pitch.** Twelve-tone equal temperament, `midi = 12 * (octave + 1) + class`,
 `hz = 440 * 2^((midi - 69) / 12)`. Computed in March; C receives Hz.
@@ -173,6 +248,12 @@ screen tint is selling.
 **Pure property tests.** Every decision above lives in a pure module, so it is
 testable without a device:
 
+- `test/score_test.march` — every mode is a rising scale from the tonic and its
+  octave closes; a degree below the tonic folds the way a degree above it does;
+  the melody moves by steps and stays in its register; a busier density really
+  is more notes and a cadence bar really is thinner; a note ends before its
+  successor starts; every phrase opens on the tonic; the bass stays under the
+  tonic on every chord.
 - `test/tone_test.march` — `Tone.row(seed)` is a permutation of 0..11 for many
   seeds; each transformation is also a permutation; retrograde of retrograde is
   the identity; inversion of inversion is the identity; transposition is mod 12.
@@ -183,7 +264,9 @@ testable without a device:
   inputs; rain gain is zero when `snow_mix` is 1; every bed but the underwater
   one is near zero when the eye is in water; cutoff is monotonically
   non-increasing in `snow_mix` and lower still underwater; the biome table
-  covers all eight ids.
+  answers for every id; bass, chord and melody all land in register in every
+  mode, key and degree; the bar line stays on the grid and the mode and key
+  never change mid-phrase.
 
 **WAV dump.** `CF_AUDIO_DUMP=<path>` tees the mix to a 16-bit WAV, mirroring
 `CF_DUMP`/`cf_gfx_dump_bmp`. With `CF_AUDIO=null` the shim opens no device and
@@ -196,8 +279,9 @@ can listen to — the audio equivalent of the BMP dumps.
 - `CF_AUDIO` — 0 off, 1 a real device (the default), 2 the null device.
 - `CF_AUDIO_DUMP=<path>` — tee the mix to a 16-bit stereo WAV.
 - `CF_AUDIO_LOG=1` — one line a second giving every bed gain, the cutoff and the
-  inputs behind them, plus a line per note with its row position, form,
-  transposition and frequency. Reading what the mixer was asked for beats
+  inputs behind them, plus a line per bar with its number, biome, mode, key and
+  chord degree, and a line per melody note with its slot, degree, MIDI note and
+  hold. Reading what the mixer was asked for beats
   inferring it back out of a spectrum, and it is how the two bugs above were
   found.
 - `CF_AUTODIVE=1` — spawns over water like `CF_AUTOSWIM` but holds the sink key

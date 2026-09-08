@@ -4994,6 +4994,16 @@ rather than re-seed a box.
 
 ## The score stops being serial, and three animals stop misbehaving (2026-09-08)
 
+> **The audio half of this entry was superseded before it landed.** It moved
+> the row onto a pentatonic set and folded every note into its biome's
+> register, which fixed the pitch and the beating and nothing else. "The score
+> plays bars, not one stretched key at a time" -- written on `main` at the same
+> time, against the same complaint -- rebuilt the thing properly: bars, three
+> voices, a pulse, modes, per-note envelopes. The merge took that wholesale and
+> dropped this. The row survives there with a job it can do, so the register
+> fold went with it; what is kept below is the fauna half. The measurements
+> here were real when taken and describe code that no longer exists.
+
 **"Too many high pitched tones that don't blend together well or sound musical
 at all."** Two causes, and the second was the interesting one.
 
