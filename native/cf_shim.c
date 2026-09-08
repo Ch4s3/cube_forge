@@ -614,6 +614,27 @@ static const char *FS =
      * rather than at the end so both the shadow and the fog mix can use it. */
     "  float fogd = (u_unlit == 1) ? 0.0 : length(v_world - u_eye) * u_fog_density;\n"
     "  float fogf = 1.0 - exp(-fogd);\n"
+    /* The window's edge, faded out.
+     *
+     * There is no world past the window: it is WORLD blocks a side and the
+     * terrain simply stops. Atmospheric fog does not hide that -- in clear
+     * weather the density is 0.002, so a fragment at the edge, 96 blocks from
+     * a centred camera, comes out 17% hazed and 83% crisp -- so a chunk
+     * arriving at the boundary appeared at almost full contrast. That is the
+     * pop-in, and trees popping "on geography I can't see" is the same event:
+     * the tree is the tallest thing in the chunk, so it clears the horizon and
+     * arrives a moment before the ground it stands on does.
+     *
+     * So the last CF_EDGE blocks of the window ramp to the fog colour, which
+     * is the sky colour, independently of the weather. A chunk now arrives
+     * already washed out and fades up over the blocks the player walks, rather
+     * than switching on. It costs two subtractions and a clamp.
+     *
+     * v_world is window-local (0..WORLD), which is what makes this cheap: the
+     * distance to the edge is the coordinate itself. */
+    "  const float CF_EDGE = 34.0;\n"
+    "  float edge = min(min(v_world.x, WORLD.x - v_world.x), min(v_world.z, WORLD.z - v_world.z));\n"
+    "  if (u_unlit != 1) fogf = max(fogf, 1.0 - clamp(edge / CF_EDGE, 0.0, 1.0));\n"
     "  bool  lit_matters = u_overcast < 0.98 && fogf < 0.98;\n"
     "  if (sk > 0.001 && lit_matters) {\n"
     "    if (inten > 0.0 && ndls > 0.0)      shad = shadow(origin, u_sundir,  u_shadow);\n"

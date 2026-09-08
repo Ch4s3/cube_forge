@@ -425,7 +425,12 @@ mod CubeForge do
   -- an upland lake's.
   pfn flock_home_y(bio : CubeForge.Biome.Field, sp : Int, x : Int, z : Int) : Float do
     let top = int_to_float(Biome.height_of(bio, x, z))
-    if Fauna.is_fish(sp) do top -. Flock.fish_depth() else top +. Flock.cruise() end
+    -- A flightless flock's home is ON the ground. want_y already refuses to
+    -- lift it, but the home is where its animals are first placed, and a home
+    -- at cruising height hatched a herd of moa nine blocks up that then sank.
+    if Fauna.is_fish(sp) do top -. Flock.fish_depth()
+    else if Fauna.flightless(sp) do top +. Flock.roost_y()
+    else top +. Flock.cruise() end end
   end
 
   -- For one chunk the tick just visited: a species with enough animals and no
@@ -3104,7 +3109,15 @@ mod CubeForge do
           let pscale = Biome.precip_scale(Biome.biome_of(scene_biome(sc1), bcx, bcz))
           let pcap = if precip_cap >= 0 do precip_cap else Settings.value(Menu.settings(menu5), Settings.field_precip()) end
           let live0 = float_to_int(int_to_float(pcap) *. wx *. pscale)
-          let live = if live0 > pcap do pcap else live0 end
+          let livec = if live0 > pcap do pcap else live0 end
+          -- Nothing falls past a camera that is under water. The mix already
+          -- silenced the rain down there (Audio.mix zeroes every surface bed
+          -- under water, because a filter alone left a thin hiss audible from
+          -- the lake bed); the PARTICLES kept coming, straight through the
+          -- surface and down past the eye, so a lake bed in a storm was full
+          -- of falling rain. The count is the gate: no particles, no draw, and
+          -- no spawn cost either.
+          let live = if Player.eye_in_water(player1, scene_world(sc1)) do 0 else livec end
           let snowmix = Precip.snow_mix(Biome.temp_of(scene_biome(sc1), bcx, bcz))
           let snowing = snowmix > 0.5
           -- Camera right, flattened to the horizontal plane and normalised.

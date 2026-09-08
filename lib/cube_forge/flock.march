@@ -261,8 +261,24 @@ mod CubeForge.Flock do
     let vz = vz1 *. k
     let vy = clampf(vy1, 0.0 -. lim, lim)
 
-    let nx = x +. vx *. dt
-    let nz = z +. vz *. dt
+    let wx0 = x +. vx *. dt
+    let wz0 = z +. vz *. dt
+    -- A FISH does not leave the water sideways. The y clamp below keeps it
+    -- under the surface and off the bed, but nothing stopped it swimming at a
+    -- bank: the column it arrived in had its ground ABOVE the surface, the
+    -- floor rose over the ceiling, and the fish was clamped out onto dry land
+    -- and went on across it. A column can hold a fish when its ground leaves
+    -- water enough to swim in; when the step would leave the water the fish
+    -- keeps its place and loses that much of its velocity, which turns it back
+    -- along the bank instead of stopping it dead.
+    --
+    -- The patch is sampled every eight blocks (patch_step), so this is the
+    -- bank to the nearest sample and not to the block. A fish can still cut a
+    -- corner; it can no longer cross a beach.
+    let holds = int_to_float(ground_at(patch, hx, hz, wx0, wz0)) < water_y -. 1.0
+    let wet = if Fa.is_fish(f_sp) do holds else true end
+    let nx = if wet do wx0 else x end
+    let nz = if wet do wz0 else z end
     -- the ground is a floor, not a suggestion: whatever the steering wanted, an
     -- animal never ends a tick inside the terrain it was told about
     let ng = int_to_float(ground_at(patch, hx, hz, nx, nz))
@@ -273,9 +289,9 @@ mod CubeForge.Flock do
     let b1 = NativeArray.set_float(b, i * stride(), nx)
     let b2 = NativeArray.set_float(b1, i * stride() + 1, ny)
     let b3 = NativeArray.set_float(b2, i * stride() + 2, nz)
-    let b4 = NativeArray.set_float(b3, i * stride() + 3, vx)
+    let b4 = NativeArray.set_float(b3, i * stride() + 3, if wet do vx else 0.0 end)
     let b5 = NativeArray.set_float(b4, i * stride() + 4, if ny <= floor_y do 0.0 else vy end)
-    NativeArray.set_float(b5, i * stride() + 5, vz)
+    NativeArray.set_float(b5, i * stride() + 5, if wet do vz else 0.0 end)
   end
 
   pfn step_go(b : NativeFloatArr, f_sp : Int, n : Int, i : Int, seed : Int, t : Int,

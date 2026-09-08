@@ -5057,3 +5057,52 @@ A/B, and it is what showed the frame underneath is very nearly black: without
 the tint a submerged frame says nothing about being submerged at all.
 
 567 tests, lint --strict clean.
+
+## Rain under a lake, fish over a beach, and the edge of the world (2026-09-08)
+
+**It rained under water.** `Audio.mix` has silenced the surface beds from below
+the surface since it was written -- a filter alone left a thin hiss of rain
+audible from the lake bed -- but nothing ever told the PARTICLES. They went on
+falling, through the surface and down past a camera on the bed. The particle
+count is the gate: `live` is 0 when the eye is in water, which skips the spawn,
+the step and the draw, because all three already read it.
+
+**Fish crossed dry land.** A fish's height is clamped between the bed and the
+surface, and nothing clamped it sideways. Swim at a bank and the column it
+arrives in has its ground ABOVE the water surface, the floor rises over the
+ceiling, and the clamp puts the fish out on the sand -- where it carries on
+swimming. A column holds a fish when its ground leaves a block of water over
+it; a step that would leave the water is refused and takes that much of the
+velocity with it, which turns the fish along the bank rather than stopping it
+dead. The ground patch a flock is told about is sampled every eight blocks, so
+this is the bank to the nearest sample: a fish can still cut a corner, it can
+no longer cross a beach.
+
+**And the flightless flocks were born nine blocks up.** `want_y` was taught
+about them in the entry above, but `flock_home_y` was not: every non-fish flock
+was placed at terrain + `cruise()`, so a herd of moa hatched in the air and
+then sank to the ground. Its home is on the ground now.
+
+**The edge of the window.** "Bad pop in on geography", and "trees pop in on
+geography that I can't see" -- which is the same event seen from one chunk
+further out. There is no world past the window: it is 192 blocks a side and
+the terrain stops. The fog does not hide that. In clear weather the density is
+0.002, so a fragment at the boundary -- 96 blocks from a centred camera --
+comes out **17% hazed and 83% crisp**, and a chunk arriving there switches on
+at almost full contrast. A tree is the tallest thing in its chunk, so it clears
+the horizon and arrives a moment before the ground under it: hence a tree
+popping in over ground that is not there yet.
+
+The last 34 blocks of the window now ramp to the fog colour, which is the sky
+colour, independently of the weather. A chunk arrives already washed out and
+fades up over the blocks the player walks. It is two subtractions and a clamp
+in the fragment shader, and it is cheap for the reason the whole renderer is
+cheap here: `v_world` is window-local, so the distance to the edge IS the
+coordinate.
+
+This does not make the window bigger, and it is worth being clear that it does
+not: you still cannot see past 96 blocks. What changed is that the boundary is
+now a haze the world fades into rather than a line it stops at.
+
+567 tests, lint --strict clean; the pinned scenario's mesh hash is unchanged at
+74139816, as it should be for a change that is all shading and behaviour.
