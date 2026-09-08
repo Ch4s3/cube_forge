@@ -713,6 +713,30 @@ static unsigned char g_vbo_cur[CF_MAX_MESHES];
 static int64_t g_vbo_cap[2][CF_MAX_MESHES];   /* floats allocated per buffer; grown, never shrunk */
 static inline GLuint vbo_of(int64_t slot) { return g_vbo_cur[slot] ? g_vbo_b[slot] : g_vbo[slot]; }
 /* A VAO per mesh slot was tried (2026-09-05 perf pass): 192 chunk draws a frame as one bind and one draw each. A/B over six alternating runs was noise, so the shared VAO stays. */
+/* Replace a mesh slot's whole data store and record what it now holds. Every
+ * glBufferData on a slot goes through here: g_vbo_cap is what cf_gfx_draw
+ * checks a vertex count against and what cf_gfx_upload_begin decides to
+ * reallocate on, so a store written behind its back is a store those two
+ * believe the wrong size of. */
+static void slot_buffer_data(int64_t slot, int64_t nfloats, const void *data, GLenum usage) {
+    glBindBuffer(GL_ARRAY_BUFFER, vbo_of(slot));
+    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(nfloats * 4), data, usage);
+    g_vbo_cap[g_vbo_cur[slot]][slot] = nfloats;
+}
+/* Does slot [slot]'s current buffer actually hold vertices [first, first+n)?
+ * A count that outruns the store is not a GL error the driver reports: it reads
+ * off the end of the data store, and with no store at all it dereferences NULL
+ * inside glDrawArrays and takes the process with it -- no March frame on the
+ * stack, so nothing names the cause. A count that outruns its buffer is a bug
+ * in the caller either way; dropping the draw makes it a missing mesh with a
+ * line on stderr rather than a crash with no backtrace. */
+static int slot_holds(int64_t slot, int64_t first, int64_t n) {
+    int64_t cap = g_vbo_cap[g_vbo_cur[slot]][slot];
+    if ((first + n) * CF_VERT_FLOATS <= cap) return 1;
+    fprintf(stderr, "cf: draw slot=%lld wants vertices %lld..%lld, buffer holds %lld floats -- skipped\n",
+            (long long)slot, (long long)first, (long long)(first + n), (long long)cap);
+    return 0;
+}
 static int g_debug = -1;
 static inline int cf_debug(void) { if (g_debug < 0) g_debug = getenv("CF_DEBUG") != NULL; return g_debug; }
 static GLint  g_u_species = -1;
@@ -840,9 +864,14 @@ void cf_gfx_upload(int64_t slot, void *arr, int64_t nfloats) {
     if (slot < 0 || slot >= CF_MAX_MESHES) return;
     g_off[slot][0] = g_off[slot][1] = 0.0f;   /* baked at the current local origin */
     if (nfloats > narr_len(arr)) nfloats = narr_len(arr);
+    /* glBufferData REPLACES the store, so the capacity after this is exactly
+     * nfloats -- smaller than it was whenever this upload is smaller than the
+     * last, and zero for an empty one. Left at the old high-water mark it told
+     * cf_gfx_upload_begin the store was big enough to skip reallocating, so the
+     * slot's parts went into a buffer with no room for them (or no store at
+     * all) and the draw read past its end. */
     g_vbo_cur[slot] ^= 1;
-    glBindBuffer(GL_ARRAY_BUFFER, vbo_of(slot));
-    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(nfloats * 4), narr_data(arr), GL_STATIC_DRAW);
+    slot_buffer_data(slot, nfloats, narr_data(arr), GL_STATIC_DRAW);
     if (cf_debug()) { const float *f = narr_data(arr); fprintf(stderr, "cf: upload slot=%lld nfloats=%lld arrlen=%lld first=%g %g %g %g %g %g %g glerr=%d\n", (long long)slot, (long long)nfloats, (long long)narr_len(arr), f[0],f[1],f[2],f[3],f[4],f[5],f[6], (int)glGetError()); }
 }
 
@@ -952,6 +981,7 @@ static void cf_bind_slot(int64_t slot) {
 void cf_gfx_draw_model(int64_t slot, int64_t first, int64_t count, double x, double y, double z,
                        double c, double s, double scale, double sky, double blk) {
     if (slot < 0 || slot >= CF_MAX_MESHES || count <= 0 || first < 0) return;
+    if (!slot_holds(slot, first, count)) return;
     cf_bind_slot(slot);
     glUniform1i(g_u_model, 1);
     glUniform3f(g_u_mpos, (float)x, (float)y, (float)z);
@@ -975,6 +1005,7 @@ void cf_gfx_draw(int64_t slot, int64_t nverts) {
     glEnableVertexAttribArray(4); glVertexAttribPointer(4, 1, GL_FLOAT, GL_FALSE, stride, (void *)(7 * 4));
     glEnableVertexAttribArray(5); glVertexAttribPointer(5, 1, GL_FLOAT, GL_FALSE, stride, (void *)(8 * 4));
     glEnableVertexAttribArray(6); glVertexAttribPointer(6, 1, GL_FLOAT, GL_FALSE, stride, (void *)(9 * 4));
+    if (!slot_holds(slot, 0, nverts)) return;
     glDrawArrays(GL_TRIANGLES, 0, (GLsizei)nverts);
     if (cf_debug()) { fprintf(stderr, "cf: draw slot=%lld nverts=%lld glerr=%d prog=%u vao=%u\n", (long long)slot, (long long)nverts, (int)glGetError(), g_prog, g_vao); }
 }
@@ -1235,6 +1266,16 @@ void cf_gfx_set_gpulight(int64_t on) { if (g_u_gpulight >= 0) glUniform1i(g_u_gp
  * once before drawing, the way the mesh drain batches its work. */
 static int64_t g_ld[6];
 static int     g_ld_any = 0;
+/* CF_LIGHT_FLUSH_LOG=1: what the union cost. How many relights merged into the
+ * box, the sum of their own volumes against the union's, and the flush split
+ * into the staging transpose and the upload -- the three numbers that say
+ * whether a short LIST of boxes would help or whether the cost is the transpose
+ * and would survive any batching policy. */
+static int64_t g_ld_n = 0, g_ld_vol = 0, g_ld_max = 0;
+static int g_lfl = -1;
+static int lfl_on(void) { if (g_lfl < 0) { const char *e = getenv("CF_LIGHT_FLUSH_LOG"); g_lfl = (e && *e == '1') ? 1 : 0; } return g_lfl; }
+static double now_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1000.0 + t.tv_nsec / 1e6; }
+static double g_stage_ms = 0, g_upload_ms = 0, g_flood_gpu_ms = 0;
 /* Passes the flood still owes. A dirty box sets it to a full convergence and
  * the frame spends a few passes at a time: sixteen at once is 7.55 ms, four is
  * under two, and light changes gradually enough that a frame or two of partial
@@ -1243,6 +1284,12 @@ static int64_t g_lf_todo = 0;
 int64_t cf_light_flood(int64_t passes);
 void cf_gfx_light_dirty(int64_t x0, int64_t y0, int64_t z0, int64_t x1, int64_t y1, int64_t z1) {
     if (x1 < x0 || y1 < y0 || z1 < z0) return;
+    g_ld_n++;
+    {
+        int64_t v = (x1 - x0 + 1) * (y1 - y0 + 1) * (z1 - z0 + 1);
+        g_ld_vol += v;
+        if (v > g_ld_max) g_ld_max = v;
+    }
     if (!g_ld_any) { g_ld[0] = x0; g_ld[1] = y0; g_ld[2] = z0; g_ld[3] = x1; g_ld[4] = y1; g_ld[5] = z1; g_ld_any = 1; return; }
     if (x0 < g_ld[0]) g_ld[0] = x0;
     if (y0 < g_ld[1]) g_ld[1] = y0;
@@ -1257,12 +1304,29 @@ void cf_gfx_sync_light_box(void *la, void *lb, int64_t x0, int64_t y0, int64_t z
 void cf_gfx_flush_light(void *la, void *lb) {
     if (g_ld_any) {
         g_ld_any = 0;
+        double t0 = lfl_on() ? now_ms() : 0;
+        int64_t uv = (g_ld[3] - g_ld[0] + 1) * (g_ld[4] - g_ld[1] + 1) * (g_ld[5] - g_ld[2] + 1);
+        g_stage_ms = g_upload_ms = 0;
         cf_gfx_sync_light_box(la, lb, g_ld[0], g_ld[1], g_ld[2], g_ld[3], g_ld[4], g_ld[5]);
+        if (lfl_on()) {
+            double tot = now_ms() - t0;
+            if (tot > 0.5)
+                fprintf(stderr, "light flush %.2f ms: %lld relights, own %lld (largest %lld), union %lld (%.1fx), stage %.2f upload %.2f\n",
+                        tot, (long long)g_ld_n, (long long)g_ld_vol, (long long)g_ld_max, (long long)uv,
+                        g_ld_vol ? (double)uv / (double)g_ld_vol : 0.0, g_stage_ms, g_upload_ms);
+        }
+        g_ld_n = 0; g_ld_vol = 0; g_ld_max = 0;
         g_lf_todo = 16;   /* the seed moved: converge again from here */
     }
     if (g_lf_todo > 0) {
         int64_t n = g_lf_todo < CF_LIGHT_STEP ? g_lf_todo : CF_LIGHT_STEP;
+        double t1 = lfl_on() ? now_ms() : 0;
         g_lf_todo -= cf_light_flood(n);
+        if (lfl_on()) {
+            double fd = now_ms() - t1;
+            if (fd > 4.0) fprintf(stderr, "light flood %lld passes: wall %.2f ms, GPU %.2f ms (sync before it: stage %.2f upload %.2f)\n",
+                                  (long long)n, fd, g_flood_gpu_ms, g_stage_ms, g_upload_ms);
+        }
         if (g_lf_todo < 0) g_lf_todo = 0;
     }
 }
@@ -1273,6 +1337,7 @@ void cf_gfx_sync_light_box(void *la, void *lb, int64_t x0, int64_t y0, int64_t z
     if (x0 < 0) x0 = 0; if (y0 < 0) y0 = 0; if (z0 < 0) z0 = 0;
     if (x1 >= g_occ_w) x1 = g_occ_w - 1; if (y1 >= g_occ_h) y1 = g_occ_h - 1; if (z1 >= g_occ_d) z1 = g_occ_d - 1;
     if (x0 > x1 || y0 > y1 || z0 > z1) return;
+    double g_t_stage0 = lfl_on() ? now_ms() : 0;
     const unsigned char *a = (const unsigned char *)narr_data(la);
     const unsigned char *b = (const unsigned char *)narr_data(lb);
     int64_t bw = x1 - x0 + 1, bh = y1 - y0 + 1, bd = z1 - z0 + 1;
@@ -1286,6 +1351,8 @@ void cf_gfx_sync_light_box(void *la, void *lb, int64_t x0, int64_t y0, int64_t z
                 stage[dst] = a[src];             /* verbatim: see cf_gfx_upload_light */
                 stage[dst + 1] = b[src];
             }
+    if (lfl_on()) g_stage_ms = now_ms() - g_t_stage0;
+    double tu0 = lfl_on() ? now_ms() : 0;
     glActiveTexture(GL_TEXTURE3);
     glBindTexture(GL_TEXTURE_3D, g_lt[0]);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
@@ -1309,6 +1376,7 @@ void cf_gfx_sync_light_box(void *la, void *lb, int64_t x0, int64_t y0, int64_t z
     glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
     glPixelStorei(GL_UNPACK_SKIP_IMAGES, 0);
     free(stage);
+    if (lfl_on()) g_upload_ms = now_ms() - tu0;
     glActiveTexture(GL_TEXTURE0);
 }
 
@@ -1548,11 +1616,19 @@ int64_t cf_light_flood(int64_t passes) {
     glBindFramebuffer(GL_FRAMEBUFFER, g_lf_fbo);
     glViewport(0, 0, (GLsizei)g_occ_w, (GLsizei)g_occ_h);
     glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE); glDisable(GL_BLEND);
+    static GLuint lf_q = 0;
+    if (lfl_on() && !lf_q) glGenQueries(1, &lf_q);
+    if (lfl_on()) glBeginQuery(GL_TIME_ELAPSED, lf_q);
     for (int64_t k = 0; k < passes; k++) {
         int src = (int)(k & 1), dst = 1 - src;
         glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_3D, g_lt[src]);
         glFramebufferTexture(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, g_lt[dst], 0);
         glDrawArraysInstanced(GL_TRIANGLES, 0, 3, (GLsizei)g_occ_d);
+    }
+    if (lfl_on()) {
+        glEndQuery(GL_TIME_ELAPSED);
+        GLuint64 ns = 0; glGetQueryObjectui64v(lf_q, GL_QUERY_RESULT, &ns);   /* blocks: diagnostic only */
+        g_flood_gpu_ms = ns / 1e6;
     }
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glEnable(GL_DEPTH_TEST); glEnable(GL_CULL_FACE);
@@ -1895,10 +1971,7 @@ void cf_precip_frame(void *light, int64_t live, int64_t snow,
         pcl_vert(v + 5 * CF_VERT_FLOATS, x - qx, y + qh, z - qz, cr, cg, cb, fx);
     }
 
-    glBindBuffer(GL_ARRAY_BUFFER, g_vbo[CF_PRECIP_SLOT]);
-    glBufferData(GL_ARRAY_BUFFER,
-                 (GLsizeiptr)(live * CF_PRECIP_VTX * (int64_t)sizeof(float)),
-                 g_pcl_vtx, GL_STREAM_DRAW);
+    slot_buffer_data(CF_PRECIP_SLOT, live * CF_PRECIP_VTX, g_pcl_vtx, GL_STREAM_DRAW);
 }
 
 /* ── Biome map ──────────────────────────────────────────────────────────────
@@ -1950,8 +2023,7 @@ void cf_biome_map_upload(void *biomes, void *active, int64_t n) {
         pcl_vert(v + 4 * CF_VERT_FLOATS, x1, CF_BIOME_Y, z1, c[0], c[1], c[2], 255.0f);
         pcl_vert(v + 5 * CF_VERT_FLOATS, x1, CF_BIOME_Y, z0, c[0], c[1], c[2], 255.0f);
     }
-    glBindBuffer(GL_ARRAY_BUFFER, g_vbo[CF_BIOME_SLOT]);
-    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(cells * 6 * CF_VERT_FLOATS * (int64_t)sizeof(float)), g_biome_vtx, GL_STATIC_DRAW);
+    slot_buffer_data(CF_BIOME_SLOT, cells * 6 * CF_VERT_FLOATS, g_biome_vtx, GL_STATIC_DRAW);
 }
 
 /* ── Mycelium map overlay ──────────────────────────────────────────────────
@@ -1994,8 +2066,7 @@ void cf_myc_map_upload(void *species, void *vigour, int64_t n) {
         pcl_vert(v + 4 * CF_VERT_FLOATS, x1, y, z1, r, g, bl, 255.0f);
         pcl_vert(v + 5 * CF_VERT_FLOATS, x1, y, z0, r, g, bl, 255.0f);
     }
-    glBindBuffer(GL_ARRAY_BUFFER, g_vbo[CF_MYC_SLOT]);
-    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(cells * 6 * CF_VERT_FLOATS * (int64_t)sizeof(float)), g_myc_vtx, GL_STATIC_DRAW);
+    slot_buffer_data(CF_MYC_SLOT, cells * 6 * CF_VERT_FLOATS, g_myc_vtx, GL_STATIC_DRAW);
 }
 
 /* ── Springs ────────────────────────────────────────────────────────────────
@@ -2076,8 +2147,7 @@ int64_t cf_spray_frame(double dt, int64_t tick) {
         pcl_vert(v + 5 * CF_VERT_FLOATS, p[0] - h, p[1] + h, p[2],     0.95f, 0.97f, 1.0f, fx);
     }
     if (g_spray_live > 0) {
-        glBindBuffer(GL_ARRAY_BUFFER, g_vbo[CF_SPRAY_SLOT]);
-        glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(g_spray_live * CF_PRECIP_VTX * (int64_t)sizeof(float)), g_spray_vtx, GL_STREAM_DRAW);
+        slot_buffer_data(CF_SPRAY_SLOT, g_spray_live * CF_PRECIP_VTX, g_spray_vtx, GL_STREAM_DRAW);
     }
     return g_spray_live * 6;
 }
@@ -2846,6 +2916,85 @@ void *cf_u8_blit(void *dst, int64_t di, void *src, int64_t si, int64_t n) {
     }
     memcpy((unsigned char *)narr_data(dst) + di, (const unsigned char *)narr_data(src) + si, (size_t)n);
     return dst;
+}
+
+/* One chunk's occupancy written into the world occupancy field, as
+ * Light.occ_chunk_go does it a voxel at a time in March. [lut] is a 256-byte
+ * table of Light.occ_value(id) built on the March side, so the block table
+ * stays the one in Chunk and this does not become a second copy of it.
+ *
+ * A chunk's cells are ordered x fastest, then z, then y; the occupancy field is
+ * x + CF_WORLD_SIDE * (y + 256 * z). So a run of 16 cells is 16 contiguous
+ * bytes at both ends, and the loop is 16 lookups per run rather than three
+ * divisions and a bounds-checked store per voxel.
+ *
+ * Same rc == 1 contract as cf_u8_blit. */
+void *cf_occ_fill_chunk(void *o, void *cells, void *lut, int64_t cx, int64_t cz, int64_t stop) {
+    int64_t rc = *(int64_t *)o;
+    if (rc != 1) { fprintf(stderr, "cf_occ_fill_chunk: field is shared (rc=%lld); refusing to write in place\n", (long long)rc); abort(); }
+    if (narr_len(o) < CF_WORLD_VOL || narr_len(cells) < 65536 || narr_len(lut) < 256
+        || cx < 0 || cz < 0 || 16 * cx + 15 >= CF_WORLD_SIDE || 16 * cz + 15 >= CF_WORLD_SIDE
+        || stop < 0 || stop > 65536) {
+        fprintf(stderr, "cf_occ_fill_chunk: out of range\n"); abort();
+    }
+    unsigned char *d = (unsigned char *)narr_data(o);
+    const unsigned char *c = (const unsigned char *)narr_data(cells);
+    const unsigned char *t = (const unsigned char *)narr_data(lut);
+    int64_t ny = stop / 256;                 /* whole 16x16 layers */
+    for (int64_t ly = 0; ly < ny; ly++)
+        for (int64_t lz = 0; lz < 16; lz++) {
+            const unsigned char *src = c + (ly << 8) + (lz << 4);
+            unsigned char *dst = d + 16 * cx + CF_WORLD_SIDE * (ly + 256 * (16 * cz + lz));
+            for (int k = 0; k < 16; k++) dst[k] = t[src[k]];
+        }
+    return o;
+}
+
+/* The chunk's topmost non-air layer, as Light.chunk_top computes it: a chunk's
+ * cells run x fastest, then z, then y, so scanning down from the last cell
+ * stops at the highest non-air voxel and its layer is the answer.
+ *
+ * In March this is one bounds-checked get_idx per voxel, and above the terrain
+ * it is all air: with a surface near y 133 that is ~32k wasted reads a chunk,
+ * and Light.sky_floor does it for all 144. Here the scan is eight bytes at a
+ * time, so the empty sky costs a load per 8 voxels. */
+int64_t cf_chunk_top(void *cells) {
+    int64_t n = narr_len(cells);
+    if (n > CF_CHUNK_BYTES) n = CF_CHUNK_BYTES;
+    const unsigned char *c = (const unsigned char *)narr_data(cells);
+    int64_t i = n - 8;
+    for (; i >= 0; i -= 8) {
+        uint64_t w;
+        memcpy(&w, c + i, 8);
+        if (w) {
+            for (int64_t k = i + 7; k >= i; k--) if (c[k]) return k / 256;
+        }
+    }
+    for (int64_t k = i + 7; k >= 0; k--) if (c[k]) return k / 256;
+    return 0;
+}
+
+/* World.hash_voxels: the rolling hash h = (h * 131 + cell) % 1073741789 over
+ * every cell of a chunk, starting from [h]. The same value, byte for byte --
+ * it is written into saves and compared against an evicted chunk's stored hash,
+ * so it may not drift. In March it is 65536 bounds-checked reads and a modulo
+ * per byte; a shift hashes ~24 chunks (the band in, the evictions out). */
+int64_t cf_hash_voxels(void *cells, int64_t h) {
+    int64_t n = narr_len(cells);
+    if (n > CF_CHUNK_BYTES) n = CF_CHUNK_BYTES;
+    const unsigned char *c = (const unsigned char *)narr_data(cells);
+    for (int64_t i = 0; i < n; i++) h = (h * 131 + (int64_t)c[i]) % 1073741789;
+    return h;
+}
+
+/* Diagnostic: how many bytes of two equal-length byte arrays differ. */
+int64_t cf_u8_diff(void *a, void *b) {
+    int64_t n = narr_len(a) < narr_len(b) ? narr_len(a) : narr_len(b);
+    const unsigned char *x = (const unsigned char *)narr_data(a);
+    const unsigned char *y = (const unsigned char *)narr_data(b);
+    int64_t bad = 0;
+    for (int64_t i = 0; i < n; i++) if (x[i] != y[i]) bad++;
+    return bad;
 }
 
 /* Sun level 0..1, eye position, look direction, and the flashlight toggle.

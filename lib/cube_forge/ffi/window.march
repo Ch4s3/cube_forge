@@ -67,6 +67,10 @@ mod CubeForge.Ffi.Window do
     fn x_f32_blit(consume dst: NativeF32Arr, di: Int, src: NativeF32Arr, si: Int, n: Int): NativeF32Arr = "cf_f32_blit"
     fn x_u8_blit(consume dst: NativeU8Arr, di: Int, src: NativeU8Arr, si: Int, n: Int): NativeU8Arr = "cf_u8_blit"
     fn x_f64_blit(consume dst: NativeFloatArr, di: Int, src: NativeFloatArr, si: Int, n: Int): NativeFloatArr = "cf_f64_blit"
+    fn x_occ_fill_chunk(consume o: NativeU8Arr, cells: NativeU8Arr, lut: NativeU8Arr, cx: Int, cz: Int, stop: Int): NativeU8Arr = "cf_occ_fill_chunk"
+    fn x_u8_diff(a: NativeU8Arr, b: NativeU8Arr): Int = "cf_u8_diff"
+    fn x_chunk_top(cells: NativeU8Arr): Int = "cf_chunk_top"
+    fn x_hash_voxels(cells: NativeU8Arr, h: Int): Int = "cf_hash_voxels"
     fn x_u8_zero_box(consume a: NativeU8Arr, x0: Int, x1: Int, y0: Int, y1: Int, z0: Int, z1: Int): NativeU8Arr = "cf_u8_zero_box"
     fn x_mark_box(consume marks: NativeIntArr, a: NativeU8Arr, b: NativeU8Arr, x0: Int, x1: Int, y0: Int, y1: Int, z0: Int, z1: Int): NativeIntArr = "cf_mark_box"
     fn x_f32_stamp(consume dst: NativeF32Arr, di: Int, src: NativeF32Arr, si: Int, n: Int, dx: Float, dy: Float, dz: Float, shade: Float): NativeF32Arr = "cf_f32_stamp"
@@ -207,6 +211,14 @@ mod CubeForge.Ffi.Window do
 
   doc "memcpy [n] bytes from src[si..] into dst[di..]; dst must be uniquely owned."
   fn u8_blit(dst : NativeU8Arr, di : Int, src : NativeU8Arr, si : Int, n : Int) : NativeU8Arr do x_u8_blit(dst, di, src, si, n) end
+  doc "One chunk's occupancy written into the field in place; [o] must be uniquely owned and [lut] is Light.occ_lut()."
+  fn occ_fill_chunk(o : NativeU8Arr, cells : NativeU8Arr, lut : NativeU8Arr, cx : Int, cz : Int, stop : Int) : NativeU8Arr do x_occ_fill_chunk(o, cells, lut, cx, cz, stop) end
+  doc "The chunk's topmost non-air layer (Light.chunk_top), scanned eight bytes at a time."
+  fn chunk_top(cells : NativeU8Arr) : Int do x_chunk_top(cells) end
+  doc "World.hash_voxels over a chunk's cells, from [h]; the same value the March loop gives."
+  fn hash_voxels(cells : NativeU8Arr, h : Int) : Int do x_hash_voxels(cells, h) end
+  doc "Diagnostic: how many bytes of two byte arrays differ."
+  fn u8_diff(a : NativeU8Arr, b : NativeU8Arr) : Int do x_u8_diff(a, b) end
   doc "The f64 twin of f32_blit, for NativeFloatArr: [dst] must be uniquely owned."
   fn f64_blit(dst : NativeFloatArr, di : Int, src : NativeFloatArr, si : Int, n : Int) : NativeFloatArr do x_f64_blit(dst, di, src, si, n) end
   doc "Diagnostic: the refcount of a byte array as the shim sees it; a uniquely owned array reads 2 (the call's own borrow)."

@@ -287,8 +287,13 @@ mod CubeForge do
   -- 0..143 opaque chunks, 144..287 water, 288..431 foliage, then the named slots
   -- below. They are all one array in the shim (CF_MAX_MESHES = 512), so a slot
   -- used twice silently overwrites; keep this list complete. They were bare
-  -- numbers at the top of a 256-slot array before the window grew, which is
-  -- exactly the collision this naming now prevents.
+  -- numbers at the top of a 256-slot array before the window grew, and naming
+  -- them here was meant to prevent exactly that collision -- but a name only
+  -- helps if it is on this list, and Fauna's two were not: they sat at 242 and
+  -- 243, which the 12-chunk window turned into water chunks 98 and 99. world_size_test asserts the
+  -- whole list against the chunk range now, so the next window growth fails a
+  -- test instead of a draw call.
+  -- 498 fauna demo buffer (CubeForge.Fauna.demo_slot), 499 fauna template blob (CubeForge.Fauna.slot)
   fn myc_map_slot() : Int do 500 end
   fn spray_slot() : Int do 502 end
   fn menu_slot() : Int do 503 end
@@ -1875,6 +1880,66 @@ mod CubeForge do
     end
   end
 
+  -- CF_FIELDS_BENCH=1: the fields stage taken apart. Each piece runs on its
+  -- own, in the order the stage runs them, and the pmap is not used: what this
+  -- has to show is the size of each piece, not the length of the longest leg.
+  --
+  -- It is here because reading the stage instead of measuring it got the answer
+  -- wrong twice. The stage looked like three 9.4 MB field slides; the slides
+  -- turned out to run at memcpy speed and cost nothing, and the 15.4 ms was
+  -- 8.2 ms of sky_floor scanning empty sky, 4.2 ms of generation hashes and
+  -- 2.6 ms of the fill the stage exists for. Keep the instrument.
+  --
+  -- band_ref is the March loop occ_band replaced, run beside it: diff must
+  -- stay 0, so the shim's fill is checked against its reference on every run
+  -- of the bench as well as in the test.
+  pfn fields_bench(w : CubeForge.World.World, dx : Int, dz : Int, wk : Int, tag : String) do
+    let n = World.side(w)
+    let bx0 = World.band_x0(n, dx)
+    let bx1 = World.band_x1(n, dx)
+    let bz0 = World.band_z0(n, dz)
+    let bz1 = World.band_z1(n, dz)
+    let a0 = Win.time()
+    let k0 = World.bench_arrays(w, dx, dz, 0, wk)
+    let s1 = Win.time()
+    let k1 = World.bench_arrays(w, dx, dz, 1, wk)
+    let s2 = Win.time()
+    let k2 = World.bench_arrays(w, dx, dz, 2, wk)
+    let a1 = Win.time()
+    let ka = k0 + k1 + k2
+    let la1 = CubeForge.Light.shift_field(World.light(w), dx, dz)
+    let a2 = Win.time()
+    let lb1 = CubeForge.Light.shift_field(World.block_light(w), dx, dz)
+    let a3 = Win.time()
+    let o1 = CubeForge.Light.shift_occ(World.occupancy(w), dx, dz)
+    let a4 = Win.time()
+    let o2 = CubeForge.Light.occ_band_ref(o1, w, bx0, bx1, bz0, bz1)
+    let a5 = Win.time()
+    let o3 = CubeForge.Light.shift_occ(World.occupancy(w), dx, dz)
+    let a6 = Win.time()
+    let o4 = CubeForge.Light.occ_band(o3, w, bx0, bx1, bz0, bz1)
+    let a7 = Win.time()
+    let diff = Win.u8_diff(o2, o4)
+    let a8 = Win.time()
+    let sf = CubeForge.Light.sky_floor(w)
+    let a9 = Win.time()
+    -- read one byte of every result, so none of the work above is dead
+    let keep = ka + NativeArray.get_u8(la1, 0) + NativeArray.get_u8(lb1, 0) + NativeArray.get_u8(o2, 0) + NativeArray.get_u8(o4, 0)
+    println("fields bench " ++ tag ++ " (" ++ int_to_string(dx) ++ "," ++ int_to_string(dz) ++ "):"
+            ++ " shown " ++ ms(s1 -. a0)
+            ++ " | dirty " ++ ms(s2 -. s1)
+            ++ " | hash " ++ ms(a1 -. s2)
+            ++ " | sky " ++ ms(a2 -. a1)
+            ++ " | block " ++ ms(a3 -. a2)
+            ++ " | occ " ++ ms(a4 -. a3)
+            ++ " | band_ref " ++ ms(a5 -. a4)
+            ++ " | band " ++ ms(a7 -. a6)
+            ++ " | diff " ++ int_to_string(diff)
+            ++ " | sky_floor " ++ ms(a9 -. a8) ++ " = " ++ int_to_string(sf)
+            ++ " | serial total " ++ ms(a5 -. a0)
+            ++ " (keep " ++ int_to_string(keep) ++ ")")
+  end
+
   -- One stage a frame. Returns the scene (changed only by a commit) and the
   -- next staging state.
   type Advanced(p) = Advanced(Scene(p), Staged)
@@ -2428,6 +2493,13 @@ mod CubeForge do
     else 0 end end end end end end end end end
   end
 
+  doc "The yaw CF_AUTOROAM adds this frame: none for the straight run, a steady turn for the last sixty frames of the period. 0 when the knob is off."
+  pfn roam_yaw(period : Int, frame : Int) : Float do
+    if period <= 60 do 0.0
+    else if frame % period >= period - 60 do 0.3 /. CubeForge.Player.mouse_sens()
+    else 0.0 end end
+  end
+
   @[no_alloc(assume)]
   pfn read_input(autowalk : Bool, autospin : Float, autoswim : Bool, autodive : Bool) : CubeForge.Player.Input do
     -- CF_AUTOWALK=1: scripted forward walk for headless collision verification.
@@ -2793,10 +2865,18 @@ mod CubeForge do
                            Win.gfx_upload(menu_slot(), F32Buf.storage(mb), F32Buf.len(mb))
                            mb
                          else menubuf end
+          let roam = Env.get_int("CF_AUTOROAM", 0)
           let player1 = if ui_open do player
                         else
                       let ef = ui_effects(scene_ui(sc_drag))
-                      Player.update_with(player, read_input(autowalk, autospin, (autoswim && frame >= 320) || Env.get_int("CF_AUTOJUMP", 0) == 1, autodive && frame >= 320), scene_world(sc_drag), dt,
+                      -- CF_AUTOROAM=<period>: a scripted walk that goes somewhere.
+                      -- CF_AUTOWALK alone holds forward, so it leans on the first
+                      -- hill it meets and the window never slides again -- every
+                      -- seed tried stopped within fifteen blocks of its spawn.
+                      -- This turns for the last sixty frames of every period, so
+                      -- the walk is a series of straight runs on different
+                      -- headings and streams chunks for as long as it is given.
+                      Player.update_with(player, read_input(autowalk, autospin +. roam_yaw(roam, frame), (autoswim && frame >= 320) || Env.get_int("CF_AUTOJUMP", 0) == 1, autodive && frame >= 320), scene_world(sc_drag), dt,
                                          Effects.speed_mult(ef, now), Effects.jump_mult(ef, now), Effects.swim_mult(ef, now))
                     end
           let view1 = write_view(player1, view)
@@ -3123,8 +3203,25 @@ mod CubeForge do
             let b8 = Win.light_bench(16, 192, 256, 192)
             println("light bench: FULL 192x256x192 x16, twice = " ++ int_to_string(b7) ++ " / " ++ int_to_string(b8) ++ " us")
           else () end
+          if Env.get_int("CF_FIELDS_BENCH", 0) == 1 && frame == 300 do
+            let bw = scene_world(sc1)
+            fields_bench(bw, 1, 0, workers, "warm")
+            fields_bench(bw, 1, 0, workers, "x   ")
+            fields_bench(bw, -1, 0, workers, "-x  ")
+            fields_bench(bw, 0, 1, workers, "z   ")
+            fields_bench(bw, 0, -1, workers, "-z  ")
+            fields_bench(bw, 1, 0, workers, "x2  ")
+          else () end
           -- Everything this frame's relights made dirty, in one upload.
+          -- The dirty light box is a single union that only ever widens, so two
+          -- relights at opposite corners of a frame make one box over most of
+          -- the window and the flush stages and uploads ~19 MB. Eight frames in
+          -- eight thousand, but they are the worst frames the game has -- 51 to
+          -- 56 ms inside a 63 to 69 ms frame. Under CF_AUTOFLOW a slow flush
+          -- names itself, so the next one does not have to be hunted again.
+          let fl0 = Win.time()
           Win.gfx_flush_light(World.light(scene_world(sc1)), World.block_light(scene_world(sc1)))
+          if autoflow >= 0 && Win.time() -. fl0 > 0.004 do println("slow light flush " ++ int_to_string(frame) ++ " phase " ++ int_to_string(frame % tick_period()) ++ ": " ++ ms(Win.time() -. fl0)) else () end
           let cull = Env.get_int("CF_CULL", 1) == 1 && !map_mode1
           let cside = World.side(scene_world(sc1))
           let ndrawn = draw_chunks(scene_counts(sc1), 0, nchunks, render_vp, cull, cside, 0)

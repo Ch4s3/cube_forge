@@ -967,10 +967,19 @@ mod CubeForge.Fauna do
   end
 
   -- ── Drawing ───────────────────────────────────────────────────────────────
-  doc "Mesh slot the template blob lives in, uploaded ONCE at startup and never touched again: every animal is drawn from it with its transform as uniforms (cf_gfx_draw_model). 192..243 are free; the chunk meshes end at 191 and the overlays start at 244."
-  fn slot() : Int do 243 end
+  -- The template blob was at 243 and the demo buffer at 242, free while the
+  -- window was 8 chunks a side and the chunk meshes ended at 191. The 12-chunk
+  -- window pushed them to 431, so 243 became water chunk 99 and every frame's
+  -- fauna upload landed in that chunk's vertex buffer: an empty blob left the
+  -- buffer with no data store while the shim's capacity bookkeeping still
+  -- claimed one, and the first window shift that gave chunk 99 water drew 36
+  -- vertices out of it, straight through a null pointer inside the GL driver.
+  -- Both now sit in the named block above the chunk meshes, and
+  -- world_size_test checks the whole named list against the chunk range.
+  doc "Mesh slot the template blob lives in, uploaded ONCE at startup and never touched again: every animal is drawn from it with its transform as uniforms (cf_gfx_draw_model). One of the named slots above the chunk meshes -- see the slot map in cube_forge.march, which lists it."
+  fn slot() : Int do 499 end
   doc "Mesh slot the demo modes stamp into and re-upload each frame: their own, so the static blob is never clobbered."
-  fn demo_slot() : Int do 242 end
+  fn demo_slot() : Int do 498 end
   doc "Floats in the whole blob."
   fn blob_len(s : Poses) : Int do offset(s, template_count()) end
   doc "First vertex of template [k] in the blob, and its vertex count: what a draw call takes."

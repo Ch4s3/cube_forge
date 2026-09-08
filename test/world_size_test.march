@@ -20,6 +20,42 @@ mod CubeForge.WorldSizeTest do
   alias CubeForge.Light as L
   alias CubeForge.Chunk as C
 
+  doc "Every named mesh slot, in the order the slot map lists them."
+  pfn named_slots() : List(Int) do
+    Cons(CubeForge.Fauna.slot(),
+    Cons(CubeForge.Fauna.demo_slot(),
+    Cons(CubeForge.myc_map_slot(),
+    Cons(CubeForge.readout_slot(),
+    Cons(CubeForge.spray_slot(),
+    Cons(CubeForge.menu_slot(),
+    Cons(CubeForge.biome_map_slot(),
+    Cons(CubeForge.Precip.slot(),
+    Cons(CubeForge.Marker.slot(),
+    Cons(CubeForge.icon_slot(),
+    Cons(CubeForge.hotbar_slot(),
+    Cons(CubeForge.underwater_slot(),
+    Cons(CubeForge.outline_slot(),
+    Cons(CubeForge.fps_slot(), Nil))))))))))))))
+  end
+  pfn named_in_range(xs : List(Int), lo : Int, hi : Int) : Bool do
+    match xs do
+      Nil -> true
+      Cons(s, rest) -> s >= lo && s < hi && named_in_range(rest, lo, hi)
+    end
+  end
+  pfn holds(xs : List(Int), v : Int) : Bool do
+    match xs do
+      Nil -> false
+      Cons(x, rest) -> x == v || holds(rest, v)
+    end
+  end
+  pfn any_repeat(xs : List(Int)) : Bool do
+    match xs do
+      Nil -> false
+      Cons(x, rest) -> holds(rest, x) || any_repeat(rest)
+    end
+  end
+
   describe "world size" do
     test "the column stride matches the chunk grid" do
       Test.assert_eq_int(W.cols(), 16 * W.size(), "cols() is size() chunks of 16")
@@ -76,6 +112,26 @@ mod CubeForge.WorldSizeTest do
       Test.assert_eq_int(CubeForge.Biome.height_of(f, 63, 63), W.surface_y(w, 63, 63), "the far corner too")
       Test.assert_eq_int(CubeForge.Biome.side_of(CubeForge.Biome.field_biomes(f)), 64, "the field is 64 wide")
     end
+    test "no named mesh slot lands in the chunk range" do
+      -- The shim holds ONE array of CF_MAX_MESHES = 512 mesh slots. The first
+      -- 3 * size^2 of them belong to the window -- opaque, water and foliage,
+      -- one block of size^2 each -- and every slot above those is named. A name
+      -- that lands inside the chunk range shares a vertex buffer with a chunk
+      -- and nothing says so: the two upload over each other, and whichever
+      -- keeps a vertex count after the other has replaced the buffer draws off
+      -- the end of it.
+      --
+      -- Fauna's two slots were 242 and 243, correct while the window was 8
+      -- chunks a side and the chunk meshes ended at 191. The 12-chunk window
+      -- moved that boundary to 431 and made 243 water chunk 99, whose draw call
+      -- took the GL driver down a few frames after the first window shift. The
+      -- slot map in cube_forge.march is the list; this is the list checked.
+      let chunks = 3 * W.size() * W.size()
+      Test.assert_eq_int(chunks, 432, "the boundary the slot map is written around")
+      Test.assert_true(named_in_range(named_slots(), chunks, 512), "every named slot is clear of the chunks and inside the shim's array")
+      Test.assert_true(!any_repeat(named_slots()), "and no two names share a slot")
+    end
+
     test "the biome field's stride is the world's" do
       -- Biome's accessors index hs/ws/bs as wx + 192 * wz, and the field is
       -- allocated at the world's runtime size. If those disagree the field reads
