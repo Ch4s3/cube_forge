@@ -419,8 +419,10 @@ built from smaller voxels").
   instead of cutting again. `World` carries its seed so the mesher can build
   the table.
 - **The block.** `crystal_beam` is a cutout: see-through, a model to the mesher,
-  opacity 6 to light. Sixteen beams a chamber, chisel-ended, centred anywhere
-  in 0.9 of the chamber's radius. No blade models in a cavern.
+  opacity 6 to light. Twelve free beams a chamber, chisel-ended, centred
+  anywhere in 0.9 of the chamber's radius, and fourteen anchored ones growing
+  out of the shell, floor-biased (`Poi.beams_free`, `beams_anchored`). No
+  blade models in a cavern.
 - **The light.** Self-lit faces are shaded by direction and by a rim term;
   `GLOW_COLD` is warm white-gold.
 

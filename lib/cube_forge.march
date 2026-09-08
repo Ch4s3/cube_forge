@@ -3236,15 +3236,18 @@ mod CubeForge do
                 ++ "  opening " ++ int_to_string(2 * CubeForge.Poi.param(k, cx, cz, seed, CubeForge.Poi.p_hole_w())) ++ "x" ++ int_to_string(CubeForge.Poi.param(k, cx, cz, seed, CubeForge.Poi.p_hole_h()))
                 ++ "  bearing " ++ int_to_string(float_to_int(CubeForge.Poi.bearing(k, cx, cz, seed) *. 57.2957795)) ++ " deg"
                 ++ (if k != CubeForge.Poi.k_cavern() do "" else
-                      let a = CubeForge.Poi.bearing(k, cx, cz, seed)
-                      let cu = CubeForge.Poi.cham_u(k, cx, cz, seed, 0)
-                      let cv = CubeForge.Poi.cham_v(k, cx, cz, seed, 0)
-                      "  chamber 0 at " ++ int_to_string(CubeForge.Poi.sx(k, cx, cz, seed) + float_to_int(cu *. Math.cos(a) -. cv *. Math.sin(a)))
-                      ++ "," ++ int_to_string(CubeForge.Poi.sz(k, cx, cz, seed) + float_to_int(cu *. Math.sin(a) +. cv *. Math.cos(a)))
-                      ++ " y " ++ int_to_string(float_to_int(CubeForge.Poi.cham_y(k, cx, cz, seed, 0, CubeForge.Poi.ground(k, cx, cz, seed)))) end))
+                      chambers_go(k, cx, cz, seed, 0, "") end))
         poi_cells_go(n, k, i + 1, seed, scale, acc + 1)
       end end
     end
+  end
+  -- every chamber of a cavern: centre, height, radius
+  pfn chambers_go(k : Int, cx : Int, cz : Int, seed : Int, j : Int, acc : String) : String do
+    if j >= CubeForge.Poi.chambers() do acc
+    else chambers_go(k, cx, cz, seed, j + 1, acc ++ "  chamber " ++ int_to_string(j) ++ " at " ++ int_to_string(CubeForge.Poi.cham_wx(k, cx, cz, seed, j))
+                     ++ "," ++ int_to_string(CubeForge.Poi.cham_wz(k, cx, cz, seed, j))
+                     ++ " y " ++ int_to_string(float_to_int(CubeForge.Poi.cham_y(k, cx, cz, seed, j, CubeForge.Poi.ground(k, cx, cz, seed))))
+                     ++ " r " ++ int_to_string(float_to_int(CubeForge.Poi.cham_r(k, cx, cz, seed, j)))) end
   end
   pfn poi_kinds_go(n : Int, k : Int, seed : Int, scale : Float, acc : Int) : Int do
     if k >= CubeForge.Poi.kinds() do acc
@@ -3313,24 +3316,21 @@ mod CubeForge do
       slice_sect(k, cx, cz, seed, x0, wz, g, y - 1, y1)
     end
   end
-  pfn poi_slice_go(n : Int, seed : Int, i : Int) : Unit do
+  pfn poi_slice_go(n : Int, seed : Int, i : Int, j : Int) : Unit do
     let k = CubeForge.Poi.k_cavern()
     let cells = 16 * n / CubeForge.Poi.cell(k) + 1
     if i >= cells * cells do ()
     else
       let cx = i % cells
       let cz = i / cells
-      if !CubeForge.Poi.here(k, cx, cz, seed, CubeForge.Poi.poi_scale()) do poi_slice_go(n, seed, i + 1)
+      if !CubeForge.Poi.here(k, cx, cz, seed, CubeForge.Poi.poi_scale()) do poi_slice_go(n, seed, i + 1, j)
       else
         let g = CubeForge.Poi.ground(k, cx, cz, seed)
-        let a = CubeForge.Poi.bearing(k, cx, cz, seed)
-        let cu = CubeForge.Poi.cham_u(k, cx, cz, seed, 0)
-        let cv = CubeForge.Poi.cham_v(k, cx, cz, seed, 0)
-        let mx = CubeForge.Poi.sx(k, cx, cz, seed) + float_to_int(cu *. Math.cos(a) -. cv *. Math.sin(a))
-        let mz = CubeForge.Poi.sz(k, cx, cz, seed) + float_to_int(cu *. Math.sin(a) +. cv *. Math.cos(a))
-        let my = float_to_int(CubeForge.Poi.cham_y(k, cx, cz, seed, 0, g))
-        println("  cavern slice: chamber 0 at " ++ int_to_string(mx) ++ "," ++ int_to_string(mz) ++ " y " ++ int_to_string(my)
-                ++ "  radius " ++ int_to_string(float_to_int(CubeForge.Poi.cham_r(k, cx, cz, seed, 0))) ++ "  -- plan at y " ++ int_to_string(my) ++ ", x " ++ int_to_string(mx - 30) ++ ".." ++ int_to_string(mx + 30))
+        let mx = CubeForge.Poi.cham_wx(k, cx, cz, seed, j)
+        let mz = CubeForge.Poi.cham_wz(k, cx, cz, seed, j)
+        let my = float_to_int(CubeForge.Poi.cham_y(k, cx, cz, seed, j, g))
+        println("  cavern slice: chamber " ++ int_to_string(j) ++ " at " ++ int_to_string(mx) ++ "," ++ int_to_string(mz) ++ " y " ++ int_to_string(my)
+                ++ "  radius " ++ int_to_string(float_to_int(CubeForge.Poi.cham_r(k, cx, cz, seed, j))) ++ "  -- plan at y " ++ int_to_string(my) ++ ", x " ++ int_to_string(mx - 30) ++ ".." ++ int_to_string(mx + 30))
         slice_plan(k, cx, cz, seed, mx - 30, my, mz - 30, g, 0)
         println("  -- section along x at z " ++ int_to_string(mz))
         slice_sect(k, cx, cz, seed, mx - 30, mz, g, my + 22, my - 22)
@@ -3338,7 +3338,8 @@ mod CubeForge do
     end
   end
   pfn poi_report(n : Int, seed : Int) : Unit do
-    if Env.get_int("CF_POI_SLICE", 0) == 1 do poi_slice_go(n, seed, 0) else () end
+    -- CF_POI_SLICE=j+1 slices chamber j of the first cavern
+    if Env.get_int("CF_POI_SLICE", 0) >= 1 do poi_slice_go(n, seed, 0, Math.min_int(CubeForge.Poi.chambers() - 1, Env.get_int("CF_POI_SLICE", 0) - 1)) else () end
     if Env.get_int("CF_POI_GATE", 0) == 1 do poi_gate(seed) else () end
     let tz = Env.get_int("CF_POI_TRANSECT", -1)
     if tz >= 0 do println("  transect z=" ++ int_to_string(tz) ++ ": " ++ poi_transect_go(n, seed, tz, 0, "")) else () end

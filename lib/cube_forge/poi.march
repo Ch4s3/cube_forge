@@ -786,7 +786,59 @@ mod CubeForge.Poi do
   doc "Beams crossing each chamber."
   -- Sixteen a chamber. Naica is packed: the beams are most of what you see,
   -- and at ten the room still read as a room with some beams in it.
-  fn beams() : Int do 16 end
+  fn beams() : Int do beams_free() + beams_anchored() end
+  doc "Beams crossing the chamber's air: centred anywhere in it, free hashed directions."
+  fn beams_free() : Int do 12 end
+  doc """
+  Beams growing OUT OF the shell: anchored at a hashed point on the wall or
+  floor (the anchor's elevation is biased downward, so three in four stand on
+  the floor) and pointing inward with a hashed lean, one end buried in the
+  rock. Naica's floor is a field of these; without them the floor and walls
+  of a chamber were bare and every beam hung overhead.
+  """
+  fn beams_anchored() : Int do 14 end
+  fn beam_anchored(b : Int) : Bool do b >= beams_free() end
+  pfn anch_th(k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int) : Float do hash(k, cx, cz, seed, 300 + 7 * j + b) *. 6.2831853 end
+  -- elevation of the anchor from -1.45 (the floor) to +0.35: the hash is
+  -- squared toward the floor, so half of them stand within 30 degrees of it
+  pfn anch_ph(k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int) : Float do
+    let h = hash(k, cx, cz, seed, 330 + 7 * j + b)
+    0.0 -. 1.45 +. h *. h *. 1.8
+  end
+  pfn anch_nx(k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int) : Float do Math.cos(anch_ph(k, cx, cz, seed, j, b)) *. Math.cos(anch_th(k, cx, cz, seed, j, b)) end
+  pfn anch_ny(k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int) : Float do Math.sin(anch_ph(k, cx, cz, seed, j, b)) end
+  pfn anch_nz(k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int) : Float do Math.cos(anch_ph(k, cx, cz, seed, j, b)) *. Math.sin(anch_th(k, cx, cz, seed, j, b)) end
+  -- the axis: inward (minus the anchor's direction) with a lean of up to 0.6 on each axis, normalised
+  pfn anch_jx(k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int) : Float do 0.0 -. anch_nx(k, cx, cz, seed, j, b) +. (hash(k, cx, cz, seed, 360 + 7 * j + b) -. 0.5) *. 1.2 end
+  pfn anch_jy(k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int) : Float do 0.0 -. anch_ny(k, cx, cz, seed, j, b) +. (hash(k, cx, cz, seed, 390 + 7 * j + b) -. 0.5) *. 1.2 end
+  pfn anch_jz(k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int) : Float do 0.0 -. anch_nz(k, cx, cz, seed, j, b) +. (hash(k, cx, cz, seed, 420 + 7 * j + b) -. 0.5) *. 1.2 end
+  pfn anch_len(k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int) : Float do
+    let x = anch_jx(k, cx, cz, seed, j, b)
+    let y = anch_jy(k, cx, cz, seed, j, b)
+    let z = anch_jz(k, cx, cz, seed, j, b)
+    Math.max_float(0.0001, Math.sqrt(x *. x +. y *. y +. z *. z))
+  end
+  pfn anch_dx(k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int) : Float do anch_jx(k, cx, cz, seed, j, b) /. anch_len(k, cx, cz, seed, j, b) end
+  pfn anch_dy(k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int) : Float do anch_jy(k, cx, cz, seed, j, b) /. anch_len(k, cx, cz, seed, j, b) end
+  pfn anch_dz(k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int) : Float do anch_jz(k, cx, cz, seed, j, b) /. anch_len(k, cx, cz, seed, j, b) end
+  -- Where beam [b] of chamber [j] is centred. A free beam anywhere in the
+  -- chamber (0.9 of its radius each way, 0.7 vertically); an anchored one at
+  -- its anchor, 1.05 radii out so an end is buried, plus half its length inward.
+  pfn beam_ou(k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int) : Float do
+    let r = cham_r(k, cx, cz, seed, j)
+    if beam_anchored(b) do cham_u(k, cx, cz, seed, j) +. anch_nx(k, cx, cz, seed, j, b) *. r *. 1.05 +. anch_dx(k, cx, cz, seed, j, b) *. beam_half(k, cx, cz, seed, j, b)
+    else cham_u(k, cx, cz, seed, j) +. (hash(k, cx, cz, seed, 200 + 7 * j + b) -. 0.5) *. 1.8 *. r end
+  end
+  pfn beam_ov(k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int) : Float do
+    let r = cham_r(k, cx, cz, seed, j)
+    if beam_anchored(b) do cham_v(k, cx, cz, seed, j) +. anch_nz(k, cx, cz, seed, j, b) *. r *. 1.05 +. anch_dz(k, cx, cz, seed, j, b) *. beam_half(k, cx, cz, seed, j, b)
+    else cham_v(k, cx, cz, seed, j) +. (hash(k, cx, cz, seed, 230 + 7 * j + b) -. 0.5) *. 1.8 *. r end
+  end
+  pfn beam_oy(k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int, g : Int) : Float do
+    let r = cham_r(k, cx, cz, seed, j)
+    if beam_anchored(b) do cham_y(k, cx, cz, seed, j, g) +. anch_ny(k, cx, cz, seed, j, b) *. r *. 1.05 +. anch_dy(k, cx, cz, seed, j, b) *. beam_half(k, cx, cz, seed, j, b)
+    else cham_y(k, cx, cz, seed, j, g) +. (hash(k, cx, cz, seed, 260 + 7 * j + b) -. 0.5) *. 1.4 *. r end
+  end
 
   -- Beam [b] of chamber [j]: a segment through the chamber at a hashed
   -- attitude, longer than the chamber is wide so it drives into both walls.
@@ -801,9 +853,15 @@ mod CubeForge.Poi do
   pfn beam_el(k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int) : Float do
     hash(k, cx, cz, seed, 111 + 4 * (7 * j + b)) *. 1.2 -. 0.6
   end
-  pfn beam_dx(k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int) : Float do Math.cos(beam_az(k, cx, cz, seed, j, b)) *. Math.cos(beam_el(k, cx, cz, seed, j, b)) end
-  pfn beam_dy(k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int) : Float do Math.sin(beam_el(k, cx, cz, seed, j, b)) end
-  pfn beam_dz(k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int) : Float do Math.sin(beam_az(k, cx, cz, seed, j, b)) *. Math.cos(beam_el(k, cx, cz, seed, j, b)) end
+  pfn beam_dx(k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int) : Float do
+    if beam_anchored(b) do anch_dx(k, cx, cz, seed, j, b) else Math.cos(beam_az(k, cx, cz, seed, j, b)) *. Math.cos(beam_el(k, cx, cz, seed, j, b)) end
+  end
+  pfn beam_dy(k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int) : Float do
+    if beam_anchored(b) do anch_dy(k, cx, cz, seed, j, b) else Math.sin(beam_el(k, cx, cz, seed, j, b)) end
+  end
+  pfn beam_dz(k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int) : Float do
+    if beam_anchored(b) do anch_dz(k, cx, cz, seed, j, b) else Math.sin(beam_az(k, cx, cz, seed, j, b)) *. Math.cos(beam_el(k, cx, cz, seed, j, b)) end
+  end
   doc """
   Is beam [b] one of the large ones. FOUR IN FIVE are: Naica is packed with big
   ones, and a chamber where the big shafts are the minority reads as a cave that
@@ -818,8 +876,10 @@ mod CubeForge.Poi do
   doc "Half the beam's length, in blocks. A long one overshoots the chamber's radius, so it is embedded in the rock at both ends; a short one is a stub a third of the way across."
   fn beam_half(k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int) : Float do
     let h = hash(k, cx, cz, seed, 112 + 4 * (7 * j + b))
-    if beam_long(k, cx, cz, seed, j, b) do cham_r(k, cx, cz, seed, j) *. (1.10 +. 0.55 *. h)
-    else cham_r(k, cx, cz, seed, j) *. (0.35 +. 0.30 *. h) end
+    -- an anchored beam runs from the shell inward: a third to two thirds of the room
+    if beam_anchored(b) do cham_r(k, cx, cz, seed, j) *. (0.18 +. 0.32 *. h)
+    else if beam_long(k, cx, cz, seed, j, b) do cham_r(k, cx, cz, seed, j) *. (1.10 +. 0.55 *. h)
+    else cham_r(k, cx, cz, seed, j) *. (0.35 +. 0.30 *. h) end end
   end
   doc """
   The beam's radius at its thickest, in blocks. That thickness against its
@@ -834,7 +894,10 @@ mod CubeForge.Poi do
     -- a tenth of the room's radius, as at Naica: a metre-thick crystal in a
     -- ten-metre chamber. At 2.0-3.3 in an eleven-radius chamber six of them
     -- were a third of the room each and fused into slabs
-    if beam_long(k, cx, cz, seed, j, b) do 1.0 +. 0.6 *. h else 0.6 +. 0.4 *. h end
+    -- an anchored beam is a stub from the floor or wall: slimmer than the
+    -- beams that cross the room, or thirty of them fuse into a white floor
+    if beam_anchored(b) do 0.55 +. 0.55 *. h
+    else if beam_long(k, cx, cz, seed, j, b) do 1.0 +. 0.6 *. h else 0.6 +. 0.4 *. h end end
   end
   doc """
   How thick the beam is at position [t] along it, as a fraction of beam_rad:
@@ -883,10 +946,9 @@ mod CubeForge.Poi do
   -- One beam's eight floats at slot [i]. The centre and axis are exactly beam_d's.
   pfn beam_put(t : NativeF32Arr, i : Int, k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int, g : Int, shx : Float, shy : Float, shz : Float) : NativeF32Arr do
     let l = beam_half(k, cx, cz, seed, j, b)
-    let r = cham_r(k, cx, cz, seed, j)
-    let ou = cham_u(k, cx, cz, seed, j) +. (hash(k, cx, cz, seed, 200 + 7 * j + b) -. 0.5) *. 1.0 *. r
-    let ov = cham_v(k, cx, cz, seed, j) +. (hash(k, cx, cz, seed, 230 + 7 * j + b) -. 0.5) *. 1.0 *. r
-    let oy = cham_y(k, cx, cz, seed, j, g) +. (hash(k, cx, cz, seed, 260 + 7 * j + b) -. 0.5) *. r *. 0.9
+    let ou = beam_ou(k, cx, cz, seed, j, b)
+    let ov = beam_ov(k, cx, cz, seed, j, b)
+    let oy = beam_oy(k, cx, cz, seed, j, b, g)
     let du = beam_dx(k, cx, cz, seed, j, b) *. l
     let dy = beam_dy(k, cx, cz, seed, j, b) *. l
     let dv = beam_dz(k, cx, cz, seed, j, b) *. l

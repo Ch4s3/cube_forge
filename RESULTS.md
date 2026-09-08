@@ -3543,3 +3543,24 @@ corner sliver with an empty cut, and "the same floats" held vacuously until
 check. Three of four floor-level views are pixel-identical to the previous
 build (the fourth had the camera in the floor). 538 tests; `CF_POI=0` still
 31924079.
+
+### The floor and the walls (2026-09-07, later still)
+
+"Make the floor and walls busier." Two populations of beam now. Twelve FREE
+beams cross the chamber's air, centred anywhere in 0.9 of its radius (the
+spread this entry's parent claimed, and which had not actually landed: that
+edit's script aborted before writing, and the centres were still within half
+a radius -- the section slice, not the prose, is the record). Fourteen
+ANCHORED beams grow out of the shell: each at a hashed point on the wall or
+floor, the elevation squared toward the floor so half stand within thirty
+degrees of it, pointing inward with a lean of up to 0.6 on each axis, a fifth
+to half the room long, slimmer (0.55-1.1) than the crossing beams, and 1.05
+radii out so one end is buried. The first cut was sixteen and twenty at the
+crossing beams' thickness, and the largest chamber (radius 16, overlapping
+two others) was a white mass wall to wall; the counts, the length and the
+radius came down together until the rock showed between them again.
+
+`CF_TERRAIN_STATS=1` now lists every chamber of a cavern with its radius, and
+`CF_POI_SLICE=j+1` slices chamber j; the camera work was done in chamber 2 of
+seed 18, the largest. 538 tests; `CF_POI=0` still 31924079; worst frame
+standing in chamber 2, 8.9 ms.
