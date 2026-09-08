@@ -1,18 +1,25 @@
--- The twelve-tone row and its four classical forms.
+-- The pentatonic set, its four forms, and the register they sound in.
 --
--- Schoenberg's rule is the whole point: all twelve pitch classes sound before
--- any of them sounds again. That is what stops a drifting ambient line from
--- settling into a key, and it is why the score can wander across a world for
--- an hour without ever arriving somewhere and staying there.
+-- This WAS a twelve-tone row, and Schoenberg's rule -- all twelve pitch
+-- classes before any of them sounds again -- was the whole point: it is what
+-- stops a drifting ambient line from settling into a key. It worked, and it
+-- was the wrong instrument for the job. Notes here last most of the gap to the
+-- next one (Audio.note_seconds) so their tails overlap deliberately, and a
+-- chromatic row makes every one of those overlaps a random interval: minor
+-- seconds and tritones as often as anything else. Held under each other for
+-- four seconds at a time those do not blend, they beat.
 --
--- There is no row *array*. A row is a pure function of (seed, position), so
--- nothing is allocated, nothing is threaded through the frame, and the world's
--- row is fixed by its seed for the world's whole lifetime.
+-- A pentatonic set has no minor second and no tritone in it at all, so EVERY
+-- pair of notes in it is consonant and the overlap that was the problem
+-- becomes the point. It still never cadences -- there is no leading tone to
+-- resolve and no dominant to resolve it -- so the line still wanders for an
+-- hour without arriving, which is what the row was for.
 --
--- Building the row by rank rather than by shuffling is what makes "it is a
--- permutation" true by construction instead of true by luck: position i takes
--- the rank of its key among the twelve keys, ties broken by index, and a rank
--- is a bijection onto 0..11 whatever the keys happen to be.
+-- The permutation survives the change of material. There is no row *array*: a
+-- row is a pure function of (seed, position), nothing is allocated, and the
+-- world's row is fixed by its seed for the world's lifetime. Building it by
+-- rank rather than by shuffling is what makes "it is a permutation" true by
+-- construction instead of true by luck.
 mod CubeForge.Tone do
 
   alias CubeForge.Noise as N
@@ -23,6 +30,24 @@ mod CubeForge.Tone do
   fn form_i() : Int do 2 end
   fn form_ri() : Int do 3 end
 
+  doc "Degrees in the scale: the minor pentatonic, five of them."
+  fn degrees() : Int do 5 end
+
+  doc "Semitones above the tonic of scale degree [d]: the minor pentatonic, 0 3 5 7 10. No minor second and no tritone anywhere in it, which is why two of these sounding together always agree."
+  fn degree(d : Int) : Int do
+    if d == 0 do 0
+    else if d == 1 do 3
+    else if d == 2 do 5
+    else if d == 3 do 7
+    else 10 end end end end
+  end
+
+  doc "Positions in a row: the five degrees over two octaves, so a row has somewhere to go without leaving the scale."
+  fn steps() : Int do 2 * degrees() end
+
+  doc "Semitones above the tonic at position [p] of the SET, before the row permutes it."
+  fn pitch_of(p : Int) : Int do degree(p % degrees()) + 12 * (p / degrees()) end
+
   doc "The sort key for position [i] of the row for [seed]."
   fn key(seed : Int, i : Int) : Float do N.hash2(i, 0, seed) end
 
@@ -30,7 +55,7 @@ mod CubeForge.Tone do
   -- at a lower index. The index tie-break is what keeps this a bijection even
   -- if two keys collide.
   pfn rank(seed : Int, i : Int, j : Int, acc : Int) : Int do
-    if j >= 12 do acc
+    if j >= steps() do acc
     else
       let kj = key(seed, j)
       let ki = key(seed, i)
@@ -39,22 +64,38 @@ mod CubeForge.Tone do
     end
   end
 
-  doc "Pitch class 0..11 at position [i] of the prime row for [seed]."
+  doc "Position 0..steps()-1 of the set that the prime row puts at [i]."
   fn prime(seed : Int, i : Int) : Int do rank(seed, i, 0, 0) end
 
-  doc "Pitch class at position [i] of [form] of the row for [seed], transposed by [t] semitones. Inversion is taken about the row's first note, so the inverted row opens on the same pitch class the prime does and every interval after it is negated."
-  fn at(seed : Int, form : Int, t : Int, i : Int) : Int do
-    let src = if form == form_r() do 11 - i
-              else if form == form_ri() do 11 - i
+  doc "The set position at [i] of [form] of the row for [seed]. Inversion is taken about the row's first position, IN THE SCALE rather than in semitones, so an inverted row is still pentatonic -- inverting the semitones instead would land between the degrees and put back the intervals this set exists to avoid."
+  fn position(seed : Int, form : Int, i : Int) : Int do
+    let src = if form == form_r() do steps() - 1 - i
+              else if form == form_ri() do steps() - 1 - i
               else i end end
     let p = prime(seed, src)
     let inverted = if form == form_i() do true else form == form_ri() end
     let v = if inverted do 2 * prime(seed, 0) - p else p end
-    (((v + t) % 12) + 12) % 12
+    (((v % steps()) + steps()) % steps())
   end
 
-  doc "MIDI note number for pitch class [pc] in [octave] (octave 4 holds concert A at pitch class 9)."
-  fn midi(pc : Int, octave : Int) : Int do 12 * (octave + 1) + pc end
+  doc "Semitones above the tonic at position [i] of [form] of the row for [seed], transposed by [t] semitones."
+  fn at(seed : Int, form : Int, t : Int, i : Int) : Int do
+    pitch_of(position(seed, form, i)) + t
+  end
+
+  doc "MIDI note number for [semitones] above the tonic of [octave] (octave 4 holds concert A at 9 semitones)."
+  fn midi(semitones : Int, octave : Int) : Int do 12 * (octave + 1) + semitones end
+
+  doc "[m] shifted by whole octaves until it sits in [lo]..[hi], which must span at least an octave. The row spans two octaves and a biome transposes it by up to ten semitones on top of that, so without this the top of a bright biome's row sounded near 2 kHz -- shrill, and nothing to do with where that biome was supposed to sing. Folding by the octave keeps the pitch class, so the line is unchanged musically and only its register is held."
+  fn fold(m : Int, lo : Int, hi : Int) : Int do
+    if hi - lo < 11 do m else fold_go(m, lo, hi, 0) end
+  end
+  pfn fold_go(m : Int, lo : Int, hi : Int, guard : Int) : Int do
+    if guard >= 16 do m
+    else if m < lo do fold_go(m + 12, lo, hi, guard + 1)
+    else if m > hi do fold_go(m - 12, lo, hi, guard + 1)
+    else m end end end
+  end
 
   doc "Equal-tempered frequency of a MIDI note: 440 Hz at 69, doubling every twelve."
   fn hz(m : Int) : Float do 440.0 *. Math.pow(2.0, int_to_float(m - 69) /. 12.0) end

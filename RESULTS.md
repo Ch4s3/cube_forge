@@ -4991,3 +4991,69 @@ describes: water that moves does not invalidate the light box, the GPU flood
 only ever raises, so light already spread through what is now water stays.
 More water moving makes more of it. The fix is still to lower light locally
 rather than re-seed a box.
+
+## The score stops being serial, and three animals stop misbehaving (2026-09-08)
+
+**"Too many high pitched tones that don't blend together well or sound musical
+at all."** Two causes, and the second was the interesting one.
+
+The register was simply too high. `octave_of` named the octave a bare pitch
+class sounded in, and alpine's was 6: its row ran 1046-1976 Hz. The whole table
+came down an octave.
+
+The material was the rest. The score was a strict twelve-tone row, and the
+module said why: all twelve classes before any of them repeats is what stops a
+drifting ambient line from settling into a key. It does -- and notes here last
+most of the gap to the next one so their tails overlap ON PURPOSE, which means
+a chromatic row makes every one of those overlaps a random interval. Minor
+seconds and tritones as often as anything else, held under each other for
+seconds at a time. That is not atonality, it is beating.
+
+The row is now over a **minor pentatonic**, five degrees across two octaves.
+There is no minor second and no tritone anywhere in the set, so every pair of
+notes in it agrees and the overlap that was the problem becomes the point. It
+still never cadences -- no leading tone, no dominant -- so it still wanders for
+an hour without arriving, which is what the row was for. The permutation
+survives: a row is still a pure function of (seed, position), built by rank so
+that "it is a permutation" is true by construction, and the four forms still
+apply. Inversion is taken IN THE SCALE rather than in semitones; inverting the
+semitones would land between the degrees and put back the intervals the set
+exists to avoid.
+
+On top of that every note is folded by octaves into its biome's register
+(`Tone.fold`), so whatever the row and the biome's transposition do, nothing
+can go shrill again. Folding keeps the pitch class, so the line is unchanged
+musically and only its register is held. A test asserts no biome can sound a
+note above 800 Hz or below 60.
+
+Measured over the same 40 s walk, seed 7: the opening note goes 1318 Hz -> 349
+Hz, and the energy above 640 Hz goes **5.75% -> 0.38%**. The 1280-2560 Hz band
+that held the shrill note goes to zero.
+
+**The flightless birds hovered.** `want_y` asked every bird that was not a fish
+for a flyer's cruising height -- nine blocks up feeding, thirteen fleeing,
+thirty-nine departing. `Fauna.flightless` already existed and nothing consulted
+it. A ratite now takes ground height in every mode; it runs instead, and the
+speed and the steering already there do the rest.
+
+**The flocks clumped.** `separation()` -- closer than this and flockmates push
+apart -- was a constant 1.6 blocks, and a Mossmoa is 4.6 blocks long: they only
+pushed apart once their centres were closer than a third of a body, so they
+stood in each other. It is a function of the species now, 1.6 + 1.6 * body
+scale, so a moa keeps seven blocks and a finch keeps two.
+
+**And there were fifteen of them.** A flock is sized by its chunk's population,
+which runs to fifteen -- right for finches, absurd for animals that are metres
+tall. `Fauna.group_cap` caps a ratite group at five; everything else keeps the
+population's own number.
+
+**Being under water looked like being on land.** There was an underwater tint
+all along -- a full-screen quad, drawn when the eye is in water -- and it had
+been dead since the vertex layout grew a tenth float for the emissive blocks.
+`underwater_quad` still wrote nine, so every vertex was one float short, every
+field after the first was read out of its neighbour's, and the quad drew
+nothing recognisable. It gets its tenth float back. `CF_UNDERWATER=0` is the
+A/B, and it is what showed the frame underneath is very nearly black: without
+the tint a submerged frame says nothing about being submerged at all.
+
+567 tests, lint --strict clean.

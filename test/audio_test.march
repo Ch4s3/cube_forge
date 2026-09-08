@@ -85,18 +85,18 @@ mod CubeForge.Test.Audio do
       let want_form = tick % 4
       let want_t = tick % 12
       let s1 = Audio.advance(s, tick, 8, want_form, want_t, seed)
-      let mid = Audio.index_of(s) != 11
+      let mid = Audio.index_of(s) != CubeForge.Tone.steps() - 1
       let changed = Audio.form_of_sched(s1) != Audio.form_of_sched(s) || Audio.transpose_of_sched(s1) != Audio.transpose_of_sched(s)
       if mid && changed do tick else form_change_mid_row(s1, tick + 1, n, seed) end end end
   end
 
-  -- Every position of the row is visited in order, 0..11 and round again.
+  -- Every position of the row is visited in order, and round again.
   pfn index_out_of_order(s : CubeForge.Audio.Sched, tick : Int, n : Int, seed : Int) : Int do
     if tick >= n do -1
     else if !Audio.due(s, tick) do index_out_of_order(s, tick + 1, n, seed)
     else
       let s1 = Audio.advance(s, tick, 8, 0, 0, seed)
-      if Audio.index_of(s1) != (Audio.index_of(s) + 1) % 12 do tick
+      if Audio.index_of(s1) != (Audio.index_of(s) + 1) % CubeForge.Tone.steps() do tick
       else index_out_of_order(s1, tick + 1, n, seed) end end end
   end
 
@@ -242,9 +242,30 @@ mod CubeForge.Test.Audio do
     end
   end
 
+  -- -1 when every note every biome can sound sits in a sane register.
+  pfn note_break(b : Int, i : Int) : Int do
+    if i >= CubeForge.Tone.steps() do -1
+    else
+      let hz = CubeForge.Tone.hz(Audio.note_midi(b, CubeForge.Tone.at(7, Audio.form_of(b), Audio.transpose_of(b), i)))
+      if hz > 800.0 || hz < 60.0 do i else note_break(b, i + 1) end
+    end
+  end
+  pfn shrill_break(b : Int) : Int do
+    if b > 9 do -1
+    else if note_break(b, 0) >= 0 do b
+    else shrill_break(b + 1) end end
+  end
+
   describe "Audio biome table" do
     test "answers for all eight biomes" do
       Test.assert_eq_int(table_break(0), -1, "every id in range")
+    end
+
+    test "no biome can sound a shrill note, whatever the row and the transposition do" do
+      -- the report was "too many high pitched tones": the old table let alpine
+      -- top out near 2 kHz. Every note every biome can ask for, over every
+      -- position of the row and every transposition the table uses.
+      Test.assert_eq_int(shrill_break(0), -1, "every note is under 800 Hz and over 60")
     end
 
     test "different biomes really do sound different" do
@@ -260,8 +281,8 @@ mod CubeForge.Test.Audio do
                          "the row is always finished before the biome is adopted")
     end
 
-    test "states all twelve positions in order" do
-      Test.assert_eq_int(index_out_of_order(Audio.sched_start(0), 0, 6000, 42), -1, "0..11 and round again")
+    test "states every position of the row in order" do
+      Test.assert_eq_int(index_out_of_order(Audio.sched_start(0), 0, 6000, 42), -1, "0..steps-1 and round again")
     end
 
     test "fires notes at roughly the requested rate" do

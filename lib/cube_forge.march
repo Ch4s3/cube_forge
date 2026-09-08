@@ -477,7 +477,10 @@ mod CubeForge do
         let hx = int_to_float(x) +. 0.5
         let hz = int_to_float(z) +. 0.5
         let hy = flock_home_y(bio, sp, x, z)
-        Flock.send_load(Array.get(fpids, free), sp, have, seed * 31 + free + 7 * (cx + n * cz), hx, hy, hz)
+        -- the population's count, capped by what a group of this species is
+        -- (Fauna.group_cap): a ratite herd of fifteen is not a flock
+        let sized = if have > Fauna.group_cap(sp) do Fauna.group_cap(sp) else have end
+        Flock.send_load(Array.get(fpids, free), sp, sized, seed * 31 + free + 7 * (cx + n * cz), hx, hy, hz)
         -- a migrant ARRIVES: it starts far out and high, from the way it
         -- leaves, and the pull home it already has flies it in
         if Fauna.migrant(sp) do
@@ -3136,14 +3139,14 @@ mod CubeForge do
               let fired = if Audio.due(sched, tick) do
                 let gap = Audio.gap_ticks(Audio.rate_of(bid), tick, seed)
                 let pc = Audio.pitch_class(sched, seed)
-                Aud.note(Tone.hz(Tone.midi(pc, Audio.octave_of(bid))),
+                Aud.note(Tone.hz(Audio.note_midi(bid, pc)),
                          Audio.note_seconds(gap), Audio.timbre_of(bid), Audio.note_gain() *. mus_vol)
                 if audio_log do
                   println("note t" ++ int_to_string(tick) ++ " row[" ++ int_to_string(Audio.index_of(sched))
                           ++ "] pc " ++ int_to_string(pc) ++ " form " ++ int_to_string(Audio.form_of_sched(sched))
                           ++ "+" ++ int_to_string(Audio.transpose_of_sched(sched))
                           ++ " oct " ++ int_to_string(Audio.octave_of(bid))
-                          ++ " " ++ float_to_string(Tone.hz(Tone.midi(pc, Audio.octave_of(bid)))) ++ " Hz for "
+                          ++ " " ++ float_to_string(Tone.hz(Audio.note_midi(bid, pc))) ++ " Hz for "
                           ++ float_to_string(Audio.note_seconds(gap)) ++ "s")
                 else () end
                 Audio.advance(sched, tick, Audio.rate_of(bid), Audio.form_of(bid), Audio.transpose_of(bid), seed)
@@ -3307,7 +3310,10 @@ mod CubeForge do
           if scene_has_hit(sc1) do CubeForge.Ffi.Window.gfx_draw_lines(outline_slot(), Outline.vertex_count()) else () end
           -- the underwater screen tint only makes sense from the real first-person eye
           if map_mode1 do ()
-          else if Player.eye_in_water(player1, scene_world(sc1)) do CubeForge.Ffi.Window.gfx_draw_hud(underwater_slot(), 6, true) else () end end
+          -- CF_UNDERWATER=0 draws the world without it: the A/B for what the tint is
+          -- worth, and what showed that a submerged frame without it is very
+          -- nearly black and says nothing about being under water at all.
+          else if Player.eye_in_water(player1, scene_world(sc1)) && Env.get_int("CF_UNDERWATER", 1) == 1 do CubeForge.Ffi.Window.gfx_draw_hud(underwater_slot(), 6, true) else () end end
           let marker1 = if map_mode1 do Marker.build(marker, V.x(Player.position(player1)), V.z(Player.position(player1))) else marker end
           if map_mode1 do
             Win.gfx_upload(Marker.slot(), F32Buf.storage(marker1), F32Buf.len(marker1))
@@ -3656,8 +3662,14 @@ mod CubeForge do
   end
   pfn species_rgb() : NativeF32Arr do species_rgb_go(NativeArray.make_f32(18, 0.0), 1) end
 
+  -- Ten floats a vertex, not nine (Vx.floats): pos.xyz, uv, layer, shade,
+  -- face, fx, and BLOCK LIGHT last. The block-light float was added to the
+  -- layout for the emissive blocks and never added here, so every vertex of
+  -- this quad was one float short, every field after the first was read out of
+  -- its neighbour's, and the tint drew nothing recognisable -- which is why
+  -- being under water looked like being on land.
   pfn underwater_quad() : CubeForge.F32Buf.F32Buf do
-    let v = fn (b, x, y, u, t) -> b |> F32Buf.push3(x, y, 0.0) |> F32Buf.push(u) |> F32Buf.push(t) |> F32Buf.push(Texture.water_layer()) |> F32Buf.push(0.6) |> F32Buf.push(0.0) |> F32Buf.push(Vx.plain())
+    let v = fn (b, x, y, u, t) -> b |> F32Buf.push3(x, y, 0.0) |> F32Buf.push(u) |> F32Buf.push(t) |> F32Buf.push(Texture.water_layer()) |> F32Buf.push(0.6) |> F32Buf.push(0.0) |> F32Buf.push(Vx.plain()) |> F32Buf.push(0.0)
     F32Buf.new(64) |> v(-1.0, -1.0, 0.0, 0.0) |> v(1.0, -1.0, 4.0, 0.0) |> v(1.0, 1.0, 4.0, 3.0)
                    |> v(-1.0, -1.0, 0.0, 0.0) |> v(1.0, 1.0, 4.0, 3.0) |> v(-1.0, 1.0, 0.0, 3.0)
   end

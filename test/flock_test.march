@@ -304,4 +304,55 @@ mod CubeForge.Test.Flock do
     end
   end
 
+  -- ── The flightless ───────────────────────────────────────────────────────
+  -- A bird that cannot fly wanted a flyer's cruising height in every mode but
+  -- roost -- nine blocks up while feeding, thirteen fleeing, thirty-nine
+  -- leaving. A moa hovering.
+  pfn hovers(sp : Int, mode : Int) : Bool do
+    Fl.want_y(sp, mode, 70, 0.0, 0.5) > 70.0 +. Fl.roost_y() +. 0.001
+  end
+  pfn any_hover(sp : Int, mode : Int) : Int do
+    if mode > 3 do -1
+    else if hovers(sp, mode) do mode
+    else any_hover(sp, mode + 1) end end
+  end
+
+  describe "a flightless bird stays on the ground" do
+    test "in every mode there is" do
+      Test.assert_eq_int(any_hover(CubeForge.Fauna.sp_stoneratite(), 0), -1, "the ratite never leaves the ground")
+      Test.assert_eq_int(any_hover(CubeForge.Fauna.sp_mossmoa(), 0), -1, "nor the moa")
+      Test.assert_eq_int(any_hover(CubeForge.Fauna.sp_brinewaddle(), 0), -1, "nor the waddler")
+    end
+
+    test "a bird that CAN fly still takes to the air to feed and to flee" do
+      Test.assert_true(hovers(CubeForge.Fauna.sp_grasspipit(), Fl.m_feed()), "the pipit cruises")
+      Test.assert_true(hovers(CubeForge.Fauna.sp_ridgehawk(), Fl.m_flee()), "the hawk climbs to flee")
+    end
+
+    test "a flyer still comes down to roost" do
+      Test.assert_true(!hovers(CubeForge.Fauna.sp_grasspipit(), Fl.m_roost()), "roosting is on the ground for everyone")
+    end
+  end
+
+  describe "flockmates keep their distance" do
+    test "a bigger animal wants more room" do
+      -- the spacing was one constant 1.6 blocks, which is a third of a moa
+      Test.assert_true(Fl.separation(CubeForge.Fauna.sp_mossmoa()) > Fl.separation(CubeForge.Fauna.sp_cinderfinch()) *. 2.0,
+                       "a moa keeps more than twice a finch's distance")
+      Test.assert_true(Fl.separation(CubeForge.Fauna.sp_mossmoa()) > CubeForge.Fauna.body_scale(CubeForge.Fauna.sp_mossmoa()),
+                       "and more than its own body length, so two of them do not stand in each other")
+    end
+  end
+
+  describe "how many to a group" do
+    test "the big flightless birds come in small groups" do
+      Test.assert_eq_int(CubeForge.Fauna.group_cap(CubeForge.Fauna.sp_mossmoa()), 5, "a moa herd is at most five")
+      Test.assert_eq_int(CubeForge.Fauna.group_cap(CubeForge.Fauna.sp_stoneratite()), 5, "so is a ratite's")
+    end
+
+    test "the small birds still flock properly" do
+      Test.assert_true(CubeForge.Fauna.group_cap(CubeForge.Fauna.sp_cinderfinch()) > 5, "a finch flock is not capped at five")
+    end
+  end
+
 end

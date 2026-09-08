@@ -121,18 +121,27 @@ mod CubeForge.Audio do
     else 0 end end end end end end end end end
   end
 
-  doc "Octave the voice sits in. Alpine sings above the treeline and forests sit under it."
+  doc "Octave the voice sits in: the BOTTOM of its register, not its centre. Alpine sings above the treeline and forests sit under it, but the whole table came down an octave when the pitches stopped being bare pitch classes -- a row now spans two octaves of its own (Tone.steps) and a biome transposes it by up to ten semitones besides, so an octave that used to name the only note there was now names the floor of a two-octave window. Alpine was the loudest offender at 6: its row topped out near 2 kHz."
   fn octave_of(b : Int) : Int do
-    if b == Biome.b_tundra() do 5
-    else if b == Biome.b_taiga() do 4
-    else if b == Biome.b_grassland() do 4
+    if b == Biome.b_tundra() do 4
+    else if b == Biome.b_taiga() do 3
+    else if b == Biome.b_grassland() do 3
     else if b == Biome.b_forest() do 3
-    else if b == Biome.b_desert() do 5
+    else if b == Biome.b_desert() do 4
     else if b == Biome.b_wetland() do 3
-    else if b == Biome.b_beach() do 4
+    else if b == Biome.b_beach() do 3
     else if b == Biome.b_oasis() do 3
     else if b == Biome.b_grove() do 2
-    else 6 end end end end end end end end end
+    else 4 end end end end end end end end end
+  end
+
+  doc "Semitones a biome's register spans above its own octave. Nineteen is an octave and a fifth: room for the line to move without the top of it turning shrill."
+  fn register_span() : Int do 18 end
+
+  doc "The MIDI note a [semitones]-above-the-tonic row degree actually sounds at in biome [b]: the note folded by octaves into the biome's register. Every pitch the score can ask for lands between the biome's floor and a fifth above the octave over it, whatever the row and the transposition do."
+  fn note_midi(b : Int, semitones : Int) : Int do
+    let lo = Tone.midi(0, octave_of(b))
+    Tone.fold(Tone.midi(semitones, octave_of(b)), lo, lo + register_span())
   end
 
   doc "Waveform id for the voice: 0 glass, 1 triangle, 2 filtered saw, 3 sine, 4 hollow square. Read by the synthesiser in cf_audio.c."
@@ -201,18 +210,18 @@ mod CubeForge.Audio do
   doc "Is a note due at [tick]?"
   fn due(s : Sched, tick : Int) : Bool do tick >= next_of(s) end
 
-  doc "The pitch class of the note this schedule is holding, for the world's row."
+  doc "Semitones above the tonic of the note this schedule is holding, for the world's row. [note_midi] puts it in a register."
   fn pitch_class(s : Sched, seed : Int) : Int do
     Tone.at(seed, form_of_sched(s), transpose_of_sched(s), index_of(s))
   end
 
-  doc "Fire the held note and set up the next one. The biome's [want_form] and [want_t] are adopted only when the row wraps, so walking into a forest never cuts a row in half -- the harmonic shift waits for all twelve classes to have sounded, up to a row later."
+  doc "Fire the held note and set up the next one. The biome's [want_form] and [want_t] are adopted only when the row wraps, so walking into a forest never cuts a row in half -- the harmonic shift waits for every position of the row to have sounded, up to a row later."
   fn advance(s : Sched, tick : Int, rate : Int, want_form : Int, want_t : Int, seed : Int) : Sched do
     let i = index_of(s)
-    let wrapped = i == 11
+    let wrapped = i == Tone.steps() - 1
     let form1 = if wrapped do want_form else form_of_sched(s) end
     let t1 = if wrapped do want_t else transpose_of_sched(s) end
-    Sched(tick + gap_ticks(rate, tick, seed), (i + 1) % 12, form1, t1)
+    Sched(tick + gap_ticks(rate, tick, seed), (i + 1) % Tone.steps(), form1, t1)
   end
 
 end

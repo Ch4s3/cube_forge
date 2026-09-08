@@ -111,8 +111,8 @@ mod CubeForge.Flock do
   fn fish_depth() : Float do 2.0 end
   doc "How far a flock strays from its home before it is steered back."
   fn home_radius() : Float do 14.0 end
-  doc "Closer than this and flockmates push apart."
-  fn separation() : Float do 1.6 end
+  doc "Closer than this and flockmates push apart. It is a function of the SPECIES because it was a constant 1.6 blocks and a Mossmoa is 4.6 blocks long: nine of them inside a fourteen-block home radius, pushing apart only once their centres were closer than a third of a body, stood in each other. A flock reads as clumped when its spacing is set by a number smaller than its animals."
+  fn separation(sp : Int) : Float do 1.6 +. Fa.body_scale(sp) *. 1.6 end
   doc "The player closer than this puts the flock up and away. What makes scanning a skill rather than a formality."
   fn flee_radius() : Float do 7.0 end
   doc "Blocks a second, feeding."
@@ -147,14 +147,15 @@ mod CubeForge.Flock do
     else if act == Fa.act_night() do (if sun < 0.1 do 0.8 else fish_depth() *. 3.0 end)
     else fish_depth() end end
   end
-  doc "The height this animal wants, from the ground under it. A fish is never asked to leave the water, however hard it is fleeing."
+  doc "The height this animal wants, from the ground under it. A fish is never asked to leave the water, however hard it is fleeing, and a FLIGHTLESS bird is never asked to leave the ground: it fed, fled and migrated at a flyer's cruising height, nine blocks up, which is a moa hovering. It runs instead -- the same ground height in every mode, and the speed and the steering do the rest."
   fn want_y(sp : Int, mode : Int, ground : Int, water_y : Float, sun : Float) : Float do
     let g = int_to_float(ground)
     if Fa.is_fish(sp) do clampf(water_y -. fish_hold(sp, sun), g +. 0.6, water_y -. 0.6)
+    else if Fa.flightless(sp) do g +. roost_y()
     else if mode == m_roost() do g +. roost_y()
     else if mode == m_flee() do g +. cruise() +. 4.0
     else if mode == m_depart() do g +. cruise() +. depart_climb()
-    else g +. cruise() end end end end
+    else g +. cruise() end end end end end
   end
 
   -- A wander angle that is a pure function of the flock's seed, the animal and
@@ -174,27 +175,27 @@ mod CubeForge.Flock do
   -- Separation is two walks rather than one returning a pair: a two-element
   -- result would have to be an array, and allocating one per animal per tick is
   -- exactly the shape of allocation this codebase keeps having to remove.
-  pfn sep_x(b : NativeFloatArr, n : Int, i : Int, j : Int, acc : Float) : Float do
+  pfn sep_x(b : NativeFloatArr, sp : Int, n : Int, i : Int, j : Int, acc : Float) : Float do
     if j >= n do acc
-    else if j == i do sep_x(b, n, i, j + 1, acc)
+    else if j == i do sep_x(b, sp, n, i, j + 1, acc)
     else
       let dx = pos_x(b, i) -. pos_x(b, j)
       let dz = pos_z(b, i) -. pos_z(b, j)
       let d2 = dx *. dx +. dz *. dz
-      if d2 > separation() *. separation() do sep_x(b, n, i, j + 1, acc)
-      else if d2 < 0.0001 do sep_x(b, n, i, j + 1, acc +. 0.5)
-      else sep_x(b, n, i, j + 1, acc +. dx /. d2) end end end end
+      if d2 > separation(sp) *. separation(sp) do sep_x(b, sp, n, i, j + 1, acc)
+      else if d2 < 0.0001 do sep_x(b, sp, n, i, j + 1, acc +. 0.5)
+      else sep_x(b, sp, n, i, j + 1, acc +. dx /. d2) end end end end
   end
-  pfn sep_z(b : NativeFloatArr, n : Int, i : Int, j : Int, acc : Float) : Float do
+  pfn sep_z(b : NativeFloatArr, sp : Int, n : Int, i : Int, j : Int, acc : Float) : Float do
     if j >= n do acc
-    else if j == i do sep_z(b, n, i, j + 1, acc)
+    else if j == i do sep_z(b, sp, n, i, j + 1, acc)
     else
       let dx = pos_x(b, i) -. pos_x(b, j)
       let dz = pos_z(b, i) -. pos_z(b, j)
       let d2 = dx *. dx +. dz *. dz
-      if d2 > separation() *. separation() do sep_z(b, n, i, j + 1, acc)
-      else if d2 < 0.0001 do sep_z(b, n, i, j + 1, acc -. 0.5)
-      else sep_z(b, n, i, j + 1, acc +. dz /. d2) end end end end
+      if d2 > separation(sp) *. separation(sp) do sep_z(b, sp, n, i, j + 1, acc)
+      else if d2 < 0.0001 do sep_z(b, sp, n, i, j + 1, acc -. 0.5)
+      else sep_z(b, sp, n, i, j + 1, acc +. dz /. d2) end end end end
   end
 
   pfn centre_x(b : NativeFloatArr, n : Int, i : Int, acc : Float) : Float do
@@ -223,8 +224,8 @@ mod CubeForge.Flock do
 
     let ahx = (cx -. x) *. 0.35
     let ahz = (cz -. z) *. 0.35
-    let asx = sep_x(b, n, i, 0, 0.0) *. 2.2
-    let asz = sep_z(b, n, i, 0, 0.0) *. 2.2
+    let asx = sep_x(b, f_sp, n, i, 0, 0.0) *. 2.2
+    let asz = sep_z(b, f_sp, n, i, 0, 0.0) *. 2.2
     -- home pulls only once it has actually strayed, so the flock drifts rather
     -- than orbiting a post
     let dhx = x -. hx

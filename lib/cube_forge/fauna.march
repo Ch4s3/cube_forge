@@ -342,6 +342,12 @@ mod CubeForge.Fauna do
   doc "A bird that does not fly."
   fn flightless(sp : Int) : Bool do if is_fish(sp) do false else plan_span(sp) <= 0 || plan_upright(sp) end end
 
+  doc "A big flightless bird -- a ratite. Two blocks of body and no wings: the Stoneratite and the Mossmoa."
+  fn ratite(sp : Int) : Bool do if flightless(sp) do body_scale(sp) >= 2.0 else false end end
+
+  doc "The most animals a group of this species holds. A flock is otherwise sized by the chunk's population, which runs to fifteen -- right for finches and absurd for ratites, which are metres tall, do not flock, and read as a herd of cattle at that count. Five is the top of a ratite group; everything else keeps the population's own number."
+  fn group_cap(sp : Int) : Int do if ratite(sp) do 5 else 15 end end
+
   doc "The one colour a species is, red channel. Its shading and underside are derived, so no two species drift out of key."
   fn base_r(sp : Int) : Int do
     if sp == 1 do 150 else if sp == 2 do 196 else if sp == 3 do 86
