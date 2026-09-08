@@ -2,7 +2,8 @@
  *
  * Responsibilities, and nothing else:
  *   - own a miniaudio playback device and its callback thread
- *   - turn six numbers a tick into 48 kHz stereo: one polyphonic voice,
+ *   - turn six numbers a tick, and a queue of scheduled notes, into 48 kHz
+ *     stereo: a polyphonic voice bank on a music bus with a stereo delay,
  *     four noise beds, one master lowpass
  *   - optionally tee the mix to a 16-bit WAV
  *
@@ -18,7 +19,7 @@
  *     read once per callback and slewed toward over ~50 ms. A parameter can
  *     therefore never click, and a read that crosses a write is at worst one
  *     callback stale.
- *   - a single-producer/single-consumer note ring, 32 deep, with atomic
+ *   - a single-producer/single-consumer note ring, 256 deep, with atomic
  *     indices. The render thread only ever pushes; the audio thread only ever
  *     pops. Neither ever takes a lock, so the audio thread cannot be made to
  *     wait on the render thread and glitch.
@@ -44,9 +45,21 @@
 #include <math.h>
 
 #define CF_SR         48000     /* sample rate */
-#define CF_VOICES     4         /* enough for a note plus the tail of the last */
-#define CF_NOTE_RING  32
+/* A bar is emitted all at once: three pad notes, up to two bass notes and up
+ * to eight melody notes, and the bar before it is still releasing. Twenty-four
+ * is that with room to spare; the old four were sized for one note at a time. */
+#define CF_VOICES     24
+#define CF_NOTE_RING  256       /* a bar's worth of notes lands in one push */
 #define CF_SLEW_TAU   0.05      /* seconds for a parameter to reach its target */
+
+/* The music bus delay. Notes this sparse need a tail to sound like they are in
+ * a place rather than in a list; the feedback is lowpassed so the repeats
+ * darken as they fade, and crossed left-to-right so they drift across the
+ * stereo field instead of stacking on the dry note. */
+#define CF_DLY_LEN    32768     /* 0.68 s at 48 kHz, comfortably over the tap */
+#define CF_DLY_TAP    18000     /* 0.375 s */
+#define CF_DLY_FB     0.42
+#define CF_DLY_WET    0.5
 
 /* Per-bed output trims. These are not taste, they are arithmetic: each bed's
  * generator has its own stationary variance, and these bring all four to the
@@ -68,7 +81,13 @@
 typedef struct { _Atomic double rain, wind, leaves, water, cutoff, music; } cf_params;
 static cf_params g_target = {0, 0, 0, 0, 18000.0, 0};
 
-typedef struct { double hz, dur, gain; int timbre; } cf_note;
+/* A scheduled note. `delay` is seconds from now to its onset, which is what
+ * lets March emit a whole bar at a tick boundary and still place an offbeat
+ * eighth to the sample. `dur` is the time from onset to the start of the
+ * release; `atk` fades in, the held part decays toward `sus`, `rel` fades out.
+ * `pan` is -1 left to 1 right. Every one of these is policy and every one of
+ * them is decided in March. */
+typedef struct { double delay, hz, dur, gain, atk, rel, sus, pan; int timbre; } cf_note;
 static cf_note              g_ring[CF_NOTE_RING];
 static _Atomic unsigned     g_ring_w = 0;    /* written by the render thread */
 static _Atomic unsigned     g_ring_r = 0;    /* written by the audio thread  */
@@ -82,9 +101,12 @@ static int       g_running   = 0;
 
 typedef struct {
     int    on;
-    double hz, gain, phase, dur;
+    double hz, gain, dur, atk, rel, sus, pan;
     int    timbre;
+    double pre;        /* seconds still to wait before the onset */
     double t;          /* seconds since the note started */
+    double phase, phase2, phase3;  /* the detuned partners of the fat timbres */
+    double vib;        /* vibrato phase; only long notes ever hear it */
     double lp;         /* per-voice one-pole state, for the filtered timbres */
 } cf_voice;
 
@@ -99,8 +121,11 @@ static struct {
     double   lfo_w, lfo_l;       /* bed amplitude wobble phases */
     double   crackle;            /* rain crackle envelope */
     double   bubble, bubble_ph;  /* underwater blip envelope and phase */
-    double   master_lp;
-} g_s = { 0, 0, 0, 0, 18000.0, 0, {{0}}, 0x1234567u, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    double   master_lp_l, master_lp_r;
+    double   dly_l[CF_DLY_LEN], dly_r[CF_DLY_LEN];
+    int      dly_i;
+    double   dly_damp_l, dly_damp_r;   /* one-pole in the feedback path */
+} g_s = { .cutoff = 18000.0, .rng = 0x1234567u };
 
 /* ── WAV tee ───────────────────────────────────────────────────────────────────
  * Honest caveat: with a real device open, this fwrite happens on the audio
@@ -149,41 +174,94 @@ static inline double cf_k(double hz) {
     return 1.0 - x;
 }
 
-static void cf_note_on(double hz, double dur, int timbre, double gain) {
+/* Take a voice for a note. A free slot first; failing that the one furthest
+ * into its release, and only then the longest-running — a bar can legitimately
+ * ask for thirteen voices at once and stealing a note that has only just been
+ * struck is the one audible way to get this wrong. A voice still counting down
+ * its pre-delay is never stolen: it has not been heard yet, so dropping it
+ * would silently tear a hole in the bar. */
+static void cf_note_on(const cf_note *n) {
     int slot = -1;
-    double oldest = -1.0;
+    double best = -1.0;
     for (int i = 0; i < CF_VOICES; i++) {
         if (!g_s.v[i].on) { slot = i; break; }
-        if (g_s.v[i].t > oldest) { oldest = g_s.v[i].t; slot = i; }   /* steal the longest-running */
+        if (g_s.v[i].pre > 0.0) continue;
+        double past = g_s.v[i].t - g_s.v[i].dur;    /* how far into the release */
+        if (past > best) { best = past; slot = i; }
     }
+    if (slot < 0) return;                            /* every voice is pending */
     cf_voice *v = &g_s.v[slot];
-    v->on = 1; v->hz = hz; v->dur = dur; v->gain = gain; v->timbre = timbre;
-    v->phase = 0.0; v->t = 0.0; v->lp = 0.0;
+    v->on = 1;
+    v->hz = n->hz; v->dur = n->dur; v->gain = n->gain; v->timbre = n->timbre;
+    v->atk = n->atk < 0.001 ? 0.001 : n->atk;
+    v->rel = n->rel < 0.01  ? 0.01  : n->rel;
+    /* The envelope's three segments are only continuous while the attack ends
+     * before the hold does. Nothing March sends today comes close — the longest
+     * attack is a third of a bar against a hold of a whole one — but the note
+     * shapes are policy and policy changes, and an attack that outran its hold
+     * would run the rising branch straight past the release and cut the note
+     * off mid-climb, which is a click. Cheaper to make it impossible here. */
+    if (v->atk > v->dur * 0.9) v->atk = v->dur * 0.9;
+    if (v->atk < 0.001) v->atk = 0.001;
+    v->sus = n->sus; v->pan = n->pan;
+    v->pre = n->delay < 0.0 ? 0.0 : n->delay;
+    /* The three oscillators start a third of a cycle apart. Struck in phase a
+     * detuned stack begins as one loud oscillator and only spreads as it
+     * drifts, which reads as a swell on the attack rather than as width. */
+    v->phase = 0.0; v->phase2 = 1.0 / 3.0; v->phase3 = 2.0 / 3.0;
+    v->t = 0.0; v->lp = 0.0; v->vib = 0.0;
 }
 
-/* Attack 1.2 s, full for the note's length, release 2.0 s. Sparse ambient
- * drift: nothing here is meant to have an edge on it. */
+/* Attack, a held part decaying toward `sus`, then a release from wherever the
+ * hold left off. All three come from March: this is the difference between a
+ * plucked melody note (1 ms in, decaying to a third over a beat) and a pad
+ * (a second and a half in, holding flat) and it is the single thing that most
+ * decided whether the old score sounded like music or like a held key. */
 static double cf_env(const cf_voice *v) {
-    const double A = 1.2, R = 2.0;
-    if (v->t < A) return v->t / A;
-    if (v->t < v->dur) return 1.0;
-    double r = (v->t - v->dur) / R;
-    return r >= 1.0 ? 0.0 : (1.0 - r);
+    if (v->t < v->atk) { double x = v->t / v->atk; return x * x * (3.0 - 2.0 * x); }
+    double hold = v->dur - v->atk;
+    if (hold < 1e-6) hold = 1e-6;
+    if (v->t < v->dur) {
+        double x = (v->t - v->atk) / hold;
+        return 1.0 + (v->sus - 1.0) * (1.0 - exp(-3.0 * x)) / 0.950213;
+    }
+    double x = (v->t - v->dur) / v->rel;
+    if (x >= 1.0) return 0.0;
+    return v->sus * (exp(-4.0 * x) - 0.018316) / 0.981684;
+}
+
+static inline double cf_saw(double p) { return 2.0 * p - 1.0; }
+
+static inline double cf_step(double *p, double hz) {
+    *p += hz / (double)CF_SR;
+    if (*p >= 1.0) *p -= 1.0;
+    return *p;
 }
 
 static double cf_osc(cf_voice *v) {
+    /* Vibrato, faded in over the first third of a second so it never smears an
+     * attack. A note held for a beat barely reaches it; a pad lives in it. */
+    double dep = v->t < 0.35 ? v->t / 0.35 : 1.0;
+    v->vib += 5.2 / (double)CF_SR;
+    if (v->vib >= 1.0) v->vib -= 1.0;
+    double hz = v->hz * (1.0 + 0.004 * dep * sin(6.283185307 * v->vib));
+
     double p = v->phase;                 /* 0..1 */
     double raw;
     switch (v->timbre) {
-        case 0:  /* glass: sine plus a quiet third partial */
-            raw = sin(6.283185307 * p) + 0.25 * sin(6.283185307 * 3.0 * p);
-            raw *= 0.8;
+        case 0:  /* glass: sine plus a quiet third partial, and a shimmering fifth */
+            raw = sin(6.283185307 * p) + 0.25 * sin(6.283185307 * 3.0 * p)
+                + 0.12 * sin(6.283185307 * v->phase2);
+            cf_step(&v->phase2, hz * 3.008);
+            raw *= 0.72;
             break;
-        case 1:  /* triangle */
-            raw = 4.0 * fabs(p - 0.5) - 1.0;
+        case 1:  /* triangle, doubled a whisker sharp so it beats slowly */
+            raw = (4.0 * fabs(p - 0.5) - 1.0) * 0.7
+                + (4.0 * fabs(v->phase2 - 0.5) - 1.0) * 0.3;
+            cf_step(&v->phase2, hz * 1.004);
             break;
         case 2:  /* saw, lowpassed to take the fizz off */
-            raw = 2.0 * p - 1.0;
+            raw = cf_saw(p);
             v->lp += cf_k(v->hz * 2.5) * (raw - v->lp);
             raw = v->lp;
             break;
@@ -192,12 +270,29 @@ static double cf_osc(cf_voice *v) {
             v->lp += cf_k(v->hz * 1.5) * (raw - v->lp);
             raw = v->lp * 1.4;
             break;
+        case 5:  /* pad: three saws a few cents apart under a soft lowpass. The
+                  * detune is the whole point — one saw is a buzz, three drifting
+                  * against each other is a chord voice that moves while it is held. */
+            raw = cf_saw(p) + cf_saw(v->phase2) + cf_saw(v->phase3);
+            cf_step(&v->phase2, hz * 1.006);
+            cf_step(&v->phase3, hz * 0.993);
+            v->lp += cf_k(v->hz * 3.0 + 200.0) * (raw * 0.33 - v->lp);
+            raw = v->lp * 0.9;
+            break;
+        case 6:  /* bass: a sine with a soft octave over it, so it reads as a
+                  * pitch on a small speaker and as weight on a large one */
+            raw = sin(6.283185307 * p) + 0.22 * sin(6.283185307 * v->phase2)
+                + 0.10 * cf_saw(v->phase3);
+            cf_step(&v->phase2, hz * 2.0);
+            cf_step(&v->phase3, hz);
+            v->lp += cf_k(v->hz * 4.0) * (raw * 0.8 - v->lp);
+            raw = v->lp;
+            break;
         default: /* sine */
             raw = sin(6.283185307 * p);
             break;
     }
-    v->phase += v->hz / (double)CF_SR;
-    if (v->phase >= 1.0) v->phase -= 1.0;
+    cf_step(&v->phase, hz);
     return raw;
 }
 
@@ -208,7 +303,7 @@ static void cf_drain_notes(void) {
     unsigned w = atomic_load_explicit(&g_ring_w, memory_order_acquire);
     while (r != w) {
         cf_note n = g_ring[r % CF_NOTE_RING];
-        cf_note_on(n.hz, n.dur, n.timbre, n.gain);
+        cf_note_on(&n);
         r++;
     }
     atomic_store_explicit(&g_ring_r, r, memory_order_release);
@@ -234,16 +329,38 @@ static void cf_render(float *out, uint32_t frames) {
         g_s.music  += slew * (t_music  - g_s.music);
         g_s.cutoff += slew * (t_cutoff - g_s.cutoff);
 
-        /* voices */
-        double voice = 0.0;
+        /* Voices, panned into a stereo music bus. A note counting down its
+         * pre-delay costs a decrement and nothing else — that countdown is
+         * what turns "a bar arrived" into "an eighth note landed 1.125 s in". */
+        double vl = 0.0, vr = 0.0;
         for (int v = 0; v < CF_VOICES; v++) {
-            if (!g_s.v[v].on) continue;
-            double e = cf_env(&g_s.v[v]);
-            if (e <= 0.0 && g_s.v[v].t > g_s.v[v].dur) { g_s.v[v].on = 0; continue; }
-            voice += cf_osc(&g_s.v[v]) * e * g_s.v[v].gain;
-            g_s.v[v].t += 1.0 / (double)CF_SR;
+            cf_voice *o = &g_s.v[v];
+            if (!o->on) continue;
+            if (o->pre > 0.0) { o->pre -= 1.0 / (double)CF_SR; continue; }
+            if (o->t > o->dur + o->rel) { o->on = 0; continue; }
+            double a = cf_osc(o) * cf_env(o) * o->gain;
+            /* Equal power, so panning a voice never changes how loud it is. */
+            double th = (o->pan + 1.0) * 0.785398163;
+            vl += a * cos(th);
+            vr += a * sin(th);
+            o->t += 1.0 / (double)CF_SR;
         }
-        voice *= g_s.music * CF_VOICE_TRIM;
+        vl *= g_s.music * CF_VOICE_TRIM;
+        vr *= g_s.music * CF_VOICE_TRIM;
+
+        /* The music bus delay. Read first, then write the input plus the
+         * crossed, damped feedback: left feeds right and right feeds left, so
+         * a single note walks across the field as it decays. */
+        int rd = g_s.dly_i - CF_DLY_TAP;
+        if (rd < 0) rd += CF_DLY_LEN;
+        double dl = g_s.dly_l[rd], dr = g_s.dly_r[rd];
+        g_s.dly_damp_l += cf_k(3000.0) * (dl - g_s.dly_damp_l);
+        g_s.dly_damp_r += cf_k(3000.0) * (dr - g_s.dly_damp_r);
+        g_s.dly_l[g_s.dly_i] = vl + g_s.dly_damp_r * CF_DLY_FB;
+        g_s.dly_r[g_s.dly_i] = vr + g_s.dly_damp_l * CF_DLY_FB;
+        g_s.dly_i = g_s.dly_i + 1 >= CF_DLY_LEN ? 0 : g_s.dly_i + 1;
+        double voice_l = vl + dl * CF_DLY_WET;
+        double voice_r = vr + dr * CF_DLY_WET;
 
         double n = cf_noise();
 
@@ -284,17 +401,16 @@ static void cf_render(float *out, uint32_t frames) {
         }
         double water = (g_s.water_lp * CF_WATER_TRIM + bub * 0.3) * g_s.water;
 
-        /* master: one lowpass over everything, which is the muffle */
-        double mixdown = voice + rain + wind + leaves + water;
-        g_s.master_lp += cf_k(g_s.cutoff) * (mixdown - g_s.master_lp);
-        double s = g_s.master_lp;
+        /* master: one lowpass over everything, which is the muffle. The beds are
+         * mono and go down the middle; only the music has a side to it. */
+        double bed = rain + wind + leaves + water;
+        g_s.master_lp_l += cf_k(g_s.cutoff) * ((voice_l + bed) - g_s.master_lp_l);
+        g_s.master_lp_r += cf_k(g_s.cutoff) * ((voice_r + bed) - g_s.master_lp_r);
 
         /* soft clip: a storm on a peak can stack four beds, and a hard clip on
          * noise sounds like a fault rather than like loudness */
-        s = tanh(s * 0.9);
-
-        out[i * 2 + 0] = (float)s;
-        out[i * 2 + 1] = (float)s;
+        out[i * 2 + 0] = (float)tanh(g_s.master_lp_l * 0.9);
+        out[i * 2 + 1] = (float)tanh(g_s.master_lp_r * 0.9);
     }
 
     if (g_wav) {
@@ -359,15 +475,16 @@ void cf_aud_set_mix(double rain, double wind, double leaves, double water,
     }
 }
 
-/* Queue one note. Single producer; the audio thread only ever reads. If the
- * ring is somehow full the note is dropped rather than blocking the render
- * thread — at one note every four seconds it never will be. */
-void cf_aud_note(double hz, double dur, int64_t timbre, double gain) {
+/* Queue one note, to sound `delay` seconds from now. Single producer; the audio
+ * thread only ever reads. If the ring is somehow full the note is dropped rather
+ * than blocking the render thread — a bar pushes at most thirteen into 256. */
+void cf_aud_note(double delay, double hz, double dur, int64_t timbre,
+                 double gain, double atk, double rel, double sus, double pan) {
     if (!g_running) return;
     unsigned w = atomic_load_explicit(&g_ring_w, memory_order_relaxed);
     unsigned r = atomic_load_explicit(&g_ring_r, memory_order_acquire);
     if (w - r >= CF_NOTE_RING) return;
-    g_ring[w % CF_NOTE_RING] = (cf_note){ hz, dur, gain, (int)timbre };
+    g_ring[w % CF_NOTE_RING] = (cf_note){ delay, hz, dur, gain, atk, rel, sus, pan, (int)timbre };
     atomic_store_explicit(&g_ring_w, w + 1, memory_order_release);
 }
 

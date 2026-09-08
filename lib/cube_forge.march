@@ -37,6 +37,7 @@ mod CubeForge do
   alias CubeForge.Veg as Veg
   alias CubeForge.Audio as Audio
   alias CubeForge.Tone as Tone
+  alias CubeForge.Score as Score
   alias CubeForge.Wind as Wind
   alias CubeForge.Ffi.Audio as Aud
   alias CubeForge.Myc as Myc
@@ -2626,6 +2627,65 @@ mod CubeForge do
 
   -- [first]: the process's first session (the only one that shows the start screen or honours CF_AUTOLOAD).
   -- [t0]: the clock at session start; [day0]: seconds into the day at that moment, so the sun continues from a save.
+  -- ── Playing a bar ─────────────────────────────────────────────────────────
+  --
+  -- The one impure part of the score. Everything about what these notes are is
+  -- decided in Score and Audio; all that happens here is the walk over a bar's
+  -- eighths and its three chord tones, handing each one to the synthesiser with
+  -- the delay that places it. A bar is pushed in one go, on the tick it falls
+  -- due, and the delays inside it are exact to the sample -- which is what lets
+  -- a six-hertz frame tick carry a pulse it could not otherwise express.
+
+  pfn play_pad(s : CubeForge.Audio.Sched, bid : Int, seed : Int, vol : Float, i : Int) : Unit do
+    if i >= 3 do ()
+    else
+      let root = Score.chord_root(seed, Audio.bar_of(s))
+      let d = Score.pad_degree(Audio.mode_of_sched(s), root, i)
+      Aud.note(0.0, Tone.hz(Score.midi_of(Audio.mode_of_sched(s), Audio.key_of(s, seed), Audio.pad_octave(bid), d)),
+               Audio.pad_hold(bid), Audio.pad_timbre(), Audio.pad_gain() *. vol,
+               Audio.pad_attack(bid), Audio.pad_release(bid), Audio.pad_sustain(), Audio.pad_pan(i))
+      play_pad(s, bid, seed, vol, i + 1)
+    end
+  end
+
+  pfn play_bass(s : CubeForge.Audio.Sched, bid : Int, seed : Int, vol : Float, i : Int) : Unit do
+    -- The downbeat, and on a busy bar the push on beat three.
+    if i >= 2 || (i == 1 && !Audio.bass_twice(bid)) do ()
+    else
+      let mode = Audio.mode_of_sched(s)
+      let d = Score.bass_degree(mode, Score.chord_root(seed, Audio.bar_of(s)))
+      Aud.note(Audio.bar_seconds(bid) *. 0.5 *. int_to_float(i),
+               Tone.hz(Score.midi_of(mode, Audio.bass_key(s, seed), Audio.bass_octave(), d)),
+               Audio.bass_hold(bid), Audio.bass_timbre(), Audio.bass_gain() *. vol *. (if i == 0 do 1.0 else 0.7 end),
+               Audio.bass_attack(), Audio.bass_release(), Audio.bass_sustain(), 0.0)
+      play_bass(s, bid, seed, vol, i + 1)
+    end
+  end
+
+  pfn play_melody(s : CubeForge.Audio.Sched, bid : Int, seed : Int, vol : Float, log : Bool, slot : Int) : Unit do
+    if slot >= Score.slots() do ()
+    else
+      let bar = Audio.bar_of(s)
+      let mode = Audio.mode_of_sched(s)
+      let dens = Audio.density_of(bid)
+      if Score.onset(seed, bar, slot, dens) do
+        let d = Score.mel_degree(seed, bar, mode, slot)
+        let m = Score.midi_of(mode, Audio.key_of(s, seed), Audio.octave_of(bid), d)
+        let hold = int_to_float(Score.note_eighths(seed, bar, slot, dens))
+                   *. Audio.eighth_seconds(bid) *. Audio.mel_hold()
+        Aud.note(Score.slot_seconds(Audio.bar_ticks_of(bid), Audio.ticks_per_second(), slot),
+                 Tone.hz(m), hold, Audio.timbre_of(bid), Audio.mel_gain(seed, bar, slot) *. vol,
+                 Audio.mel_attack(), Audio.mel_release(), Audio.mel_sustain(),
+                 Audio.mel_pan(seed, bar, slot))
+        if log do
+          println("  note slot " ++ int_to_string(slot) ++ " deg " ++ int_to_string(d)
+                  ++ " midi " ++ int_to_string(m) ++ " hold " ++ float_to_string(hold) ++ "s")
+        else () end
+      else () end
+      play_melody(s, bid, seed, vol, log, slot + 1)
+    end
+  end
+
   fn frame_loop(f : Frame, k : Knobs, sc_in, nchunks : Int, proj : NativeFloatArr, map_proj : NativeFloatArr, fps : Fps, wxpid, fpids, bpids, seed : Int, first : Bool, t0 : Float, day0 : Float) : Frame do
     match f do
       Frame(frame, last_t, player_in, sample, view, vp, map_mode, marker, flash, wcache, bcache, inv_open, drag_from, menu, menubuf, next_seed, worst, worst_at, sched, survey, known, faunap, faunab, herd, pop, kfauna, staged_in) ->
@@ -3133,20 +3193,21 @@ mod CubeForge do
               let s_aud = Menu.settings(menu5)
               let amb_vol = Settings.fraction(s_aud, Settings.field_master()) *. Settings.fraction(s_aud, Settings.field_ambience())
               let mus_vol = Settings.fraction(s_aud, Settings.field_master()) *. Settings.fraction(s_aud, Settings.field_music())
+              -- A bar, all at once. The pad first so the chord is established
+              -- under the melody, then the bass, then the line over both.
               let fired = if Audio.due(sched, tick) do
-                let gap = Audio.gap_ticks(Audio.rate_of(bid), tick, seed)
-                let pc = Audio.pitch_class(sched, seed)
-                Aud.note(Tone.hz(Tone.midi(pc, Audio.octave_of(bid))),
-                         Audio.note_seconds(gap), Audio.timbre_of(bid), Audio.note_gain() *. mus_vol)
                 if audio_log do
-                  println("note t" ++ int_to_string(tick) ++ " row[" ++ int_to_string(Audio.index_of(sched))
-                          ++ "] pc " ++ int_to_string(pc) ++ " form " ++ int_to_string(Audio.form_of_sched(sched))
-                          ++ "+" ++ int_to_string(Audio.transpose_of_sched(sched))
-                          ++ " oct " ++ int_to_string(Audio.octave_of(bid))
-                          ++ " " ++ float_to_string(Tone.hz(Tone.midi(pc, Audio.octave_of(bid)))) ++ " Hz for "
-                          ++ float_to_string(Audio.note_seconds(gap)) ++ "s")
+                  println("bar t" ++ int_to_string(tick) ++ " #" ++ int_to_string(Audio.bar_of(sched))
+                          ++ " " ++ Biome.name(bid)
+                          ++ " mode " ++ int_to_string(Audio.mode_of_sched(sched))
+                          ++ " key " ++ int_to_string(Audio.key_of(sched, seed))
+                          ++ " chord deg " ++ int_to_string(Score.chord_root(seed, Audio.bar_of(sched)))
+                          ++ " " ++ float_to_string(Audio.bar_seconds(bid)) ++ "s")
                 else () end
-                Audio.advance(sched, tick, Audio.rate_of(bid), Audio.form_of(bid), Audio.transpose_of(bid), seed)
+                play_pad(sched, bid, seed, mus_vol, 0)
+                play_bass(sched, bid, seed, mus_vol, 0)
+                play_melody(sched, bid, seed, mus_vol, audio_log, 0)
+                Audio.advance(sched, Audio.bar_ticks_of(bid), Audio.mode_of(bid), Audio.transpose_of(bid))
               else sched end
               Aud.set_mix(Audio.rain_of(m) *. amb_vol, Audio.wind_of(m) *. amb_vol, Audio.leaves_of(m) *. amb_vol,
                           Audio.water_of(m) *. amb_vol, Audio.cutoff_of(m), Audio.music_of(m) *. mus_vol)
@@ -4354,7 +4415,7 @@ mod CubeForge do
       -- The flock pool is loaded per session, from the world this session has:
       -- the actors outlive the game, their contents do not.
       if Env.get_int("CF_FAUNA_STATS", 0) == 1 do println(Fauna.stats()) else () end
-      match frame_loop(Frame(0, t4, player, 0, NativeArray.make_float(16, 0.0), NativeArray.make_f32(16, 0.0), false, F32Buf.new(64), Env.get_int("CF_FLASH", 0) == 1, 0.0, 0.0, false, -1, menu0, F32Buf.new(2048), NoStart, 0.0, -1, Audio.sched_start(0), false, known0, poses0, F32Buf.new(4096), CubeForge.Flocks.new(), pop0, kfauna0, NoShift), k, scene, n * n, proj, map_proj, fps0, wxpid, fpids, bpids, seed, first, t4, day0) do
+      match frame_loop(Frame(0, t4, player, 0, NativeArray.make_float(16, 0.0), NativeArray.make_f32(16, 0.0), false, F32Buf.new(64), Env.get_int("CF_FLASH", 0) == 1, 0.0, 0.0, false, -1, menu0, F32Buf.new(2048), NoStart, 0.0, -1, Audio.sched_start(0, Biome.biome_of(scene_biome(scene), 0, 0)), false, known0, poses0, F32Buf.new(4096), CubeForge.Flocks.new(), pop0, kfauna0, NoShift), k, scene, n * n, proj, map_proj, fps0, wxpid, fpids, bpids, seed, first, t4, day0) do
         Frame(frames, _, p, _, _, _, _, _, _, _, _, _, _, mfin, _, ns, worst, worst_at, _, _, _, _, _, _, _, _, _) ->
           let t5 = Win.time()
           println("ran " ++ int_to_string(frames) ++ " frames in " ++ ms(t5 -. t4) ++ " (" ++ float_to_string(int_to_float(frames) /. (t5 -. t4)) ++ " fps, vsync on); player ended at " ++ V.to_string(Player.position(p)))

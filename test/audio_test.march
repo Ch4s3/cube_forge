@@ -1,5 +1,5 @@
 -- The mixer policy: every gain a real gain, snow and water muffling the world
--- monotonically, and a note schedule that never breaks a row in half.
+-- monotonically, and a bar schedule that never modulates mid-phrase.
 mod CubeForge.Test.Audio do
 
   -- Capability ceiling (GAPS G41): this test only calls pure functions, but the
@@ -13,6 +13,7 @@ mod CubeForge.Test.Audio do
   import Test
   alias CubeForge.Audio as Audio
   alias CubeForge.Biome as Biome
+  alias CubeForge.Score as Score
 
   -- A coarse sweep of the whole input space, 1728 combinations, decoded from
   -- one index so the scan can be a single recursion.
@@ -62,49 +63,72 @@ mod CubeForge.Test.Audio do
     end
   end
 
-  -- The biome table must answer for all eight ids.
+  -- The biome table must answer for every id, and answer with something the
+  -- score and the synthesiser can actually use.
   pfn table_break(b : Int) : Int do
-    if b >= 8 do -1
+    if b >= Biome.count() do -1
     else
-      let bad = Audio.form_of(b) < 0 || Audio.form_of(b) > 3
+      let bad = Audio.mode_of(b) < 0 || Audio.mode_of(b) >= Score.mode_count()
                 || Audio.transpose_of(b) < 0 || Audio.transpose_of(b) > 11
-                || Audio.octave_of(b) < 3 || Audio.octave_of(b) > 6
-                || Audio.rate_of(b) < 4 || Audio.rate_of(b) > 14
+                || Audio.octave_of(b) < 4 || Audio.octave_of(b) > 6
+                || Audio.bar_ticks_of(b) < 12 || Audio.bar_ticks_of(b) > 48
+                || Audio.density_of(b) <= 0.0 || Audio.density_of(b) > 1.0
                 || Audio.timbre_of(b) < 0 || Audio.timbre_of(b) > 4
       if bad do b else table_break(b + 1) end
     end
   end
 
-  -- Walk the schedule, firing whenever due, and report the tick at which the
-  -- form changed while the row was part-stated.
-  pfn form_change_mid_row(s : CubeForge.Audio.Sched, tick : Int, n : Int, seed : Int) : Int do
-    if tick >= n do -1
-    else if !Audio.due(s, tick) do form_change_mid_row(s, tick + 1, n, seed)
+  -- Every voice has to be somewhere a listener can hear it, in every key, in
+  -- every mode, on every degree the progression can reach. A bass note under
+  -- 30 Hz is a thump on a good speaker and nothing at all on a bad one, and a
+  -- melody over 3 kHz is a whistle; both are what an unfolded key does.
+  pfn pitch_out_of_range(i : Int) : Int do
+    if i >= Biome.count() * 4 do -1
     else
-      -- the biome under the listener changes every tick, as violently as it can
-      let want_form = tick % 4
-      let want_t = tick % 12
-      let s1 = Audio.advance(s, tick, 8, want_form, want_t, seed)
-      let mid = Audio.index_of(s) != 11
-      let changed = Audio.form_of_sched(s1) != Audio.form_of_sched(s) || Audio.transpose_of_sched(s1) != Audio.transpose_of_sched(s)
-      if mid && changed do tick else form_change_mid_row(s1, tick + 1, n, seed) end end end
+      let b = i / 4
+      let m = Audio.mode_of(b)
+      let bar = i % 4
+      let root = Score.chord_root(11, bar)
+      let bass = Score.midi_of(m, Score.fold_key(Audio.transpose_of(b)), Audio.bass_octave(), Score.bass_degree(m, root))
+      let pad = Score.midi_of(m, Audio.transpose_of(b), Audio.pad_octave(b), Score.pad_degree(m, root, 2))
+      let mel = Score.midi_of(m, Audio.transpose_of(b), Audio.octave_of(b), Score.reg_high(m))
+      -- MIDI 29 is 44 Hz and 101 is 2.8 kHz: the outside of what a three-voice
+      -- texture can use at either end.
+      if bass < 29 || bass > 53 || pad < 45 || pad > 84 || mel < 62 || mel > 101 do i
+      else pitch_out_of_range(i + 1) end
+    end
   end
 
-  -- Every position of the row is visited in order, 0..11 and round again.
-  pfn index_out_of_order(s : CubeForge.Audio.Sched, tick : Int, n : Int, seed : Int) : Int do
+  -- Walk the schedule, playing whenever a bar is due, and report the tick at
+  -- which the mode or the key changed part-way through a phrase.
+  pfn shift_mid_phrase(s : CubeForge.Audio.Sched, tick : Int, n : Int) : Int do
     if tick >= n do -1
-    else if !Audio.due(s, tick) do index_out_of_order(s, tick + 1, n, seed)
+    else if !Audio.due(s, tick) do shift_mid_phrase(s, tick + 1, n)
     else
-      let s1 = Audio.advance(s, tick, 8, 0, 0, seed)
-      if Audio.index_of(s1) != (Audio.index_of(s) + 1) % 12 do tick
-      else index_out_of_order(s1, tick + 1, n, seed) end end end
+      -- the biome under the listener changes every bar, as violently as it can
+      let s1 = Audio.advance(s, 20, tick % Score.mode_count(), tick % 12)
+      let mid = (Audio.bar_of(s) + 1) % Score.phrase_bars() != 0
+      let changed = Audio.mode_of_sched(s1) != Audio.mode_of_sched(s)
+                    || Audio.transpose_of_sched(s1) != Audio.transpose_of_sched(s)
+      if mid && changed do tick else shift_mid_phrase(s1, tick + 1, n) end end end
   end
 
-  -- How many notes fire in [n] ticks at rate [rate].
-  pfn notes_in(s : CubeForge.Audio.Sched, tick : Int, n : Int, rate : Int, seed : Int, acc : Int) : Int do
+  -- Bars are numbered in order and the downbeat falls exactly bar_ticks apart:
+  -- a bar line that drifts is the one rhythmic error an ear will not forgive.
+  pfn bar_off_grid(s : CubeForge.Audio.Sched, tick : Int, n : Int, bt : Int) : Int do
+    if tick >= n do -1
+    else if !Audio.due(s, tick) do bar_off_grid(s, tick + 1, n, bt)
+    else
+      let s1 = Audio.advance(s, bt, 0, 0)
+      if Audio.bar_of(s1) != Audio.bar_of(s) + 1 || Audio.next_of(s1) != Audio.next_of(s) + bt do tick
+      else bar_off_grid(s1, tick + 1, n, bt) end end end
+  end
+
+  -- How many bars fall in [n] ticks at [bt] ticks a bar.
+  pfn bars_in(s : CubeForge.Audio.Sched, tick : Int, n : Int, bt : Int, acc : Int) : Int do
     if tick >= n do acc
-    else if !Audio.due(s, tick) do notes_in(s, tick + 1, n, rate, seed, acc)
-    else notes_in(Audio.advance(s, tick, rate, 0, 0, seed), tick + 1, n, rate, seed, acc + 1) end end
+    else if !Audio.due(s, tick) do bars_in(s, tick + 1, n, bt, acc)
+    else bars_in(Audio.advance(s, bt, 0, 0), tick + 1, n, bt, acc + 1) end end
   end
 
   describe "Audio.mix" do
@@ -218,11 +242,22 @@ mod CubeForge.Test.Audio do
     end
   end
 
-  describe "Audio.note_seconds" do
-    test "a note lasts most of the gap before the next one" do
-      Test.assert_true(Audio.note_seconds(Audio.min_gap()) > 1.5, "the shortest note is still long")
-      Test.assert_true(Audio.note_seconds(Audio.max_gap()) < 9.0, "the longest note still ends")
-      Test.assert_true(Audio.note_seconds(Audio.max_gap()) > Audio.note_seconds(Audio.min_gap()), "longer gap, longer note")
+  describe "Audio bar timing" do
+    test "a bar is a whole number of ticks, so the downbeat cannot drift" do
+      Test.assert_true(Math.abs(Audio.bar_seconds(Biome.b_forest())
+                        *. int_to_float(Audio.ticks_per_second())
+                        -. int_to_float(Audio.bar_ticks_of(Biome.b_forest()))) < 0.0001,
+                       "bar_seconds is bar_ticks over the tick rate, exactly")
+    end
+
+    test "eight eighths make a bar" do
+      Test.assert_true(Math.abs(Audio.eighth_seconds(Biome.b_forest()) *. 8.0
+                        -. Audio.bar_seconds(Biome.b_forest())) < 0.0001, "the grid closes")
+    end
+
+    test "every biome keeps a tempo somebody could follow" do
+      Test.assert_true(Audio.bar_seconds(Biome.b_wetland()) > 1.5, "the fastest is not a scramble")
+      Test.assert_true(Audio.bar_seconds(Biome.b_grove()) < 8.0, "the slowest is still a bar")
     end
   end
 
@@ -243,39 +278,67 @@ mod CubeForge.Test.Audio do
   end
 
   describe "Audio biome table" do
-    test "answers for all eight biomes" do
+    test "answers for every biome" do
       Test.assert_eq_int(table_break(0), -1, "every id in range")
+    end
+
+    test "every voice lands somewhere it can be heard" do
+      Test.assert_eq_int(pitch_out_of_range(0), -1, "bass, chord and melody all in register")
     end
 
     test "different biomes really do sound different" do
       Test.assert_true(Audio.octave_of(Biome.b_alpine()) != Audio.octave_of(Biome.b_forest()), "alpine sits above forest")
-      Test.assert_true(Audio.form_of(Biome.b_desert()) != Audio.form_of(Biome.b_grassland()), "desert and grassland take different forms")
-      Test.assert_true(Audio.rate_of(Biome.b_wetland()) > Audio.rate_of(Biome.b_desert()), "a wetland is busier than a desert")
+      Test.assert_true(Audio.mode_of(Biome.b_desert()) != Audio.mode_of(Biome.b_grassland()), "desert and grassland are in different modes")
+      Test.assert_true(Audio.density_of(Biome.b_wetland()) > Audio.density_of(Biome.b_desert()), "a wetland is busier than a desert")
+      Test.assert_true(Audio.bar_ticks_of(Biome.b_wetland()) < Audio.bar_ticks_of(Biome.b_grove()), "a wetland is faster than a grove")
     end
   end
 
   describe "Audio.advance" do
-    test "never changes form or transposition mid-row" do
-      Test.assert_eq_int(form_change_mid_row(Audio.sched_start(0), 0, 6000, 42), -1,
-                         "the row is always finished before the biome is adopted")
+    test "never changes mode or key mid-phrase" do
+      Test.assert_eq_int(shift_mid_phrase(Audio.sched_start(0, Biome.b_forest()), 0, 6000), -1,
+                         "the phrase is always finished before the biome is adopted")
     end
 
-    test "states all twelve positions in order" do
-      Test.assert_eq_int(index_out_of_order(Audio.sched_start(0), 0, 6000, 42), -1, "0..11 and round again")
+    test "keeps the bar line on the grid" do
+      Test.assert_eq_int(bar_off_grid(Audio.sched_start(0, Biome.b_forest()), 0, 6000, 20), -1,
+                         "bars in order, exactly bar_ticks apart")
     end
 
-    test "fires notes at roughly the requested rate" do
-      -- 6 ticks a second, so 3600 ticks is ten minutes; at 6 notes a minute
-      -- that is about 60 notes, at 12 about 120.
-      let slow = notes_in(Audio.sched_start(0), 0, 3600, 6, 42, 0)
-      let fast = notes_in(Audio.sched_start(0), 0, 3600, 12, 42, 0)
-      Test.assert_true(slow > 40 && slow < 80, "about sixty notes at rate 6")
-      Test.assert_true(fast > 90 && fast < 150, "about a hundred and twenty at rate 12")
+    test "plays bars at the requested tempo" do
+      -- 6 ticks a second, so 3600 ticks is ten minutes: 180 bars of 20 ticks
+      -- and 120 of 30.
+      Test.assert_eq_int(bars_in(Audio.sched_start(0, Biome.b_forest()), 0, 3600, 20, 0), 180, "180 bars at 20 ticks")
+      Test.assert_eq_int(bars_in(Audio.sched_start(0, Biome.b_forest()), 0, 3600, 30, 0), 120, "120 bars at 30 ticks")
     end
 
-    test "spaces notes out rather than bunching them" do
-      Test.assert_true(Audio.gap_ticks(8, 100, 42) >= Audio.min_gap(), "never faster than the floor")
-      Test.assert_true(Audio.gap_ticks(8, 100, 42) <= Audio.max_gap(), "never slower than the ceiling")
+    test "opens in the biome it starts in" do
+      let s = Audio.sched_start(0, Biome.b_desert())
+      Test.assert_eq_int(Audio.mode_of_sched(s), Audio.mode_of(Biome.b_desert()), "the desert's mode from the first bar")
+      Test.assert_true(Audio.phrase_start(s), "bar zero opens a phrase")
+    end
+  end
+
+  describe "note shapes" do
+    test "a melody note is struck and a pad note swells" do
+      Test.assert_true(Audio.mel_attack() < 0.05, "the melody has an edge on it")
+      Test.assert_true(Audio.pad_attack(Biome.b_forest()) > 0.5, "the chord arrives under the line, not with it")
+      Test.assert_true(Audio.mel_sustain() < Audio.pad_sustain(), "a struck note decays and a held one holds")
+    end
+
+    test "a melody note stops before the next one starts" do
+      Test.assert_true(Audio.mel_hold() < 1.0, "consecutive eighths are two notes, not one")
+    end
+
+    test "the chord sits under the melody and the bass under the chord" do
+      Test.assert_true(Audio.pad_octave(Biome.b_forest()) < Audio.octave_of(Biome.b_forest()), "chord below melody")
+      Test.assert_true(Audio.bass_octave() <= Audio.pad_octave(Biome.b_forest()), "bass below chord")
+      Test.assert_true(Audio.bass_gain() > Audio.pad_gain(), "one bass note against three chord tones")
+    end
+
+    test "every voice is panned somewhere real" do
+      Test.assert_true(Audio.pad_pan(0) < 0.0 && Audio.pad_pan(2) > 0.0, "the chord is spread")
+      Test.assert_true(Math.abs(Audio.mel_pan(42, 3, 5)) < 0.5, "the line stays near the middle")
     end
   end
 

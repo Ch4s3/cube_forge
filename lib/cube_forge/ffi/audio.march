@@ -14,7 +14,7 @@ mod CubeForge.Ffi.Audio do
     fn x_aud_init(mode: Int): Int = "cf_aud_init"
     fn x_aud_close(): Unit = "cf_aud_close"
     fn x_aud_set_mix(rain: Float, wind: Float, leaves: Float, water: Float, cutoff: Float, music: Float): Unit = "cf_aud_set_mix"
-    fn x_aud_note(hz: Float, dur: Float, timbre: Int, gain: Float): Unit = "cf_aud_note"
+    fn x_aud_note(delay: Float, hz: Float, dur: Float, timbre: Int, gain: Float, atk: Float, rel: Float, sus: Float, pan: Float): Unit = "cf_aud_note"
     fn x_aud_dump_begin(path: String): Int = "cf_aud_dump_begin"
     fn x_aud_dump_end(): Unit = "cf_aud_dump_end"
   end
@@ -30,8 +30,11 @@ mod CubeForge.Ffi.Audio do
     x_aud_set_mix(rain, wind, leaves, water, cutoff, music)
   end
 
-  doc "Start one note: [hz] pitch, [dur] seconds at full level before the release, [timbre] waveform id from Audio.timbre_of, [gain] 0..1."
-  fn note(hz : Float, dur : Float, timbre : Int, gain : Float) : Unit do x_aud_note(hz, dur, timbre, gain) end
+  doc "Schedule one note. [delay] seconds from now to its onset, which is what lets a whole bar be pushed on one tick and still land its offbeats on the eighth; [hz] pitch; [dur] seconds from the onset to the start of the release; [timbre] waveform id; [gain] 0..1; [atk] the attack in seconds; [rel] the release in seconds; [sus] the level the held part decays to, 0..1; [pan] -1 left to 1 right."
+  fn note(delay : Float, hz : Float, dur : Float, timbre : Int, gain : Float,
+          atk : Float, rel : Float, sus : Float, pan : Float) : Unit do
+    x_aud_note(delay, hz, dur, timbre, gain, atk, rel, sus, pan)
+  end
 
   doc "Begin teeing the mix to a 16-bit stereo WAV at [path]. Returns 1 on success."
   fn dump_begin(path : String) : Int do x_aud_dump_begin(path) end

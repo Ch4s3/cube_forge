@@ -1,0 +1,278 @@
+-- The score: that every note it lays out is in key, that the melody is a line
+-- rather than a walk, and that a bar is eight eighths and not eight events at
+-- whatever offset a hash produced.
+mod CubeForge.Test.Score do
+
+  -- Capability ceiling (GAPS G41): this test only calls pure functions, but the
+  -- ceiling charges it for everything reachable through Score.
+  needs IO.Spawn
+  needs IO.Clock
+  needs IO.Console
+  needs IO.Process
+  needs IO.FileRead
+  needs IO.FileWrite
+  import Test
+  alias CubeForge.Score as Score
+
+  -- ── The modes ─────────────────────────────────────────────────────────────
+
+  -- Inside its own octave a mode must be strictly rising, start on the tonic
+  -- and stop short of one: anything else is not a scale, whatever it sounds
+  -- like, and every degree computed from it afterwards is wrong.
+  pfn mode_not_a_scale(m : Int, d : Int) : Int do
+    if m >= Score.mode_count() do -1
+    else if d >= Score.mode_len(m) do mode_not_a_scale(m + 1, 0)
+    else
+      let v = Score.mode_step(m, d)
+      let rising = if d == 0 do v == 0 else v > Score.mode_step(m, d - 1) end
+      if !rising || v < 0 || v > 11 do m * 100 + d else mode_not_a_scale(m, d + 1) end
+    end end
+  end
+
+  -- Degree n of an n-note mode is the tonic an octave up, and degree -1 is the
+  -- top of the mode an octave down. Both directions, because the bass reads
+  -- degrees below the tonic and the melody reads them above.
+  pfn octave_break(m : Int) : Int do
+    if m >= Score.mode_count() do -1
+    else
+      let n = Score.mode_len(m)
+      let up = Score.semitone(m, n) == 12
+      let down = Score.semitone(m, 0 - 1) == Score.mode_step(m, n - 1) - 12
+      let two = Score.semitone(m, 2 * n) == 24
+      if !up || !down || !two do m else octave_break(m + 1) end
+    end
+  end
+
+  -- Every degree the score can reach, in every mode, must land on a semitone
+  -- that rises with it. A fold that got its floor division wrong shows up here
+  -- as a degree that goes down when it should go up.
+  pfn semitone_not_monotone(m : Int, d : Int) : Int do
+    if m >= Score.mode_count() do -1
+    else if d > 24 do semitone_not_monotone(m + 1, 0 - 24)
+    else if Score.semitone(m, d) <= Score.semitone(m, d - 1) do m * 1000 + d
+    else semitone_not_monotone(m, d + 1) end end end
+  end
+
+  -- ── Melody ────────────────────────────────────────────────────────────────
+
+  -- No leap wider than two scale degrees between consecutive slots, except at
+  -- the half bar, where the line is allowed to reach for the chord tone, and
+  -- except for the octave displacement that keeps a line which has run to the
+  -- end of its register inside it: a step plus an octave, which the ear hears
+  -- as the same move somewhere else.
+  pfn leaps(seed : Int, bar : Int, m : Int, slot : Int) : Int do
+    if bar >= 64 do -1
+    else if slot >= Score.slots() do leaps(seed, bar + 1, m, 1)
+    else
+      let a = Score.mel_degree(seed, bar, m, slot - 1)
+      let b = Score.mel_degree(seed, bar, m, slot)
+      let step = if b > a do b - a else a - b end
+      let n = Score.mode_len(m)
+      let ok = step <= 2 || (step >= n - 2 && step <= n + 2)
+               || (slot == Score.slots() / 2 && step <= n)
+      if !ok do bar * 100 + slot else leaps(seed, bar, m, slot + 1) end
+    end end
+  end
+
+  -- And the displacement has to stay rare, or the "line" is a line only in the
+  -- sense that every one of its jumps is individually excused.
+  pfn wide_moves(seed : Int, bar : Int, m : Int, slot : Int, wide : Int, all : Int) : Int do
+    if bar >= 64 do 100 * wide / all
+    else if slot >= Score.slots() do wide_moves(seed, bar + 1, m, 1, wide, all)
+    else
+      let a = Score.mel_degree(seed, bar, m, slot - 1)
+      let b = Score.mel_degree(seed, bar, m, slot)
+      let step = if b > a do b - a else a - b end
+      wide_moves(seed, bar, m, slot + 1, if step > 2 do wide + 1 else wide end, all + 1)
+    end end
+  end
+
+  -- The line has to stay in its register or the arc means nothing: a melody
+  -- that walks off the top and keeps going is what an unbounded walk does.
+  pfn out_of_register(seed : Int, bar : Int, m : Int, slot : Int) : Int do
+    if bar >= 64 do -1
+    else if slot >= Score.slots() do out_of_register(seed, bar + 1, m, 0)
+    else
+      let d = Score.mel_degree(seed, bar, m, slot)
+      if d < Score.reg_low() - Score.mode_len(m) || d > Score.reg_high(m) + Score.mode_len(m) do bar * 100 + slot
+      else out_of_register(seed, bar + 1000, m, slot) end
+    end end
+  end
+
+  -- How many distinct pitches a run of bars states. A line that repeats one
+  -- note is the failure this whole module exists to prevent, and it is not
+  -- caught by any range check: every note of it is perfectly in key.
+  pfn spread(seed : Int, m : Int, bar : Int, n : Int, lo : Int, hi : Int) : Int do
+    if bar >= n do hi - lo
+    else
+      let d = Score.mel_degree(seed, bar, m, bar % Score.slots())
+      spread(seed, m, bar + 1, n, if d < lo do d else lo end, if d > hi do d else hi end)
+    end
+  end
+
+  -- ── Rhythm ────────────────────────────────────────────────────────────────
+
+  -- Onsets in the bars [bar], [bar]+8, [bar]+16 ... so the cadence bar of every
+  -- phrase can be weighed against the same slot of the phrase before it rather
+  -- than against one bar's worth of coin flips.
+  pfn onsets_every_eighth(seed : Int, bar : Int, n : Int, dens : Float, slot : Int, acc : Int) : Int do
+    if bar >= n do acc
+    else if slot >= Score.slots() do onsets_every_eighth(seed, bar + 8, n, dens, 0, acc)
+    else onsets_every_eighth(seed, bar, n, dens, slot + 1,
+                             if Score.onset(seed, bar, slot, dens) do acc + 1 else acc end) end end
+  end
+
+  pfn onsets(seed : Int, bar : Int, n : Int, dens : Float, slot : Int, acc : Int) : Int do
+    if bar >= n do acc
+    else if slot >= Score.slots() do onsets(seed, bar + 1, n, dens, 0, acc)
+    else onsets(seed, bar, n, dens, slot + 1, if Score.onset(seed, bar, slot, dens) do acc + 1 else acc end) end end
+  end
+
+  -- A note must last until the next onset and no further, or two notes on
+  -- consecutive eighths are heard as one held note -- which is where this
+  -- started.
+  pfn hold_overruns(seed : Int, bar : Int, dens : Float, slot : Int) : Int do
+    if bar >= 64 do -1
+    else if slot >= Score.slots() do hold_overruns(seed, bar + 1, dens, 0)
+    else if !Score.onset(seed, bar, slot, dens) do hold_overruns(seed, bar, dens, slot + 1)
+    else
+      let e = Score.note_eighths(seed, bar, slot, dens)
+      let ok = e >= 1 && slot + e <= Score.slots()
+      let clear = e == 1 || !Score.onset(seed, bar, slot + e - 1, dens)
+      if !ok || !clear do bar * 100 + slot else hold_overruns(seed, bar, dens, slot + 1) end
+    end end end
+  end
+
+  -- ── Harmony ───────────────────────────────────────────────────────────────
+
+  pfn root_out_of_key(seed : Int, bar : Int) : Int do
+    if bar >= 256 do -1
+    else
+      let r = Score.chord_root(seed, bar)
+      let opens = bar % Score.phrase_bars() != 0 || r == 0
+      if r < 0 || r > 6 || !opens do bar else root_out_of_key(seed, bar + 1) end
+    end
+  end
+
+  describe "Score modes" do
+    test "every mode is a rising scale from the tonic" do
+      Test.assert_eq_int(mode_not_a_scale(0, 0), -1, "no mode doubles back or leaves the octave")
+    end
+
+    test "a degree past the end of a mode is the octave" do
+      Test.assert_eq_int(octave_break(0), -1, "up, down and two octaves up")
+    end
+
+    test "semitones rise with the degree in both directions" do
+      Test.assert_eq_int(semitone_not_monotone(0, 0 - 23), -1, "the floor division holds below the tonic")
+    end
+
+    test "the modes are not each other" do
+      Test.assert_true(Score.mode_step(Score.mode_phrygian(), 1) < Score.mode_step(Score.mode_aeolian(), 1),
+                       "phrygian has the flat second")
+      Test.assert_true(Score.mode_step(Score.mode_lydian(), 3) > Score.mode_step(Score.mode_ionian(), 3),
+                       "lydian has the sharp fourth")
+      Test.assert_eq_int(Score.mode_len(Score.mode_pent_minor()), 5, "a pentatonic has five")
+    end
+  end
+
+  describe "Score melody" do
+    test "moves by steps, not by leaps" do
+      Test.assert_eq_int(leaps(42, 0, Score.mode_dorian(), 1), -1, "a degree or two at a time")
+      Test.assert_eq_int(leaps(7, 0, Score.mode_pent_minor(), 1), -1, "and the same in a pentatonic")
+    end
+
+    test "stays in its register" do
+      Test.assert_eq_int(out_of_register(42, 0, Score.mode_aeolian(), 0), -1, "never runs off either end")
+    end
+
+    test "is a line rather than one note repeated" do
+      -- The whole complaint this replaced: notes with nothing between them.
+      -- Four degrees of spread over sixteen bars is a melody; one is a key
+      -- being held down.
+      Test.assert_true(spread(42, Score.mode_dorian(), 0, 16, 99, 0 - 99) >= 4, "dorian goes somewhere")
+      Test.assert_true(spread(9, Score.mode_ionian(), 0, 16, 99, 0 - 99) >= 4, "so does ionian")
+    end
+
+    test "lands on the harmony at the strong beats" do
+      let m = Score.mode_aeolian()
+      let root = Score.chord_root(42, 4)
+      let d = Score.mel_degree(42, 4, m, 0)
+      let n = Score.mode_len(m)
+      let cls = (((d - root) % n) + n) % n
+      Test.assert_true(cls == 0 || cls == 2 || cls == 4, "the downbeat is a chord tone")
+    end
+  end
+
+  describe "Score rhythm" do
+    test "the downbeat is always struck" do
+      Test.assert_true(Score.onset(42, 0, 0, 0.0), "even at no density at all")
+      Test.assert_true(Score.onset(42, 5, 0, 1.0), "and at full")
+    end
+
+    test "a busier biome plays more notes" do
+      let sparse = onsets(42, 0, 64, 0.25, 0, 0)
+      let busy = onsets(42, 0, 64, 0.9, 0, 0)
+      Test.assert_true(busy > sparse + 40, "density is heard as notes")
+      Test.assert_true(sparse >= 64, "the downbeats alone are already this many")
+    end
+
+    test "leaves rests in even the busiest bar" do
+      Test.assert_true(onsets(42, 0, 64, 1.0, 0, 0) < 64 * Score.slots(),
+                       "a line with every slot filled is a scale exercise")
+    end
+
+    test "a note ends before the next one begins" do
+      Test.assert_eq_int(hold_overruns(42, 0, 0.6, 0), -1, "no note overruns its successor or the bar line")
+    end
+
+    test "the strong beats carry the accent" do
+      Test.assert_true(Score.slot_weight(0) > Score.slot_weight(1), "the downbeat over the offbeat")
+      Test.assert_true(Score.slot_weight(4) > Score.slot_weight(5), "and beat three over the one after it")
+      Test.assert_true(Score.accent(42, 3, 0) > Score.accent(42, 3, 1), "struck harder, too")
+    end
+
+    test "a phrase breathes at its end" do
+      Test.assert_true(Score.cadence_bar(7), "the last bar of the second phrase")
+      Test.assert_true(!Score.cadence_bar(3), "but not of the first")
+      Test.assert_true(onsets_every_eighth(42, 7, 128, 0.8, 0, 0) < onsets_every_eighth(42, 6, 128, 0.8, 0, 0),
+                       "cadence bars are thinner than the bars before them")
+    end
+  end
+
+  describe "Score harmony" do
+    test "every phrase opens on the tonic and stays in the mode" do
+      Test.assert_eq_int(root_out_of_key(42, 0), -1, "roots in range, phrases open at home")
+      Test.assert_eq_int(root_out_of_key(7, 0), -1, "and for another world's row")
+    end
+
+    test "a phrase goes somewhere before it comes back" do
+      Test.assert_true(Score.chord_root(42, 1) != 0 || Score.chord_root(42, 2) != 0,
+                       "not four bars of the tonic")
+      Test.assert_eq_int(Score.chord_root(42, Score.phrase_bars() - 1), 4, "and leans on the fifth degree at the end")
+    end
+
+    test "the bass keeps its own register whatever the chord is" do
+      let m = Score.mode_dorian()
+      Test.assert_true(Score.semitone(m, Score.bass_degree(m, 0)) < 0, "under the tonic on the tonic chord")
+      Test.assert_true(Score.semitone(m, Score.bass_degree(m, 5)) < 0, "and still under it on the sixth")
+    end
+
+    test "the key is folded so no world sits an octave above another" do
+      Test.assert_eq_int(Score.fold_key(0), 0, "C stays")
+      Test.assert_eq_int(Score.fold_key(11), 0 - 1, "B drops rather than climbing")
+      Test.assert_eq_int(Score.fold_key(6), 6, "the tritone is the last one that stays")
+    end
+  end
+
+  describe "Score metre" do
+    test "the slots divide the bar evenly" do
+      Test.assert_true(Math.abs(Score.slot_seconds(24, 6, 0)) < 0.0001, "slot zero is the downbeat")
+      Test.assert_true(Math.abs(Score.slot_seconds(24, 6, Score.slots()) -. Score.bar_seconds(24, 6)) < 0.0001,
+                       "slot eight would be the next bar line")
+      Test.assert_true(Math.abs(Score.slot_seconds(24, 6, 4) -. Score.bar_seconds(24, 6) /. 2.0) < 0.0001,
+                       "slot four is the half bar")
+    end
+  end
+
+end

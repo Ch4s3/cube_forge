@@ -1,0 +1,264 @@
+-- The score: what a bar of music actually contains.
+--
+-- The first version of this file did not exist, and it shows in what it
+-- replaced. `Audio` scheduled one note every four to twelve seconds, at a
+-- jittered offset, from a twelve-tone row, with a 1.2 s attack and a 2 s
+-- release on every one of them. Each of those decisions is defensible on its
+-- own and together they guarantee the one thing music is not: a sequence of
+-- unrelated sustained pitches. There was no pulse to hear the notes against,
+-- no harmony to hear them in, and no shape to any single one of them.
+--
+-- So the unit here is a *bar*, not a note. A bar has:
+--
+--   a chord   -- three scale tones held under everything, so the melody is
+--                heard as being somewhere rather than as being alone
+--   a bass     -- the chord's root, low, on the downbeat
+--   a melody   -- up to eight eighth notes on a fixed grid, stepping through
+--                the mode and landing on chord tones at the two strong beats
+--
+-- Four bars make a phrase and the progression repeats over it, which is what
+-- gives the ear something to recognise on the way past. The biome chooses the
+-- mode, the key, the register, the tempo and how busy the melody is; a change
+-- is adopted at a phrase boundary, never inside one.
+--
+-- Everything is a pure function of (seed, bar, slot). No state is threaded
+-- anywhere: the melody's note at slot 5 is defined by recursion back to slot 0
+-- of the same bar, which costs eight evaluations and buys a score that cannot
+-- drift out of sync with itself.
+mod CubeForge.Score do
+
+  alias CubeForge.Noise as N
+  alias CubeForge.Tone as Tone
+
+  -- ── Modes ─────────────────────────────────────────────────────────────────
+  --
+  -- Diatonic modes and two pentatonics, as semitone offsets from the tonic.
+  -- Which one a biome states is most of what makes it sound like itself: the
+  -- flat second of phrygian is a desert and the sharp fourth of lydian is not.
+
+  fn mode_aeolian() : Int do 0 end
+  fn mode_dorian() : Int do 1 end
+  fn mode_ionian() : Int do 2 end
+  fn mode_lydian() : Int do 3 end
+  fn mode_mixolydian() : Int do 4 end
+  fn mode_phrygian() : Int do 5 end
+  fn mode_pent_minor() : Int do 6 end
+  fn mode_pent_major() : Int do 7 end
+  fn mode_count() : Int do 8 end
+
+  doc "How many degrees the mode has before it repeats an octave up. Five for the pentatonics, seven for everything else."
+  fn mode_len(m : Int) : Int do
+    if m == mode_pent_minor() do 5 else if m == mode_pent_major() do 5 else 7 end end
+  end
+
+  pfn s_aeolian(d : Int) : Int do if d == 0 do 0 else if d == 1 do 2 else if d == 2 do 3 else if d == 3 do 5 else if d == 4 do 7 else if d == 5 do 8 else 10 end end end end end end end
+  pfn s_dorian(d : Int) : Int do if d == 0 do 0 else if d == 1 do 2 else if d == 2 do 3 else if d == 3 do 5 else if d == 4 do 7 else if d == 5 do 9 else 10 end end end end end end end
+  pfn s_ionian(d : Int) : Int do if d == 0 do 0 else if d == 1 do 2 else if d == 2 do 4 else if d == 3 do 5 else if d == 4 do 7 else if d == 5 do 9 else 11 end end end end end end end
+  pfn s_lydian(d : Int) : Int do if d == 0 do 0 else if d == 1 do 2 else if d == 2 do 4 else if d == 3 do 6 else if d == 4 do 7 else if d == 5 do 9 else 11 end end end end end end end
+  pfn s_mixo(d : Int) : Int do if d == 0 do 0 else if d == 1 do 2 else if d == 2 do 4 else if d == 3 do 5 else if d == 4 do 7 else if d == 5 do 9 else 10 end end end end end end end
+  pfn s_phryg(d : Int) : Int do if d == 0 do 0 else if d == 1 do 1 else if d == 2 do 3 else if d == 3 do 5 else if d == 4 do 7 else if d == 5 do 8 else 10 end end end end end end end
+  pfn s_pmin(d : Int) : Int do if d == 0 do 0 else if d == 1 do 3 else if d == 2 do 5 else if d == 3 do 7 else 10 end end end end end
+  pfn s_pmaj(d : Int) : Int do if d == 0 do 0 else if d == 1 do 2 else if d == 2 do 4 else if d == 3 do 7 else 9 end end end end end
+
+  doc "Semitones above the tonic for degree [d] of [m], where [d] is within the mode."
+  fn mode_step(m : Int, d : Int) : Int do
+    if m == mode_aeolian() do s_aeolian(d)
+    else if m == mode_dorian() do s_dorian(d)
+    else if m == mode_ionian() do s_ionian(d)
+    else if m == mode_lydian() do s_lydian(d)
+    else if m == mode_mixolydian() do s_mixo(d)
+    else if m == mode_phrygian() do s_phryg(d)
+    else if m == mode_pent_minor() do s_pmin(d)
+    else s_pmaj(d) end end end end end end end
+  end
+
+  -- Floor division, which is what a degree below the tonic needs: -1 must land
+  -- an octave down at the mode's top degree, not at degree 1 by truncation.
+  pfn floor_div(a : Int, b : Int) : Int do
+    if a >= 0 do a / b else 0 - (((0 - a) + b - 1) / b) end
+  end
+
+  doc "Semitones above the tonic for scale degree [d] of [m]. Degrees run off both ends: -1 is the degree below the tonic an octave down, and 7 in a seven-note mode is the tonic an octave up."
+  fn semitone(m : Int, d : Int) : Int do
+    let n = mode_len(m)
+    let oct = floor_div(d, n)
+    mode_step(m, d - oct * n) + 12 * oct
+  end
+
+  -- ── Metre ─────────────────────────────────────────────────────────────────
+  --
+  -- Eight eighth-note slots to a bar, four beats. A bar's length is given in
+  -- ticks rather than in beats per minute so that it is a whole number of them:
+  -- the frame loop only reaches this code every tick, so a bar that is 3.4
+  -- ticks long would leave the downbeat drifting by up to a sixth of a second,
+  -- which is the one place in a piece of music the ear will not forgive.
+
+  doc "Eighth-note slots in a bar."
+  fn slots() : Int do 8 end
+  doc "Bars in a phrase. The progression repeats over this and a biome change waits for it."
+  fn phrase_bars() : Int do 4 end
+
+  doc "Seconds a bar lasts, for a bar of [bt] ticks at [tps] ticks per second."
+  fn bar_seconds(bt : Int, tps : Int) : Float do int_to_float(bt) /. int_to_float(tps) end
+
+  doc "Seconds from the downbeat to eighth-note [slot]."
+  fn slot_seconds(bt : Int, tps : Int, slot : Int) : Float do
+    bar_seconds(bt, tps) *. int_to_float(slot) /. int_to_float(slots())
+  end
+
+  -- ── Harmony ───────────────────────────────────────────────────────────────
+  --
+  -- A chord is a degree with two more stacked on top of it in thirds *of the
+  -- mode*, which is what keeps it in key without any chord table: stack thirds
+  -- on degree 0 of aeolian and a minor triad falls out, on ionian a major one,
+  -- on a pentatonic a stacked fourth that is neither and sits well under both.
+
+  doc "The [i]th tone, 0..2, of the triad rooted on degree [root]."
+  fn chord_tone(root : Int, i : Int) : Int do root + 2 * i end
+
+  doc "The degree the bass plays for a chord on [root]: the root's pitch class, in the octave below the tonic. Playing the root where the progression put it walks the bass up with the harmony -- a chord on the sixth degree would land the bass a sixth above where the tonic chord left it, which is a tenor line, not a bass one."
+  fn bass_degree(m : Int, root : Int) : Int do
+    let n = mode_len(m)
+    (((root % n) + n) % n) - n
+  end
+
+  doc "The degree chord tone [i] is voiced on: its pitch class, inside the octave above the tonic. Stacking thirds upward from wherever the progression is puts the chord on the sixth degree an octave over the chord on the tonic; folding them into one octave is what keeps the pad a single voice in a single place, and moves it by the smallest step from one chord to the next."
+  fn pad_degree(m : Int, root : Int, i : Int) : Int do
+    let n = mode_len(m)
+    ((chord_tone(root, i) % n) + n) % n
+  end
+
+  -- The progression. Bar 0 of a phrase is the tonic and bar 3 leans away from
+  -- it; the two in between come from the world's row, which is the row's real
+  -- job now -- it gave every world its own twelve-tone identity and it still
+  -- does, one phrase at a time, over degrees that cannot be out of key.
+  pfn lean(k : Int) : Int do if k == 0 do 5 else if k == 1 do 3 else if k == 2 do 4 else 2 end end end end
+
+  doc "Scale degree the chord of [bar] is rooted on, for the world's row. Bar 0 of every phrase is the tonic; the last bar of a phrase leans to the fifth degree and wants to come home."
+  fn chord_root(seed : Int, bar : Int) : Int do
+    let b = ((bar % phrase_bars()) + phrase_bars()) % phrase_bars()
+    if b == 0 do 0
+    else if b == phrase_bars() - 1 do 4
+    else lean(Tone.prime(seed, (bar / phrase_bars() + b) % 12) % 4) end end
+  end
+
+  -- ── Melody ────────────────────────────────────────────────────────────────
+
+  doc "Register the melody is kept inside, in scale degrees relative to the tonic. About an octave and a half, sitting a little under the tonic rather than over it: enough for a line to go somewhere, little enough that it stays a line."
+  fn reg_low() : Int do 0 - 2 end
+  fn reg_high(m : Int) : Int do mode_len(m) + 3 end
+
+  -- Out of register, drop or lift an octave rather than clamping. Clamping
+  -- makes a line that has run to the top sit on the top note repeating itself;
+  -- an octave displacement keeps the melodic shape and moves it.
+  pfn in_register(d : Int, m : Int) : Int do
+    if d > reg_high(m) do d - mode_len(m)
+    else if d < reg_low() do d + mode_len(m)
+    else d end end
+  end
+
+  doc "The degree the line is drawn toward in [bar]: an arc across the phrase, up and then home. A melody that is only a random walk has no shape, because every step is as likely as its opposite -- it wanders to whichever end of the register it reaches first and stays there, which is exactly what the first pass at this did."
+  fn arc(bar : Int) : Int do
+    let b = ((bar % phrase_bars()) + phrase_bars()) % phrase_bars()
+    if b == 0 do 2 else if b == 1 do 4 else if b == 2 do 6 else 3 end end end
+  end
+
+  -- The chord tone nearest [prev], searched over the triad in three octaves.
+  pfn near_chord(root : Int, prev : Int, n : Int, k : Int, best : Int, bestd : Int) : Int do
+    if k >= 9 do best
+    else
+      let c = chord_tone(root, k % 3) + n * ((k / 3) - 1)
+      let d = if c > prev do c - prev else prev - c end
+      if d < bestd do near_chord(root, prev, n, k + 1, c, d)
+      else near_chord(root, prev, n, k + 1, best, bestd) end
+    end
+  end
+
+  -- One melodic move, ordered downward to upward so that a bias is a shift
+  -- along the same line. Steps of a degree or two either way, and now and then
+  -- a repeat: the shape of a line somebody could sing. Leaps are what the
+  -- strong beats are for, where the chord tone pulls the line where the
+  -- harmony went.
+  pfn walk(prev : Int, target : Int, h : Float) : Int do
+    let pull = if prev > target do 0.0 -. 0.16 else if prev < target do 0.16 else 0.0 end end
+    let g = h +. pull
+    if g < 0.20 do prev - 2
+    else if g < 0.48 do prev - 1
+    else if g < 0.58 do prev
+    else if g < 0.86 do prev + 1
+    else prev + 2 end end end end
+  end
+
+  doc "Scale degree of the melody at eighth-note [slot] of [bar]. Slots 0 and 4 -- the two strong beats -- take a chord tone, so the melody follows the harmony; the one at the half bar is the chord tone nearest where a step would have gone, so it lands on the harmony without standing still to reach it. Everything between steps, pulled toward the phrase's arc."
+  fn mel_degree(seed : Int, bar : Int, m : Int, slot : Int) : Int do
+    let root = chord_root(seed, bar)
+    let n = mode_len(m)
+    if slot <= 0 do near_chord(root, arc(bar), n, 0, root, 999)
+    else
+      let prev = mel_degree(seed, bar, m, slot - 1)
+      let stepped = in_register(walk(prev, arc(bar), N.hash2(bar * 64 + slot, 91, seed)), m)
+      if slot == slots() / 2 do in_register(near_chord(root, stepped, n, 0, root, 999), m)
+      else stepped end
+    end
+  end
+
+  -- ── Rhythm ────────────────────────────────────────────────────────────────
+  --
+  -- Which of the eight slots are struck. The downbeat almost always; the other
+  -- strong beat usually; the offbeats by density, which is the biome's. The
+  -- rests are not an absence of decisions -- a line that plays every slot is a
+  -- scale exercise, and one that plays two is the thing this replaced.
+
+  doc "Weight of [slot] in the bar: how readily it takes a note at all. The metric hierarchy, which is what makes eight equal slots sound like four beats."
+  fn slot_weight(slot : Int) : Float do
+    if slot == 0 do 1.0
+    else if slot == 4 do 0.9
+    else if slot % 2 == 0 do 0.72
+    else 0.48 end end end
+  end
+
+  doc "The last bar of a phrase is a cadence: the melody thins to the strong beats and lets the chord be heard arriving. A line with no breath in it stops being phrased."
+  fn cadence_bar(bar : Int) : Bool do
+    ((bar % (2 * phrase_bars())) + 2 * phrase_bars()) % (2 * phrase_bars()) == 2 * phrase_bars() - 1
+  end
+
+  doc "Is there a melody note at [slot] of [bar], at [density] 0..1?"
+  fn onset(seed : Int, bar : Int, slot : Int, density : Float) : Bool do
+    let d = if density < 0.0 do 0.0 else if density > 1.0 do 1.0 else density end end
+    let thin = if cadence_bar(bar) do 0.45 else 1.0 end
+    if slot == 0 do true
+    else N.hash2(bar * 64 + slot, 23, seed) < slot_weight(slot) *. d *. thin end
+  end
+
+  -- How many slots until the next onset, so a note can last until the one that
+  -- follows it rather than for a length picked out of the air.
+  pfn until_next(seed : Int, bar : Int, slot : Int, density : Float, k : Int) : Int do
+    if slot + k >= slots() do k
+    else if onset(seed, bar, slot + k, density) do k
+    else until_next(seed, bar, slot, density, k + 1) end end
+  end
+
+  doc "Eighth notes the melody note at [slot] holds for: up to the next onset in the bar, or to the bar line."
+  fn note_eighths(seed : Int, bar : Int, slot : Int, density : Float) : Int do
+    until_next(seed, bar, slot, density, 1)
+  end
+
+  doc "How hard the melody note at [slot] is struck. The metric accent, plus a little jitter, is what stops eight even eighths reading as a machine."
+  fn accent(seed : Int, bar : Int, slot : Int) : Float do
+    0.62 *. slot_weight(slot) +. 0.3 +. 0.08 *. N.hash2(bar * 64 + slot, 55, seed)
+  end
+
+  -- ── Pitch ─────────────────────────────────────────────────────────────────
+
+  doc "MIDI note for scale degree [d] of [m], in the key [key] semitones above C, at [octave]."
+  fn midi_of(m : Int, key : Int, octave : Int, d : Int) : Int do
+    Tone.midi(0, octave) + key + semitone(m, d)
+  end
+
+  doc "The world's key: which of the twelve pitch classes the tonic sits on, from the first note of the world's row. Two worlds with the same biome under the player are still in different keys."
+  fn key_of(seed : Int) : Int do Tone.prime(seed, 0) end
+
+  doc "The key, folded to whichever tonic is nearer rather than always the one above C. A world in B would otherwise sit eleven semitones above a world in C, which the melody can ride and the floor of the piece cannot -- a bass part that is a tenth higher in some worlds than in others is not a bass part."
+  fn fold_key(key : Int) : Int do if key > 6 do key - 12 else key end end
+
+end
