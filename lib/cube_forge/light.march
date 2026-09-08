@@ -1,5 +1,5 @@
 -- Light — the world skylight field: one byte per voxel, value 0..15, in a
--- single flat NativeU8Arr of 128 * 256 * 128. Index x + 128 * (z + 128 * y),
+-- single flat NativeU8Arr of 192 * 256 * 192. Index x + 192 * (z + 192 * y),
 -- the same world-space coordinates World uses.
 --
 -- One array for the whole world, not one per chunk: a per-chunk array lives
@@ -19,24 +19,24 @@ mod CubeForge.Light do
   -- index() exists to give (measured: 85 unverified obligations become 100).
   -- world_size_test asserts they agree, so changing the world's size fails
   -- loudly here rather than silently mis-indexing.
-  fn size_x() : Int do 128 end
+  fn size_x() : Int do 192 end
   fn size_y() : Int do 256 end
-  fn size_z() : Int do 128 end
-  fn volume() : Int do 4194304 end
+  fn size_z() : Int do 192 end
+  fn volume() : Int do 9437184 end
   doc "World columns in one y layer: the stride between layers in the flat index."
-  fn layer() : Int do 16384 end
+  fn layer() : Int do 36864 end
   doc "Cells in one y layer of a CHUNK, 16 x 16. Distinct from layer(), and both were spelled as bare numbers before."
   fn chunk_layer() : Int do 256 end
   fn max_level() : Int do 15 end
   @[no_alloc]
   -- Flat world index of a voxel; the refinements let Z3 discharge the bound.
-  fn index(x : {Int | 0 <= _ && _ < 128}, y : {Int | 0 <= _ && _ < 256}, z : {Int | 0 <= _ && _ < 128})
-      : {Int | 0 <= _ && _ < 4194304} do
-    x + 128 * (z + 128 * y)
+  fn index(x : {Int | 0 <= _ && _ < 192}, y : {Int | 0 <= _ && _ < 256}, z : {Int | 0 <= _ && _ < 192})
+      : {Int | 0 <= _ && _ < 9437184} do
+    x + 192 * (z + 192 * y)
   end
 
   doc "A dark light field."
-  fn new() : NativeU8Arr do NativeArray.make_u8(4194304, 0) end
+  fn new() : NativeU8Arr do NativeArray.make_u8(9437184, 0) end
   -- ── A byte of light: level in the low nibble, COLOUR in the high ─────────
   -- Block light is one channel, and every emitter lit the world the same warm
   -- orange: a near-white crystal cast an orange glow on the rock round it. The
@@ -64,13 +64,13 @@ mod CubeForge.Light do
   -- Light LEVEL at a world coordinate; 0 outside the world. The colour nibble is
   -- stripped, so every caller that wants a level still gets one.
   fn get(la : NativeU8Arr, x : Int, y : Int, z : Int) : Int do
-    if x < 0 || x >= 128 || y < 0 || y >= 256 || z < 0 || z >= 128 do 0
+    if x < 0 || x >= 192 || y < 0 || y >= 256 || z < 0 || z >= 192 do 0
     else bl_level(NativeArray.get_u8(la, index(x, y, z))) end
   end
   doc "Light COLOUR at a world coordinate (see colour_warm, colour_cold); warm outside the world."
   @[no_alloc]
   fn colour(la : NativeU8Arr, x : Int, y : Int, z : Int) : Int do
-    if x < 0 || x >= 128 || y < 0 || y >= 256 || z < 0 || z >= 128 do 0
+    if x < 0 || x >= 192 || y < 0 || y >= 256 || z < 0 || z >= 192 do 0
     else bl_colour(NativeArray.get_u8(la, index(x, y, z))) end
   end
   @[no_alloc]
@@ -183,7 +183,7 @@ mod CubeForge.Light do
 
   doc "Copy the whole field from [src] into [dst] (one memcpy in the shim)."
   fn copy_field(src : NativeU8Arr, dst : NativeU8Arr) : NativeU8Arr do
-    CubeForge.Ffi.Window.u8_blit(dst, 0, src, 0, 4194304)
+    CubeForge.Ffi.Window.u8_blit(dst, 0, src, 0, 9437184)
   end
 
   doc "A fresh buffer holding the first [n] bytes of [src]. A y-range is contiguous in the flat index, so a prefix is a whole sub-world of y layers."
@@ -195,7 +195,7 @@ mod CubeForge.Light do
   -- Give light to the single neighbour (x, y, z) from a voxel at level [lv].
   -- Reads [src], writes [dst].
   pfn give1(src : NativeU8Arr, dst : NativeU8Arr, w : CubeForge.World.World, x : Int, y : Int, z : Int, lv : Int, c16 : Int) : NativeU8Arr do
-    if x < 0 || x >= 128 || y < 0 || y >= 256 || z < 0 || z >= 128 do dst
+    if x < 0 || x >= 192 || y < 0 || y >= 256 || z < 0 || z >= 192 do dst
     -- The best this neighbour could receive is lv - 1, so when it already has
     -- that much there is nothing to do — and no reason to pay for the chunk
     -- lookup below. Open sky is almost entirely this case.
@@ -316,7 +316,7 @@ mod CubeForge.Light do
   doc "Compute the world's block light from scratch: seed every emitter, then spread. The sweep scans max_level() layers above the sky floor: skylight has nothing to do up there, but block light climbs into the open air."
   fn flood_block(w : CubeForge.World.World) : NativeU8Arr do
     let top = clampi(sky_floor(w) + 1 + max_level(), 0, 256)
-    sweep_go(seed_emitters(new(), w), w, max_level(), top * 16384)
+    sweep_go(seed_emitters(new(), w), w, max_level(), top * layer())
   end
 
   -- ── Incremental relight ───────────────────────────────────────────────────
@@ -473,7 +473,7 @@ mod CubeForge.Light do
   -- take is computed by a callee that only reads, and the walk only writes.
 
   @[no_alloc]
-  pfn flat(x : Int, y : Int, z : Int) : Int do x + 128 * (z + 128 * y) end
+  pfn flat(x : Int, y : Int, z : Int) : Int do x + 192 * (z + 192 * y) end
 
   @[no_alloc]
   -- The value voxel (x, y, z) should take from a neighbour at [lv], or 0 for
@@ -485,7 +485,7 @@ mod CubeForge.Light do
   -- water and leaves still read the block for their opacity: only opaque is
   -- tracked in the field (see occ_value).
   pfn give_level(la : NativeU8Arr, occ : NativeU8Arr, x : Int, y : Int, z : Int, lv : Int) : Int do
-    if x < 0 || x >= 128 || y < 0 || y >= 256 || z < 0 || z >= 128 do 0
+    if x < 0 || x >= 192 || y < 0 || y >= 256 || z < 0 || z >= 192 do 0
     else
       let cur = bl_level(NativeArray.get_u8(la, index(x, y, z)))
       if lv - 1 <= cur do 0
@@ -525,27 +525,27 @@ mod CubeForge.Light do
       let nxt = wl_entry_next(wl, e)
       if !at_level(la, i, lv) do list_go(la, wl, occ, lv, nxt, x0, x1, y0, y1, z0, z1)
       else
-        let x = i % 128
-        let y = i / 16384
-        let z = (i / 128) % 128
+        let x = i % 192
+        let y = i / 36864
+        let z = (i / 192) % 192
         let c = col16(la, i)
         let n1 = give_level(la, occ, x + 1, y, z, lv)
         let a1 = if n1 > 0 do NativeArray.set_u8(la, flat(x + 1, y, z), n1 + c) else la end
         let l1 = if n1 >= 2 do wl_push(wl, n1, flat(x + 1, y, z)) else wl end
         let n2 = give_level(a1, occ, x - 1, y, z, lv)
-        let a2 = if n2 > 0 do NativeArray.set_u8(a1, flat(x - 1, y, z), n2) else a1 end
+        let a2 = if n2 > 0 do NativeArray.set_u8(a1, flat(x - 1, y, z), n2 + c) else a1 end
         let l2 = if n2 >= 2 do wl_push(l1, n2, flat(x - 1, y, z)) else l1 end
         let n3 = give_level(a2, occ, x, y + 1, z, lv)
-        let a3 = if n3 > 0 do NativeArray.set_u8(a2, flat(x, y + 1, z), n3) else a2 end
+        let a3 = if n3 > 0 do NativeArray.set_u8(a2, flat(x, y + 1, z), n3 + c) else a2 end
         let l3 = if n3 >= 2 do wl_push(l2, n3, flat(x, y + 1, z)) else l2 end
         let n4 = give_level(a3, occ, x, y - 1, z, lv)
-        let a4 = if n4 > 0 do NativeArray.set_u8(a3, flat(x, y - 1, z), n4) else a3 end
+        let a4 = if n4 > 0 do NativeArray.set_u8(a3, flat(x, y - 1, z), n4 + c) else a3 end
         let l4 = if n4 >= 2 do wl_push(l3, n4, flat(x, y - 1, z)) else l3 end
         let n5 = give_level(a4, occ, x, y, z + 1, lv)
-        let a5 = if n5 > 0 do NativeArray.set_u8(a4, flat(x, y, z + 1), n5) else a4 end
+        let a5 = if n5 > 0 do NativeArray.set_u8(a4, flat(x, y, z + 1), n5 + c) else a4 end
         let l5 = if n5 >= 2 do wl_push(l4, n5, flat(x, y, z + 1)) else l4 end
         let n6 = give_level(a5, occ, x, y, z - 1, lv)
-        let a6 = if n6 > 0 do NativeArray.set_u8(a5, flat(x, y, z - 1), n6) else a5 end
+        let a6 = if n6 > 0 do NativeArray.set_u8(a5, flat(x, y, z - 1), n6 + c) else a5 end
         let l6 = if n6 >= 2 do wl_push(l5, n6, flat(x, y, z - 1)) else l5 end
         list_go(a6, l6, occ, lv, nxt, x0, x1, y0, y1, z0, z1)
       end
@@ -564,15 +564,15 @@ mod CubeForge.Light do
       let n1 = give_level(la, occ, x + 1, y, z, lv)
       let a1 = if n1 > 0 do NativeArray.set_u8(la, flat(x + 1, y, z), n1 + c) else la end
       let n2 = give_level(a1, occ, x - 1, y, z, lv)
-      let a2 = if n2 > 0 do NativeArray.set_u8(a1, flat(x - 1, y, z), n2) else a1 end
+      let a2 = if n2 > 0 do NativeArray.set_u8(a1, flat(x - 1, y, z), n2 + c) else a1 end
       let n3 = give_level(a2, occ, x, y + 1, z, lv)
-      let a3 = if n3 > 0 do NativeArray.set_u8(a2, flat(x, y + 1, z), n3) else a2 end
+      let a3 = if n3 > 0 do NativeArray.set_u8(a2, flat(x, y + 1, z), n3 + c) else a2 end
       let n4 = give_level(a3, occ, x, y - 1, z, lv)
-      let a4 = if n4 > 0 do NativeArray.set_u8(a3, flat(x, y - 1, z), n4) else a3 end
+      let a4 = if n4 > 0 do NativeArray.set_u8(a3, flat(x, y - 1, z), n4 + c) else a3 end
       let n5 = give_level(a4, occ, x, y, z + 1, lv)
-      let a5 = if n5 > 0 do NativeArray.set_u8(a4, flat(x, y, z + 1), n5) else a4 end
+      let a5 = if n5 > 0 do NativeArray.set_u8(a4, flat(x, y, z + 1), n5 + c) else a4 end
       let n6 = give_level(a5, occ, x, y, z - 1, lv)
-      full_row_ip(if n6 > 0 do NativeArray.set_u8(a5, flat(x, y, z - 1), n6) else a5 end, occ, lv, x + 1, x1, y, z)
+      full_row_ip(if n6 > 0 do NativeArray.set_u8(a5, flat(x, y, z - 1), n6 + c) else a5 end, occ, lv, x + 1, x1, y, z)
     end end
   end
   pfn full_plane_ip(la : NativeU8Arr, occ : NativeU8Arr, lv : Int, x0 : Int, x1 : Int, y : Int, z : Int, z1 : Int) : NativeU8Arr do
@@ -602,6 +602,48 @@ mod CubeForge.Light do
   end
 
 
+  -- ── Re-seeding, for the GPU flood ────────────────────────────────────────
+  -- The seed is what the CPU still owes the light: sky columns filled and
+  -- emitters set, with everything else dark. The spread is the GPU's job
+  -- (cf_light_flood), and it derives exactly what sweep_box_lists derives --
+  -- proved voxel for voxel against Light.flood on the dump frame.
+  --
+  -- Re-seeding needs no radius, which is the whole difference from a relight. A
+  -- column's sunlight depends on that column alone and an emitter on its own
+  -- voxel, so an edit re-seeds the columns it touched and nothing further; the
+  -- sweep had to reach fifteen blocks in every direction because it was doing
+  -- the spreading as well.
+  pfn reseed_cols_go(la : NativeU8Arr, w : CubeForge.World.World, x0 : Int, x1 : Int, z0 : Int, z1 : Int, x : Int, z : Int) : NativeU8Arr do
+    if z > z1 do la
+    else if x > x1 do reseed_cols_go(la, w, x0, x1, z0, z1, x0, z + 1)
+    else reseed_cols_go(seed_column(la, w, x, z, size_y() - 1, 0, max_level()), w, x0, x1, z0, z1, x + 1, z) end end
+  end
+  doc "Re-seed the sunlight of every column in [x0..x1] x [z0..z1]: the box is cleared over the full height and each column walked down from the top."
+  fn reseed_sky(la : NativeU8Arr, w : CubeForge.World.World, x0 : Int, x1 : Int, z0 : Int, z1 : Int) : NativeU8Arr do
+    let cx0 = clampi(x0, 0, size_x() - 1)
+    let cx1 = clampi(x1, 0, size_x() - 1)
+    let cz0 = clampi(z0, 0, size_z() - 1)
+    let cz1 = clampi(z1, 0, size_z() - 1)
+    if cx1 < cx0 || cz1 < cz0 do la
+    -- copy_prefix first: the field is shared with the World it came from, and
+    -- cf_u8_zero_box refuses to write in place through a shared reference.
+    -- The same copy every relight has always paid (GAPS G54).
+    else reseed_cols_go(zero_box(copy_prefix(la, volume()), cx0, cx1, 0, size_y() - 1, cz0, cz1), w, cx0, cx1, cz0, cz1, cx0, cz0) end
+  end
+  doc "Re-seed the block light of every column in [x0..x1] x [z0..z1]: the box is cleared over the full height and every emitter in it set to its emission."
+  fn reseed_block(lb : NativeU8Arr, w : CubeForge.World.World, x0 : Int, x1 : Int, z0 : Int, z1 : Int) : NativeU8Arr do
+    let cx0 = clampi(x0, 0, size_x() - 1)
+    let cx1 = clampi(x1, 0, size_x() - 1)
+    let cz0 = clampi(z0, 0, size_z() - 1)
+    let cz1 = clampi(z1, 0, size_z() - 1)
+    if cx1 < cx0 || cz1 < cz0 do lb
+    else
+      let bw = cx1 - cx0 + 1
+      let bd = cz1 - cz0 + 1
+      seed_emit_box_go(zero_box(copy_prefix(lb, volume()), cx0, cx1, 0, size_y() - 1, cz0, cz1), w, cx0, bw, cz0, 0, size_y() - 1, 0, bw * bd)
+    end
+  end
+
   -- ── Which sections need remeshing ────────────────────────────────────────
   --
   -- Per-vertex light is baked into the mesh, so every section whose light moved
@@ -613,10 +655,10 @@ mod CubeForge.Light do
   -- reading an array before writing it turns every write into a full copy
   -- (GAPS.md G63). This pass is write-only.
 
-  fn marks_new() : NativeIntArr do NativeArray.make_int(1024, 0) end
+  fn marks_new() : NativeIntArr do NativeArray.make_int(2304, 0) end
 
   @[no_alloc]
-  fn mark_slot(cx : Int, cz : Int, sy : Int) : Int do cx + 8 * cz + 64 * sy end
+  fn mark_slot(cx : Int, cz : Int, sy : Int) : Int do cx + 12 * cz + 144 * sy end
 
   pfn mark_row(m : NativeIntArr, a : NativeU8Arr, b : NativeU8Arr, x : Int, x1 : Int, y : Int, z : Int) : NativeIntArr do
     if x > x1 do m
@@ -682,8 +724,8 @@ mod CubeForge.Light do
   end
   doc "The relight radius a region edit needs in field [la]: the brightest light in and round the region before the edit, or the brightest emission in it after, clamped to 1..relight_radius()."
   fn region_reach(la : NativeU8Arr, w : CubeForge.World.World, x0 : Int, x1 : Int, y0 : Int, y1 : Int, z0 : Int, z1 : Int, with_emission : Bool) : Int do
-    let m = region_max(la, clampi(x0 - 1, 0, 127), clampi(x1 + 1, 0, 127), clampi(y0 - 1, 0, 255), clampi(y1 + 1, 0, 255), clampi(z0 - 1, 0, 127), clampi(z1 + 1, 0, 127), 0, 0)
-    let e = if with_emission do region_emission(w, clampi(x0, 0, 127), clampi(x1, 0, 127), clampi(y0, 0, 255), clampi(y1, 0, 255), clampi(z0, 0, 127), clampi(z1, 0, 127), 0, 0) else 0 end
+    let m = region_max(la, clampi(x0 - 1, 0, size_x() - 1), clampi(x1 + 1, 0, size_x() - 1), clampi(y0 - 1, 0, size_y() - 1), clampi(y1 + 1, 0, size_y() - 1), clampi(z0 - 1, 0, size_z() - 1), clampi(z1 + 1, 0, size_z() - 1), 0, 0)
+    let e = if with_emission do region_emission(w, clampi(x0, 0, size_x() - 1), clampi(x1, 0, size_x() - 1), clampi(y0, 0, size_y() - 1), clampi(y1, 0, size_y() - 1), clampi(z0, 0, size_z() - 1), clampi(z1, 0, size_z() - 1), 0, 0) else 0 end
     let r = if e > m do e else m end
     if r < 1 do 1 else if r > relight_radius() do relight_radius() else r end end
   end
@@ -710,11 +752,11 @@ mod CubeForge.Light do
   the shade its edges cast (44 skylight voxels wrong by frame 30 at seed 7).
   """
   fn relight_region_marked(la : NativeU8Arr, w : CubeForge.World.World, x0 : Int, x1 : Int, y0 : Int, y1 : Int, z0 : Int, z1 : Int, r : Int) : Relit do
-    let cx0 = clampi(x0 - r, 0, 127)
-    let cx1 = clampi(x1 + r, 0, 127)
-    let cz0 = clampi(z0 - r, 0, 127)
-    let cz1 = clampi(z1 + r, 0, 127)
-    let cy1 = clampi(y1 + r, 0, 255)
+    let cx0 = clampi(x0 - r, 0, size_x() - 1)
+    let cx1 = clampi(x1 + r, 0, size_x() - 1)
+    let cz0 = clampi(z0 - r, 0, size_z() - 1)
+    let cz1 = clampi(z1 + r, 0, size_z() - 1)
+    let cy1 = clampi(y1 + r, 0, size_y() - 1)
     -- The box only has to reach y = 0 when the edit can cap a live sky column.
     -- If full sky light does not already reach the voxel just above the edit,
     -- the column below is interrupted higher up and cannot change; lateral
@@ -723,14 +765,14 @@ mod CubeForge.Light do
     -- from the edit until the first opaque block; below that the column cannot
     -- change at all, and only lateral spread reaches it, which the radius already
     -- bounds. Taking 0 unconditionally made the box 126 layers tall instead of ~31.
-    let cy0 = clampi(region_bottom(la, w, x0, x1, y0, y1, z0, z1, x0, z0, y0) - r, 0, 255)
+    let cy0 = clampi(region_bottom(la, w, x0, x1, y0, y1, z0, z1, x0, z0, y0) - r, 0, size_y() - 1)
     -- The before-picture, for seeding the box top and for the section diff at
     -- the end. Both read only y layers up to the scan box top, and a y range is
     -- a contiguous prefix of the flat index, so this copies that prefix rather
     -- than the whole 4 MB field: ~1.6 MB for an edit at tree height, and one
     -- fewer 4 MB allocation per relight. sy1 is hoisted above its box for it.
-    let sy1 = clampi(y1 + r + 1, 0, 255)
-    let above_len = if sy1 >= 254 do volume() else (sy1 + 2) * 16384 end
+    let sy1 = clampi(y1 + r + 1, 0, size_y() - 1)
+    let above_len = if sy1 >= 254 do volume() else (sy1 + 2) * layer() end
     let above = copy_prefix(la, above_len)
     -- The field is the World's, so it is shared here; the first byte written
     -- used to copy all 4 MB silently (copy-on-write) and every later write
@@ -739,18 +781,18 @@ mod CubeForge.Light do
     let la1 = zero_box_go(copy_prefix(la, volume()), cx0, cx1, cy0, cy1, cz0, cz1)
     let la2 = seed_box_go(la1, w, above, cx0, cx1 - cx0 + 1, cz0, cy1, cy0, 0, (cx1 - cx0 + 1) * (cz1 - cz0 + 1))
     -- scan box: one wider, so the unchanged voxels around the edit feed inward
-    let sx0 = clampi(x0 - r - 1, 0, 127)
-    let sx1 = clampi(x1 + r + 1, 0, 127)
-    let sz0 = clampi(z0 - r - 1, 0, 127)
-    let sz1 = clampi(z1 + r + 1, 0, 127)
-    let sy0 = if cy0 <= 0 do 0 else clampi(cy0 - 1, 0, 255) end
+    let sx0 = clampi(x0 - r - 1, 0, size_x() - 1)
+    let sx1 = clampi(x1 + r + 1, 0, size_x() - 1)
+    let sz0 = clampi(z0 - r - 1, 0, size_z() - 1)
+    let sz1 = clampi(z1 + r + 1, 0, size_z() - 1)
+    let sy0 = if cy0 <= 0 do 0 else clampi(cy0 - 1, 0, size_y() - 1) end
     -- One y layer past the box top, so give1's reads of the layer above are in
     -- range; that layer is read-only and feeds the box as a boundary source.
     -- Literal, not layer(): this feeds copy_prefix's `_ >= 1`, and a call has no
     -- SMT translation, so naming it here costs two verified obligations.
-    let plen = (sy1 + 2) * 16384
+    let plen = (sy1 + 2) * layer()
     -- only the swept y-slice is written, so only it has to be re-synced per pass
-    let slo = sy0 * 16384
+    let slo = sy0 * layer()
     -- Both buffers are copies: [la2] itself is read again below, so it cannot be
     -- one of the pair. Two copies up front replace fourteen.
     -- In place: la2 is uniquely owned (the copy above only read it, and reads
@@ -830,13 +872,13 @@ mod CubeForge.Light do
 
   doc "Repair the block-light field after every block in the region may have changed; the box is the region grown by [r]. See relight_region_marked."
   fn relight_block_region_marked(lb : NativeU8Arr, w : CubeForge.World.World, x0 : Int, x1 : Int, y0 : Int, y1 : Int, z0 : Int, z1 : Int, r : Int) : Relit do
-    let cx0 = clampi(x0 - r, 0, 127)
-    let cx1 = clampi(x1 + r, 0, 127)
-    let cz0 = clampi(z0 - r, 0, 127)
-    let cz1 = clampi(z1 + r, 0, 127)
-    let cy0 = clampi(y0 - r, 0, 255)
-    let cy1 = clampi(y1 + r, 0, 255)
-    let sy1 = clampi(y1 + r + 1, 0, 255)
+    let cx0 = clampi(x0 - r, 0, size_x() - 1)
+    let cx1 = clampi(x1 + r, 0, size_x() - 1)
+    let cz0 = clampi(z0 - r, 0, size_z() - 1)
+    let cz1 = clampi(z1 + r, 0, size_z() - 1)
+    let cy0 = clampi(y0 - r, 0, size_y() - 1)
+    let cy1 = clampi(y1 + r, 0, size_y() - 1)
+    let sy1 = clampi(y1 + r + 1, 0, size_y() - 1)
     -- Most edits are nowhere near a light-emitting block, and for those this
     -- whole pass is provably a no-op: with no block light anywhere in the scan
     -- box, there is nothing to clear, nothing to seed (an emissive block inside
@@ -849,28 +891,28 @@ mod CubeForge.Light do
     -- Worth it because this pass is half the cost of a block edit: relighting
     -- both fields was 5.7-6.9 ms of a 10-14 ms break, and skylight is the half
     -- that genuinely has work to do.
-    let sx0g = clampi(x0 - r - 1, 0, 127)
-    let sx1g = clampi(x1 + r + 1, 0, 127)
-    let sz0g = clampi(z0 - r - 1, 0, 127)
-    let sz1g = clampi(z1 + r + 1, 0, 127)
-    let sy0g = if cy0 <= 0 do 0 else clampi(cy0 - 1, 0, 255) end
+    let sx0g = clampi(x0 - r - 1, 0, size_x() - 1)
+    let sx1g = clampi(x1 + r + 1, 0, size_x() - 1)
+    let sz0g = clampi(z0 - r - 1, 0, size_z() - 1)
+    let sz1g = clampi(z1 + r + 1, 0, size_z() - 1)
+    let sy0g = if cy0 <= 0 do 0 else clampi(cy0 - 1, 0, size_y() - 1) end
     let dark = if region_emits(w, x0, x1, y0, y1, z0, z1, 0) do false
                else !box_any_go(lb, sx0g, sx1g, sy0g, sy1, sz0g, sz1g, 0) end
     if dark do Relit(lb, marks_new())
     else
     -- Only y layers up to the scan box top are read or written, and a y range
     -- is a contiguous prefix of the flat index, so every copy is that prefix.
-    let plen = if sy1 >= 254 do volume() else (sy1 + 2) * 16384 end
+    let plen = if sy1 >= 254 do volume() else (sy1 + 2) * layer() end
     let before = copy_prefix(lb, plen)
     -- an explicit copy of the shared field, as in relight_marked
     let lb1 = zero_box_go(copy_prefix(lb, volume()), cx0, cx1, cy0, cy1, cz0, cz1)
     let lb2 = seed_emit_box_go(lb1, w, cx0, cx1 - cx0 + 1, cz0, cy0, cy1, 0, (cx1 - cx0 + 1) * (cz1 - cz0 + 1))
     -- scan box: one wider, so the unchanged voxels around the edit feed inward
-    let sx0 = clampi(x0 - r - 1, 0, 127)
-    let sx1 = clampi(x1 + r + 1, 0, 127)
-    let sz0 = clampi(z0 - r - 1, 0, 127)
-    let sz1 = clampi(z1 + r + 1, 0, 127)
-    let sy0 = if cy0 <= 0 do 0 else clampi(cy0 - 1, 0, 255) end
+    let sx0 = clampi(x0 - r - 1, 0, size_x() - 1)
+    let sx1 = clampi(x1 + r + 1, 0, size_x() - 1)
+    let sz0 = clampi(z0 - r - 1, 0, size_z() - 1)
+    let sz1 = clampi(z1 + r + 1, 0, size_z() - 1)
+    let sy0 = if cy0 <= 0 do 0 else clampi(cy0 - 1, 0, size_y() - 1) end
     let out = sweep_box_lists(lb2, w, sx0, sx1, sy0, sy1, sz0, sz1)
     Relit(out, mark_box(marks_new(), before, out, sx0, sx1, sy0, sy1, sz0, sz1))
     end
@@ -879,7 +921,7 @@ mod CubeForge.Light do
   -- The union of two marks arrays, as a fresh array: reads [a] and [b], writes
   -- only the new one, so neither input is copied (GAPS.md G21).
   pfn or_go(a : NativeIntArr, b : NativeIntArr, m : NativeIntArr, i : Int) : NativeIntArr do
-    if i >= 1024 do m
+    if i >= 2304 do m
     else if NativeArray.get_int(a, i) != 0 do or_go(a, b, NativeArray.set_int(m, i, 1), i + 1)
     else if NativeArray.get_int(b, i) != 0 do or_go(a, b, NativeArray.set_int(m, i, 1), i + 1)
     else or_go(a, b, m, i + 1) end end end
@@ -907,9 +949,9 @@ mod CubeForge.Light do
   -- as x fastest, then y, then z (offset = x + width*(y + height*z)), while the
   -- light field is x, then z, then y. The two orders are transposed, and using
   -- the light field's index here samples the world sideways.
-  fn occ_index(x : {Int | 0 <= _ && _ < 128}, y : {Int | 0 <= _ && _ < 256}, z : {Int | 0 <= _ && _ < 128})
-      : {Int | 0 <= _ && _ < 4194304} do
-    x + 128 * (y + 256 * z)
+  fn occ_index(x : {Int | 0 <= _ && _ < 192}, y : {Int | 0 <= _ && _ < 256}, z : {Int | 0 <= _ && _ < 192})
+      : {Int | 0 <= _ && _ < 9437184} do
+    x + 192 * (y + 256 * z)
   end
 
   -- One chunk's 65536 voxels, with the chunk fetched once (GAPS.md G64).
@@ -933,44 +975,44 @@ mod CubeForge.Light do
   -- ── Shifting the window ────────────────────────────────────────────────
   -- The window slid by (dx, dz) chunks: local voxel (x, z) is what was at
   -- (x + 16dx, z + 16dz), and the band that came in is dark until lit below.
-  -- Rows are blits: an x shift copies 112 bytes per (y, z) row, a z shift one
+  -- Rows are blits: an x shift copies 176 bytes per (y, z) row, a z shift one
   -- contiguous run per y layer. dx and dz are -1, 0 or 1, one of them zero.
   pfn shift_rows_go(src : NativeU8Arr, dst : NativeU8Arr, s : Int, r : Int, rows : Int, stride : Int) : NativeU8Arr do
     if r >= rows do dst
     else
-      let len = 128 - (if s < 0 do 0 - s else s end)
+      let len = 192 - (if s < 0 do 0 - s else s end)
       let xs0 = if s > 0 do s else 0 end
       let xd0 = if s > 0 do 0 else 0 - s end
       shift_rows_go(src, CubeForge.Ffi.Window.u8_blit(dst, r * stride + xd0, src, r * stride + xs0, len), s, r + 1, rows, stride)
     end
   end
-  -- z shift of the light layout (x + 128 (z + 128 y)): per y, rows z form one run of 128 bytes each
+  -- z shift of the light layout (x + 192 (z + 192 y)): per y, rows z form one run of 192 bytes each
   pfn shift_z_go(src : NativeU8Arr, dst : NativeU8Arr, s : Int, y : Int) : NativeU8Arr do
     if y >= 256 do dst
     else
-      let len = 128 - (if s < 0 do 0 - s else s end)
+      let len = 192 - (if s < 0 do 0 - s else s end)
       let zs0 = if s > 0 do s else 0 end
       let zd0 = if s > 0 do 0 else 0 - s end
-      shift_z_go(src, CubeForge.Ffi.Window.u8_blit(dst, 128 * (zd0 + 128 * y), src, 128 * (zs0 + 128 * y), 128 * len), s, y + 1)
+      shift_z_go(src, CubeForge.Ffi.Window.u8_blit(dst, 192 * (zd0 + 192 * y), src, 192 * (zs0 + 192 * y), 192 * len), s, y + 1)
     end
   end
   doc "A light field (skylight or block light) moved by [dx], [dz] chunks; the band that came in is dark."
   fn shift_field(la : NativeU8Arr, dx : Int, dz : Int) : NativeU8Arr do
-    if dx != 0 do shift_rows_go(la, new(), 16 * dx, 0, 32768, 128)
+    if dx != 0 do shift_rows_go(la, new(), 16 * dx, 0, 49152, 192)
     else if dz != 0 do shift_z_go(la, new(), 16 * dz, 0)
     else copy_field(la, new()) end end
   end
-  -- z shift of the occupancy layout (x + 128 (y + 256 z)): a z slab is one run of 128 * 256 bytes
+  -- z shift of the occupancy layout (x + 192 (y + 256 z)): a z slab is one run of 192 * 256 bytes
   pfn shift_occ_z_go(src : NativeU8Arr, dst : NativeU8Arr, s : Int, z : Int) : NativeU8Arr do
-    let len = 128 - (if s < 0 do 0 - s else s end)
+    let len = 192 - (if s < 0 do 0 - s else s end)
     let zs0 = if s > 0 do s else 0 end
     let zd0 = if s > 0 do 0 else 0 - s end
     if z >= len do dst
-    else shift_occ_z_go(src, CubeForge.Ffi.Window.u8_blit(dst, 32768 * (zd0 + z), src, 32768 * (zs0 + z), 32768), s, z + 1) end
+    else shift_occ_z_go(src, CubeForge.Ffi.Window.u8_blit(dst, 49152 * (zd0 + z), src, 49152 * (zs0 + z), 49152), s, z + 1) end
   end
   doc "The occupancy field moved by [dx], [dz] chunks; the band that came in is empty."
   fn shift_occ(o : NativeU8Arr, dx : Int, dz : Int) : NativeU8Arr do
-    if dx != 0 do shift_rows_go(o, new(), 16 * dx, 0, 32768, 128)
+    if dx != 0 do shift_rows_go(o, new(), 16 * dx, 0, 49152, 192)
     else if dz != 0 do shift_occ_z_go(o, new(), 16 * dz, 0)
     else copy_field(o, new()) end end
   end
@@ -1000,7 +1042,7 @@ mod CubeForge.Light do
     end end
   end
   fn band_top(w : CubeForge.World.World, cx0 : Int, cx1 : Int, cz0 : Int, cz1 : Int) : Int do
-    clampi(band_top_go(w, cx0 - 1, cx1 + 1, cz0 - 1, cz1 + 1, cx0 - 1, cz0 - 1, 0) + 2, 0, 255)
+    clampi(band_top_go(w, cx0 - 1, cx1 + 1, cz0 - 1, cz1 + 1, cx0 - 1, cz0 - 1, 0) + 2, 0, size_y() - 1)
   end
 
   doc """
@@ -1013,8 +1055,8 @@ mod CubeForge.Light do
   fn light_band(la : NativeU8Arr, w : CubeForge.World.World, cx0 : Int, cx1 : Int, cz0 : Int, cz1 : Int) : NativeU8Arr do
     let r = relight_radius()
     let la1 = seed_band_go(la, w, cx0, cx1, cz0, cz1, cx0, cz0)
-    sweep_box_lists(la1, w, clampi(16 * cx0 - r, 0, 127), clampi(16 * cx1 + 15 + r, 0, 127), 0, band_top(w, cx0, cx1, cz0, cz1),
-                    clampi(16 * cz0 - r, 0, 127), clampi(16 * cz1 + 15 + r, 0, 127))
+    sweep_box_lists(la1, w, clampi(16 * cx0 - r, 0, size_x() - 1), clampi(16 * cx1 + 15 + r, 0, size_x() - 1), 0, band_top(w, cx0, cx1, cz0, cz1),
+                    clampi(16 * cz0 - r, 0, size_z() - 1), clampi(16 * cz1 + 15 + r, 0, size_z() - 1))
   end
   doc "light_band for the block-light field: re-seed the band's emitters, then sweep."
   fn light_band_block(lb : NativeU8Arr, w : CubeForge.World.World, cx0 : Int, cx1 : Int, cz0 : Int, cz1 : Int) : NativeU8Arr do
@@ -1023,8 +1065,8 @@ mod CubeForge.Light do
     let bd = 16 * (cz1 - cz0 + 1)
     let top = band_top(w, cx0, cx1, cz0, cz1)
     let lb1 = seed_emit_box_go(lb, w, 16 * cx0, bw, 16 * cz0, 0, top, 0, bw * bd)
-    sweep_box_lists(lb1, w, clampi(16 * cx0 - r, 0, 127), clampi(16 * cx1 + 15 + r, 0, 127), 0, top,
-                    clampi(16 * cz0 - r, 0, 127), clampi(16 * cz1 + 15 + r, 0, 127))
+    sweep_box_lists(lb1, w, clampi(16 * cx0 - r, 0, size_x() - 1), clampi(16 * cx1 + 15 + r, 0, size_x() - 1), 0, top,
+                    clampi(16 * cz0 - r, 0, size_z() - 1), clampi(16 * cz1 + 15 + r, 0, size_z() - 1))
   end
   doc "The occupancy of the band of chunks [cx0, cx1] x [cz0, cz1] written into [o] (a fresh shift_occ result)."
   fn occ_band(o : NativeU8Arr, w : CubeForge.World.World, cx0 : Int, cx1 : Int, cz0 : Int, cz1 : Int) : NativeU8Arr do

@@ -74,7 +74,7 @@ mod CubeForge.World do
   end
   doc "The local indices a shift by ([dx], [dz]) brings in, for a world [n] chunks a side."
   fn band_incoming(n : Int, dx : Int, dz : Int) : List(Int) do band_incoming_go(n, dx, dz, n * n - 1, Nil) end
-  doc "The lake tile the band that a shift by ([dx], [dz]) brings in generates against: the corner (bx0, bz0) of the band, and its far corner (bx1, bz1). See `shift_with`."
+  doc "The band that comes in, in local chunk coordinates, for a shift of ([dx], [dz]): the corner (bx0, bz0) and its far corner (bx1, bz1). The band's lake tiles are chosen from these (see `shift_chunks_with`), and the commit syncs just this band of the occupancy texture."
   fn band_x0(n : Int, dx : Int) : Int do if dx > 0 do n - 1 else 0 end end
   fn band_x1(n : Int, dx : Int) : Int do if dx < 0 do 0 else n - 1 end end
   fn band_z0(n : Int, dz : Int) : Int do if dz > 0 do n - 1 else 0 end end
@@ -107,7 +107,7 @@ mod CubeForge.World do
   type World = World(CubeForge.Tree.Tree(CubeForge.Chunk.Chunk), NativeU8Arr, NativeU8Arr, NativeU8Arr, NativeU8Arr, Int, CubeForge.Model.Templates, Int, Int, NativeU8Arr, List(Evicted), List(Evicted), List(CubeForge.Lakes.Tile), NativeIntArr, Int)   -- chunks, skylight field, block-light field, occupancy field, shown species per column, side length in chunks, the model templates the mesher stamps, the window origin in chunks (x, z), the dirty flag per local chunk, the evicted cache, the chunks the last shift restored from it, the lake tiles poured so far (a window touches at most four), the hash each local chunk generated to (0 unknown), the seed the world was generated from (the mesher re-derives a point of interest's shape from it)
 
   doc "The LARGEST world side in chunks: what the fixed-width fields (light, occupancy, the shader) are written for. A world's own side is World.side(w), from Noise.size_of its seed, 4..8."
-  fn size() : Int do 8 end
+  fn size() : Int do 12 end
 
   doc "Columns per side: size() chunks of 16."
   fn cols() : Int do 16 * size() end
@@ -179,7 +179,7 @@ mod CubeForge.World do
   -- always the blocks' opacity (Light.occ_value) and the light sweep can read
   -- a neighbour's opacity from it instead of fetching the block (GAPS G82).
   pfn occ_write(o : NativeU8Arr, x : Int, y : Int, z : Int, id : Int) : NativeU8Arr do
-    if x < 0 || x >= 128 || y < 0 || y >= 256 || z < 0 || z >= 128 do o
+    if x < 0 || x >= 192 || y < 0 || y >= 256 || z < 0 || z >= 192 do o
     else NativeArray.set_u8(o, CubeForge.Light.occ_index(x, y, z), CubeForge.Light.occ_value(id)) end
   end
 
@@ -222,7 +222,49 @@ mod CubeForge.World do
     else match w do World(cs, la, lb, o, sh, n, mo, ox, oz, dt, ca, rs, tl, gh, sd) -> World(cs, la, lb, o, NativeArray.set_u8(sh, x + c * z, sp), n, mo, ox, oz, dt, ca, rs, tl, gh, sd) end end
   end
 
-  doc "Recompute both light fields from scratch."
+  doc """
+  Re-seed both light fields over the columns [x0..x1] x [z0..z1], GROWN by the
+  relight radius.
+
+  The seed of a column is local, so the grown margin is not needed to compute
+  it. It is needed to CLEAR it: the flood only ever raises a value, so light
+  that should now be dimmer -- a roof built over open ground -- has to be zeroed
+  before the flood re-derives it, and stale brightness reaches as far as the old
+  sweep did. Zeroing only the edited column left a lit halo the flood could not
+  put out.
+  """
+  fn reseed_region(w : World, rx0 : Int, rx1 : Int, rz0 : Int, rz1 : Int) : World do
+    reseed_exact(w, rx0 - CubeForge.Light.relight_radius(), rx1 + CubeForge.Light.relight_radius(),
+                    rz0 - CubeForge.Light.relight_radius(), rz1 + CubeForge.Light.relight_radius())
+  end
+
+  doc """
+  Re-seed exactly the columns given, without the relight radius.
+
+  For a shift's band that is all that is needed: the seed is local, so the
+  columns either side of the seam still hold the right seed and only the band's
+  own changed. The margin exists to clear stale SPREAD light out of the texture,
+  and the caller uploads the grown box for that -- it does not have to be
+  re-seeded, only re-sent.
+  """
+  fn reseed_exact(w : World, x0 : Int, x1 : Int, z0 : Int, z1 : Int) : World do
+    set_block_light(set_light(w, CubeForge.Light.reseed_sky(light(w), w, x0, x1, z0, z1)),
+                    CubeForge.Light.reseed_block(block_light(w), w, x0, x1, z0, z1))
+  end
+
+  doc """
+  Seed both light fields for the whole world: sky columns and emitters, with
+  nothing spread. This is what the game uses at session start, because the
+  spreading is the GPU's (cf_light_flood) and it derives exactly what the CPU
+  sweep derives -- proved voxel for voxel on the dump frame. It is the cheap
+  half of relight_all: no BFS in it at all.
+  """
+  fn seed_all_fields(w : World) : World do
+    set_block_light(set_light(w, CubeForge.Light.seed_all(CubeForge.Light.new(), w)),
+                    CubeForge.Light.seed_emitters(CubeForge.Light.new(), w))
+  end
+
+  doc "Recompute both light fields from scratch, spread and all. The CPU implementation of the flood: the game no longer uses it, and the light tests hold it to the same answer the GPU has to reach."
   fn relight_all(w : World) : World do
     set_block_light(set_light(w, CubeForge.Light.flood(w)), CubeForge.Light.flood_block(w))
   end
@@ -304,12 +346,16 @@ mod CubeForge.World do
         occ_cells(occ_write(o, 16 * cx + i % 16, i / 256, 16 * cz + (i / 16) % 16, v % 256), cx, cz, rest)
     end
   end
-  doc "Pack a world cell for set_blocks: x and z in 0..127, y and id in 0..255."
-  fn pack_cell(x : Int, y : Int, z : Int, id : Int) : Int do ((x * 128 + z) * 256 + y) * 256 + id end
+  doc "Pack a world cell for set_blocks: x and z in 0..cols()-1, y and id in 0..255."
+  -- The four unpackers are written from cols() rather than the literal, so the
+  -- x divisor cannot drift from the x multiplier when the window's side moves.
+  -- It did: cell_x kept 128 * 65536 after the rest went to 192, and every tree
+  -- and fruit body landed at the wrong x.
+  fn pack_cell(x : Int, y : Int, z : Int, id : Int) : Int do ((x * cols() + z) * 256 + y) * 256 + id end
   pfn cell_id(v : Int) : Int do v % 256 end
   pfn cell_y(v : Int) : Int do (v / 256) % 256 end
-  pfn cell_z(v : Int) : Int do (v / 65536) % 128 end
-  pfn cell_x(v : Int) : Int do v / 8388608 end
+  pfn cell_z(v : Int) : Int do (v / 65536) % cols() end
+  pfn cell_x(v : Int) : Int do v / (65536 * cols()) end
   -- Split [cells] into those in chunk (cx, cz), repacked as chunk-local
   -- idx * 256 + id, and the rest.
   pfn split_chunk(cells : List(Int), cx : Int, cz : Int, mine : List(Int), rest : List(Int)) : Split do
@@ -429,14 +475,30 @@ mod CubeForge.World do
   fn coords(n : Int) : List(Int) do coords_go(n * n - 1, n, Nil) end
 
   doc "Stage 1: generate every chunk in parallel. Chunks are independent, so this is a plain pmap."
+  -- Every distinct lake tile covering local chunks 0..n-1 at window origin
+  -- (ox, oz), poured once. `Lakes.tile` is memoised in the shim, so pouring
+  -- them here in sequence makes the parallel generate below hit every time
+  -- instead of a dozen workers pouring the same tile at once.
+  pfn warm_tiles(seed : Int, ox : Int, oz : Int, n : Int, cx : Int, cz : Int, tl : List(CubeForge.Lakes.Tile)) : List(CubeForge.Lakes.Tile) do
+    if cz >= n do tl
+    else if cx >= n do warm_tiles(seed, ox, oz, n, 0, cz + 8, tl)
+    else warm_tiles(seed, ox, oz, n, cx + 8, cz, remember_tile(tl, tile_for(tl, seed, ox + cx, oz + cz))) end end
+  end
+
   fn generate(n : Int, seed : Int, workers : Int) : World do
-    -- the lake table once, read by every chunk (a read only: no copy -- GAPS G68)
-    let lk = CubeForge.Lakes.levels(seed, n)
-    let chunks = List.pmap_n(coords(n), fn i -> C.generate_lakes(16 * (i % n), 16 * (i / n), seed, lk), workers)
+    -- Generated against the SAME per-tile lake basis the shift uses
+    -- (Lakes.tile_of_chunk, a fixed 128-block grid), not one Lakes.levels pour
+    -- over the window. Those two agreed only while the window was itself 128
+    -- blocks: at 192 they disagree, so the world's lakes -- and every chunk
+    -- hash, and the water actors' idea of their own chunk -- changed under the
+    -- player at the first shift. The tiles are also kept, so the first shifts
+    -- reuse them rather than pouring again.
+    let tl = warm_tiles(seed, 0, 0, n, 0, 0, Nil)
+    let chunks = List.pmap_n(coords(n), fn i -> C.generate_lakes(16 * (i % n), 16 * (i / n), seed, tile_for(tl, seed, i % n, i / n)), workers)
     let cs = CubeForge.Tree.from_list(chunks, C.new())
     -- what each chunk generated to: the cache's test for "back to pristine"
     let gh = hashes_in_go(List.pmap_n(coords(n), fn i -> hash_voxels(CubeForge.Tree.get(cs, i), 0, 7), workers), NativeArray.make_int(n * n, 0), 0, n * n)
-    rebuild_occupancy(World(cs, CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), shown_new(n), n, default_models(), 0, 0, NativeArray.make_u8(n * n, 0), Nil, Nil, Nil, gh, seed))
+    rebuild_occupancy(World(cs, CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), shown_new(n), n, default_models(), 0, 0, NativeArray.make_u8(n * n, 0), Nil, Nil, tl, gh, seed))
   end
 
   -- ── The shift ─────────────────────────────────────────────────────────────
@@ -460,6 +522,46 @@ mod CubeForge.World do
       Cons(e, rest) -> uncache_go(rest, cx, cz, if ev_cx(e) == cx && ev_cz(e) == cz do acc else Cons(e, acc) end)
     end
   end
+  -- The local indices the band brought in, ascending.
+  pfn band_indices_of(n : Int, dx : Int, dz : Int) : List(Int) do band_idx_go(n, dx, dz, n * n - 1, Nil) end
+  pfn band_idx_go(n : Int, dx : Int, dz : Int, i : Int, acc : List(Int)) : List(Int) do
+    if i < 0 do acc
+    else
+      let sx = i % n + dx
+      let sz = i / n + dz
+      band_idx_go(n, dx, dz, i - 1, if sx >= 0 && sx < n && sz >= 0 && sz < n do acc else Cons(i, acc) end)
+    end
+  end
+  -- The chunk list after the shift, built from n*n-1 down: a chunk that moved is
+  -- taken straight from the old tree, one that came in from [fresh], in the same
+  -- ascending order band_indices_of produced them.
+  pfn shifted_list(cs : CubeForge.Tree.Tree(CubeForge.Chunk.Chunk), fresh : List(CubeForge.Chunk.Chunk), n : Int, dx : Int, dz : Int, i : Int, acc : List(CubeForge.Chunk.Chunk)) : List(CubeForge.Chunk.Chunk) do
+    if i < 0 do acc
+    else
+      let sx = i % n + dx
+      let sz = i / n + dz
+      if sx >= 0 && sx < n && sz >= 0 && sz < n do
+        shifted_list(cs, fresh, n, dx, dz, i - 1, Cons(CubeForge.Tree.get(cs, sx + n * sz), acc))
+      else
+        shifted_list(cs, drop_last(fresh), n, dx, dz, i - 1, Cons(last_of(fresh, C.new()), acc))
+      end
+    end
+  end
+  pfn last_of(l : List(CubeForge.Chunk.Chunk), d : CubeForge.Chunk.Chunk) : CubeForge.Chunk.Chunk do
+    match l do
+      Nil -> d
+      Cons(h, Nil) -> h
+      Cons(_, rest) -> last_of(rest, d)
+    end
+  end
+  pfn drop_last(l : List(CubeForge.Chunk.Chunk)) : List(CubeForge.Chunk.Chunk) do
+    match l do
+      Nil -> Nil
+      Cons(_, Nil) -> Nil
+      Cons(h, rest) -> Cons(h, drop_last(rest))
+    end
+  end
+
   pfn shifted_chunk(cs : CubeForge.Tree.Tree(CubeForge.Chunk.Chunk), n : Int, i : Int, dx : Int, dz : Int, ox1 : Int, oz1 : Int, seed : Int,
                     ta : CubeForge.Lakes.Tile, tb : CubeForge.Lakes.Tile, ca : List(Evicted), bd : Band) : CubeForge.Chunk.Chunk do
     let lx = i % n
@@ -602,18 +704,34 @@ mod CubeForge.World do
     end
   end
 
-  doc "Slide the window by ([dx], [dz]) chunks, one of them zero and the other -1 or 1: see the section comment. [blobs] are the column blobs of the chunks leaving (by local index; only the dirty ones are kept); the cache gives back what it holds for the band that comes in, and `restored` lists it."
-  fn shift(w : World, dx : Int, dz : Int, seed : Int, workers : Int, blobs : List(Blob)) : World do
-    shift_with(w, dx, dz, seed, workers, blobs, band_none())
+  -- A shift with its chunks in place but none of its fields: what shift_chunks
+  -- hands shift_fields. The world inside has the new chunks and the new origin
+  -- and every field still at the OLD origin, so it is not a world anyone may
+  -- render or read a field from -- it lives in the frame loop's staging value
+  -- and nowhere else. The list is the evicted cache including this shift's own
+  -- evictions, which the dirty and hash arrays still need.
+  type HalfShift = HalfShift(World, List(Evicted))
+  fn half_world(h : HalfShift) : World do match h do HalfShift(w, _) -> w end end
+
+  doc """
+  Stage one of a shift: the chunks. Pours the band's lake tiles, evicts the
+  dirty chunks leaving, and generates or un-caches the band that comes in.
+
+  This is the expensive half and it is expensive for a reason that splitting it
+  further will not fix: the twelve new chunks are generated in one pmap, so its
+  cost is the LATENCY of a single chunk generation (~23 ms), not the sum. Half
+  a band costs the same as a whole one.
+  """
+  fn shift_chunks(w : World, dx : Int, dz : Int, seed : Int, workers : Int, blobs : List(Blob)) : HalfShift do
+    shift_chunks_with(w, dx, dz, seed, workers, blobs, band_none())
   end
 
-  doc "`shift`, given a band prepared for exactly this move (see `Band`): its tiles are taken instead of poured and its chunks instead of generated. A band that does not match, or is empty, costs nothing and the shift generates inline."
-  fn shift_with(w : World, dx : Int, dz : Int, seed : Int, workers : Int, blobs : List(Blob), bd0 : Band) : World do
+  doc "[shift_chunks], given a band prepared for exactly this move (see `Band`): its tiles are taken instead of poured and its chunks instead of generated. A band that does not match, or is empty, costs nothing and the stage generates inline."
+  fn shift_chunks_with(w : World, dx : Int, dz : Int, seed : Int, workers : Int, blobs : List(Blob), bd0 : Band) : HalfShift do
     match w do
       World(cs, la, lb, o, sh, n, mo, ox, oz, dt, ca, _, tl, gh, sd) ->
         let ox1 = ox + dx
         let oz1 = oz + dz
-        -- the band that comes in, in local chunk coordinates
         let bx0 = band_x0(n, dx)
         let bx1 = band_x1(n, dx)
         let bz0 = band_z0(n, dz)
@@ -629,18 +747,87 @@ mod CubeForge.World do
         let tl2 = remember_tile(tl1, tb)
         let ca1 = evict_go(cs, dt, n, dx, dz, ox, oz, blobs, 0, ca, gh)
         let rs = restored_go(ca1, n, dx, dz, ox1, oz1, 0, Nil)
-        let cs1 = CubeForge.Tree.from_list(List.pmap_n(coords(n), fn i -> shifted_chunk(cs, n, i, dx, dz, ox1, oz1, seed, ta, tb, ca1, bd), workers), C.new())
-        let c = 16 * n
-        let sh1 = restore_shown_go(shift_shown_go(sh, NativeArray.make_u8(c * c, 0), c, 16 * dx, 16 * dz, 0), rs, n, ox1, oz1)
-        let dt1 = shift_dirty_go(dt, NativeArray.make_u8(n * n, 0), n, dx, dz, ox1, oz1, ca1, 0)
-        let gh1 = shift_hash_go(gh, cs1, NativeArray.make_int(n * n, 0), n, dx, dz, ox1, oz1, ca1, 0)
-        let ca2 = drop_restored(ca1, rs)
-        let w1 = World(cs1, CubeForge.Light.shift_field(la, dx, dz), CubeForge.Light.shift_field(lb, dx, dz), CubeForge.Light.shift_occ(o, dx, dz), sh1, n, mo, ox1, oz1, dt1, ca2, rs, tl2, gh1, sd)
-        let la2 = CubeForge.Light.light_band(light(w1), w1, bx0, bx1, bz0, bz1)
-        let lb2 = CubeForge.Light.light_band_block(block_light(w1), w1, bx0, bx1, bz0, bz1)
-        let o2 = CubeForge.Light.occ_band(occupancy(w1), w1, bx0, bx1, bz0, bz1)
-        World(cs1, la2, lb2, o2, sh1, n, mo, ox1, oz1, dt1, ca2, rs, tl2, gh, sd)
+        -- Only the band is generated, and only the band goes through pmap. It
+        -- used to fan all n*n indices out, so 132 of the 144 tasks existed to
+        -- copy a chunk reference the tree already had -- and the task overhead,
+        -- not the generation, was most of the stage: an in-window chunk
+        -- generates in ~2 ms, twelve of them over fourteen workers is a couple
+        -- of milliseconds, and the stage measured 27.
+        let fresh = List.pmap_n(band_indices_of(n, dx, dz), fn i -> shifted_chunk(cs, n, i, dx, dz, ox1, oz1, seed, ta, tb, ca1, bd), workers)
+        let cs1 = CubeForge.Tree.from_list(shifted_list(cs, fresh, n, dx, dz, n * n - 1, Nil), C.new())
+        -- the new chunks and the new origin; every field is still the old one
+        HalfShift(World(cs1, la, lb, o, sh, n, mo, ox1, oz1, dt, ca1, rs, tl2, gh, sd), ca1)
     end
+  end
+
+  doc """
+  Stage two of a shift: the per-column arrays and the fields. Slides shown,
+  dirty and the generation hashes, slides both light fields and the occupancy
+  field, and builds the band's occupancy.
+
+  The returned world's LIGHT IS NOT VALID in the band: both fields are slid, so
+  the band comes back dark. [shift_light] finishes it, and [shift] is all three
+  together. They are separate so the frame loop can pay for them on separate
+  frames (see the staging comment on Staged in cube_forge.march).
+  """
+  fn shift_fields(h : HalfShift, dx : Int, dz : Int, workers : Int) : World do
+    match h do
+      HalfShift(hw, ca1) ->
+        match hw do
+          World(cs1, la, lb, o, sh, n, mo, ox1, oz1, dt, _, rs, tl2, gh, sd) ->
+            let bx0 = band_x0(n, dx)
+            let bx1 = band_x1(n, dx)
+            let bz0 = band_z0(n, dz)
+            let bz1 = band_z1(n, dz)
+            let c = 16 * n
+            let sh1 = restore_shown_go(shift_shown_go(sh, NativeArray.make_u8(c * c, 0), c, 16 * dx, 16 * dz, 0), rs, n, ox1, oz1)
+            let dt1 = shift_dirty_go(dt, NativeArray.make_u8(n * n, 0), n, dx, dz, ox1, oz1, ca1, 0)
+            let gh1 = shift_hash_go(gh, cs1, NativeArray.make_int(n * n, 0), n, dx, dz, ox1, oz1, ca1, 0)
+            let ca2 = drop_restored(ca1, rs)
+            -- The three fields slide independently, and the occupancy band goes
+            -- with the occupancy slide: reading it needs only the chunks, which
+            -- [hw] already has. So all three run as one pmap rather than in
+            -- series -- the occupancy leg is much the longest, and the two light
+            -- slides ride along inside it.
+            --
+            -- The occupancy field belongs to THIS stage and not the light one:
+            -- the light sweep reads a neighbour's opacity out of it
+            -- (Light.sweep_box_lists -> list_go), so a band still zeroed from
+            -- shift_occ would light the incoming chunks as if they were air.
+            let parts = List.pmap_n(Cons(0, Cons(1, Cons(2, Nil))),
+                                    fn i -> if i == 0 do CubeForge.Light.shift_field(la, dx, dz)
+                                            else if i == 1 do CubeForge.Light.shift_field(lb, dx, dz)
+                                            else CubeForge.Light.occ_band(CubeForge.Light.shift_occ(o, dx, dz), hw, bx0, bx1, bz0, bz1) end end, workers)
+            match parts do
+              Cons(la1, Cons(lb1, Cons(o1, _))) -> World(cs1, la1, lb1, o1, sh1, n, mo, ox1, oz1, dt1, ca2, rs, tl2, gh1, sd)
+              _ -> hw
+            end
+        end
+    end
+  end
+
+  doc "Stages one and two together: every caller that does not care about frame budget."
+  fn shift_blocks(w : World, dx : Int, dz : Int, seed : Int, workers : Int, blobs : List(Blob)) : World do
+    shift_fields(shift_chunks(w, dx, dz, seed, workers, blobs), dx, dz, workers)
+  end
+
+  doc "Stage two of a shift: re-seed the band that [shift_chunks] brought in. Only the seed -- sky columns and emitters -- because the GPU does the spreading (cf_light_flood), and it derives what the CPU sweep derived, proved voxel for voxel on the dump frame."
+  fn shift_light(w : World, dx : Int, dz : Int) : World do
+    match w do
+      World(_, _, _, _, _, n, _, _, _, _, _, _, _, _, _) ->
+        reseed_exact(w, 16 * band_x0(n, dx), 16 * band_x1(n, dx) + 15,
+                        16 * band_z0(n, dz), 16 * band_z1(n, dz) + 15)
+    end
+  end
+
+  doc "Slide the window by ([dx], [dz]) chunks in one go: [shift_blocks] then [shift_light]. The frame loop stages the two separately; tests and any caller that does not care about frame budget use this."
+  fn shift(w : World, dx : Int, dz : Int, seed : Int, workers : Int, blobs : List(Blob)) : World do
+    shift_light(shift_blocks(w, dx, dz, seed, workers, blobs), dx, dz)
+  end
+
+  doc "[shift], given a band prepared for exactly this move (see `Band`). Only stage one takes the band -- it is the stage that pours and generates -- so this is [shift] with [shift_chunks_with] at the front. A band that does not match, or is empty, costs nothing and the shift generates inline."
+  fn shift_with(w : World, dx : Int, dz : Int, seed : Int, workers : Int, blobs : List(Blob), bd : Band) : World do
+    shift_light(shift_fields(shift_chunks_with(w, dx, dz, seed, workers, blobs, bd), dx, dz, workers), dx, dz)
   end
 
   doc "A world over chunks read from a save, with empty light fields (rebuilt by the caller); the occupancy field is built here, as every constructor does."

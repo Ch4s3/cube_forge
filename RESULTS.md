@@ -3659,3 +3659,1121 @@ occupancy sweeps over the band (25 of it), the band's mesh, and the field
 remaps -- none of them pure in the window's coordinates the way the chunks
 are, so none of them prefetchable without moving the 4 MB fields through an
 actor. That is the next cut if a shift needs to fit in a frame.
+
+## The window shift, staged over four frames (2026-09-06)
+
+Reported as "big FPS drops and 58 fps most of the time". The 58 fps is vsync:
+uncapped, the same scripted walk (`CF_AUTOWALK`, seed 7) runs at 228 fps with
+a **2.8 ms** mean frame and a 9.9 ms worst quiet frame. Nothing in the steady
+state is near the 16.7 ms budget. What breaks it is the window shift, which
+ran whole on one frame, once every 16 blocks walked (~3 s).
+
+`CF_FRAME_LOG=1` prints one line per frame with its elapsed time; it is what
+these distributions are read off.
+
+### Where a shift's 63-100 ms went
+
+| | ms |
+|---|---|
+| `World.shift` | 45-78 |
+| ├ chunk pmap + tree rebuild | 14-15 |
+| ├ sky light band | 10-12 |
+| ├ block light + occupancy band | 11-12 |
+| ├ shown/dirty/hash + field slides | 5-6 |
+| └ lake tiles + evict | 3.3-3.8 |
+| band mesh (8 chunks) | 6-9 |
+| GL shift + remap | 5.4 |
+| biome / myc / actors / springs | 6-9 |
+
+### The band was lit against occupancy it did not have yet
+
+`Light.sweep_box_lists` reads a neighbour's opacity out of the world's
+occupancy field, and `World.shift` swept both light bands *before* `occ_band`
+filled the incoming band -- which `shift_occ` leaves zeroed. Every freshly
+streamed chunk was lit as if it were air. The light oracle after one shift:
+
+| | sky | block |
+|---|---|---|
+| before | **17 995** | 0 |
+| after (frames 400 / 1200 / 2000) | **42 / 13 / 9** | 0 / 0 / 0 |
+
+The remainder is the accepted 15/13 water pattern already recorded above. The
+same expression also returned the pre-shift `gh` instead of `gh1`, so the
+generation hashes went stale after every shift; both are one edit.
+
+### Parallel bands, then four stages
+
+The two bands are independent once the occupancy is in, so they run as a pair:
+`World.shift` 45-47 -> **31.5 ms**, a whole shift 63-67 -> **45 ms**.
+
+`World.shift` then splits into `shift_blocks` and `shift_light`, and the frame
+loop pays a shift one stage a frame, carried in the `Frame` (never the Scene,
+so every staging frame still renders a coherent world). The world is frozen
+for those frames: water, retexturing, vegetation, fruit and the player's edits
+all sit out, because each stage is computed from the snapshot before it. The
+biome and mycelium field ticks are *not* frozen -- they touch only their own
+fields, which the commit slides from whatever the scene holds -- so they keep
+their "every column once a period" invariant. Nor is the mesh drain.
+
+| stage | ms (median of 3, first shift in brackets) |
+|---|---|
+| blocks | 25.8 (45.2, with the first lake-tile pour) |
+| light | 9.3 |
+| mesh | 5.2 |
+| commit | 9.1 |
+
+### Two spikes that were not the shift
+
+A **20-70 ms frame a few frames after every shift**: the commit makes all 64
+moved chunks owe all 16 sections, and `drain_go` rebaked one whole chunk per
+frame regardless of budget, landing on whichever was dense with foliage. A
+moved chunk does have to be rebaked whole -- its vertices carry the old origin
+and a buffer may never mix two -- but not in one frame. It now rebuilds a
+budget of sections a frame into the March mesh and uploads only once it owes
+nothing; until then the offset old buffer draws, which is correct.
+
+A **35-110 ms frame on the first water slot after a commit**: the eight
+incoming chunks were flagged live, so the tick called eight actors that each
+had a `WLoad` queued ahead of the request and replied with nothing. A freshly
+generated chunk has only sea and lakes at rest, so it is no longer flagged; it
+loads in the background, and a spring (`spring_band`) or water spilling at the
+seam still wakes it. A chunk restored from the cache *is* flagged -- it may
+have been mid-flow when the window dropped it.
+
+### Net
+
+Uncapped, 6000 frames, 3 shifts. Worst frame per shift, before -> after:
+
+| | before | after |
+|---|---|---|
+| the shift's own frame | 74 ms | **26 ms** (blocks stage) |
+| the water slot after it | 90 ms | **36 ms** |
+| mean frame | 2.99 ms | 2.67 ms |
+| p99 | 7.92 ms | 6.68 ms |
+
+456 tests. Light oracle at the accepted baseline through four shifts.
+
+Still over budget, and both named rather than fixed: the `blocks` stage at
+25 ms (of which ~14 is eight parallel chunk generations -- it would have to
+generate the band in halves to fit), and the water reload at 36 ms, which is
+the actors regenerating chunks `shift_blocks` has already generated, because
+a message may not carry a native array (GAPS G44).
+
+
+## The window grows to 12 chunks (2026-09-06)
+
+The pop-in half of the report. The window was 8 chunks and the player is held
+in its central 2x2, so terrain simply ended 48-80 blocks out with clear-weather
+fog at 0.002 -- 9-15% opacity at that range, which hides nothing. The window is
+now **12 chunks, 192 blocks**, and the view distance 80-112 blocks.
+
+`World.size()` is the one number, but it cannot be derived into the places that
+need it: a refinement predicate that calls a function has no SMT translation
+(see the header of `world_size_test`). So the literals moved with it, and
+`world_size_test` asserts they agree. What that test did **not** cover, and now
+partly does, was the four bugs this shook out:
+
+1. **`World.cell_x` kept the old divisor.** `pack_cell` packs
+   `((x * cols + z) * 256 + y) * 256 + id`; `cell_z` was updated to 192 and
+   `cell_x` kept `v / 8388608` (= 128 * 65536). Every multi-block write -- every
+   tree, bush and fruit body -- landed at the wrong x. `Biome.pack_edit` had the
+   same shape and the same latent bug. Both unpackers are now written from
+   `cols()` / `stride()` so the divisor cannot drift from the multiplier.
+2. **The shim kept its own copies of four UI slot numbers.** `CF_PRECIP_SLOT`
+   249, `CF_BIOME_SLOT` 248, `CF_MYC_SLOT` 244 and `CF_SPRAY_SLOT` 246 are bound
+   directly in C as well as being named in March. At 144 chunks those are chunk
+   slots, so the spray upload clobbered a chunk's VBO: a segfault on the first
+   frame. The UI slots are now named functions in March from 500 up, and the C
+   defines carry a comment tying them to that list.
+3. **36 relight clamps were `clampi(..., 0, 127)`.** Nothing searching for `128`
+   finds them. Every incremental relight stopped at x or z 127, so the last
+   chunk column's light was never repaired: 2158 wrong sky voxels by frame 12,
+   all at x >= 180. Now `size_x() - 1` / `size_z() - 1`.
+4. **The light oracle compared only the first 4194304 bytes** -- the old volume,
+   less than half the new field. It now reads `Light.volume()`.
+
+The shift trigger was a fifth: `shift_dx`/`shift_dz` tested `lx < 3 || lx > 4`,
+the central 2x2 of an 8-chunk window. On a 12-chunk window that held the player
+three chunks from one edge and seven from the other -- the whole view distance
+the change was for. Now `World.size() / 2 - 1` and `/ 2`.
+
+`cf_gfx_upload_occupancy` aborts if the dimensions March passes it disagree with
+the shim's `CF_WORLD_SIDE`, so the two halves cannot silently drift again.
+
+### What it costs
+
+Seed 11, release, uncapped, the staged shift of the pass above:
+
+| stage | 8 chunks | 12 chunks |
+|---|---|---|
+| blocks | 25.8 ms | **46.9** |
+| light | 9.3 | **16.2** |
+| mesh | 5.2 | **6.3** |
+| commit | 9.1 | **22.5** |
+| whole shift | 48 | **91** |
+| mean frame | 2.67 | 3.8-5.2 |
+
+144 chunks instead of 64: 529k vertices against 218k, three fields of 9.4 MB
+against 4.2. The shift roughly doubled, as a band of 12 chunks and a field slide
+of 9.4 MB must. Three of the four stages still fit a frame; `blocks` at 47 ms
+does not, and splitting it means generating the band in halves.
+
+### Open: 139 stale block-light voxels
+
+The light oracle at frame 30 reads sky 47, block 139. The sky count is the
+accepted "water moves without a relight" pattern (15/13) and is proportionate to
+2.25x the area and 33 springs against 11. The block count is a regression -- it
+was 0 at 8 chunks -- and is NOT explained. What is known:
+
+- Two clusters, hugging x = 0 and z = 0, kept 1-2 against a flooded 0.
+- They need wild fungus to exist, but the count is identical at
+  `CF_MYC_BUDGET` 0, 1, 8 and 64, so the mycelium migration is not writing them.
+- They still appear with every block-mutating phase frozen (water, retexturing,
+  vegetation, fruit and the player's edits all skipped).
+- Under that freeze `World.state_hash` still changes twice per 10-frame period,
+  after the frames whose phase is 2 and 6 -- and every probe *within* those
+  frames, up to and including the one just before the drain, reads the old hash.
+  So blocks are changing outside every writer the frame loop knows about. That,
+  not the light, is the thing to chase.
+
+
+## The water reload, and the bug underneath it (2026-09-06)
+
+### 144 actors pouring the same four lakes
+
+A water actor cannot be handed its chunk -- a message may not carry a native
+array (GAPS G44) -- so `WLoad` regenerates the chunk from the seed. Timing
+`load_sim` (`CF_WATER_LOG=1`, one line per load) said where that went:
+
+| | per load, 144 loads at startup |
+|---|---|
+| the lake tile | **157-214 ms** (median 555 under contention) |
+| the chunk | 4-20 ms |
+| four neighbours' edges | 9-48 ms |
+
+`Lakes.tile` pours a priority-flood over a 128x128 tile. It is a pure function
+of (seed, tx, tz) and a 12-chunk window plus its apron touches nine of them, so
+144 actors were pouring the same nine tiles: **78 seconds** of summed wall.
+
+Memoised in the shim, because actors share a process and nothing else. One
+call, `cf_lake_get`, with the hit flag in the LAST byte of the caller's buffer
+(sized one longer than the tile for it) so the test and the fetch cannot race;
+`cf_lake_put` keeps the first writer of a key. Both take a mutex -- these run on
+scheduler threads. 32 slots, 32 KB each.
+
+A memo alone did nothing: 144 actors start together, all miss, and all pour.
+So the main thread pours the window's nine tiles first, in parallel, before a
+single `WLoad` goes out (`warm_lake_tiles`, 34 ms), and every actor then hits.
+
+| | before | after |
+|---|---|---|
+| tile, per load | med 555 ms | **0.0 ms** |
+| tile, all 144 loads | 78 325 ms | **42.7 ms** |
+| water tick `calls`, after a commit | 35-110 ms | **2-3 ms** |
+| water tick `calls`, over a whole run | — | med 2.15, p99 3.85, max 23.1 ms |
+
+### The bug: two different lakes
+
+Chasing the last of it turned up what the previous entry left open.
+`World.generate` poured **one `Lakes.levels(seed, n)` over the whole window**;
+`World.shift_blocks` and every water actor use **`Lakes.tile_of_chunk`, a fixed
+128-block grid**. Those two agreed only while the window was itself 128 blocks
+-- `Lakes.levels(seed, 8)` *is* tile (0, 0). At 192 they do not, so the world
+generated one set of lakes and then changed to another at the first shift,
+while the actors had been simulating the second set all along.
+
+`World.generate` now generates against `tile_for` like the shift does, warming
+its four tiles first (the memo makes that cheap) and keeping them so the first
+shifts reuse them. Both symptoms the previous entry recorded as open went with
+it:
+
+| | before | after |
+|---|---|---|
+| light oracle, block, frame 30 | 139 | **2** |
+| `World.state_hash` over frames 0-7, every phase frozen | changed twice | **constant** |
+
+The sky count stays at the accepted water pattern (25 at frame 1 rising to 86
+by 120, against 18-43 at 8 chunks with a third of the springs).
+
+Note this changes world generation: a seed makes different lakes than it did,
+and slots written before this will not match. `Lakes.levels` stays for the
+bounded-world tests and `CF_TERRAIN_STATS`.
+
+### Where the frame budget is now
+
+Seed 7, release, uncapped, 19 899 frames, 11 shifts:
+
+| | ms |
+|---|---|
+| mean frame | 4.08 |
+| p99 | 9.41 |
+| max | 55.3 |
+| frames over 16.67 | 34 (0.17%), all of them shift stages |
+| shift: blocks / light / mesh / commit | 47.3 / 21.6 / 6.0 / 21.8 (medians) |
+
+The shift's own stages are all that break budget now. `blocks` is ~14 ms of
+twelve parallel chunk generations plus the field slides; splitting it means
+generating the band in halves.
+
+
+## The shift's stages split again (2026-09-06)
+
+`blocks` was 47 ms of the staged shift's 91 and the only stage far over budget.
+Timing it (`CF_STREAM_LOG=1`) at twelve chunks:
+
+| | ms |
+|---|---|
+| tiles + evict | 4.0 |
+| **chunk pmap** | **23** |
+| shown/dirty/hash arrays | 4.0 |
+| field slides | 4.5 |
+| occupancy band | 11.5 |
+
+So it split into `StChunks` (tiles, evict, the band's chunks) and `StFields`
+(the arrays, the three field slides, the occupancy band), and the three slides
+run as one pmap with the occupancy band riding inside the occupancy leg -- that
+leg needs only the chunks, which the half-shifted world already has.
+
+`World.shift_blocks` is now `shift_chunks` then `shift_fields`, joined by a
+`HalfShift`: the new chunks and the new origin with every field still at the
+old origin. It is not a world anyone may render or read a field from, and it
+never reaches the Scene -- it lives in the frame loop's staging value.
+
+| stage | before | after |
+|---|---|---|
+| chunks | — | **26.5** |
+| fields | — | **17.1** (22.8 before the slides were paired) |
+| blocks | 47.3 | — |
+| light | 21.6 | 21.5 |
+| mesh | 6.0 | 5.6 |
+| commit | 21.8 | 20.3 |
+| worst stage | **47.3** | **26.5** |
+| max frame | 55.3 | 49.5 |
+| frames over 16.67 (19 899 frames, 11 shifts) | 34 | 43 |
+
+The worst stage nearly halves; the count of over-budget frames rises, because a
+shift is now five frames of which four are over rather than four of which three
+are. That is the trade the split is: no single lurch, a few more small ones.
+
+None of the three remaining stages will yield to more splitting:
+
+- **chunks, 26.5 ms** — the twelve new chunks go through one pmap, so the cost
+  is one chunk generation's LATENCY, not their sum. Half a band costs the same
+  as a whole one. Under this is faster terrain generation.
+- **light, 21.5 ms** — the sky and block bands already run as a pair, so the
+  stage costs one band. Splitting them across frames would make each frame cost
+  what both cost together now.
+- **commit, 20.3 ms** — every GL call of the shift is here and has to be:
+  `gfx_shift`, the occupancy upload and the band's mesh uploads must land on one
+  frame or a buffer mixes two origins.
+
+468 tests. Light oracle at the accepted water baseline (sky 47/142/99 at frames
+30/400/1200, block 2/2/1).
+
+
+## The occupancy texture goes toroidal (2026-09-06)
+
+The commit stage was 20-22 ms and `CF_STREAM_LOG` said where: **13 of it was one
+call**, re-uploading the whole 9.4 MB occupancy texture. Everything else in the
+stage is small (biome+myc slide 3.2, actors+springs 3.3, the band's twelve mesh
+uploads 0.8, `gfx_shift` 5 microseconds, the counts/pending remaps 35).
+
+A shift does not change the world the texture describes -- it changes which part
+of it the window covers. So the texture stops moving and the window's origin
+inside it moves instead: window-local (x, y, z) lives at texel
+((x + g_occ_ox) mod w, y, (z + g_occ_oz) mod d), and the origin advances 16 per
+chunk shifted. The band that comes in lands on exactly the texels the band that
+left was using, so a shift uploads 0.8 MB instead of 9.4.
+
+The shader pays an add. It samples with normalised coordinates, so switching the
+two 3D textures from `GL_CLAMP_TO_EDGE` to `GL_REPEAT` and adding a `u_occ_off`
+uniform gets the wrap **in hardware, for free** -- no modulo in the DDA's hot
+loop, and no need for a power-of-two window (192 is not one). Both DDAs already
+bounds-check before every sample, so a ray leaving the window never reaches the
+wrap. The coarse level rides along: the origin is always a multiple of 16 and
+the cell is 8, so it shifts by a whole number of cells.
+
+`cf_gfx_sync_box` and `cf_gfx_set_voxel` write through the same wrap, splitting a
+box that straddles the seam into at most four `glTexSubImage3D` calls sourced out
+of one staging buffer with unpack strides.
+
+### The oracle
+
+`cf_occ_check` reads both levels back and checks every texel against the world's
+occupancy array through the shader's own wrap; the dump frame prints it beside
+the light oracle. It must read 0 and 0.
+
+It did not at first: 37,310 fine texels differed at frame 30, before any shift.
+That turned out to be a pre-existing disagreement, not the wrap --
+`cf_gfx_upload_occupancy` uploads the array verbatim, so water sits in the
+texture as 2 and leaves as 6, while `cf_gfx_sync_box` normalises to 0/255. The
+shader only ever asks `> 0.5`, so both read as empty and nothing was ever wrong;
+the oracle now compares solidity, which is what has to agree.
+
+| frame (shifts by then) | fine | coarse |
+|---|---|---|
+| 30 (0) | 0 | 0 |
+| 800 (1) | 0 | 0 |
+| 1500 (2) | 0 | 0 |
+| 2500 (3) | 0 | 0 |
+| 4000 (6) | 0 | 0 |
+
+### Result
+
+| | before | after |
+|---|---|---|
+| occupancy upload, per shift | 12.6-14.8 ms | **0.7-2.8 ms** |
+| commit stage | 20.3 | **9.7** |
+| worst frame, 19 899 frames | 49.5 | **36.1** |
+| frames over 16.67 | 43 | 39 |
+| worst frame, the 1500-frame line | 33.7 | **29.6** |
+| mean / p99 | 4.13 / 9.53 | 4.11 / 9.49 |
+
+Commit drops out of the over-budget set. What is left is `chunks` at 27.1 ms
+(one chunk generation's latency) and `light` at 23.4 (one band sweep, the two
+already running as a pair). 468 tests.
+
+
+## Measuring per-fragment smooth lighting (2026-09-06)
+
+A prototype (`CF_GPULIGHT=1`) that samples light per fragment from a 3D texture
+instead of reading it from the vertex, to decide whether moving lighting off the
+mesh is affordable. Not a finished path -- see the caveats.
+
+### What the prototype does
+
+`Mesher.corner_pack`, in the fragment shader. For each of the four corners of the
+voxel face the fragment sits on: average the light of the face-adjacent air voxel
+and the three neighbours round that corner, **skipping the occluded ones**, and
+derive AO from how many were occluded (`0.55 + 0.15 * ao`, exactly the mesher's
+`ao_factor`); then bilinearly blend the four. 25 texture fetches a fragment: one
+shared light tap, then three occupancy and three light taps per corner.
+
+The two light fields go up as one RG8 3D texture (sky in R, block in G, level *
+17 so it samples as level/15) on unit 3, toroidal with the occupancy textures.
+
+### It looks right
+
+Same camera, same frame, sun 45, 2560x1440 framebuffer:
+
+| | |
+|---|---|
+| mean channel delta | **0.50** |
+| channels differing by > 4 | 0.6% |
+| by > 16 | 0.2% |
+| by > 48 | 0.1% |
+
+The residue is where it should be: the quad-flip diagonals (`Mesher.flip`, which
+exists only because per-vertex light interpolates wrong across a merged quad) and
+the chunk seams.
+
+### It costs almost nothing
+
+Wall-clock fps cannot see it -- the game is CPU-bound -- so this is a
+`GL_TIME_ELAPSED` query round the frame, two queries ping-ponged so reading one
+never stalls (`CF_GPU_LOG=1`).
+
+| framebuffer | vertex | per-fragment | cost |
+|---|---|---|---|
+| 1600x1200 | 2.581 ms | 2.591 ms | noise |
+| 3456x2234 | 4.489 ms | 4.475 ms | noise |
+| 5120x2880 | 4.196 ms | 4.535 ms | **+0.34 ms** |
+
+At 14.7 M fragments the 25 dependent fetches cost a third of a millisecond, and
+the CPU frame is ~5 ms, so fps does not move at any resolution. The estimate that
+this would make the game GPU-bound was wrong: the shadow DDA already has these
+textures hot, and the extra taps ride along.
+
+### The false start
+
+The first A/B said the vertex path was FASTER (229 vs 196 fps), which was
+nonsense: with `CF_GPULIGHT=0` nothing was being drawn at all. `u_light` was left
+at its default sampler unit 0, where it collided with `u_tex`, a sampler2DArray
+-- two sampler types on one unit make every draw incomplete, silently. The unit
+is now claimed at init with a 1x1x1 texture on it whether the path is used or
+not. Worth remembering: a blank frame with no error is what a sampler collision
+looks like.
+
+### What this does NOT yet measure
+
+The prototype pays the cost of per-fragment light **without taking the benefit**.
+It still bakes light into the vertex and into the greedy key, so the meshes are
+still fragmented by it. Removing light from `Mesher.key_of` is where the win is,
+and it is measured: **517 098 vertices against 334 878** with corner light forced
+constant, so light costs **35% of the mesh**. Taking that would cut vertex work,
+very likely paying for the 0.34 ms and more.
+
+Also missing: the light texture is uploaded whole on every shift rather than
+band-synced like the occupancy (easy, the machinery exists), the path is gated to
+ordinary geometry (`fx >> 8 == 0`, so not foliage or water), and nothing yet
+stops a light change from remeshing.
+
+### What other engines do
+
+Per-vertex at mesh time is the near-universal answer, and 0fps -- the canonical
+write-up for the method this codebase uses -- gives the reason: AO values have to
+be constant along a greedy edge for the merge to be valid, so AO and greedy
+meshing are designed together. It dismisses SSAO for voxel worlds and does not
+consider a 3D-texture alternative at all.
+
+The volume-sampled alternative is well trodden outside voxel games -- Unreal's
+Volumetric Lightmaps interpolate per pixel from a brick structure -- and its
+documented failure is exactly the one that matters here: light leaking, whose
+only fixes are "decrease the cell size" or "increase the thickness of the wall".
+A voxel game whose walls are routinely one block thick cannot take either. That
+is why naive trilinear sampling is not an option, and why the prototype
+reproduces the occlusion-aware average instead of filtering.
+
+The engines that genuinely move voxel lighting to the GPU do it by abandoning
+meshed geometry: voxel cone tracing and voxel ray tracing march the volume
+directly. That is a different renderer, not a change to this one.
+
+
+## Frustum culling (2026-09-06)
+
+`draw_chunks` submitted every chunk slot every frame, the ones behind the camera
+included: 144 chunks x 3 passes, unconditionally. Backface culling was on, but
+nothing rejected a chunk outside the view.
+
+The six planes come out of the view-projection matrix (Gribb-Hartmann): with
+clip = M * v, the left plane is row 3 + row 0, the right row 3 - row 0, and so
+down the rows. `vp` is column-major, GL's order, so component c of row r is
+`vp[r + 4c]`. A chunk is tested as its 16 x 16 columns over the world's full
+height, by the box corner furthest along each plane's normal.
+
+Never applied in map view -- that camera is the overhead one, not `render_vp`.
+`CF_CULL=0` restores the old behaviour for the A/B; `CF_CULL_LOG=1` prints how
+many of the 144 were drawn.
+
+### How much it culls
+
+Depends entirely on where the camera looks, which is the point:
+
+| camera pitch | chunks drawn | culled |
+|---|---|---|
+| -0.10 rad (ahead, the normal angle) | 54 of 144 | **62%** |
+| -0.25 rad | 66 of 144 | 54% |
+| -0.70 rad (steeply down) | 99 of 144 | 31% |
+
+### What it saves
+
+GPU time by `GL_TIME_ELAPSED` query, standing still at pitch -0.70 -- the
+*least* favourable of the three angles:
+
+| framebuffer | all chunks | culled | |
+|---|---|---|---|
+| 3456x2234 | 4.770 ms | **4.047 ms** | -15% |
+| 5120x2880 | 4.839 ms | **4.152 ms** | -14% |
+
+And end to end, the walking benchmark at 3456x2234, uncapped:
+
+| | fps |
+|---|---|
+| all chunks | 95.7 |
+| culled | **104.4** |
+
+**+9%**, for a plane test. The CPU saving is negligible -- draw submission was
+only 0.58 ms of the frame -- so this is almost entirely vertex work the GPU no
+longer does.
+
+### A note on frame dumps as an oracle
+
+The obvious check -- dump a frame with culling on and off and compare -- does not
+work in this project, and it is worth writing down. Two runs of the SAME build
+with the same seed, `CF_NOMOUSE`, `CF_TIME` pinned and `CF_WEATHER` pinned differ
+by 1.6 M pixels at frame 400, and still differ at frame 5. The water actors load
+and tick asynchronously, so the world state at a given frame is not reproducible
+run to run; the player's position is (it settles), but what the water has done is
+not. `todos.md` already records `CF_NOMOUSE` being needed for this reason; the
+asynchrony is a second, larger one.
+
+So culling was checked by eye instead (no holes, no missing chunks) and measured
+with the GPU timer, which does not care about determinism.
+
+
+## Lighting moves off the mesh (2026-09-07)
+
+Light is sampled per fragment from a 3D texture now; the mesher no longer bakes
+it into the vertex or into the greedy key. `Mesher.corner_pack` lives in the
+fragment shader as `smoothLight` -- for each of the four corners of the voxel
+face, the light of the face-adjacent air voxel and the three neighbours round
+that corner, averaged over the unoccluded ones, AO from how many were occluded,
+bilinearly blended. Occlusion-aware, so it does not leak through a one-block
+wall the way a filtered volume lightmap would.
+
+### What it buys
+
+| | before | after |
+|---|---|---|
+| vertices | 517 098 | **334 878** (-35%) |
+| mesh all | 410 ms | 377 ms |
+| relights that force a remesh | all of them | **none** |
+
+Light is out of `Mesher.key_of`, so two faces that differ only in their light
+merge. That 35% was the whole reason the key carried four 10-bit corners.
+
+Nothing marks a section dirty for a light change any more -- a mesh cannot show
+stale light when it holds none. Only geometry does.
+
+### Keeping the texture current
+
+The two fields go up as one RG8 3D texture, toroidal with the occupancy. A
+relight WIDENS a dirty box; the frame flushes it once before drawing, the way
+the drain batches remeshing. Doing it per relight instead cost more than the
+whole change saved: a retexture slot alone is dozens of single-column edits.
+Flushed box, over a walking run: median 4 096 texels, p90 24 576, 0.02 MB
+staged, 223 flushes in 3 000 frames.
+
+### The measurement that was not a measurement
+
+The first numbers said mean frame 4.11 -> 8.61 ms and 39 -> 142 frames over
+budget, which looked like a bad regression. It was not one, and the way it fell
+apart is worth recording.
+
+Segmenting the whole frame showed **SWAP** carrying it -- 5.08 ms in the first
+quarter of a 20 000-frame run, 0.74 by the third, with every other segment flat.
+Swap blocking is the GPU behind, so the two runs were looking at different
+things: the scripted walk is dt-dependent, my change moved dt, and the camera
+path diverged. The same trap as the frame dumps, one level up.
+
+Against a reference build of HEAD in a second worktree, with a FIXED camera so
+both see the same world:
+
+| | HEAD (vertex light) | now (per fragment) |
+|---|---|---|
+| fps, pitch -0.10 | 121.8 | **122.5** |
+| fps, pitch -0.70 | 104.3 | **103.5** |
+| GPU ms, pitch -0.10 | 3.176 | **3.292** |
+
+Within noise, and the 35% of vertices is free.
+
+**The autowalk benchmark line cannot A/B two builds.** Five runs each: HEAD 89,
+92, 101, 104, 114; this build 42, 86, 104, 106, 126. A ±25% spread on the same
+binary, because the walk's path depends on frame timing. Every "57 -> 109 fps"
+style number in this file is a single sample of that, and only the large ones
+mean anything. Use a fixed camera, or the GPU timer, for anything smaller.
+
+
+## Is a light flood on the GPU worth it? A cost probe (2026-09-07)
+
+`CF_LIGHT_BENCH=1` runs `cf_light_bench` on frame 300: the memory pattern a GPU
+flood would have -- one relaxation pass per light level over a box of a 3D
+texture, each voxel reading its six neighbours and the occupancy, ping-ponged
+between two RG8 textures -- against dummy data, timed with a GL query. It
+measures the mechanism, not the flood: no seeding, no correctness.
+
+Written with **layered rendering**: the 3D texture is attached whole and a
+geometry shader sends the triangle to `gl_Layer`, which is how a 3D texture is
+written at all without compute or image load/store, neither of which GL 4.1 has.
+One *instanced* draw covers every z layer (the instance id is the layer, passed
+VS -> GS because `gl_InstanceID` is not visible in a geometry shader). Drawing a
+layer at a time instead was 192 draws a pass and entirely draw-call bound: 11.7
+ms for a single pass over 1.1 M voxels.
+
+Eight timed repetitions, minimum reported. One is not enough -- unrepeated, it
+measured 13 ms for a band and 7.6 ms for a field eight times its size.
+
+| box | voxels | 15 passes |
+|---|---|---|
+| band 46 x 128 x 192 (what a shift lights) | 1.13 M | **3.39 ms** |
+| edit box 48 x 48 x 48 | 0.11 M | **1.30 ms** |
+| band-tall 192 x 128 x 192 | 4.72 M | 13.06 ms |
+| full field 192 x 256 x 192 | 9.44 M | 7.15 ms |
+
+The band repeats to 2 microseconds across runs (3387, 3389). Measured again at
+16 passes the full field is **7.55 ms**, and it repeats too: 7555, 7553, 7554,
+7575 across four runs. So the full field really is faster than the 192 x 128 x
+192 box half its size, which is still not explained -- most likely the 256-high
+viewport tiles better -- but it is a stable measurement, not noise.
+
+That matters, because **a whole-field flood needs no apron**. Ping-ponging two
+textures over a sub-box is not simply a smaller version of the same thing: each
+pass reads its neighbours, so at the box edge it reads the scratch texture
+outside the box, where nothing has been written. A full-field pass has no edge
+and no such hazard. 7.55 ms for the whole field against 16.7 ms for the CPU's
+band is both faster and very much simpler.
+
+### The verdict
+
+**Worth it for the shift's band: 16.7 ms of CPU against 3.39 ms of GPU, ~5x**,
+and the GPU does sky and block together in one RG texture where the CPU runs two
+sweeps in parallel to get its 16.7. That would take the shift's over-budget
+stages from two to one, leaving only `chunks` at 27 ms.
+
+**Not clearly worth it per edit.** A 48-cube is 1.30 ms on the GPU against a
+tree relight's 1.7-2.9 ms on the CPU -- and the CPU's sweep is a worklist that
+stops when nothing more can change, where the GPU pays 15 passes whatever
+happens. For small edits the CPU may well stay ahead.
+
+**And nothing has to come back.** The light field is read on the CPU in exactly
+two places now, both a single voxel: `Audio.exposure` and the dump's ground
+readout. So a GPU flood writes the texture the shader already samples and the
+readback question -- the objection that made this look hard -- does not arise.
+
+
+## The light flood, on the GPU: the propagation rule, verified (2026-09-07)
+
+Step one of moving lighting to the GPU. `cf_light_flood(passes)` runs the CPU's
+own propagation rule as a relaxation over the whole light field, ping-ponged
+between two RG8 3D textures by layered rendering. `Light.give_level`, exactly: a
+voxel takes `max(own, neighbour - 1 - its own opacity)`, and a solid voxel takes
+nothing. Opacity comes from the occupancy texture, which already holds
+`occ_value` -- 0 air, 2 water, 6 leaves, 255 solid.
+
+An EVEN number of passes leaves the result in `g_lt[0]`, the texture the world
+shader samples and the one every upload writes; `g_lt[1]` is pure scratch. The
+whole field, not a box: ping-ponging over a sub-box is not a smaller version of
+this, because every pass reads its neighbours and at the box edge would read
+scratch nothing has written.
+
+### The oracle, and what it caught
+
+A converged field is a fixed point of the relaxation, so uploading the CPU's own
+light and flooding it must change nothing. `cf_light_check` reads the texture
+back and compares, voxel for voxel, through the toroidal wrap. It went:
+
+| | sky | block |
+|---|---|---|
+| first run | 66 | 1260 |
+| after the opacity fix | 1 | 1260 |
+| after the solid-voxel fix | **1** | **0** |
+| with shifts, before the wrap fix | 360 162 | 20 840 |
+| with shifts, after | **2-282** | **0-2** |
+
+Three real bugs, none of which the rendering could have shown:
+
+1. **`cf_gfx_sync_box` normalised the occupancy to 0/255**, flattening water's 2
+   and leaves' 6. The shadow trace only ever asks `> 0.5` so it could not tell,
+   but the flood subtracts the opacity per step -- light ran straight through
+   water. It now uploads the array verbatim, which also puts it back in
+   agreement with `cf_gfx_upload_occupancy`, a disagreement recorded earlier in
+   this file as harmless. It was harmless only until something read the value.
+   `cf_gfx_set_voxel` took a solid/not-solid flag for the same reason and now
+   takes `occ_value` too.
+2. **A solid voxel was being zeroed.** `Light.give_level` says a solid voxel
+   RECEIVES nothing; it does not say it holds nothing. Glowing mycelium is a
+   solid block holding its own emission, and zeroing it put out every light.
+3. **`cf_gfx_upload_light` wrote at window-local coordinates**, ignoring the
+   toroidal origin every other writer respects. Correct only while the origin
+   was zero; after one shift the upload and every reader disagreed by the
+   origin. Standing still could never show it.
+
+The residue, 2-282 sky voxels out of 9 437 184, tracks the light oracle's own
+count of how far the maintained CPU field has drifted from a true flood (the
+accepted "water moves without a relight"). The GPU arrives at the right answer;
+the CPU field is the one that is stale.
+
+### What is NOT done
+
+The relaxation only ever RAISES a value, so flooding from the current field
+cannot correct light that is too bright -- which is why block light reads 0
+against the CPU field but the CPU field still differs from a fresh flood by 41.
+A real flood starts from the seed: sky columns filled and emitters set,
+everything else zero. **That seed pass is the next piece**, and after it the
+wiring that lets the GPU result replace the CPU sweep, and then the relight
+path. The rule itself is now known to be right.
+
+
+## The occupancy bug was only half fixed (2026-09-07)
+
+Tightening `cf_occ_check` from "solidity agrees" to "the exact byte agrees" --
+which is what the light flood actually reads -- showed the texture still
+disagreeing with the world, and getting worse with time: 47 texels at frame 30,
+148 by frame 800.
+
+**Water.** `World.set_cells`, the path the water tick applies its replies
+through, writes the CPU occupancy byte (air 0, water 2) and nothing ever synced
+that to the GPU. Every water movement diverged the texture a little further.
+Invisible for as long as the only consumer was the shadow trace, which asks
+`> 0.5` and cannot tell 0 from 2; a real defect the moment the flood began
+subtracting the opacity per step.
+
+Fixed by syncing the touched y range of the chunk after the cells are applied --
+a few layers near the surface, not the whole column.
+
+| | before | after |
+|---|---|---|
+| occupancy oracle, exact byte, frames 30 / 400 / 800 | 47 / 130 / 148 | **0 / 0 / 0** |
+| flood oracle, sky | 2 / 17 / 67 | **0 / 0 / 4** |
+
+The flood agrees better too, which is the same fact from the other side: it was
+reading water as transparent.
+
+The lesson is the oracle's, not the bug's. `cf_occ_check` was written to compare
+what the shadow trace could see, so it certified a texture that was wrong in a
+way nothing yet looked at. An oracle only checks what it is asked to check.
+
+
+## Correction: the 57 fps baseline was a bad sample (2026-09-07)
+
+Numbers earlier in this file quote "57 -> 109 fps" for the streaming work. **The
+57 does not reproduce.** Re-measuring the branch's starting commit today, five
+runs of the same line: 111, 111, 111, 111, 111. The session's opening 56.94 is
+almost exactly half of that, which is vsync half-rate on a cold or contended
+machine, not the code.
+
+Measured properly -- five samples each, a reference build of the starting commit
+in a second worktree:
+
+| | start (8 chunks) | after (12 chunks) |
+|---|---|---|
+| fps, vsync on, median | 111 | **120** |
+| samples | 111 111 111 111 111 | 101 102 120 120 122 |
+| worst frame, median | **84 ms** | **35 ms** |
+| samples | 10 76 84 86 93 | 31 34 35 35 35 |
+| view distance | 48-80 blocks | **80-112** |
+| vertices | 218 064 | 334 878 |
+
+So the honest headline is **+8% fps and less than half the worst frame, with
+1.5x the view distance** -- not the near-doubling the bad sample suggested. The
+hitch numbers are the real result: the spread went from 10-93 ms to 31-35.
+
+Uncapped at a fixed camera the starting build is FASTER (351 against 194 fps at
+800x600), as it must be -- it draws 2.25x less world. That throughput was spent
+on view distance deliberately.
+
+## Merging main's fauna, and a stride that was only accidentally right
+
+Main's fauna work (populations, flocks, the survey) merged with six conflicts in
+the frame loop, all of them the same shape: main's new Frame fields plus the
+staging field, and main's population-and-flock slide rekeyed from the frame the
+shift is QUEUED to the frame the commit lands, since the world only moves once.
+
+Five of main's tests then failed, and the cause was mine. `Biome.water_dist_at`,
+`water_reach_at` and `trend_at` indexed the distance array by `stride()`, the
+compile-time width, where every other accessor uses `side_of` -- the array's own
+width. That was correct only while `stride()` happened to equal the world's
+width. Widening the window to twelve chunks made those three read eight columns
+off in any narrower world, which is what a test's eight-chunk world is: a pond
+the fish could not find. They index by `side_of` now, like the rest.
+
+505 tests. fps drops from 120 to 88 with the fauna in, which is the cost of the
+new system rather than anything in this branch.
+
+
+## The seed pass: the GPU derives the light the CPU derives (2026-09-07)
+
+The oracle on the dump frame now runs the whole design end to end: upload the
+SEED -- `Light.seed_all` for the sky columns, `Light.seed_emitters` for the
+emitters, everything else dark -- flood it on the GPU, and compare against
+`Light.flood` / `Light.flood_block`, a from-scratch CPU flood of the same world.
+
+| seed | frame | sky | block |
+|---|---|---|---|
+| 7 | 60 | 0 | 0 |
+| 7 | 400 | 0 | 0 |
+| 11 | 30 | 0 | 0 |
+| 11 | 800 | 0 | 0 |
+| 11 | 1500 | 0 | 0 |
+
+Zero, both channels, 9 437 184 voxels each, across shifts and deep into a run.
+**The CPU sweep is redundant**: given the same seed, the GPU arrives at the same
+light. The seed itself stays on the CPU, where it is cheap -- it is a pure
+function of the blocks with no BFS in it, and the expensive half was always the
+sweep.
+
+### Why this is not yet wired in
+
+Two things stand between the proof and the switch, and both are design rather
+than doubt:
+
+**The CPU field cannot be half-swept.** Every relight reads the field it is
+about to repair (`Light.region_reach` sizes its box from the brightest light
+around the region). If the GPU sweeps and the CPU does not, the next edit works
+from a wrong field. So the CPU field has to stop being a swept field altogether
+and become a SEED field -- zeroed and re-seeded per edited box, never swept --
+and every relight becomes "re-seed the box, then flood". That is coherent, and
+it deletes `sweep_box_lists`, `region_reach`, the relight boxes and the marks
+that serve them. It is not a change that can be made half way.
+
+**A flood is 7.55 ms and edits are frequent.** A retexture slot alone is dozens
+of single-column edits. Flooding per edit is out of the question; the light has
+to be marked dirty and flooded ONCE, with the sixteen passes amortised across
+frames -- four a frame is ~1.9 ms and converges in four. Light changes are
+gradual enough that a frame or two of partial convergence is invisible, which is
+the same trade the mesh drain already makes.
+
+
+## The light switch: the CPU stops sweeping (2026-09-07)
+
+The fields `World` keeps are SEED fields now -- sky columns and emitters, with
+nothing spread. The spreading is `cf_light_flood`'s, four passes a frame while
+it converges. `Light.flood` and the whole incremental relight stay in the file
+as the CPU implementation, and the light tests hold them to the same answer the
+GPU has to reach; the game calls neither.
+
+| | before | after |
+|---|---|---|
+| startup light | 312 ms | **43 ms** |
+| shift `light` stage | 16.7 ms | **7.1 ms** (under budget) |
+| fps, fixed camera, pitch -0.10 | 97.3 | **109.4** (+13%) |
+| fps, fixed camera, pitch -0.70 | 88.7 | 88.1 (-1%) |
+| worst frame, median of 5 | 35 ms | 36 ms |
+
+Seeding is the cheap half and always was: it is a walk down each column with no
+BFS in it, which is why the startup number falls sevenfold.
+
+### Two things the switch needed that the proof did not
+
+**A re-seed has to be GROWN, an upload has to be SENT.** The seed of a column is
+local, so computing it needs no radius. Clearing it does: the flood only ever
+raises a value, so light that should now be dimmer -- a roof built over open
+ground -- has to be zeroed before the flood re-derives it, and stale brightness
+reaches as far as the old sweep did. Re-seeding only the edited column left a
+lit halo nothing could put out.
+
+The shift's band is the case where the two come apart, and it is worth 6 ms: the
+columns either side of the seam still hold the right seed and do not need
+re-seeding, but they do need re-SENDING, because the texture there holds spread
+light from the band that left. `reseed_exact` seeds the band, and the commit
+uploads the band grown by the radius.
+
+**`relight_all` had to keep its meaning.** Making it seed instead of flood broke
+six light tests, correctly: they assert the incremental relight matches a full
+re-flood, which is a statement about the CPU implementation and still true. The
+game calls `seed_all_fields` instead. Changing what a tested function means, to
+avoid adding one, is how a test suite stops meaning anything.
+
+### The measurement trap, for the third time
+
+The first measurement of this change said mean frame 8.6 -> 15.65 ms and 7 339
+frames over budget, and I nearly reverted on it. It was the scripted walk again:
+`dt` differs between builds, so the camera goes somewhere else, and a 20 000
+frame mean is mostly a statement about what the camera happened to look at. The
+per-segment timers said the flood cost 0.21 ms and the phases 3.1, which
+accounts for none of it.
+
+**Fixed camera, uncapped, both builds, same seed** is the only frame-rate
+comparison in this project that means anything. The walking benchmark is for
+worst-frame and for oracles, not for means.
+
+
+## G44, paid off (2026-09-07)
+
+`GAPS.md` G44: `NativeU8Arr` is in the typechecker's `non_sendable_types`, so a
+message cannot carry a chunk. What shipped instead was every `WaterChunk` actor
+regenerating its own chunk from `(cx, cz, seed)` on `WLoad` -- and its four
+neighbours too, for the edge mirrors. Five chunk generations a load, and a
+second implementation of world generation living inside the actor.
+
+The rule is not broken here, and the language is not changed. Only integers
+cross the message, as before. The main thread already holds every chunk, so it
+leaves them in a shim-side store keyed by WORLD chunk coordinate, and an actor
+asks by coordinate. The same shape as the lake tile memo, for the same reason:
+actors share a process and this is the only thing they can share. A miss just
+means the actor generates as it used to, so a neighbour outside the window still
+works.
+
+| per water load | before | after |
+|---|---|---|
+| the chunk itself | 13-39 ms | **0.02 ms** |
+| four neighbours | 119 ms | **25.6 ms** |
+| water tick `calls`, worst over a run | 23.1 ms | **5.2 ms** |
+
+The neighbours are not free because the edge mirrors still have to be copied and
+each fetch allocates a chunk-sized buffer; the fetch itself is a memcpy. Fetching
+only the edge strip rather than the whole neighbour is the obvious next cut.
+
+**A behaviour change worth naming:** an actor now loads the world's CURRENT
+chunk, where it used to regenerate the pristine one. That is more correct -- it
+sees the wild fungus, the vegetation and any edits already applied -- but it is
+a change, and no test covered the difference.
+
+### On fixing G44 properly
+
+The gap itself is a March language limitation and the fix it names -- "a
+linear/moved send for uniquely-owned buffers" -- is a compiler change, not a
+change here. Two things stopped that being the answer today:
+
+- `~/code/march` is on a feature branch with another session's uncommitted work
+  in it. Editing a shared repository someone else is mid-task in is not a thing
+  to do quietly.
+- Native arrays are in `non_sendable_types` *deliberately*, added 2026-08-07 and
+  pinned by reject tests `t164`/`t165`, because they are "flat, in-place-mutable
+  buffers that must stay owned by one actor". Removing that is removing a safety
+  property from every March program, not fixing a defect in one.
+
+If it is wanted, the cheap version is copy-on-send -- allow the array in a
+payload and have the runtime deep-copy it, which is semantically a snapshot and
+needs no linearity. For this project it would save the 64 KB memcpy the store
+already costs, and nothing else: the store is what actually removed the cost.
+
+
+## Toolchain updated, and the water seed drift priced (2026-09-07)
+
+**March 0.3.0 from `origin/main` (680790da)**, built and installed. It carries
+`march-language/march#424` (native arrays finally have a header tag, so a
+generic walker no longer reads their payload as pointers) and, more usefully
+here, **G80** -- a closure's captures are released when its environment dies.
+505 tests, fixed-camera 109.8 fps, worst frame 32.3 ms: no change either way
+that this project can measure.
+
+### The water seed drift: fixed, measured, reverted
+
+Water moves through `set_cells`, which changes a column's sunlight -- air is
+clear, water attenuates by two -- and nothing re-seeded those columns, so the
+seed the GPU floods was stale by 64-134 sky voxels. The documented "water moves
+without a relight" approximation, in its new clothes.
+
+Re-seeding the touched chunks each water tick fixes it exactly:
+
+| | before | after |
+|---|---|---|
+| seed vs a fresh seed | sky 64-100 | **0** |
+| live texture vs a CPU flood, fully converged | sky 65-134 | **sky 0, block 0** |
+| **fixed-camera fps** | **109.8** | **80.5** |
+| water tick apply | ~2 ms | 13.2 ms med, 21 max |
+
+**Reverted.** 27% of the frame rate to correct 0.001% of the voxels, none of
+them anywhere a player looks, is not a trade worth making. The approximation
+stays, now with a number on it.
+
+The cost is not the seeding itself but its shape: re-seeding is per COLUMN and
+cheap, while the copy-on-write copy is per CALL and 9.4 MB. Batching the whole
+tick into one copy (which this did) still re-seeds every flagged chunk, most of
+which ticked without changing a cell. The affordable version collects the
+columns that actually took a write -- `apply_reply` already has them, it is what
+`sync_water_occ` is handed -- and re-seeds exactly those in one batch. That is
+the shape to build if the drift ever matters; it is not worth building for a
+defect nobody can see.
+
+
+## The chunks stage was task overhead, not generation (2026-09-07)
+
+`chunks` was the last stage meaningfully over budget at 27 ms, and the assumption
+all along -- written into two commit messages -- was that it is one chunk
+generation's latency and therefore irreducible. **It was not.** Profiling
+`Chunk.generate_lakes` by phase says a chunk costs:
+
+| phase | share | median |
+|---|---|---|
+| fill | 48% | 1.30 ms |
+| heights | 34% | 0.42 ms |
+| caves | 16% | 0.00 (4.17 when a chunk has any) |
+| lakes | 2% | 0.09 ms |
+| **an in-window chunk, total** | | **~1.9 ms** |
+
+The profile's tail looked alarming -- totals of 42, 34, 27 ms -- until the
+coordinates went into the log with the times: every slow chunk was at
+`wx`/`wz` of `-16` or `192`, which is *outside* a 12-chunk window. Those are the
+apron neighbours a water actor generates on a store miss, timed while competing
+for threads. In-window chunks are uniformly ~2 ms.
+
+Twelve chunks at 2 ms over fourteen workers is a couple of milliseconds. The
+stage measured 27. The difference was the pmap: it fanned out **all n\*n = 144
+indices**, of which 132 existed only to copy a chunk reference the tree already
+held. The task overhead was the stage.
+
+Now only the band goes through `pmap_n` (twelve tasks), and the list the new
+tree is built from is walked sequentially, taking a moved chunk straight out of
+the old tree.
+
+| stage | before | after |
+|---|---|---|
+| chunks | 27.1 ms | **9.6 ms** |
+| fields | 16.7 | 16.5 |
+| light | 7.1 | 7.2 |
+| mesh | 5.4 | 5.3 |
+| commit | 9.1 | 11.0 |
+| worst frame over 19 899 | ~42 | **31.4 ms** |
+
+**Every stage of a shift is now at or under the 16.67 ms budget.** Fixed-camera
+fps is unchanged at 110 -- this was never throughput, it was one stage's latency.
+
+The lesson is the profile's. "It is one chunk generation, so splitting the band
+cannot help" was a reasonable inference from the stage's cost and the band's
+size, and it was wrong, and it survived two commits because nobody measured the
+generation on its own. The coordinates in the log were what settled it.
+
+## The two mains, merged (2026-09-08)
+
+`main` and `origin/main` had diverged: 33 commits here (points of interest,
+crystal caverns, fauna and the roost, open ocean, coloured block light) against
+21 there (PRs #3 and #4 -- frustum culling, toroidal occupancy, the light flood
+moved to the GPU, the shift staged over four frames, a 12-chunk window). Both
+sides were wanted, so this is a merge and not a rebase: 28 conflict hunks over
+seven files.
+
+Most of it composed. The window widened 128 -> 192 on one side while the light
+byte grew a colour nibble on the other, and those are different bits of
+different things. Three of the hunks were not that.
+
+**The occupancy texture, twice fixed, two ways.** Both sides had found the same
+bug -- `cf_gfx_set_voxel` stepped a coarse cell's count on every edit, whether
+or not the edit changed occlusion, so a cell it had under-counted would not
+clear. Here it was fixed by routing edits through `cf_gfx_sync_box` on their one
+voxel, which recounts from the array; there by making `sync_box` recount
+exactly, while `set_voxel` kept its incremental count beside it. The merge takes
+both halves: `sync_box` recounts, and `set_voxel` is gone.
+
+They disagreed about what the texture holds, though, and there the far side is
+right for a reason this side could not have known: it must be the RAW opacity
+(0 air, 2 water, 6 leaves, 255 solid), because the GPU light flood subtracts it
+per step. Normalising to 0/255 -- which is what the oracle here was taught to
+expect -- would let light run straight through water. The oracle now insists on
+the exact byte instead.
+
+**Coloured light had to move.** It rode in bit 56 of the greedy face key, into
+the fx word, and the shader picked `GLOW_COLD` off it. But the far side had
+taken light out of the mesh entirely: terrain faces carry a constant corner now
+and the fragment shader samples an RG 3D texture, which is most of where a third
+of the vertices went. Keeping the colour in the key would have put that
+fragmentation back, by emitter instead of by level.
+
+So the colour goes where the light went. The texture holds the March byte
+VERBATIM rather than scaled to 0..255 -- there is no room to rescale a byte that
+is a level in one nibble and a colour in the other -- and:
+
+- the flood shader works in levels, not in packed bytes. A `max` over the six
+  neighbours would have ordered a dim cold voxel above a bright warm one; it
+  takes the brightest block LEVEL and carries that neighbour's colour with it,
+  and changes the colour only where it raises the level, which is the one place
+  the CPU sweep writes one.
+- `litAt` splits the byte per fragment, and `smoothLight` returns the colour
+  beside the two blended levels. The colour is READ, not blended, from the air
+  voxel the face sits against -- the same voxel the mesher used to read it at.
+  Averaging two palette indices means nothing.
+- `cf_light_check` compares the exact byte now, colour included, so a flood that
+  spread the right level with the wrong emitter's colour is a difference it
+  sees.
+
+`cf_vert` lost its colour argument and the face key its top two bits: a terrain
+face carries nothing about its light any more.
+
+**A bug the move exposed.** Carrying the colour through the flood meant reading
+what the CPU sweep does with it, and the CPU sweep was only doing it in one
+direction of six. `list_go` added the colour bits to the +x neighbour and wrote
+a bare level to the other five; `full_row_ip`, the overflow fallback, the same.
+A cold crystal lit the rock east of it white and the rock on its other five
+faces orange. Both now carry it all six ways.
+
+**Verified.** 544 tests. `forge lint --strict` clean -- which meant deleting
+seven private functions the merge left unreachable, six of them already dead on
+`origin/main` (`corner_pack` and `occluded` are what `smoothLight` replaced).
+The occupancy oracle reads `fine 0 coarse 0`. The light oracle reads `sky 73
+block 3`, and both numbers have an account:
+
+- the 73 is the sky seed's own pre-existing disagreement, 55 on `origin/main`
+  and 75 here on a world with more terrain in it; the two move together.
+- the 3 are one glow block's light under three voxels the water reached AFTER
+  the light had passed through them. The flood only ever raises, so light
+  spread before the water arrived stays. Marking the light box dirty on a water
+  move does fix it -- converged `block 0` -- but it puts the whole column back
+  to the seed, and at `CF_LIGHT_STEP = 4` that is four frames of re-spreading,
+  which a chunk with water moving in it every tick never finishes. Three stale
+  voxels beat a column that never converges. Lowering light locally, rather
+  than re-seeding a box, is the fix; it is not this change.
+
+The colour itself is checked at night against seed 7, a glow cap and a crystal
+placed on the same column through `edit_block`: the newly lit pixels average
+(40.3, 36.7, 29.5) for the cap and (68.1, 65.9, 60.9) for the crystal -- R/B of
+1.37 and 1.12 against the shader's own 1.43 (`GLOW`) and 1.11 (`GLOW_COLD`).
+Orange and near-white, off the texture, per fragment.
+
+**Not measured.** The frame budget. This machine had other builds on it
+throughout and read 17.5 ms merged, 15.7 for `origin/main` and 16.6 for local
+`main` -- with a 15.7-19.6 ms spread across runs of the SAME tree, which is
+wider than any gap between them, and against the 7.0 ms this file records for
+local `main` on an idle box. The script warns about exactly this. It wants a
+re-run somewhere quiet before any number here means anything. The drained mesh
+equals the full rebuild (703923462).

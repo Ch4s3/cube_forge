@@ -85,7 +85,7 @@ mod CubeForge do
     end
   end
 
-  type Frame = Frame(Int, Float, CubeForge.Player.Player, Int, NativeFloatArr, NativeF32Arr, Bool, CubeForge.F32Buf.F32Buf, Bool, Float, Float, Bool, Int, CubeForge.Menu.Menu, CubeForge.F32Buf.F32Buf, Start, Float, Int, CubeForge.Audio.Sched, Bool, Int, CubeForge.Fauna.Poses, CubeForge.F32Buf.F32Buf, CubeForge.Flocks.Snap, CubeForge.Pop.Reg, Int)   -- ..., inventory open, slot a stack was lifted from (-1 = not dragging), menu, its vertex buffer, what the next session starts from (NoStart = keep playing), worst frame seen after warmup, the frame it was, the note schedule, whether the survey is open, the species scanned so far as a bitmask, the animal bodies (greedy-meshed once), the buffer they are stamped into each frame, the two ticks of flock transforms the renderer blends between, the populations: what lives in each chunk of the window, and the animals scanned so far as a bitmask
+  type Frame = Frame(Int, Float, CubeForge.Player.Player, Int, NativeFloatArr, NativeF32Arr, Bool, CubeForge.F32Buf.F32Buf, Bool, Float, Float, Bool, Int, CubeForge.Menu.Menu, CubeForge.F32Buf.F32Buf, Start, Float, Int, CubeForge.Audio.Sched, Bool, Int, CubeForge.Fauna.Poses, CubeForge.F32Buf.F32Buf, CubeForge.Flocks.Snap, CubeForge.Pop.Reg, Int, Staged)   -- ..., inventory open, slot a stack was lifted from (-1 = not dragging), menu, its vertex buffer, what the next session starts from (NoStart = keep playing), worst frame seen after warmup, the frame it was, the note schedule, whether the survey is open, the species scanned so far as a bitmask, the animal bodies (greedy-meshed once), the buffer they are stamped into each frame, the two ticks of flock transforms the renderer blends between, the populations: what lives in each chunk of the window, the animals scanned so far as a bitmask, and any window shift in flight (see Staged)
   -- Frames before this are not counted toward the worst frame: the first few
   -- carry one-time costs (the first draw of each buffer, the first time down
   -- every path) that no steady-state budget should be measured against.
@@ -112,7 +112,7 @@ mod CubeForge do
   fn ui_with_effects(u : Ui, e : CubeForge.Effects.Effects) : Ui do match u do Ui(i, a, b, k, r, t, _, fx, g, gr) -> Ui(i, a, b, k, r, t, e, fx, g, gr) end end
   pfn readout_verts(u : Ui) : Int do match u do Ui(_, _, _, _, r, _, _, _, _, _) -> F32Buf.len(r) / Vx.floats() end end
   doc "VBO slot of the ground readout line."
-  fn readout_slot() : Int do 245 end
+  fn readout_slot() : Int do 501 end
 
   -- Rebuild + upload the hotbar buffers when the inventory's HUD key changed.
   -- While the inventory is open the icons follow the cursor, so the key check is
@@ -269,9 +269,9 @@ mod CubeForge do
         if k == key && !open do Ui(inv, hb, ic, key, rb1, text, ef, fx, gkey, ground)
         else
           let hb1 = Hud.build_hotbar(hb, inv, Inv.progress(inv), open, drag_from, tint)
-          Win.gfx_upload(252, F32Buf.storage(hb1), F32Buf.len(hb1))
+          Win.gfx_upload(hotbar_slot(), F32Buf.storage(hb1), F32Buf.len(hb1))
           let ic1 = Hud.build_icons(ic, inv, open, drag_from, nx, ny)
-          Win.gfx_upload(251, F32Buf.storage(ic1), F32Buf.len(ic1))
+          Win.gfx_upload(icon_slot(), F32Buf.storage(ic1), F32Buf.len(ic1))
           Ui(inv, hb1, ic1, k, rb1, text, ef, fx, gkey, ground)
         end
     end
@@ -286,20 +286,31 @@ mod CubeForge do
   end
   pfn hud_verts(u : Ui) : Int do match u do Ui(_, hb, _, _, _, _, _, _, _, _) -> F32Buf.len(hb) / Vx.floats() end end
   pfn icon_verts(u : Ui) : Int do match u do Ui(_, _, ic, _, _, _, _, _, _, _) -> F32Buf.len(ic) / Vx.floats() end end
-  -- VBO slot map. 0..63 opaque chunks, 64..127 water, 128..191 foliage, and the
-  -- named slots below. They are all one array in the shim (CF_MAX_MESHES = 256),
-  -- so a slot used twice silently overwrites; keep this list complete.
-  --   244 mycelium map  245 ground readout 246 water spray   247 escape menu 248 biome map      249 precipitation
-  --   250 map marker    251 hotbar icons 252 hotbar        253 underwater tint
-  --   254 selection outline               255 fps counter
-  fn menu_slot() : Int do 247 end
-  fn water_slot_base() : Int do 64 end
-  fn foliage_slot_base() : Int do 128 end
+  -- VBO slot map, for a window of World.size() = 12 chunks a side (144 of them).
+  -- 0..143 opaque chunks, 144..287 water, 288..431 foliage, then the named slots
+  -- below. They are all one array in the shim (CF_MAX_MESHES = 512), so a slot
+  -- used twice silently overwrites; keep this list complete. They were bare
+  -- numbers at the top of a 256-slot array before the window grew, which is
+  -- exactly the collision this naming now prevents.
+  fn myc_map_slot() : Int do 500 end
+  fn spray_slot() : Int do 502 end
+  fn menu_slot() : Int do 503 end
+  fn biome_map_slot() : Int do 504 end
+  -- 505 precipitation (CubeForge.Precip.slot), 506 map marker (CubeForge.Marker.slot)
+  fn icon_slot() : Int do 507 end
+  fn hotbar_slot() : Int do 508 end
+  fn underwater_slot() : Int do 509 end
+  fn outline_slot() : Int do 510 end
+  fn fps_slot() : Int do 511 end
+  doc "Slots in a marks or pending array: one per (chunk, section) of the window."
+  fn marks_len() : Int do World.size() * World.size() * 16 end
+  fn water_slot_base() : Int do 144 end
+  fn foliage_slot_base() : Int do 288 end
   -- The counts array's fourth block: 1 while a chunk's mesh was baked before
   -- the window last moved under it. Its slots draw with the shim's offset
   -- until it is rebaked; any rebuild of such a chunk rebuilds every section
   -- and pass at once, so one buffer never mixes two origins (see shift_scene).
-  fn moved_base() : Int do 192 end
+  fn moved_base() : Int do 432 end
   pfn is_moved(counts : NativeIntArr, ci : Int) : Bool do NativeArray.get_int(counts, moved_base() + ci) == 1 end
   pfn clear_moved(counts : NativeIntArr, ci : Int) : NativeIntArr do NativeArray.set_int(counts, moved_base() + ci, 0) end
   fn tick_period() : Int do 10 end
@@ -630,6 +641,39 @@ mod CubeForge do
   -- returns the array — discarding it loses the write when the array is shared, GAPS.md G47).
   type Rep = Rep(CubeForge.World.World, NativeIntArr)
 
+  -- The lowest and highest y a batch of chunk-local cells touches. A cell is
+  -- idx * 256 + id with idx = lx + 16 lz + 256 y, so y is v / 65536.
+  pfn cells_y_lo(cells : List(Int), acc : Int) : Int do
+    match cells do
+      Nil -> acc
+      Cons(v, rest) -> cells_y_lo(rest, if acc < 0 do v / 65536 else Math.min_int(acc, v / 65536) end)
+    end
+  end
+  -- Water moving is a block write like any other, and it changes the occupancy
+  -- byte: air is 0 and water is 2. Nothing synced that to the GPU, because
+  -- until the light flood started subtracting the opacity per step nothing on
+  -- the GPU could tell 0 from 2 -- the shadow trace only ever asks `> 0.5`. The
+  -- exact-byte occupancy oracle now catches it, and this is the fix: the touched
+  -- y range of the chunk, which for water is a few layers near the surface.
+  pfn sync_water_occ(w : CubeForge.World.World, cx : Int, cz : Int, cells : List(Int)) : CubeForge.World.World do
+    let lo = cells_y_lo(cells, 0 - 1)
+    if lo < 0 do w
+    else
+      Win.gfx_sync_box(World.occupancy(w), 16 * cx, 0, 16 * cz, 16 * cx + 15, 255, 16 * cz + 15)
+      -- The LIGHT is deliberately NOT marked dirty here, though water that
+      -- moved has changed the opacity the flood subtracts. The flood only ever
+      -- raises, so light it spread before the water arrived stays: the light
+      -- oracle counts three such voxels in the pinned scenario, under a glow
+      -- block the water reached afterwards. Re-syncing the column does fix it
+      -- (converged block 0), but it puts the whole column back to the seed, and
+      -- at CF_LIGHT_STEP = 4 that is four frames of re-spreading -- which a
+      -- chunk with water moving in it every tick never finishes. Three stale
+      -- voxels beat a column that never converges; lowering light locally,
+      -- rather than re-seeding a box, is what would actually fix this.
+      w
+    end
+  end
+
   -- Apply one actor's reply: cell writes are batched per chunk, edge/spill entries become
   -- messages to neighbours (flagging them), a pending marker keeps the chunk flagged.
   pfn apply_reply(w : CubeForge.World.World, pids, flags : NativeIntArr, ci : Int, out : List(Int), cells : List(Int)) : Rep do
@@ -637,7 +681,7 @@ mod CubeForge do
     let cx = ci % n
     let cz = ci / n
     match out do
-      Nil -> Rep(World.set_cells(w, cx, cz, cells), flags)
+      Nil -> Rep(sync_water_occ(World.set_cells(w, cx, cz, cells), cx, cz, cells), flags)
       Cons(v, rest) ->
         let kind = v / 4294967296
         let payload = v % 4294967296
@@ -831,7 +875,7 @@ mod CubeForge do
 
   -- Owe [passes] on every section [marks] touched.
   pfn stage_go(pend : NativeIntArr, marks : NativeIntArr, i : Int, passes : Int) : NativeIntArr do
-    if i >= 1024 do pend
+    if i >= marks_len() do pend
     else if NativeArray.get_int(marks, i) != 0 do
       stage_go(NativeArray.set_int(pend, i, int_or(NativeArray.get_int(pend, i), passes)), marks, i + 1, passes)
     else stage_go(pend, marks, i + 1, passes) end end
@@ -845,6 +889,18 @@ mod CubeForge do
   pfn owed_count(pend : NativeIntArr, cx : Int, cz : Int, sy : Int, acc : Int) : Int do
     if sy >= 16 do acc
     else owed_count(pend, cx, cz, sy + 1, if NativeArray.get_int(pend, CubeForge.Light.mark_slot(cx, cz, sy)) != 0 do acc + 1 else acc end) end
+  end
+  -- The bitmask of at most [k] of the sections a chunk owes, lowest first.
+  pfn owed_first(pend : NativeIntArr, cx : Int, cz : Int, sy : Int, k : Int, acc : Int) : Int do
+    if sy >= 16 || k <= 0 do acc
+    else if NativeArray.get_int(pend, CubeForge.Light.mark_slot(cx, cz, sy)) != 0 do
+      owed_first(pend, cx, cz, sy + 1, k - 1, int_or(acc, pow2(sy)))
+    else owed_first(pend, cx, cz, sy + 1, k, acc) end end
+  end
+  -- Clear just the sections in [mask].
+  pfn clear_sections(pend : NativeIntArr, cx : Int, cz : Int, mask : Int, sy : Int) : NativeIntArr do
+    if sy >= 16 do pend
+    else clear_sections(if int_and(mask, pow2(sy)) != 0 do NativeArray.set_int(pend, CubeForge.Light.mark_slot(cx, cz, sy), 0) else pend end, cx, cz, mask, sy + 1) end
   end
   pfn drain_sections(world : CubeForge.World.World, cx : Int, cz : Int, pend : NativeIntArr, sy : Int,
                      m : CubeForge.ChunkMesh.ChunkMesh, empty : CubeForge.Chunk.Chunk) : CubeForge.ChunkMesh.ChunkMesh do
@@ -875,10 +931,21 @@ mod CubeForge do
       let mask = owed_mask(pend, cx, cz, 0, 0)
       if mask == 0 do drain_go(w, pend, ci + 1, n, counts, meshes, empty, budget, log)
       else if is_moved(counts, ci) do
-        -- baked before the window moved: rebake whole, at the current origin
-        let m1 = remesh_sections(w, cx, cz, 65535, 0, Array.get(meshes, ci), empty, pass_all())
-        drain_go(w, clear_chunk(pend, cx, cz, 0), ci + 1, n, clear_moved(upload_chunk_passes(m1, ci, counts, pass_all()), ci),
-                 Array.set(meshes, ci, m1), empty, budget - 16, log)
+        -- Baked before the window moved, so its vertices carry the old origin
+        -- and the shim is drawing it at an offset (cf_gfx_shift). It has to be
+        -- rebaked WHOLE -- a buffer may never mix two origins -- but it does
+        -- not have to be rebaked in one frame: the sections are rebuilt into
+        -- the March mesh a budget at a time, and only when the chunk owes
+        -- nothing is the buffer uploaded and the moved flag dropped. Until
+        -- then the offset old buffer is what draws, which is correct. Doing
+        -- all sixteen at once put a 20-70 ms frame a few frames after every
+        -- shift, on whichever chunk happened to be dense with foliage.
+        let take = owed_first(pend, cx, cz, 0, budget, 0)
+        let m1 = remesh_sections(w, cx, cz, take, 0, Array.get(meshes, ci), empty, pass_all())
+        let pend1 = clear_sections(pend, cx, cz, take, 0)
+        let done = owed_mask(pend1, cx, cz, 0, 0) == 0
+        let counts1 = if done do clear_moved(upload_chunk_passes(m1, ci, counts, pass_all()), ci) else counts end
+        drain_go(w, pend1, ci + 1, n, counts1, Array.set(meshes, ci, m1), empty, budget - count_bits(take, 0, 0), log)
       else
         let done = owed_count(pend, cx, cz, 0, 0)
         let t0 = Win.time()
@@ -1106,9 +1173,13 @@ mod CubeForge do
         Win.gfx_sync_box(World.occupancy(w0), x, y, z, x, y, z)
         let n = World.side(w0)
         -- accessors, not a match: a dotted constructor pattern does not parse (GAPS.md G24/G25)
-        let relit = World.relight_marked(w0, x, y, z)
-        let world1 = World.relit_world(relit)
-        let marks = mark_geometry(World.relit_marks(relit), x, y, z, n)
+        -- Re-seed the edited column; the GPU spreads it (cf_light_flood).
+        let world1 = World.reseed_region(w0, x, x, z, z)
+        Win.gfx_light_dirty(x - 16, 0, z - 16, x + 16, 255, z + 16)
+        -- A relight no longer marks anything for remeshing: light comes from
+        -- the light texture per fragment, so a mesh cannot show stale light.
+        -- Only a GEOMETRY change still needs a section rebuilt.
+        let marks = mark_geometry(CubeForge.Light.marks_new(), x, y, z, n)
         -- The edited section is rebuilt here and now, so the block appears or
         -- vanishes under the cursor in the same frame the click landed. Its
         -- neighbours -- the chunk over a boundary, the sections the relight
@@ -1160,21 +1231,16 @@ mod CubeForge do
         -- but whose mesh was not rebuilt renders stale. The relight reports
         -- exactly which sections it changed; those join the geometry marks.
         -- the whole edit's region, not its centre voxel: a canopy's shade falls four columns out
-        let relit = if bush do World.relight_region_marked(w1, x - 1, x + 1, base + 1, base + 1, z - 1, z + 1)
-                    else World.relight_region_marked(w1, x - 4, x + 4, base + 1, base + trunk + 2, z - 4, z + 4) end
-        let w2 = World.relit_world(relit)
+        let w2 = World.reseed_region(w1, x - 4, x + 4, z - 4, z + 4)
+        Win.gfx_light_dirty(x - 20, 0, z - 20, x + 20, 255, z + 20)
         let t2 = Win.time()
         sync_occupancy(w2, x, z, base, base + trunk + 2)
         let t3 = Win.time()
-        let marks1 = or_marks(mark_box(marks, x - 4, base, z - 4, x + 4, base + trunk + 2, z + 4, n, 0), World.relit_marks(relit), 0)
+        let marks1 = mark_box(marks, x - 4, base, z - 4, x + 4, base + trunk + 2, z + 4, n, 0)
         let bio1 = Biome.rescan_box(bio, w2, x, z, Veg.decay_radius() + 1, base + trunk + 2)
         if Env.get_int("CF_VEG_LOG", 0) == 1 do println("  veg edit: blocks " ++ ms(t1 -. t0) ++ " relight " ++ ms(t2 -. t1) ++ " occupancy " ++ ms(t3 -. t2) ++ " marks+rescan " ++ ms(Win.time() -. t3)) else () end
         veg_go(w2, bio1, marks1, seed, n, rest)
     end
-  end
-  pfn or_marks(a : NativeIntArr, b : NativeIntArr, i : Int) : NativeIntArr do
-    if i >= 1024 do a
-    else or_marks(if NativeArray.get_int(b, i) != 0 do NativeArray.set_int(a, i, 1) else a end, b, i + 1) end
   end
   -- Mark every section a box touches: the box's corners at each section row it spans.
   pfn mark_box(marks : NativeIntArr, x0 : Int, y0 : Int, z0 : Int, x1 : Int, y1 : Int, z1 : Int, n : Int, i : Int) : NativeIntArr do
@@ -1226,10 +1292,10 @@ mod CubeForge do
         else
           let top = base + Fruit.height_of(sp, x, z, seed)
           let w1 = Fruit.stamp(w, sp, x, base, z, seed)
-          let relit = World.relight_region_marked(w1, x - 4, x + 4, base + 1, top, z - 4, z + 4)
-          let w2 = World.relit_world(relit)
+          let w2 = World.reseed_region(w1, x - 4, x + 4, z - 4, z + 4)
+          Win.gfx_light_dirty(x - 20, 0, z - 20, x + 20, 255, z + 20)
           sync_occupancy(w2, x, z, base, top)
-          let marks1 = or_marks(mark_box(marks, x - 4, base, z - 4, x + 4, top, z + 4, n, 0), World.relit_marks(relit), 0)
+          let marks1 = mark_box(marks, x - 4, base, z - 4, x + 4, top, z + 4, n, 0)
           fruit_edits(w2, Biome.rescan_box(bio, w2, x, z, Fruit.footprint() + 1, top), myc, marks1, seed, n, rest)
         end
     end
@@ -1245,10 +1311,10 @@ mod CubeForge do
         let r = Fruit.fell(world, sp, x, base, z, seed)
         let w1 = Fruit.felled_world(r)
         let top = base + Fruit.height_of(sp, x, z, seed)
-        let relit = World.relight_region_marked(w1, x - 4, x + 4, base + 1, top, z - 4, z + 4)
-        let w2 = World.relit_world(relit)
+        let w2 = World.reseed_region(w1, x - 4, x + 4, z - 4, z + 4)
+        Win.gfx_light_dirty(x - 20, 0, z - 20, x + 20, 255, z + 20)
         sync_occupancy(w2, x, z, base, top)
-        let marks = or_marks(mark_box(CubeForge.Light.marks_new(), x - 4, base, z - 4, x + 4, top, z + 4, n, 0), World.relit_marks(relit), 0)
+        let marks = mark_box(CubeForge.Light.marks_new(), x - 4, base, z - 4, x + 4, top, z + 4, n, 0)
         let inv1 = Inv.give(Inv.give(Inv.give(ui_inv(ui), Species.spore_item(sp), Species.spores(sp)), Chunk.fruit_stem(sp), Fruit.felled_stems(r)), Chunk.fruit_cap(sp), Fruit.felled_caps(r))
         Scene(w2, counts, outline, hit, ui_with_inv(ui, inv1), pids, flags, meshes, Biome.rescan_box(bio, w2, x, z, Fruit.footprint() + 1, top),
               stage_go(pend, marks, 0, pass_solid()), Myc.reseed(myc, n * 16, x, z))
@@ -1324,12 +1390,12 @@ mod CubeForge do
     match sc do
       Scene(world, counts, outline, hit, ui, pids, flags, meshes, bio, pend, myc) ->
         let n = World.side(world)
-        match remesh_marked(world, all_marks(0, NativeArray.make_int(1024, 0)), 0, n, counts, meshes, Chunk.new(), pass_all()) do
+        match remesh_marked(world, all_marks(0, CubeForge.Light.marks_new()), 0, n, counts, meshes, Chunk.new(), pass_all()) do
           Remeshed(c1, m1) -> Scene(world, c1, outline, hit, ui, pids, flags, m1, bio, pend, myc)
         end
     end
   end
-  pfn all_marks(i : Int, m : NativeIntArr) : NativeIntArr do if i >= 1024 do m else all_marks(i + 1, NativeArray.set_int(m, i, 1)) end end
+  pfn all_marks(i : Int, m : NativeIntArr) : NativeIntArr do if i >= marks_len() do m else all_marks(i + 1, NativeArray.set_int(m, i, 1)) end end
 
   -- One mycelium migration: the column's surface takes or drops its mycelium
   -- block and `shown` follows. Columns whose EMISSION changes need block light
@@ -1392,10 +1458,9 @@ mod CubeForge do
                 if ax < 0 do Scene(w1, counts, outline, hit, ui, pids, flags, meshes, bio, stage_go(pend, marks, 0, pass_solid()), myc)
                 else
                   -- the batch's window (every taken column within 4 of the anchor, bodies up to 12 tall), with the full radius
-                  let relit = CubeForge.Light.relight_block_region_marked(World.block_light(w1), w1, ax - 4, ax + 4, ah, ah + 12, az - 4, az + 4,
-                                                                          CubeForge.Light.region_reach(World.block_light(w1), w1, ax - 4, ax + 4, ah, ah + 12, az - 4, az + 4, true))
-                  let w2 = World.set_block_light(w1, CubeForge.Light.relit_field(relit))
-                  Scene(w2, counts, outline, hit, ui, pids, flags, meshes, bio, stage_go(pend, CubeForge.Light.or_marks(marks, CubeForge.Light.relit_marks(relit)), 0, pass_solid()), myc)
+                  let w2 = World.set_block_light(w1, CubeForge.Light.reseed_block(World.block_light(w1), w1, ax - 4, ax + 4, az - 4, az + 4))
+                  Win.gfx_light_dirty(ax - 20, 0, az - 20, ax + 20, 255, az + 20)
+                  Scene(w2, counts, outline, hit, ui, pids, flags, meshes, bio, stage_go(pend, marks, 0, pass_solid()), myc)
                 end
             end
         end
@@ -1464,8 +1529,77 @@ mod CubeForge do
   end
 
   -- Water on the surface at (px+3, pz+dz) for dz in [k, 4]: nine columns east of the player.
+  -- The light texture, after a relight of the region [x0..x1] x [z0..z1] up to
+  -- [ytop]. The sweep reaches Light.relight_radius() in every direction and the
+  -- whole column beneath a changed sky shaft, so the box is grown by the radius
+  -- in x and z and taken from the ground up. A superset of what moved: cheaper
+  -- to sync a few thousand spare texels than to track the exact set.
+  -- The bounding box of the sections a relight marked, in blocks, or empty.
+  -- The relight already computes exactly which sections changed; taking their
+  -- box is far tighter than growing the edit by the sweep's reach and running
+  -- from the ground up, which is what this did first -- and that cost more in
+  -- staging than the whole change saved.
+  type SBox = SBox(Int, Int, Int, Int, Int, Int)
+
+  -- Leave every chunk of the window where the water actors can read it, by
+  -- world coordinate. They used to regenerate their own -- five chunks and a
+  -- lake pour per load, and a second copy of world generation living inside the
+  -- actor -- because GAPS.md G44 forbids a native array in a message payload.
+  -- It still does; only the coordinate is sent, and the chunk is fetched by it.
+  pfn store_chunks_go(w : CubeForge.World.World, n : Int, i : Int) : Unit do
+    if i >= n * n do ()
+    else
+      Win.chunk_put(World.origin_x(w) + i % n, World.origin_z(w) + i / n,
+                    Chunk.raw(World.chunk_at(w, i % n, i / n)))
+      store_chunks_go(w, n, i + 1)
+    end
+  end
+  pfn store_band_go(w : CubeForge.World.World, n : Int, band : List(Int)) : Unit do
+    match band do
+      Nil -> ()
+      Cons(d, rest) ->
+        Win.chunk_put(World.origin_x(w) + d % n, World.origin_z(w) + d / n,
+                      Chunk.raw(World.chunk_at(w, d % n, d / n)))
+        store_band_go(w, n, rest)
+    end
+  end
+
   -- Every source above sea level: told to the shim, and its chunk flagged so the
   -- water actor ticks from the first frame (a chunk with a spring is always live).
+  -- ── A shift in flight ──────────────────────────────────────────────────
+  -- A window shift is ~90 ms of work and a frame's budget is 16.7 ms, so it is
+  -- paid over five frames instead of one. The stages are values carried in the
+  -- Frame, NOT in the Scene: the Scene stays wholly on the old window until the
+  -- commit, so every staging frame still renders a coherent world.
+  --
+  --   StChunks  queued; next frame generates the band         (~23 ms)
+  --   StFields  chunks in; next frame slides the fields        (~20 ms)
+  --   StLight   fields in; next frame lights the band          (~22 ms)
+  --   StMesh    lit; next frame meshes the band that came in   (~6 ms)
+  --   StCommit  meshed; next frame swaps the scene over        (~22 ms)
+  --
+  -- StChunks is the floor: its twelve chunks are generated in one pmap, so it
+  -- costs one chunk generation's LATENCY, not their sum, and splitting the band
+  -- would not move it. Under it is faster terrain generation, not more stages.
+  --
+  -- While a shift is staged the world is FROZEN (see `frozen` in the frame
+  -- loop): the water tick, the biome and mycelium ticks and migrations,
+  -- vegetation, fruit and the player's own edits are all skipped, because each
+  -- stage is computed from the snapshot the stage before it took. The mesh
+  -- drain keeps running -- it reads the world and writes only meshes. Four
+  -- frames is ~67 ms, under a tenth of a tick period and about 0.8 blocks of
+  -- walking against the 16 blocks of slack the central 2x2 leaves.
+  type Staged = NoShift
+              | StChunks(Int, Int)
+              | StFields(Int, Int, CubeForge.World.HalfShift)
+              | StLight(Int, Int, CubeForge.World.World)
+              | StMesh(Int, Int, CubeForge.World.World)
+              | StCommit(Int, Int, CubeForge.World.World, List(CubeForge.ChunkMesh.ChunkMesh))
+  pfn is_staged(st : Staged) : Bool do match st do
+    NoShift -> false
+    _ -> true
+  end end
+
   -- ── Streaming: the window follows the player ───────────────────────────
   -- Every coordinate the engine holds is window-local (see World.origin_x).
   -- When the player's chunk leaves the window's central 2x2 the window slides
@@ -1473,13 +1607,19 @@ mod CubeForge do
   -- pool and the pending marks slide with it, the band that came in is
   -- generated, lit, meshed and given actors, and the player moves 16 blocks
   -- the other way, so nothing they see moves.
+  -- The window's central 2x2, in local chunks: (size/2 - 1, size/2). Derived,
+  -- not written out: with the literals 3 and 4 a 12-chunk window held the
+  -- player three chunks from one edge and seven from the other, which is the
+  -- whole view distance the bigger window was for.
+  fn centre_lo() : Int do World.size() / 2 - 1 end
+  fn centre_hi() : Int do World.size() / 2 end
   pfn shift_dx(p : CubeForge.Player.Player) : Int do
     let lx = World.floor_div16(float_to_int(Math.floor(V.x(Player.position(p)))))
-    if lx < 3 do -1 else if lx > 4 do 1 else 0 end end
+    if lx < centre_lo() do -1 else if lx > centre_hi() do 1 else 0 end end
   end
   pfn shift_dz(p : CubeForge.Player.Player) : Int do
     let lz = World.floor_div16(float_to_int(Math.floor(V.z(Player.position(p)))))
-    if lz < 3 do -1 else if lz > 4 do 1 else 0 end end
+    if lz < centre_lo() do -1 else if lz > centre_hi() do 1 else 0 end end
   end
   -- Which shift each axis would make next, told to the streamers so the band
   -- is generated before the frame that needs it. In the window's stable band
@@ -1604,19 +1744,23 @@ mod CubeForge do
       else leaving_blobs(w, myc, n, dx, dz, i - 1, Cons(CubeForge.World.Blob(i, World.with_shown_bytes(w, i % n, i / n, Myc.chunk_bytes(myc, 16 * n, i % n, i / n))), acc)) end
     end
   end
+  -- The chunks a shift took back from the cache, flagged live for the water tick.
+  pfn flag_restored(flags : NativeIntArr, w1 : CubeForge.World.World, n : Int, rs : List(CubeForge.World.Evicted)) : NativeIntArr do
+    match rs do
+      Nil -> flags
+      Cons(e, rest) ->
+        let cx = World.ev_cx(e) - World.origin_x(w1)
+        let cz = World.ev_cz(e) - World.origin_z(w1)
+        flag_restored(if cx >= 0 && cx < n && cz >= 0 && cz < n do NativeArray.set_int(flags, cx + n * cz, 1) else flags end, w1, n, rest)
+    end
+  end
+
   -- The fungus columns of the chunks the shift restored from the cache.
   pfn restore_myc(myc : CubeForge.Myc.Net, w1 : CubeForge.World.World, n : Int, rs : List(CubeForge.World.Evicted)) : CubeForge.Myc.Net do
     match rs do
       Nil -> myc
       Cons(e, rest) -> restore_myc(Myc.restore_chunk(myc, 16 * n, World.ev_cx(e) - World.origin_x(w1), World.ev_cz(e) - World.origin_z(w1), World.ev_cols(e)), w1, n, rest)
     end
-  end
-  -- The water flags of the band that came in: staggered, so neither its
-  -- reload nor its first tick lands in one frame. See water_settle.
-  pfn settle_band_go(flags : NativeIntArr, n : Int, dx : Int, dz : Int, d : Int) : NativeIntArr do
-    if d >= n * n do flags
-    else if shift_src(d, n, dx, dz) >= 0 do settle_band_go(flags, n, dx, dz, d + 1)
-    else settle_band_go(NativeArray.set_int(flags, d, water_settle() + d % settle_spread()), n, dx, dz, d + 1) end end
   end
   pfn mark_moved_go(counts : NativeIntArr, n : Int, dx : Int, dz : Int, d : Int) : NativeIntArr do
     if d >= n * n do counts
@@ -1636,45 +1780,152 @@ mod CubeForge do
       Err(_) -> CubeForge.World.band_none()
     end
   end
-  pfn shift_scene(sc, dx : Int, dz : Int, seed : Int, workers : Int, bpids) do
+  -- Stage 1: the band's chunks. Reads the scene, returns the half-shifted
+  -- world; the scene itself is untouched, so this frame still renders the old
+  -- window. The streamer's prepared band, when it is for this move, spares the
+  -- stage both the pour and the generate; when it is not, the stage generates
+  -- inline exactly as it did before there was a streamer.
+  pfn stage_chunks(sc, dx : Int, dz : Int, seed : Int, workers : Int, bpids, log : Bool) : CubeForge.World.HalfShift do
+    match sc do
+      Scene(w, _, _, _, _, _, _, _, _, _, myc) ->
+        let n = World.side(w)
+        let bd = take_band(bpids, dx, dz)
+        if log do
+          println("  shift band " ++ (if World.band_matches(bd, World.origin_x(w), World.origin_z(w), dx, dz) do "prepared" else "GENERATED INLINE" end))
+        else () end
+        World.shift_chunks_with(w, dx, dz, seed, workers, leaving_blobs(w, myc, n, dx, dz, n * n - 1, Nil), bd)
+    end
+  end
+
+  -- Stage 3: the band that came in, meshed. The mesher is pure over the world,
+  -- so the eight chunks go through one pmap.
+  pfn stage_mesh(w1 : CubeForge.World.World, dx : Int, dz : Int, workers : Int) : List(CubeForge.ChunkMesh.ChunkMesh) do
+    let n = World.side(w1)
+    List.pmap_n(band_indices(n, dx, dz, n * n - 1, Nil), fn d -> CM.build(w1, d % n, d / n, Chunk.new()), workers)
+  end
+
+  -- Stage 4: swap the scene over to [w1]. Every GL call of the shift is here
+  -- and happens together -- gfx_shift, the occupancy upload and the band's
+  -- uploads -- so one buffer never mixes two origins.
+  pfn commit_shift(sc, w1 : CubeForge.World.World, fresh : List(CubeForge.ChunkMesh.ChunkMesh), dx : Int, dz : Int, seed : Int, t0 : Float) do
     match sc do
       Scene(w, counts, outline, hit, ui, pids, flags, meshes, bio, pend, myc) ->
         let n = World.side(w)
-        let t0 = Win.time()
-        let bd = take_band(bpids, dx, dz)
-        let prepared = World.band_matches(bd, World.origin_x(w), World.origin_z(w), dx, dz)
-        let w1 = World.shift_with(w, dx, dz, seed, workers, leaving_blobs(w, myc, n, dx, dz, n * n - 1, Nil), bd)
-        let t1 = Win.time()
+        let c0 = Win.time()
         let bio1 = Biome.shift(bio, w1, dx, dz, seed)
-        let t1b = Win.time()
         let myc1 = restore_myc(Myc.shift(myc, 16 * n, dx, dz), w1, n, World.restored(w1))
-        let t2 = Win.time()
+        let c1 = Win.time()
         Win.gfx_shift(dx, dz)
-        Win.gfx_upload_occupancy(World.occupancy(w1), 128, 256, 128)
+        let c2 = Win.time()
+        -- The occupancy textures are toroidal (see gfx_shift_occupancy): the
+        -- window's origin inside them moves and their content does not, so all
+        -- that has to reach the GPU is the band that came in -- 0.8 MB against
+        -- the 9.4 MB whole-texture upload this replaces, which was 13 of this
+        -- stage's 21 ms. The band's texels are exactly the ones the band that
+        -- left was using, so nothing else is stale.
+        Win.gfx_shift_occupancy(dx, dz)
+        let obx0 = 16 * World.band_x0(n, dx)
+        let obx1 = 16 * World.band_x1(n, dx) + 15
+        let obz0 = 16 * World.band_z0(n, dz)
+        let obz1 = 16 * World.band_z1(n, dz) + 15
+        Win.gfx_sync_box(World.occupancy(w1), obx0, 0, obz0, obx1, 255, obz1)
+        -- the band's light, grown by the sweep's reach: light_band sweeps into
+        -- the apron either side of the seam, so those columns moved too
+        if Env.get_int("CF_GPULIGHT", 1) == 1 do
+          -- just the band: the seed is local, so nothing outside it moved
+          -- The band's own columns were re-seeded; the margin either side was
+          -- not, and does not need to be. It is uploaded all the same, to clear
+          -- the spread light the old band left in the texture -- the flood only
+          -- ever raises, so anything now dimmer has to be sent again.
+          let lr = CubeForge.Light.relight_radius()
+          Win.gfx_sync_light_box(World.light(w1), World.block_light(w1), obx0 - lr, 0, obz0 - lr, obx1 + lr, 255, obz1 + lr)
+          Win.gfx_light_dirty(obx0 - lr, 0, obz0 - lr, obx1 + lr, 255, obz1 + lr)
+        else () end
+        let c3 = Win.time()
         let counts0 = remap_bases_go(counts, NativeArray.make_int(4 * water_slot_base(), 0), n, dx, dz, water_slot_base(), 3, 0, 0)
         -- every chunk that moved is flagged, and owes every section, so the
         -- drain rebakes it at the new origin over the coming frames
         let counts1 = mark_moved_go(counts0, n, dx, dz, 0)
-        let pend1 = owe_moved_go(remap_bases_go(pend, NativeArray.make_int(1024, 0), n, dx, dz, 64, 16, 0, 0), n, dx, dz, 0)
-        let flags1 = settle_band_go(remap_ints_go(flags, NativeArray.make_int(n * n, 0), n, dx, dz, 0, 0, 0), n, dx, dz, 0)
-        let t3 = Win.time()
+        let pend1 = owe_moved_go(remap_bases_go(pend, CubeForge.Light.marks_new(), n, dx, dz, n * n, 16, 0, 0), n, dx, dz, 0)
+        -- A chunk that came in is not flagged live (fill 0) unless it came back
+        -- from the cache. Its actor has a WLoad queued from just below, and a
+        -- WTickReq sent behind that waits for the load to finish: calling all
+        -- eight on the very next water slot was a 35-110 ms frame, every one of
+        -- them replying with nothing. A freshly generated chunk has only sea
+        -- and lakes at rest, so there is nothing for that tick to do; it loads
+        -- in the background, and a spring in it still flags it (spring_band),
+        -- as does water at the seam spilling in. A chunk RESTORED from the
+        -- cache is flagged, because it may have been carrying a flow when the
+        -- window dropped it and nothing else would wake it.
+        let flags1 = flag_restored(remap_ints_go(flags, NativeArray.make_int(n * n, 0), n, dx, dz, 0, 0, 0), w1, n, World.restored(w1))
+        let c4 = Win.time()
         let band = band_indices(n, dx, dz, n * n - 1, Nil)
-        let fresh = List.pmap_n(band, fn d -> CM.build(w1, d % n, d / n, Chunk.new()), workers)
         let rm = remap_meshes_go(meshes, w1, n, dx, dz, n * n - 1, counts1, Chunk.new(), band, fresh, Nil)
-        let t4 = Win.time()
+        let c5 = Win.time()
+        store_band_go(w1, n, band)
         let pids1 = Array.from_list(remap_pids_go(pids, w1, n, dx, dz, n * n - 1, freed_pids_go(pids, n, dx, dz, n * n - 1, Nil), seed, Nil))
         let flags2 = spring_band(w1, bio1, n, band, flags1)
         match rm do
           ShiftMeshes(mlist, counts2) ->
-            -- CF_STREAM_LOG=1: one line per shift with where its time went
+            -- CF_STREAM_LOG=1: one line per shift, on the frame it lands
             if Env.get_int("CF_STREAM_LOG", 0) == 1 do
-              println("window shift (" ++ int_to_string(dx) ++ "," ++ int_to_string(dz) ++ ") -> origin (" ++ int_to_string(World.origin_x(w1)) ++ "," ++ int_to_string(World.origin_z(w1)) ++ ") in " ++ ms(Win.time() -. t0)
-                      ++ " (band " ++ (if prepared do "prepared" else "GENERATED INLINE" end) ++ ")"
-                      ++ ": world " ++ ms(t1 -. t0) ++ " biome " ++ ms(t1b -. t1) ++ " myc " ++ ms(t2 -. t1b) ++ " gl+remap " ++ ms(t3 -. t2) ++ " mesh " ++ ms(t4 -. t3) ++ " actors+springs " ++ ms(Win.time() -. t4))
+              println("window shift (" ++ int_to_string(dx) ++ "," ++ int_to_string(dz) ++ ") -> origin (" ++ int_to_string(World.origin_x(w1)) ++ "," ++ int_to_string(World.origin_z(w1)) ++ "); commit " ++ ms(Win.time() -. t0)
+                      ++ " [bio+myc " ++ ms(c1 -. c0) ++ " gfx_shift " ++ ms(c2 -. c1) ++ " OCCUPANCY_UPLOAD " ++ ms(c3 -. c2)
+                      ++ " remaps " ++ ms(c4 -. c3) ++ " meshupload " ++ ms(c5 -. c4) ++ " actors+springs " ++ ms(Win.time() -. c5) ++ "]")
             else () end
             Scene(w1, counts2, outline, hit, ui, pids1, flags2, Array.from_list(mlist), bio1, pend1, myc1)
         end
     end
+  end
+
+  -- One stage a frame. Returns the scene (changed only by a commit) and the
+  -- next staging state.
+  type Advanced(p) = Advanced(Scene(p), Staged)
+  pfn advance_shift(sc, st : Staged, seed : Int, workers : Int, bpids, log : Bool) do
+    let t0 = Win.time()
+    match st do
+      NoShift -> Advanced(sc, NoShift)
+      StChunks(dx, dz) ->
+        let h = stage_chunks(sc, dx, dz, seed, workers, bpids, log)
+        if log do println("  shift stage chunks " ++ ms(Win.time() -. t0)) else () end
+        Advanced(sc, StFields(dx, dz, h))
+      StFields(dx, dz, h) ->
+        let w = World.shift_fields(h, dx, dz, workers)
+        if log do println("  shift stage fields " ++ ms(Win.time() -. t0)) else () end
+        Advanced(sc, StLight(dx, dz, w))
+      StLight(dx, dz, w) ->
+        let w1 = World.shift_light(w, dx, dz)
+        if log do println("  shift stage light " ++ ms(Win.time() -. t0)) else () end
+        Advanced(sc, StMesh(dx, dz, w1))
+      StMesh(dx, dz, w1) ->
+        let fresh = stage_mesh(w1, dx, dz, workers)
+        if log do println("  shift stage mesh " ++ ms(Win.time() -. t0)) else () end
+        Advanced(sc, StCommit(dx, dz, w1, fresh))
+      StCommit(dx, dz, w1, fresh) ->
+        Advanced(commit_shift(sc, w1, fresh, dx, dz, seed, t0), NoShift)
+    end
+  end
+
+  -- Chunk coordinate to tile coordinate: eight chunks a tile, rounding down
+  -- through zero, the same as Lakes.floor_div(_, 8) which is private there.
+  pfn fdiv8(a : Int) : Int do if a >= 0 do a / 8 else (a - 7) / 8 end end
+  -- Every lake tile the window's chunks and their one-chunk apron lie in, as
+  -- (tx, tz) pairs without repeats. A 12-chunk window spans two tiles a side
+  -- and the apron adds one either way, so this is at most sixteen.
+  pfn tile_keys(ox : Int, oz : Int, n : Int, tx : Int, tz : Int, acc : List(Int)) : List(Int) do
+    let lo_x = fdiv8(ox - 1)
+    let hi_x = fdiv8(ox + n)
+    let lo_z = fdiv8(oz - 1)
+    let hi_z = fdiv8(oz + n)
+    if tz > hi_z do acc
+    else if tx > hi_x do tile_keys(ox, oz, n, lo_x, tz + 1, acc)
+    else tile_keys(ox, oz, n, tx + 1, tz, Cons(tx * 65536 + (tz + 32768), acc)) end end
+  end
+  doc "Pour every lake tile the water actors are about to want, in parallel, so the shim's memo answers each of their loads. Returns how many were poured."
+  pfn warm_lake_tiles(seed : Int, ox : Int, oz : Int, n : Int, workers : Int) : Int do
+    let keys = tile_keys(ox, oz, n, fdiv8(ox - 1), fdiv8(oz - 1), Nil)
+    let _ = List.pmap_n(keys, fn k -> CubeForge.Lakes.tile_side(CubeForge.Lakes.tile(seed, k / 65536, k % 65536 - 32768)), workers)
+    List.length(keys)
   end
 
   -- A source above sea level with somewhere to give (Water.is_spring_at, over
@@ -1924,7 +2175,10 @@ mod CubeForge do
   -- Per-frame: raycast from the eye, refresh the outline, apply the break-hold and placement.
   -- [break_held] is the button level (or scripted), [place_now] an edge, [new_sel] a slot 1..4 or 0.
   -- [place_id] > 0 forces a block id for scripted edits.
-  pfn interact(sc, p : CubeForge.Player.Player, break_held : Bool, place_now : Bool, place_id : Int, new_sel : Int, dt : Float, seed : Int, now : Float) do
+  -- [frozen]: a window shift is in flight, so no edit may land (see Staged).
+  -- The ray, the outline and the break's progress bar all keep running; only
+  -- the completion and the placement wait, at most five frames.
+  pfn interact(sc, p : CubeForge.Player.Player, break_held : Bool, place_now : Bool, place_id : Int, new_sel : Int, dt : Float, seed : Int, now : Float, frozen : Bool) do
     match sc do
       Scene(world, counts, outline, _, ui0, pids, flags, meshes, bio, pend, myc) ->
         let inv0 = if new_sel > 0 do Inv.select(ui_inv(ui0), new_sel) else ui_inv(ui0) end
@@ -1937,13 +2191,13 @@ mod CubeForge do
         -- ray regardless (see Raycast.blocks_ray), so they can be mined with an empty hand.
         let hit = Ray.cast(world, V.x(e), V.y(e), V.z(e), V.x(d), V.y(d), V.z(d), reach(), !Chunk.is_water(Inv.selected_id(inv0)))
         let outline1 = if Ray.is_hit(hit) do Outline.build(outline, Ray.bx(hit), Ray.by_(hit), Ray.bz(hit)) else F32Buf.clear(outline) end
-        if Ray.is_hit(hit) do CubeForge.Ffi.Window.gfx_upload(254, F32Buf.storage(outline1), F32Buf.len(outline1)) else () end
+        if Ray.is_hit(hit) do CubeForge.Ffi.Window.gfx_upload(outline_slot(), F32Buf.storage(outline1), F32Buf.len(outline1)) else () end
         -- breaking: hold accumulates on the same target; release, a miss, or an
         -- unbreakable block (bedrock: the world floor) resets, so no progress shows.
         let can_break = break_held && Ray.is_hit(hit) && World.breakable_at(world, Ray.bx(hit), Ray.by_(hit), Ray.bz(hit))
         let inv1 = if can_break do Inv.hold(inv0, Ray.bx(hit), Ray.by_(hit), Ray.bz(hit), dt) else Inv.release(inv0) end
         let sc1 = Scene(world, counts, outline1, hit, ui_with_inv(ui0, inv1), pids, flags, meshes, bio, pend, myc)
-        if Inv.is_complete(inv1) do
+        if Inv.is_complete(inv1) && !frozen do
           let id = World.block_at(world, Ray.bx(hit), Ray.by_(hit), Ray.bz(hit))
           -- the ground under a fruit block, read before the block goes
           let fbase = Fruit.base_of(world, Ray.bx(hit), Ray.bz(hit), Ray.by_(hit))
@@ -1960,7 +2214,7 @@ mod CubeForge do
                        if sp > 0 do Inv.give(inv2, Species.spore_item(sp), 1) else inv2 end
                      else inv2 end
           set_inv(sc3, Inv.release(inv3))
-        else if place_now && Ray.is_hit(hit) do
+        else if place_now && !frozen && Ray.is_hit(hit) do
           let px = Ray.bx(hit) + Ray.nx(hit)
           let py = Ray.by_(hit) + Ray.ny(hit)
           let pz = Ray.bz(hit) + Ray.nz(hit)
@@ -2071,7 +2325,7 @@ mod CubeForge do
         if now -. t0 >= 0.25 do
           let fps = float_to_int(int_to_float(n + 1) /. (now -. t0) +. 0.5)
           let hud1 = Hud.build_number(hud, fps, 0.006, 0.008)
-          Win.gfx_upload(255, F32Buf.storage(hud1), F32Buf.len(hud1))
+          Win.gfx_upload(fps_slot(), F32Buf.storage(hud1), F32Buf.len(hud1))
           Fps(now, 0, fps, hud1)
         else
           Fps(t0, n + 1, shown, hud)
@@ -2305,39 +2559,63 @@ mod CubeForge do
   -- [t0]: the clock at session start; [day0]: seconds into the day at that moment, so the sun continues from a save.
   fn frame_loop(f : Frame, k : Knobs, sc_in, nchunks : Int, proj : NativeFloatArr, map_proj : NativeFloatArr, fps : Fps, wxpid, fpids, bpids, seed : Int, first : Bool, t0 : Float, day0 : Float) : Frame do
     match f do
-      Frame(frame, last_t, player_in, sample, view, vp, map_mode, marker, flash, wcache, bcache, inv_open, drag_from, menu, menubuf, next_seed, worst, worst_at, sched, survey, known, faunap, faunab, herd, pop, kfauna) ->
+      Frame(frame, last_t, player_in, sample, view, vp, map_mode, marker, flash, wcache, bcache, inv_open, drag_from, menu, menubuf, next_seed, worst, worst_at, sched, survey, known, faunap, faunab, herd, pop, kfauna, staged_in) ->
         match k do
         Knobs(max_frames, dump_frame, dump_path, autowalk, autospin, autoedit, autoswim, autoflow, workers, automap, day_len, sun_deg, autoinv, autobreak, weather_pin, precip_cap, biome_rate, biome_map, autocanal, biome_budget, veg_budget, time_pin, remesh_all_at, automenu, audio_mode, audio_log, autodive, autoglow, myc_rate, myc_map, autoplant, myc_budget, autoplant_species, autospore, fruit_budget, fruit_rate, autostart, autosave, autosave_slot, autoload, autoload_slot, autoslots, myc_feedback, autosettings, settings_disk, settings_mask, autopage, autosurvey, autoscan, fauna_demo, fauna_on_knob, slow_log, prefetch) ->
         if Win.should_close() || (max_frames >= 0 && frame >= max_frames) || !is_no_start(next_seed) do
-          Frame(frame, last_t, player_in, sample, view, vp, map_mode, marker, flash, wcache, bcache, inv_open, drag_from, menu, menubuf, next_seed, worst, worst_at, sched, survey, known, faunap, faunab, herd, pop, kfauna)
+          Frame(frame, last_t, player_in, sample, view, vp, map_mode, marker, flash, wcache, bcache, inv_open, drag_from, menu, menubuf, next_seed, worst, worst_at, sched, survey, known, faunap, faunab, herd, pop, kfauna, staged_in)
         else
           In.poll()
-          -- Streaming: one chunk of shift a frame, toward the player, while
-          -- their chunk is off the window's centre (see shift_scene).
-          let sdx = shift_dx(player_in)
-          let sdz = if sdx != 0 do 0 else shift_dz(player_in) end
-          let sc = if sdx != 0 || sdz != 0 do shift_scene(sc_in, sdx, sdz, seed, workers, bpids) else sc_in end
-          -- The populations and the flocks slide with the window. Chunks that
+          -- Streaming: one chunk of shift, toward the player, while their chunk
+          -- is off the window's centre. The shift is queued here and paid one
+          -- stage a frame (see Staged); nothing is queued while one is already
+          -- in flight, and the player only moves when the commit lands, so
+          -- nothing they see moves.
+          let sdx = if is_staged(staged_in) do 0 else shift_dx(player_in) end
+          let sdz = if sdx != 0 || is_staged(staged_in) do 0 else shift_dz(player_in) end
+          let st_in = if sdx != 0 || sdz != 0 do StChunks(sdx, sdz) else staged_in end
+          -- Committing this frame? then the player steps back the chunk the
+          -- window stepped forward, on the same frame the scene swaps over.
+          let cdx = match st_in do
+            StCommit(dx, _, _, _) -> dx
+            _ -> 0
+          end
+          let cdz = match st_in do
+            StCommit(_, dz, _, _) -> dz
+            _ -> 0
+          end
+          let adv = advance_shift(sc_in, st_in, seed, workers, bpids, Env.get_int("CF_STREAM_LOG", 0) == 1)
+          let sc = match adv do Advanced(s1, _) -> s1 end
+          let staged1 = match adv do Advanced(_, st1) -> st1 end
+          -- The populations and the flocks slide with the window, on the frame
+          -- the COMMIT lands rather than the frame the shift is queued: the
+          -- world only moves once, four frames after the request. Chunks that
           -- left are archived under their world key; chunks that came in are
-          -- restored from the archive and caught up against the world as it
-          -- is now, which needs the shifted world and biome field.
+          -- restored and caught up against the world as it is now.
           -- from the last frame's clock: `now` is read further down, and a year
           -- is hours long
           let year_now = year_of(last_t -. t0 +. day0, day_len)
-          let pop_s = if sdx != 0 || sdz != 0 do
+          let pop_s = if cdx != 0 || cdz != 0 do
             let ox0 = World.origin_x(scene_world(sc_in))
             let oz0 = World.origin_z(scene_world(sc_in))
-            Pop.restore_entered(Pop.shift(pop, sdx, sdz, ox0, oz0, frame / tick_period()), scene_world(sc), scene_biome(sc), sdx, sdz,
+            Pop.restore_entered(Pop.shift(pop, cdx, cdz, ox0, oz0, frame / tick_period()), scene_world(sc), scene_biome(sc), cdx, cdz,
                                 World.origin_x(scene_world(sc)), World.origin_z(scene_world(sc)), year_now, frame / tick_period())
           else pop end
-          let herd_s = if sdx != 0 || sdz != 0 do shift_herd(herd, fpids, sdx, sdz, World.side(scene_world(sc))) else herd end
-          let player = if sdx != 0 || sdz != 0 do Player.translate(player_in, int_to_float(0 - 16 * sdx), int_to_float(0 - 16 * sdz)) else player_in end
+          let herd_s = if cdx != 0 || cdz != 0 do shift_herd(herd, fpids, cdx, cdz, World.side(scene_world(sc))) else herd end
+          let player = if cdx != 0 || cdz != 0 do Player.translate(player_in, int_to_float(0 - 16 * cdx), int_to_float(0 - 16 * cdz)) else player_in end
+          -- The world is frozen while a shift is in flight: every stage is
+          -- computed from the snapshot the one before it took, so a block edit
+          -- landing in between would be dropped by the commit. The mesh drain
+          -- is exempt -- it reads the world and writes only meshes.
+          let frozen = is_staged(staged1)
           -- Tell the streamers which shift to have ready next, from where the
           -- player stands in the window it stands in now. Every tick rather
           -- than every frame: a band takes a fraction of a second to build,
           -- the window takes seconds to reach its edge, and the shift's own
-          -- call queues behind these in the same mailbox.
-          if prefetch && (frame % tick_period() == 0 || sdx != 0 || sdz != 0) do prep_bands(bpids, scene_world(sc), player, seed) else () end
+          -- call queues behind these in the same mailbox. It is keyed off the
+          -- COMMIT, not the request: until then the window has not moved and
+          -- the band to prepare next is the one already in flight.
+          if prefetch && (frame % tick_period() == 0 || cdx != 0 || cdz != 0) do prep_bands(bpids, scene_world(sc), player, seed) else () end
           -- I toggles the inventory. While it is open the cursor is released and no
           -- input reaches the player; the world keeps ticking, as in the map view.
           -- I is ignored while the menu is up, so the two panels can never be open together.
@@ -2388,6 +2666,7 @@ mod CubeForge do
           if slow_log > 0 && frame > warmup_frames() && elapsed *. 1000.0 > int_to_float(slow_log) do
             println("slow frame " ++ int_to_string(frame - 1) ++ " phase " ++ int_to_string((frame - 1) % tick_period()) ++ ": " ++ ms(elapsed))
           else () end
+          if Env.get_int("CF_FRAME_LOG", 0) == 1 do println("F " ++ int_to_string(frame) ++ " " ++ ms(elapsed)) else () end
           let worst1 = if frame > warmup_frames() && elapsed > worst do elapsed else worst end
           let worst_at1 = if frame > warmup_frames() && elapsed > worst do frame - 1 else worst_at end
           -- Under CF_AUTOFLOW (the diagnostics gate), every frame over 4 ms names
@@ -2538,7 +2817,7 @@ mod CubeForge do
           -- No breaking or placing while the inventory is open: those clicks are drags.
           let sc0 = if ui_open do sc_eat
                     else interact(sc_eat, player1, In.button(In.button_left()) || scripted_hold, In.button_pressed(In.button_right()) || scripted_place || place_water,
-                                  if place_water do Chunk.id_of_level(7) else -1 end, if scripted_place do 1 else if scripted_sel > 0 do scripted_sel else selected_key() end end, dt, seed, now) end
+                                  if place_water do Chunk.id_of_level(7) else -1 end, if scripted_place do 1 else if scripted_sel > 0 do scripted_sel else selected_key() end end, dt, seed, now, frozen) end
           -- CF_AUTOFLOW: break the source again 600 frames after placing it
           let sc0b = if autoflow >= 0 && frame == autoflow + 600 do break_sources_near(sc0, player1) else sc0 end
           -- CF_AUTOBREAK=<frame>: from that frame, mine straight down one block every 20 frames.
@@ -2579,8 +2858,17 @@ mod CubeForge do
           -- than the retexture left it, which is why this moves the state hash
           -- where every other step in this sequence held it.
           let phase = frame % tick_period()
+          -- The phase the BLOCK-mutating slots read. While a shift is staged it
+          -- matches no slot, so water, retexturing, vegetation and fruit all sit
+          -- the frame out: each of those edits the world the commit is about to
+          -- replace, and would be silently dropped. The biome and mycelium field
+          -- ticks below are NOT gated -- they touch only their own fields, which
+          -- the commit slides from whatever the scene holds at the time, so they
+          -- keep their "every column once a period" invariant. Nor is the mesh
+          -- drain: it reads the world and writes only meshes.
+          let wphase = if frozen do -1 else phase end
           -- water simulation tick
-          let scw = if phase == water_slot() do water_tick(sc0d, workers, autoflow >= 0) else sc0d end
+          let scw = if wphase == water_slot() do water_tick(sc0d, workers, autoflow >= 0) else sc0d end
           -- The climate field. Its whole-map half -- the water flags and the
           -- distance sweep -- runs here; its ease/reclassify sweep is spread a
           -- slice a frame across the period, because the fungus climate feedback
@@ -2615,7 +2903,7 @@ mod CubeForge do
           -- first half's columns are no longer candidates by the time the second
           -- runs -- so a period still retextures up to biome_budget columns from
           -- the same window, in two smaller pieces.
-          let scm = if is_migrate_slot(phase) do
+          let scm = if is_migrate_slot(wphase) do
             let tm0 = Win.time()
             let picks = Biome.migrations(scene_biome(scb), scene_world(scb), frame / tick_period(), 2048, biome_budget / migrate_slots())
             let m1 = migrate(scb, picks)
@@ -2624,7 +2912,7 @@ mod CubeForge do
           else scb end
           -- The mycelium surface follows the field on the same slots: a column
           -- takes or drops its mycelium block, and only a glow change relights.
-          let scm2 = if is_migrate_slot(phase) do
+          let scm2 = if is_migrate_slot(wphase) do
             let tq0 = Win.time()
             let mpicks = Myc.migrations(scene_myc(scm), World.side(scene_world(scm)) * 16, World.shown(scene_world(scm)), frame / tick_period(), 2048, myc_budget / migrate_slots())
             let m2 = migrate_myc(scm, seed, mpicks)
@@ -2642,10 +2930,10 @@ mod CubeForge do
           -- for the 0.3 ms copy-on-write of the occupancy field that every edit pays
           -- (the field is shared when the edit writes it); it made no difference, so
           -- the extra reference is not this `if`. Kept because it reads better.
-          let sc1pre = veg_phase(scm2, if phase == veg_slot() do (frame / tick_period()) % 2 == 0 else false end, seed, frame, veg_budget, autoflow)
+          let sc1pre = veg_phase(scm2, if wphase == veg_slot() do (frame / tick_period()) % 2 == 0 else false end, seed, frame, veg_budget, autoflow)
           -- Fruit: on the vegetation slot, on the periods vegetation skips, so
           -- no frame carries a tree and a mushroom at once.
-          let sc1pre2 = if if phase == veg_slot() do (frame / tick_period()) % 2 == 1 else false end do
+          let sc1pre2 = if if wphase == veg_slot() do (frame / tick_period()) % 2 == 1 else false end do
             let tf0 = Win.time()
             -- period count as the cursor, for the same reason as vegetation
             let fpicks = Fruit.candidates(scene_myc(sc1pre), World.shown(scene_world(sc1pre)), scene_world(sc1pre), scene_biome(sc1pre), seed, frame / tick_period() / 2, 2048, fruit_budget, int_to_float(fruit_rate) /. 100.0)
@@ -2807,9 +3095,45 @@ mod CubeForge do
           Win.gfx_set_light(sun, V.x(eye), V.y(eye), V.z(eye), V.x(look), V.y(look), V.z(look), flash_now)
           Win.gfx_set_time(if time_pin >= 0 do int_to_float(time_pin) else now end)
           Win.gfx_set_view_proj(render_vp)
-          draw_chunks(scene_counts(sc1), 0, nchunks)
-          draw_foliage(scene_counts(sc1), 0, nchunks)
-          draw_water(scene_counts(sc1), 0, nchunks)
+          -- CF_CULL=0 draws every slot, as this did before, for the A/B.
+          -- Never in map view: that camera is the overhead one, not render_vp's.
+          -- CF_LIGHT_BENCH=1: cost probe for a GPU light flood, once, on frame
+          -- 300. 15 relaxation passes over the band box a shift's light stage
+          -- covers (46 x 128 x 192), then over the whole field for reference.
+          if Env.get_int("CF_LIGHT_BENCH", 0) == 1 && frame == 300 do
+            -- each measured twice; the first call of a size compiles or resizes
+            let _w1 = Win.light_bench(15, 46, 128, 192)
+            let b1 = Win.light_bench(15, 46, 128, 192)
+            let _w2 = Win.light_bench(15, 192, 256, 192)
+            let b2 = Win.light_bench(15, 192, 256, 192)
+            let _w3 = Win.light_bench(1, 46, 128, 192)
+            let b3 = Win.light_bench(1, 46, 128, 192)
+            let _w4 = Win.light_bench(15, 192, 128, 192)
+            let b4 = Win.light_bench(15, 192, 128, 192)
+            let _w5 = Win.light_bench(15, 48, 48, 48)
+            let b5 = Win.light_bench(15, 48, 48, 48)
+            let _w6 = Win.light_bench(15, 46, 128, 192)
+            let b6 = Win.light_bench(15, 46, 128, 192)
+            println("light bench: band 46x128x192,  15 passes = " ++ int_to_string(b1) ++ " us")
+            println("light bench: band 46x128x192,   1 pass   = " ++ int_to_string(b3) ++ " us")
+            println("light bench: band-tall 192x128x192, 15   = " ++ int_to_string(b4) ++ " us")
+            println("light bench: full 192x256x192, 15 passes = " ++ int_to_string(b2) ++ " us")
+            println("light bench: edit box 48x48x48, 15 passes = " ++ int_to_string(b5) ++ " us")
+            println("light bench: band again (repeat of the first) = " ++ int_to_string(b6) ++ " us")
+            let _w7 = Win.light_bench(16, 192, 256, 192)
+            let b7 = Win.light_bench(16, 192, 256, 192)
+            let _w8 = Win.light_bench(16, 192, 256, 192)
+            let b8 = Win.light_bench(16, 192, 256, 192)
+            println("light bench: FULL 192x256x192 x16, twice = " ++ int_to_string(b7) ++ " / " ++ int_to_string(b8) ++ " us")
+          else () end
+          -- Everything this frame's relights made dirty, in one upload.
+          Win.gfx_flush_light(World.light(scene_world(sc1)), World.block_light(scene_world(sc1)))
+          let cull = Env.get_int("CF_CULL", 1) == 1 && !map_mode1
+          let cside = World.side(scene_world(sc1))
+          let ndrawn = draw_chunks(scene_counts(sc1), 0, nchunks, render_vp, cull, cside, 0)
+          draw_foliage(scene_counts(sc1), 0, nchunks, render_vp, cull, cside)
+          draw_water(scene_counts(sc1), 0, nchunks, render_vp, cull, cside)
+          if Env.get_int("CF_CULL_LOG", 0) == 1 && frame > 200 do println("C " ++ int_to_string(ndrawn) ++ " " ++ int_to_string(nchunks)) else () end
           -- Fauna. Bodies are stamped fresh every frame from the transforms and
           -- drawn with the opaque world, so they take the sun, the shadows and
           -- the fog like everything else. Between the foliage and the water:
@@ -2885,11 +3209,11 @@ mod CubeForge do
           else () end
           if live > 0 do Win.gfx_draw_precip(Precip.slot(), Precip.vertex_count(live)) else () end
           let spray_verts = Win.spray_frame(pdt, frame)
-          if spray_verts > 0 do Win.gfx_draw_precip(246, spray_verts) else () end
-          if scene_has_hit(sc1) do CubeForge.Ffi.Window.gfx_draw_lines(254, Outline.vertex_count()) else () end
+          if spray_verts > 0 do Win.gfx_draw_precip(spray_slot(), spray_verts) else () end
+          if scene_has_hit(sc1) do CubeForge.Ffi.Window.gfx_draw_lines(outline_slot(), Outline.vertex_count()) else () end
           -- the underwater screen tint only makes sense from the real first-person eye
           if map_mode1 do ()
-          else if Player.eye_in_water(player1, scene_world(sc1)) do CubeForge.Ffi.Window.gfx_draw_hud(253, 6, true) else () end end
+          else if Player.eye_in_water(player1, scene_world(sc1)) do CubeForge.Ffi.Window.gfx_draw_hud(underwater_slot(), 6, true) else () end end
           let marker1 = if map_mode1 do Marker.build(marker, V.x(Player.position(player1)), V.z(Player.position(player1))) else marker end
           if map_mode1 do
             Win.gfx_upload(Marker.slot(), F32Buf.storage(marker1), F32Buf.len(marker1))
@@ -2897,16 +3221,16 @@ mod CubeForge do
             if biome_map || survey1 do
               let bn = World.side(scene_world(sc1)) * 16
               if frame % tick_period() == 0 do Win.biome_map_upload(Biome.field_biomes(scene_biome(sc1)), Biome.active(scene_biome(sc1)), bn) else () end
-              CubeForge.Ffi.Window.gfx_draw_marker(248, bn * bn * 6)
+              CubeForge.Ffi.Window.gfx_draw_marker(biome_map_slot(), bn * bn * 6)
             else () end
             if myc_map do
               let mn = World.side(scene_world(sc1)) * 16
               if frame % tick_period() == 0 do Win.myc_map_upload(Myc.field_species(scene_myc(sc1)), Myc.vigour_u8(scene_myc(sc1), mn), mn) else () end
-              CubeForge.Ffi.Window.gfx_draw_marker(244, mn * mn * 6)
+              CubeForge.Ffi.Window.gfx_draw_marker(myc_map_slot(), mn * mn * 6)
             else () end
           else () end
           let fps1 = tick_fps(fps, now)
-          Win.gfx_draw_hud(255, fps_hud_verts(fps1), false)
+          Win.gfx_draw_hud(fps_slot(), fps_hud_verts(fps1), false)
           -- The ground readout: what the looked-at column holds, or what would grow there.
           let hit_now = scene_hit(sc1)
           -- The ground readout is a string; building one every frame was the last
@@ -2916,7 +3240,7 @@ mod CubeForge do
           -- is rebuilt only when the key moves. -1 is "no target".
           let gcols = World.side(scene_world(sc1)) * 16
           let gkey = if Ray.is_hit(hit_now) && !map_mode1 do
-              Ray.bx(hit_now) + 128 * Ray.bz(hit_now) + 16384 * (Myc.species_of(scene_myc(sc1), gcols, Ray.bx(hit_now), Ray.bz(hit_now))
+              Ray.bx(hit_now) + 192 * Ray.bz(hit_now) + 36864 * (Myc.species_of(scene_myc(sc1), gcols, Ray.bx(hit_now), Ray.bz(hit_now))
               + 8 * float_to_int(Myc.vigour_of(scene_myc(sc1), gcols, Ray.bx(hit_now), Ray.bz(hit_now)) *. 255.0 +. 0.5))
             else 0 - 1 end
           let ground = if gkey == ui_gkey(scene_ui(sc1)) do ui_ground(scene_ui(sc1))
@@ -2979,8 +3303,8 @@ mod CubeForge do
           let panel_on = if survey1 do !map_mode1 else false end
           let hud_text = if panel_on do join_lines(slines, "") else readout end
           let sc2 = scene_with_ui(sc1, refresh_hud(scene_ui(sc1), inv_open2, drag2, ndc_x, ndc_y, hud_text, slines, panel_on, fx_line, tint, gkey, ground))
-          Win.gfx_draw_hud(252, hud_verts(scene_ui(sc2)), false)
-          Win.gfx_draw_hud(251, icon_verts(scene_ui(sc2)), true)
+          Win.gfx_draw_hud(hotbar_slot(), hud_verts(scene_ui(sc2)), false)
+          Win.gfx_draw_hud(icon_slot(), icon_verts(scene_ui(sc2)), true)
           if hud_text != "" do Win.gfx_draw_hud(readout_slot(), readout_verts(scene_ui(sc2)), false) else () end
           -- Untextured, like the hotbar: build_menu emits colour-in-uv vertices.
           if Menu.is_open(menu2) do Win.gfx_draw_hud(menu_slot(), F32Buf.len(menubuf1) / Vx.floats(), false) else () end
@@ -3002,14 +3326,33 @@ mod CubeForge do
             -- The light oracle: the incrementally maintained fields against a
             -- flood from scratch, as voxel counts that differ. Both must be 0;
             -- a non-zero count is a relight that missed something.
-            println("  light oracle: sky " ++ int_to_string(count_diff_u8(World.light(scene_world(sc1)), CubeForge.Light.flood(scene_world(sc1)), 0, 4194304, 0))
-                    ++ " block " ++ int_to_string(count_diff_u8(World.block_light(scene_world(sc1)), CubeForge.Light.flood_block(scene_world(sc1)), 0, 4194304, 0)) ++ " voxels differ;"
-                    ++ " first sky:" ++ first_diffs(World.light(scene_world(sc1)), CubeForge.Light.flood(scene_world(sc1)), 0, 4194304, 6, "")
-                    ++ " first block:" ++ first_diffs(World.block_light(scene_world(sc1)), CubeForge.Light.flood_block(scene_world(sc1)), 0, 4194304, 4, ""))
-            -- The occupancy oracle: the shadow texture against the world's own
-            -- occupancy array. Both counts must be 0; a differing texel is a
-            -- block writer that moved the world without moving the texture.
-            Win.occ_check(World.occupancy(scene_world(sc1)))
+            -- The GPU flood against the CPU's fields. A converged field is a
+            -- fixed point of the relaxation, so uploading the CPU's own light
+            -- and flooding it must change nothing: any difference is the rule,
+            -- the edge handling or the wrap being wrong.
+            -- The whole design, end to end: upload the SEED -- sky columns
+            -- filled, emitters set, everything else dark -- flood it on the
+            -- GPU, and compare against a from-scratch CPU flood of the same
+            -- world. Zero means the GPU can derive the light the CPU derives,
+            -- from the same starting point, and the CPU sweep is redundant.
+            -- The LIVE texture -- whatever the running game has flooded into it --
+            -- against a from-scratch CPU flood of the same world. This is the
+            -- real invariant now that the CPU no longer sweeps: the seed it
+            -- maintains, spread on the GPU, must equal what a full CPU flood of
+            -- the same blocks gives.
+            let sw = scene_world(sc1)
+            let lpost = Win.light_check(CubeForge.Light.flood(sw), CubeForge.Light.flood_block(sw))
+            let _fl = Win.light_flood(16)
+            let lconv = Win.light_check(CubeForge.Light.flood(sw), CubeForge.Light.flood_block(sw))
+            println("  live light texture vs a CPU flood: sky " ++ int_to_string(lpost / 10000000)
+                    ++ " block " ++ int_to_string(lpost % 10000000)
+                    ++ " | fully converged: sky " ++ int_to_string(lconv / 10000000) ++ " block " ++ int_to_string(lconv % 10000000))
+            let occbad = Win.occ_check(World.occupancy(scene_world(sc1)))
+            println("  occupancy oracle: fine " ++ int_to_string(occbad / 1000000) ++ " coarse " ++ int_to_string(occbad % 1000000) ++ " texels differ from the world (both must be 0)")
+            println("  seed oracle: sky " ++ int_to_string(count_diff_u8(World.light(scene_world(sc1)), CubeForge.Light.seed_all(CubeForge.Light.new(), scene_world(sc1)), 0, CubeForge.Light.volume(), 0))
+                    ++ " block " ++ int_to_string(count_diff_u8(World.block_light(scene_world(sc1)), CubeForge.Light.seed_emitters(CubeForge.Light.new(), scene_world(sc1)), 0, CubeForge.Light.volume(), 0)) ++ " voxels differ;"
+                    ++ " first sky:" ++ first_diffs(World.light(scene_world(sc1)), CubeForge.Light.seed_all(CubeForge.Light.new(), scene_world(sc1)), 0, CubeForge.Light.volume(), 6, "")
+                    ++ " first block:" ++ first_diffs(World.block_light(scene_world(sc1)), CubeForge.Light.seed_emitters(CubeForge.Light.new(), scene_world(sc1)), 0, CubeForge.Light.volume(), 4, ""))
             println("  fruit: small " ++ int_to_string(Fruit.count_bodies(scene_world(sc1), scene_biome(sc1), 0)) ++ " medium " ++ int_to_string(Fruit.count_bodies(scene_world(sc1), scene_biome(sc1), 1)) ++ " giant " ++ int_to_string(Fruit.count_bodies(scene_world(sc1), scene_biome(sc1), 2)) ++ " orphans " ++ int_to_string(Fruit.count_orphans(scene_world(sc1), scene_biome(sc1), World.shown(scene_world(sc1)))))
             -- the column three east of the player: where CF_AUTOPLANT plants
             let mx = pcx + 3
@@ -3042,13 +3385,14 @@ mod CubeForge do
           if frame % 60 == 0 && autowalk do
             println("frame " ++ int_to_string(frame) ++ " player at " ++ V.to_string(Player.position(player1)) ++ " on_ground=" ++ (if Player.on_ground(player1) do "true" else "false" end))
           else () end
+          if Env.get_int("CF_GPU_LOG", 0) == 1 && frame > 200 do println("G " ++ int_to_string(Win.gfx_gpu_us())) else () end
           Win.swap()
           -- allocation gauge: sample the live-object delta over frames 100..200
           let sample1 = if frame == 100 do Win.live_allocs() else sample end
           if frame == 200 do
             println("live-object delta over frames 100..200: " ++ int_to_string(Win.live_allocs() - sample1) ++ " (" ++ int_to_string((Win.live_allocs() - sample1) / 100) ++ " per frame); resident " ++ int_to_string(Win.rss_bytes() / 1048576) ++ " MB")
           else () end
-          frame_loop(Frame(frame + 1, now, player1, sample1, view1, vp1, map_mode1, marker1, flash1, wnow, bnow, inv_open2, drag2, menu5, menubuf1, next_seed1, worst1, worst_at1, sched1, survey1, known1, faunap, faunab1, herd1, pop1, kfauna1), k, sc2, nchunks, proj, map_proj, fps1, wxpid, fpids, bpids, seed, first, t0, day0)
+          frame_loop(Frame(frame + 1, now, player1, sample1, view1, vp1, map_mode1, marker1, flash1, wnow, bnow, inv_open2, drag2, menu5, menubuf1, next_seed1, worst1, worst_at1, sched1, survey1, known1, faunap, faunab1, herd1, pop1, kfauna1, staged1), k, sc2, nchunks, proj, map_proj, fps1, wxpid, fpids, bpids, seed, first, t0, day0)
         end
         end
     end
@@ -3145,31 +3489,74 @@ mod CubeForge do
     measure("view_proj (in place)", fn _ -> NativeArray.get_f32(repeat_view_inplace(proj, Player.new(8.0, 70.0, 8.0), NativeArray.make_float(16, 0.0), NativeArray.make_f32(16, 0.0), 100), 0))
   end
 
+  -- ── Frustum culling ────────────────────────────────────────────────────
+  -- Every chunk slot used to be drawn every frame, the ones behind the camera
+  -- included. The six planes come out of the view-projection matrix
+  -- (Gribb-Hartmann): with clip = M * v, the left plane is row 3 + row 0, the
+  -- right row 3 - row 0, and so on down the rows. [vp] is column-major, GL's
+  -- order, so component c of row r is vp[r + 4c].
+  --
+  -- A chunk's box is its 16 x 16 columns over the world's full height. Using
+  -- the real height would reject more, but it would have to be kept per chunk
+  -- and the win is mostly horizontal anyway.
+  @[no_alloc]
+  pfn vp_at(vp : NativeF32Arr, r : Int, c : Int) : Float do NativeArray.get_f32(vp, r + 4 * c) end
+  -- Is the box entirely behind the plane row3 + [s] * row[r]? Tests the corner
+  -- furthest along the plane's normal: if even that one is behind, all eight are.
+  @[no_alloc]
+  pfn plane_rejects(vp : NativeF32Arr, r : Int, s : Float, x0 : Float, x1 : Float, z0 : Float, z1 : Float) : Bool do
+    let a = vp_at(vp, 3, 0) +. s *. vp_at(vp, r, 0)
+    let b = vp_at(vp, 3, 1) +. s *. vp_at(vp, r, 1)
+    let c = vp_at(vp, 3, 2) +. s *. vp_at(vp, r, 2)
+    let d = vp_at(vp, 3, 3) +. s *. vp_at(vp, r, 3)
+    let px = if a > 0.0 do x1 else x0 end
+    let py = if b > 0.0 do 256.0 else 0.0 end
+    let pz = if c > 0.0 do z1 else z0 end
+    a *. px +. b *. py +. c *. pz +. d < 0.0
+  end
+  doc "Does chunk (cx, cz) touch the view frustum of [vp]."
+  @[no_alloc]
+  fn chunk_visible(vp : NativeF32Arr, cx : Int, cz : Int) : Bool do
+    let x0 = int_to_float(16 * cx)
+    let z0 = int_to_float(16 * cz)
+    let x1 = x0 +. 16.0
+    let z1 = z0 +. 16.0
+    if plane_rejects(vp, 0, 1.0, x0, x1, z0, z1) do false
+    else if plane_rejects(vp, 0, 0.0 -. 1.0, x0, x1, z0, z1) do false
+    else if plane_rejects(vp, 1, 1.0, x0, x1, z0, z1) do false
+    else if plane_rejects(vp, 1, 0.0 -. 1.0, x0, x1, z0, z1) do false
+    else if plane_rejects(vp, 2, 1.0, x0, x1, z0, z1) do false
+    else !plane_rejects(vp, 2, 0.0 -. 1.0, x0, x1, z0, z1) end end end end end
+  end
+
   -- Draw every chunk slot; counts holds the vertex count per slot.
   @[no_alloc(assume)]
-  pfn draw_chunks(counts : NativeIntArr, i : Int, n : Int) : Unit do
-    if i >= n do ()
+  pfn draw_chunks(counts : NativeIntArr, i : Int, n : Int, vp : NativeF32Arr, cull : Bool, side : Int, drawn : Int) : Int do
+    if i >= n do drawn
+    else if cull && !chunk_visible(vp, i % side, i / side) do draw_chunks(counts, i + 1, n, vp, cull, side, drawn)
     else
       Win.gfx_draw(i, NativeArray.get_int(counts, i))
-      draw_chunks(counts, i + 1, n)
-    end
+      draw_chunks(counts, i + 1, n, vp, cull, side, drawn + 1)
+    end end
   end
 
   -- Foliage is alpha-cutout, not blended, so it can be drawn before water.
-  pfn draw_foliage(counts : NativeIntArr, i : Int, n : Int) : Unit do
+  pfn draw_foliage(counts : NativeIntArr, i : Int, n : Int, vp : NativeF32Arr, cull : Bool, side : Int) : Unit do
     if i >= n do ()
+    else if cull && !chunk_visible(vp, i % side, i / side) do draw_foliage(counts, i + 1, n, vp, cull, side)
     else
       Win.gfx_draw_cutout(foliage_slot_base() + i, NativeArray.get_int(counts, foliage_slot_base() + i))
-      draw_foliage(counts, i + 1, n)
-    end
+      draw_foliage(counts, i + 1, n, vp, cull, side)
+    end end
   end
 
-  pfn draw_water(counts : NativeIntArr, i : Int, n : Int) : Unit do
+  pfn draw_water(counts : NativeIntArr, i : Int, n : Int, vp : NativeF32Arr, cull : Bool, side : Int) : Unit do
     if i >= n do ()
+    else if cull && !chunk_visible(vp, i % side, i / side) do draw_water(counts, i + 1, n, vp, cull, side)
     else
       Win.gfx_draw_translucent(water_slot_base() + i, NativeArray.get_int(counts, water_slot_base() + i))
-      draw_water(counts, i + 1, n)
-    end
+      draw_water(counts, i + 1, n, vp, cull, side)
+    end end
   end
 
   -- Full-screen quad in NDC for the underwater tint: layer 1 (water), shade 0.6. Built once.
@@ -3206,7 +3593,7 @@ mod CubeForge do
   pfn first_diffs(a : NativeU8Arr, b : NativeU8Arr, i : Int, n : Int, left : Int, acc : String) : String do
     if i >= n || left <= 0 do acc
     else if NativeArray.get_u8(a, i) != NativeArray.get_u8(b, i) do
-      first_diffs(a, b, i + 1, n, left - 1, acc ++ " " ++ int_to_string(i % 128) ++ "," ++ int_to_string(i / 16384) ++ "," ++ int_to_string((i / 128) % 128) ++ " " ++ int_to_string(NativeArray.get_u8(a, i)) ++ "/" ++ int_to_string(NativeArray.get_u8(b, i)))
+      first_diffs(a, b, i + 1, n, left - 1, acc ++ " " ++ int_to_string(i % CubeForge.Light.size_x()) ++ "," ++ int_to_string(i / CubeForge.Light.layer()) ++ "," ++ int_to_string((i / CubeForge.Light.size_x()) % CubeForge.Light.size_z()) ++ " " ++ int_to_string(NativeArray.get_u8(a, i)) ++ "/" ++ int_to_string(NativeArray.get_u8(b, i)))
     else first_diffs(a, b, i + 1, n, left, acc) end end
   end
   pfn count_diff_u8(a : NativeU8Arr, b : NativeU8Arr, i : Int, n : Int, acc : Int) : Int do
@@ -3606,7 +3993,7 @@ mod CubeForge do
                         int_to_float(Env.get_int("CF_MYC_BRANCH_SCALE", Species.branch_scale())) /. 100.0,
                         int_to_float(Env.get_int("CF_MYC_BRANCH_SHARP", Species.branch_sharp())) /. 100.0)
         let uq = underwater_quad()
-        Win.gfx_upload(253, F32Buf.storage(uq), F32Buf.len(uq))
+        Win.gfx_upload(underwater_slot(), F32Buf.storage(uq), F32Buf.len(uq))
       else () end
       let proj = M.perspective(70.0 *. Math.pi() /. 180.0, 800.0 /. 600.0, 0.1, 500.0)
       -- top-down map camera (M toggles it): orthographic, follows the player, zoomed to a local
@@ -3730,14 +4117,19 @@ mod CubeForge do
     println("  biome field: " ++ int_to_string(tw1 - tw0) ++ " ms, wild fungus: " ++ myc_summary(myc0, cols, 1, "") ++ "in " ++ int_to_string(tw2 - tw1) ++ " ms, applied in " ++ int_to_string(System.monotonic_time() - tw2) ++ " ms")
     let t2 = System.monotonic_time()
     -- stage 1b: skylight and block light (need the finished terrain, including neighbours)
-    let world_lit = World.relight_all(world_wild)
+    let world_lit = World.seed_all_fields(world_wild)
     let t2b = System.monotonic_time()
     println("  light flood (sky + block): " ++ int_to_string(t2b - t2) ++ " ms")
     -- The shadow ray-marcher's view of the world. Built once and handed over;
     -- March keeps no copy, since a block edit only needs one texel.
     let to0 = System.monotonic_time()
     let world = World.rebuild_occupancy(world_lit)
-    if !headless do Win.gfx_upload_occupancy(World.occupancy(world), 128, 256, 128) else () end
+    if !headless do Win.gfx_upload_occupancy(World.occupancy(world), 192, 256, 192) else () end
+    -- PROTOTYPE (CF_GPULIGHT=1): light sampled per fragment from a 3D texture
+    -- instead of baked into the vertex. Measurement only; the texture is
+    -- uploaded whole here and after each shift.
+    if !headless do Win.gfx_set_gpulight(Env.get_int("CF_GPULIGHT", 1) == 1) else () end
+    if !headless && Env.get_int("CF_GPULIGHT", 1) == 1 do Win.gfx_upload_light(World.light(world), World.block_light(world), 192, 256, 192) else () end
     println("  occupancy: " ++ int_to_string(System.monotonic_time() - to0) ++ " ms")
     -- stage 2: meshing (needs neighbours; runs only after stage 1 completed)
     -- CF_MESH_REPS>0 re-meshes the whole world that many extra times, purely
@@ -3842,6 +4234,17 @@ mod CubeForge do
       -- actors rather than killing and respawning them. `kill(pid)` does exist,
       -- so this is a cost choice (64 messages, not 64 kills + 64 spawns + 64
       -- loads) and not a workaround.
+      -- Warm the shim's lake-tile cache FIRST. A water actor's WLoad pours the
+      -- tile its chunk lies in (and its neighbours' tiles), 157-214 ms each,
+      -- and the memo in Lakes.tile cannot help 144 actors that all start
+      -- pouring at once and all miss. Poured here, in parallel, before a single
+      -- WLoad goes out, every actor hits instead. The apron is one tile wide
+      -- because load_sim mirrors the four neighbouring chunks, which can be in
+      -- the next tile over.
+      store_chunks_go(world, n, 0)
+      let tl0 = Win.time()
+      let ntiles = warm_lake_tiles(seed, World.origin_x(world), World.origin_z(world), n, workers)
+      println("  lake tiles poured for the water actors: " ++ int_to_string(ntiles) ++ " in " ++ ms(Win.time() -. tl0))
       let tw0 = Win.time()
       if is_loaded(loaded) do reload_water_slot(pids, n * n - 1, n, seed, Save.dir(), start_slot(start), World.origin_x(world), World.origin_z(world))
       else reload_water(pids, n * n - 1, n, seed) end
@@ -3869,8 +4272,8 @@ mod CubeForge do
       -- The flock pool is loaded per session, from the world this session has:
       -- the actors outlive the game, their contents do not.
       if Env.get_int("CF_FAUNA_STATS", 0) == 1 do println(Fauna.stats()) else () end
-      match frame_loop(Frame(0, t4, player, 0, NativeArray.make_float(16, 0.0), NativeArray.make_f32(16, 0.0), false, F32Buf.new(64), Env.get_int("CF_FLASH", 0) == 1, 0.0, 0.0, false, -1, menu0, F32Buf.new(2048), NoStart, 0.0, -1, Audio.sched_start(0), false, known0, poses0, F32Buf.new(4096), CubeForge.Flocks.new(), pop0, kfauna0), k, scene, n * n, proj, map_proj, fps0, wxpid, fpids, bpids, seed, first, t4, day0) do
-        Frame(frames, _, p, _, _, _, _, _, _, _, _, _, _, mfin, _, ns, worst, worst_at, _, _, _, _, _, _, _, _) ->
+      match frame_loop(Frame(0, t4, player, 0, NativeArray.make_float(16, 0.0), NativeArray.make_f32(16, 0.0), false, F32Buf.new(64), Env.get_int("CF_FLASH", 0) == 1, 0.0, 0.0, false, -1, menu0, F32Buf.new(2048), NoStart, 0.0, -1, Audio.sched_start(0), false, known0, poses0, F32Buf.new(4096), CubeForge.Flocks.new(), pop0, kfauna0, NoShift), k, scene, n * n, proj, map_proj, fps0, wxpid, fpids, bpids, seed, first, t4, day0) do
+        Frame(frames, _, p, _, _, _, _, _, _, _, _, _, _, mfin, _, ns, worst, worst_at, _, _, _, _, _, _, _, _, _) ->
           let t5 = Win.time()
           println("ran " ++ int_to_string(frames) ++ " frames in " ++ ms(t5 -. t4) ++ " (" ++ float_to_string(int_to_float(frames) /. (t5 -. t4)) ++ " fps, vsync on); player ended at " ++ V.to_string(Player.position(p)))
           println("worst frame after warmup: " ++ ms(worst) ++ " at frame " ++ int_to_string(worst_at))

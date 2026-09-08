@@ -145,7 +145,8 @@ int64_t cf_win_open(int64_t w, int64_t h, march_value title) {
     return 1;
 }
 int64_t cf_win_should_close(void) { return g_win && glfwWindowShouldClose(g_win); }
-void    cf_win_swap(void)         { if (g_win) glfwSwapBuffers(g_win); }
+void cf_gfx_end_query(void);   /* defined with the timer query below */
+void    cf_win_swap(void)         { cf_gfx_end_query(); if (g_win) glfwSwapBuffers(g_win); }
 double  cf_win_time(void)         { return glfwGetTime(); }
 int64_t cf_win_fb_w(void)         { return g_fb_w; }
 int64_t cf_win_fb_h(void)         { return g_fb_h; }
@@ -209,7 +210,11 @@ void cf_win_set_fullscreen(int64_t on) {
  * the FFI is stated in these terms -- a literal here and a literal in
  * F32Buf.push_quad drifted apart the moment the vertex grew. */
 #define CF_QUAD_FLOATS (6 * CF_VERT_FLOATS)
-#define CF_PRECIP_SLOT 249
+/* These four slots are bound directly here as well as being named on the
+ * March side; they MUST match the slot map in cube_forge.march. They were
+ * 249/248/244/246, which the 12-chunk window turned into chunk slots -- the
+ * spray upload then clobbered a chunk's VBO. Keep the two lists together. */
+#define CF_PRECIP_SLOT 505
 static GLuint g_prog = 0, g_vao = 0;
 static GLint  g_u_vp = -1, g_u_tex = -1;
 
@@ -288,6 +293,14 @@ static const char *FS =
     "uniform sampler3D u_occ_c;\n"
     "uniform float u_shadow;\n"
     "uniform float u_soft;\n"
+    /* The occupancy textures are TOROIDAL: the window slides but their content
+     * does not move, so a shift only rewrites the incoming band. This is the
+     * window origin inside them, in texels (x, z); GL_REPEAT does the wrap, so
+     * it costs an add. Both DDAs bounds-check before every sample, so a ray
+     * leaving the window never reaches the wrap. */
+    "uniform vec2 u_occ_off;\n"
+    "uniform sampler3D u_light;\n"
+    "uniform int u_gpulight;\n"
     "uniform float u_fog_density;\n"
     "uniform vec3  u_fog_color;\n"
     "uniform float u_overcast;\n"
@@ -344,7 +357,7 @@ static const char *FS =
     "const float DIRECT = 0.62;\n"
     /* World dimensions, for turning voxel coordinates into texture coordinates
      * and for knowing when a ray has left the world. */
-    "const vec3 WORLD = vec3(128.0, 256.0, 128.0);\n"
+    "const vec3 WORLD = vec3(192.0, 256.0, 192.0);\n"   /* = CF_WORLD_SIDE, checked in cf_gfx_upload_occupancy */
     "const int  MAX_STEPS = 256;\n"
     "const float SOFT_SPREAD = 0.035;\n"
     "const int SOFT_TAPS = 2;\n"
@@ -377,7 +390,7 @@ static const char *FS =
     "  vec3  tDelta = mix(vec3(1e30), 1.0 / abs(den), moving);\n"
     "  if (testEntry && v.x >= 0 && v.y >= 0 && v.z >= 0 &&\n"
     "      v.x < int(WORLD.x) && v.y < int(WORLD.y) && v.z < int(WORLD.z))\n"
-    "    if (texture(u_occ, (vec3(v) + 0.5) / WORLD).r > 0.5) return t0;\n"
+    "    if (texture(u_occ, (vec3(v) + vec3(u_occ_off.x, 0.0, u_occ_off.y) + 0.5) / WORLD).r > 0.5) return t0;\n"
     "  float span = t1 - t0;\n"
     "  for (int i = 0; i < MAX_STEPS; i++){\n"
     "    float tNow = min(tMax.x, min(tMax.y, tMax.z));\n"
@@ -386,7 +399,7 @@ static const char *FS =
     "    else if (tMax.y <= tMax.z)                { v.y += stp.y; tMax.y += tDelta.y; }\n"
     "    else                                      { v.z += stp.z; tMax.z += tDelta.z; }\n"
     "    if (v.x < 0 || v.y < 0 || v.z < 0 || v.x >= int(WORLD.x) || v.y >= int(WORLD.y) || v.z >= int(WORLD.z)) return 1e30;\n"
-    "    if (texture(u_occ, (vec3(v) + 0.5) / WORLD).r > 0.5) return t0 + tNow;\n"
+    "    if (texture(u_occ, (vec3(v) + vec3(u_occ_off.x, 0.0, u_occ_off.y) + 0.5) / WORLD).r > 0.5) return t0 + tNow;\n"
     "  }\n"
     "  return 1e30;\n"
     "}\n"
@@ -397,6 +410,54 @@ static const char *FS =
      * ray order, so the first fine hit is the nearest: the result is identical to
      * the single-level trace, in far fewer steps. That matters most with soft
      * shadows, which fire four of these per fragment. */
+    /* PROTOTYPE: the mesher's corner_pack, per fragment. For each of the four
+     * corners of the voxel face the fragment sits on, average the light of the
+     * face-adjacent air voxel and the three neighbours round that corner,
+     * skipping the occluded ones, and derive AO from how many were occluded --
+     * then bilinearly blend the four. This is exactly what the mesher bakes into
+     * a_shade; doing it here is what would let light stop fragmenting the greedy
+     * merge. 25 texture fetches a fragment: one shared light tap, then three
+     * occupancy and three light taps per corner. */
+    "float occAt(vec3 v){ return texture(u_occ, (v + vec3(u_occ_off.x, 0.0, u_occ_off.y) + 0.5) / WORLD).r > 0.5 ? 1.0 : 0.0; }\n"
+    /* The light texture holds the March bytes verbatim: sky is a bare level
+     * 0..15, the block byte is level in the low nibble and the emitter's colour
+     * above it (CubeForge.Light.pack_bl). litAt gives back the two LEVELS as
+     * 0..1 shades, which is what the corner blend averages; the colour is a
+     * separate lookup, because averaging colour indices is meaningless. */
+    "vec2 rawLit(vec3 v){ return texture(u_light, (v + vec3(u_occ_off.x, 0.0, u_occ_off.y) + 0.5) / WORLD).rg * 255.0; }\n"
+    "vec2 litAt(vec3 v){ vec2 r = rawLit(v); return vec2(r.r, floor(mod(r.g + 0.5, 16.0))) / 15.0; }\n"
+    "float litColAt(vec3 v){ return floor((rawLit(v).g + 0.5) / 16.0); }\n"
+    "vec2 cornerLight(vec3 av, vec3 du, vec3 dv, vec2 nl){\n"
+    "  float o1 = occAt(av + du), o2 = occAt(av + dv), oc = occAt(av + du + dv);\n"
+    "  vec2 l1 = o1 > 0.5 ? vec2(0.0) : litAt(av + du);\n"
+    "  vec2 l2 = o2 > 0.5 ? vec2(0.0) : litAt(av + dv);\n"
+    "  vec2 lc = oc > 0.5 ? vec2(0.0) : litAt(av + du + dv);\n"
+    "  float cnt = 1.0 + (1.0 - o1) + (1.0 - o2) + (1.0 - oc);\n"
+    /* the mesher's corner_ao: both sides occluded is the darkest corner */
+    "  float side = o1 + o2;\n"
+    "  float ao = (o1 > 0.5 && o2 > 0.5) ? 0.0 : (3.0 - side - oc) / 3.0;\n"
+    "  return ((nl + l1 + l2 + lc) / cnt) * mix(0.55, 1.0, ao);\n"
+    "}\n"
+    "vec3 smoothLight(vec3 p, vec3 n){\n"
+    "  vec3 av = floor(p + n * 0.5);\n"
+    /* the two in-face axes */
+    "  vec3 du = abs(n.x) > 0.5 ? vec3(0,1,0) : vec3(1,0,0);\n"
+    "  vec3 dv = abs(n.y) > 0.5 ? vec3(0,0,1) : (abs(n.x) > 0.5 ? vec3(0,0,1) : vec3(0,1,0));\n"
+    "  vec3 rel = p + n * 0.5 - av;\n"
+    "  float fu = clamp(dot(rel, du), 0.0, 1.0);\n"
+    "  float fv = clamp(dot(rel, dv), 0.0, 1.0);\n"
+    "  vec2 nl = litAt(av);\n"
+    "  vec2 c00 = cornerLight(av, -du, -dv, nl);\n"
+    "  vec2 c10 = cornerLight(av,  du, -dv, nl);\n"
+    "  vec2 c01 = cornerLight(av, -du,  dv, nl);\n"
+    "  vec2 c11 = cornerLight(av,  du,  dv, nl);\n"
+    /* The colour is READ, not blended: it comes from the air voxel the face
+     * sits against -- the one the light actually reaches the face from, which
+     * is the voxel the mesher used to read it at when the colour rode in the
+     * face key. Two emitters meeting on one face take the nearer one's colour
+     * rather than some average of two palette indices. */
+    "  return vec3(mix(mix(c00, c10, fu), mix(c01, c11, fu), fv), litColAt(av));\n"
+    "}\n"
     "float traceDist(vec3 p, vec3 dir, float maxDist){\n"
     /* Skipping empty space only pays when there IS empty space. A ray near the
      * horizon travels a long way through terrain, so almost every coarse cell it
@@ -417,7 +478,7 @@ static const char *FS =
     "    if (tEnter > maxDist) return 1e30;\n"
     "    if (c.x < 0 || c.y < 0 || c.z < 0 || c.x >= int(CW.x) || c.y >= int(CW.y) || c.z >= int(CW.z)) return 1e30;\n"
     "    float tExit = min(ctMax.x, min(ctMax.y, ctMax.z));\n"
-    "    if (texture(u_occ_c, (vec3(c) + 0.5) / CW).r > 0.5) {\n"
+    "    if (texture(u_occ_c, (vec3(c) + vec3(u_occ_off.x, 0.0, u_occ_off.y) / CS + 0.5) / CW).r > 0.5) {\n"
     "      float hit = traceSpan(p, dir, tEnter, min(tExit, maxDist), i > 0);\n"
     "      if (hit < 1e29) return hit;\n"
     "    }\n"
@@ -486,12 +547,19 @@ static const char *FS =
     "void main(){\n"
     "  int  fxw = int(v_fx + 0.5);\n"
     "  int  fe  = (fxw >> 8) & 255;\n"
+    /* The block light's colour index: from the light texture per fragment on
+     * the GPU path below, and from the vertex only for the overlays, which
+     * push their own fx word. */
     "  int  lci = fxw >> 16;\n"
     /* The shade float packs two channels (see Vertex.pack_shade): sky shade in
      * [0, 1], and block-light shade in even integers above it. Overlays push a
      * plain shade in [0, 1], which decodes as sky-only and leaves them alone. */
     "  float sk = v_shade;\n"
     "  float bl = v_blk;\n"
+    /* PROTOTYPE: take the same two channels from the light texture instead of
+     * the vertex, computed per fragment. Uniform branch, so it is coherent
+     * across the draw and the off case pays nothing. */
+    "  if (u_gpulight == 1 && u_unlit != 1 && (fxw >> 8) != 1) { vec3 g = smoothLight(v_world, v_normal); sk = g.r; bl = g.g; lci = int(g.b + 0.5); }\n"
     "  float spd = float(fxw & 255) / 255.0 * 7.0;\n"
     /* Effect 10's byte is depth in blocks, not speed (see Vertex.pack_depth). */
     "  float wdep = (fe == 10) ? float(fxw & 255) : 0.0;\n"
@@ -623,7 +691,19 @@ static GLuint compile(GLenum kind, const char *src) {
     return s;
 }
 
-#define CF_MAX_MESHES 256
+/* The streaming window is CF_WORLD_CHUNKS chunks a side, so the light and
+ * occupancy fields are CF_WORLD_SIDE = 16 * CF_WORLD_CHUNKS wide and deep.
+ * These must agree with CubeForge.World.size() and CubeForge.Light.size_x();
+ * world_size_test asserts the March half, and cf_gfx_upload_occupancy checks
+ * this half against the dimensions March passes it. The shader's WORLD
+ * constant below is written out as a literal and is checked there too. */
+#define CF_WORLD_CHUNKS 12
+#define CF_WORLD_SIDE   (16 * CF_WORLD_CHUNKS)
+#define CF_WORLD_VOL    ((int64_t)CF_WORLD_SIDE * 256 * CF_WORLD_SIDE)
+#define CF_CHUNK_SLOTS  (CF_WORLD_CHUNKS * CF_WORLD_CHUNKS)
+/* 3 passes of CF_CHUNK_SLOTS, then the named UI slots from 500 (see the slot
+ * map in cube_forge.march). */
+#define CF_MAX_MESHES 512
 /* Two VBOs per mesh slot. An upload goes to the one the last frame did NOT
  * draw, so glBufferSubData never waits on a buffer the GPU still reads; the
  * drain trace had 1-4 ms stalls in it on a single buffer, orphaning or not. */
@@ -646,6 +726,17 @@ static GLint  g_u_cutout = -1;
 static GLint  g_u_sun = -1, g_u_eye = -1, g_u_dir = -1, g_u_flash = -1;
 static GLint  g_u_sundir = -1, g_u_moondir = -1, g_u_unlit = -1;
 static GLint  g_u_time = -1;
+/* The occupancy textures are toroidal: window-local (x, y, z) lives at texel
+ * ((x + g_occ_ox) mod w, y, (z + g_occ_oz) mod d). A shift advances the origin
+ * by the band it brought in, which lands on exactly the texels the band that
+ * left was using, so only that band is rewritten -- 0.8 MB instead of 9.4.
+ * Always a multiple of 16, hence of CF_OCC_CS, so the coarse level shifts by a
+ * whole number of cells too. */
+static int64_t g_occ_ox = 0, g_occ_oz = 0;
+static GLint  g_u_occ_off = -1;
+static GLint  g_u_light = -1, g_u_gpulight = -1;
+static GLuint g_lt[2] = {0, 0};
+static void occ_push_off(void);
 static GLint  g_u_fog_density = -1, g_u_fog_color = -1, g_u_overcast = -1, g_u_bolt = -1;
 static GLint  g_u_off = -1;
 static GLint  g_u_model = -1, g_u_mpos = -1, g_u_mrot = -1, g_u_mscale = -1, g_u_msky = -1, g_u_mblk = -1;
@@ -704,18 +795,41 @@ int64_t cf_gfx_init(void) {
     g_u_shadow = glGetUniformLocation(g_prog, "u_shadow");
     g_u_soft = glGetUniformLocation(g_prog, "u_soft");
     g_u_occ_c = glGetUniformLocation(g_prog, "u_occ_c");
+    g_u_occ_off = glGetUniformLocation(g_prog, "u_occ_off");
+    g_u_light = glGetUniformLocation(g_prog, "u_light");
+    g_u_gpulight = glGetUniformLocation(g_prog, "u_gpulight");
     g_u_fog_density = glGetUniformLocation(g_prog, "u_fog_density");
     g_u_fog_color = glGetUniformLocation(g_prog, "u_fog_color");
     g_u_overcast = glGetUniformLocation(g_prog, "u_overcast");
     g_u_bolt = glGetUniformLocation(g_prog, "u_bolt");
     g_u_time = glGetUniformLocation(g_prog, "u_time");
     g_u_off = glGetUniformLocation(g_prog, "u_off");
+    /* GL 4.1 is the ceiling on macOS (Apple GL over Metal): no compute shaders,
+     * no SSBOs, no image load/store -- all of those want 4.3. */
+    if (cf_debug()) fprintf(stderr, "cf: GL %s | GLSL %s | %s\n", glGetString(GL_VERSION), glGetString(GL_SHADING_LANGUAGE_VERSION), glGetString(GL_RENDERER));
     if (cf_debug()) fprintf(stderr, "cf: uniforms occ=%d shadow=%d sundir=%d unlit=%d\n", g_u_occ, g_u_shadow, g_u_sundir, g_u_unlit);
     glGenVertexArrays(1, &g_vao);
     glGenBuffers(CF_MAX_MESHES, g_vbo);
     glGenBuffers(CF_MAX_MESHES, g_vbo_b);
     glUseProgram(g_prog);
     glUniform1i(g_u_tex, 0);
+    /* u_light must name a unit of its own even when the per-fragment light path
+     * is off: left at the default 0 it collides with u_tex, a sampler2DArray, and
+     * two sampler types on one unit make every draw incomplete -- the whole world
+     * silently stops rendering. So the unit is claimed here and a 1x1x1 texture
+     * put on it, which cf_gfx_upload_light replaces when the path is enabled. */
+    glUniform1i(g_u_light, 3);
+    {
+        unsigned char dummy[2] = {0, 0};
+        glGenTextures(2, g_lt);
+        glActiveTexture(GL_TEXTURE3);
+        glBindTexture(GL_TEXTURE_3D, g_lt[0]);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexImage3D(GL_TEXTURE_3D, 0, GL_RG8, 1, 1, 1, 0, GL_RG, GL_UNSIGNED_BYTE, dummy);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glActiveTexture(GL_TEXTURE0);
+    }
     glUniform1i(g_u_use_tex, 0);
     glUniform1i(g_u_cutout, 0);
     return 1;
@@ -780,7 +894,28 @@ void cf_gfx_upload_part(int64_t slot, int64_t offset, void *arr, int64_t nfloats
     if (g_stage_filled >= g_stage_total) cf_stage_flush();
 }
 
+/* GPU time for the frame, by timer query. Two queries ping-ponged so reading
+ * one never stalls on the frame still in flight; cf_gfx_gpu_us returns the last
+ * result that was ready. Diagnostic: the game is CPU-bound, so wall-clock fps
+ * cannot see what the fragment shader costs. */
+static GLuint g_tq[2] = {0, 0};
+static int    g_tq_i = 0, g_tq_armed[2] = {0, 0};
+static int64_t g_gpu_us = 0;
+void cf_gfx_end_query(void) {
+    if (g_tq[g_tq_i] && g_tq_armed[g_tq_i] == 2) { glEndQuery(GL_TIME_ELAPSED); g_tq_armed[g_tq_i] = 1; g_tq_i = 1 - g_tq_i; }
+}
+int64_t cf_gfx_gpu_us(void) { return g_gpu_us; }
+
 void cf_gfx_begin_frame(double r, double g, double b) {
+    if (!g_tq[0]) { glGenQueries(2, g_tq); }
+    int other = 1 - g_tq_i;
+    if (g_tq_armed[other]) {
+        GLint ready = 0;
+        glGetQueryObjectiv(g_tq[other], GL_QUERY_RESULT_AVAILABLE, &ready);
+        if (ready) { GLuint64 ns = 0; glGetQueryObjectui64v(g_tq[other], GL_QUERY_RESULT, &ns); g_gpu_us = (int64_t)(ns / 1000); g_tq_armed[other] = 0; }
+    }
+    if (!g_tq_armed[g_tq_i]) { glBeginQuery(GL_TIME_ELAPSED, g_tq[g_tq_i]); g_tq_armed[g_tq_i] = 2; }
+
     g_fog_rgb[0] = (float)r; g_fog_rgb[1] = (float)g; g_fog_rgb[2] = (float)b;
     glClearColor((float)r, (float)g, (float)b, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -859,19 +994,20 @@ static void cf_shift_particles(int64_t dx, int64_t dz);   /* defined with the pa
 void cf_gfx_shift(int64_t dx, int64_t dz) {
     /* A slot's state is its VBO pair, which of the two the last upload went
      * to, both capacities and its offset: all of it moves with the chunk. */
-    for (int base = 0; base < 192; base += 64) {
-        GLuint olda[64], oldb[64]; unsigned char oldcur[64]; int64_t oldcap[2][64]; float oldoff[64][2]; int used[64];
-        for (int i = 0; i < 64; i++) {
+    for (int base = 0; base < 3 * CF_CHUNK_SLOTS; base += CF_CHUNK_SLOTS) {
+        GLuint olda[CF_CHUNK_SLOTS], oldb[CF_CHUNK_SLOTS]; unsigned char oldcur[CF_CHUNK_SLOTS];
+        int64_t oldcap[2][CF_CHUNK_SLOTS]; float oldoff[CF_CHUNK_SLOTS][2]; int used[CF_CHUNK_SLOTS];
+        for (int i = 0; i < CF_CHUNK_SLOTS; i++) {
             olda[i] = g_vbo[base + i]; oldb[i] = g_vbo_b[base + i]; oldcur[i] = g_vbo_cur[base + i];
             oldcap[0][i] = g_vbo_cap[0][base + i]; oldcap[1][i] = g_vbo_cap[1][base + i];
             oldoff[i][0] = g_off[base + i][0]; oldoff[i][1] = g_off[base + i][1]; used[i] = 0;
         }
-        int has[64];
-        for (int d = 0; d < 64; d++) {
-            int64_t sx = d % 8 + dx, sz = d / 8 + dz;
+        int has[CF_CHUNK_SLOTS];
+        for (int d = 0; d < CF_CHUNK_SLOTS; d++) {
+            int64_t sx = d % CF_WORLD_CHUNKS + dx, sz = d / CF_WORLD_CHUNKS + dz;
             has[d] = 0;
-            if (sx >= 0 && sx < 8 && sz >= 0 && sz < 8) {
-                int s = (int)(sx + 8 * sz);
+            if (sx >= 0 && sx < CF_WORLD_CHUNKS && sz >= 0 && sz < CF_WORLD_CHUNKS) {
+                int s = (int)(sx + CF_WORLD_CHUNKS * sz);
                 g_vbo[base + d] = olda[s]; g_vbo_b[base + d] = oldb[s]; g_vbo_cur[base + d] = oldcur[s];
                 g_vbo_cap[0][base + d] = oldcap[0][s]; g_vbo_cap[1][base + d] = oldcap[1][s];
                 used[s] = 1; has[d] = 1;
@@ -880,10 +1016,10 @@ void cf_gfx_shift(int64_t dx, int64_t dz) {
             }
         }
         int u = 0;
-        for (int d = 0; d < 64; d++) {
+        for (int d = 0; d < CF_CHUNK_SLOTS; d++) {
             if (has[d]) continue;
-            while (u < 64 && used[u]) u++;
-            if (u >= 64) break;
+            while (u < CF_CHUNK_SLOTS && used[u]) u++;
+            if (u >= CF_CHUNK_SLOTS) break;
             g_vbo[base + d] = olda[u]; g_vbo_b[base + d] = oldb[u]; g_vbo_cur[base + d] = oldcur[u];
             g_vbo_cap[0][base + d] = oldcap[0][u]; g_vbo_cap[1][base + d] = oldcap[1][u];
             used[u] = 1;
@@ -920,6 +1056,14 @@ static int64_t g_occ_w = 0, g_occ_h = 0, g_occ_d = 0;
 
 void cf_gfx_upload_occupancy(void *arr, int64_t w, int64_t h, int64_t d) {
     if (narr_len(arr) < w * h * d) { fprintf(stderr, "cf: occupancy array too small\n"); return; }
+    /* March, this file and the shader's WORLD constant all carry the window's
+     * side independently; a mismatch would mis-index shadows silently. */
+    if (w != CF_WORLD_SIDE || d != CF_WORLD_SIDE) {
+        fprintf(stderr, "cf: occupancy is %lldx%lld but the shim is built for %d; "
+                        "CF_WORLD_CHUNKS and CubeForge.World.size() disagree\n",
+                (long long)w, (long long)d, CF_WORLD_SIDE);
+        abort();
+    }
     GLint maxdim = 0;
     glGetIntegerv(GL_MAX_3D_TEXTURE_SIZE, &maxdim);
     /* GL 3.3 only guarantees 256, and the world's Y is exactly 256. Any real GPU
@@ -930,30 +1074,24 @@ void cf_gfx_upload_occupancy(void *arr, int64_t w, int64_t h, int64_t d) {
         return;
     }
     if (!g_occ) glGenTextures(1, &g_occ);
+    /* a whole upload is the window as it stands, so the toroidal origin resets */
     g_occ_w = w; g_occ_h = h; g_occ_d = d;
-    /* The array holds 0 / opacity / occ_solid; the texture wants 0 / 255, the
-     * same staging cf_gfx_sync_box does. Uploading the raw bytes left water and
-     * leaves in the texture as 2 and 6 -- below the shader's 0.5, so they
-     * shadowed nothing either way, but not what any other writer here puts in a
-     * texel, and so a read-back could not be compared against the world. */
-    unsigned char *up = (unsigned char *)malloc((size_t)(w * h * d));
-    if (!up) { fprintf(stderr, "cf: occupancy staging allocation failed\n"); return; }
-    {
-        const unsigned char *src = (const unsigned char *)narr_data(arr);
-        for (size_t i = 0, n = (size_t)(w * h * d); i < n; i++) up[i] = src[i] == 255 ? 255 : 0;
-    }
+    g_occ_ox = 0; g_occ_oz = 0;
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_3D, g_occ);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    /* VERBATIM -- 0 air, 2 water, 6 leaves, 255 solid. The shadow trace only
+     * asks `> 0.5`, but the GPU light flood subtracts this byte per step, so
+     * normalising to 0/255 here would let light run straight through water.
+     * cf_gfx_sync_box writes the same values, and cf_occ_check compares them. */
     glTexImage3D(GL_TEXTURE_3D, 0, GL_R8, (GLsizei)w, (GLsizei)h, (GLsizei)d, 0,
-                 GL_RED, GL_UNSIGNED_BYTE, up);
-    free(up);
+                 GL_RED, GL_UNSIGNED_BYTE, narr_data(arr));
     glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
-    /* Coarse level. Occupancy is indexed x + 128 * (y + 256 * z), matching
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_REPEAT);
+    /* Coarse level. Occupancy is indexed x + CF_WORLD_SIDE * (y + 256 * z), matching
      * CubeForge.Light.occ_index. */
     g_occ_cw = (int)((w + CF_OCC_CS - 1) / CF_OCC_CS);
     g_occ_ch = (int)((h + CF_OCC_CS - 1) / CF_OCC_CS);
@@ -980,18 +1118,212 @@ void cf_gfx_upload_occupancy(void *arr, int64_t w, int64_t h, int64_t d) {
                  GL_RED, GL_UNSIGNED_BYTE, coarse);
     glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_REPEAT);
     free(coarse);
     glActiveTexture(GL_TEXTURE0);
     glUseProgram(g_prog);
     glUniform1i(g_u_occ, 1);
     glUniform1i(g_u_occ_c, 2);
+    occ_push_off();
+}
+
+/* Window-local (x, z) to texel, through the toroidal origin. */
+static inline int64_t occ_tx(int64_t x) { int64_t v = (x + g_occ_ox) % g_occ_w; return v < 0 ? v + g_occ_w : v; }
+static inline int64_t occ_tz(int64_t z) { int64_t v = (z + g_occ_oz) % g_occ_d; return v < 0 ? v + g_occ_d : v; }
+
+/* Upload a staged box, splitting it where it wraps. [stage] is bw x bh x bd in
+ * the texture's own order; (tx, ty, tz) is its wrapped origin. Unpack strides
+ * let each piece be sourced straight out of the one staging buffer. */
+static void occ_sub_wrapped(GLuint tex, const unsigned char *stage,
+                            int64_t tx, int64_t ty, int64_t tz,
+                            int64_t bw, int64_t bh, int64_t bd, int64_t texw, int64_t texd) {
+    glBindTexture(GL_TEXTURE_3D, tex);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, (GLint)bw);
+    glPixelStorei(GL_UNPACK_IMAGE_HEIGHT, (GLint)bh);
+    int64_t xs[2], xw[2], zs[2], zd[2];
+    int nx = 0, nz = 0;
+    if (tx + bw <= texw) { xs[0] = 0; xw[0] = bw; nx = 1; }
+    else { xs[0] = 0; xw[0] = texw - tx; xs[1] = xw[0]; xw[1] = bw - xw[0]; nx = 2; }
+    if (tz + bd <= texd) { zs[0] = 0; zd[0] = bd; nz = 1; }
+    else { zs[0] = 0; zd[0] = texd - tz; zs[1] = zd[0]; zd[1] = bd - zd[0]; nz = 2; }
+    for (int i = 0; i < nx; i++)
+        for (int j = 0; j < nz; j++) {
+            glPixelStorei(GL_UNPACK_SKIP_PIXELS, (GLint)xs[i]);
+            glPixelStorei(GL_UNPACK_SKIP_IMAGES, (GLint)zs[j]);
+            glTexSubImage3D(GL_TEXTURE_3D, 0,
+                            (GLint)(i == 0 ? tx : 0), (GLint)ty, (GLint)(j == 0 ? tz : 0),
+                            (GLsizei)xw[i], (GLsizei)bh, (GLsizei)zd[j],
+                            GL_RED, GL_UNSIGNED_BYTE, stage);
+        }
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    glPixelStorei(GL_UNPACK_IMAGE_HEIGHT, 0);
+    glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
+    glPixelStorei(GL_UNPACK_SKIP_IMAGES, 0);
+}
+
+/* The window slid by (dx, dz) chunks: advance the texture origin. The caller
+ * then syncs the band that came in, which lands on the texels the band that
+ * left was using. Nothing else moves, and nothing else is uploaded. */
+/* ── PROTOTYPE: the light fields as a 3D texture ──────────────────────────────
+ * Measurement only, for deciding whether per-fragment smooth lighting is
+ * affordable. Sky in R, block in G, toroidal with the occupancy textures (the
+ * light fields slide with them), on unit 3. A whole upload per shift; if this
+ * path were kept it would sync the band like the occupancy does. */
+void cf_gfx_upload_light(void *la, void *lb, int64_t w, int64_t h, int64_t d) {
+    if (narr_len(la) < w * h * d || narr_len(lb) < w * h * d) return;
+    const unsigned char *a = (const unsigned char *)narr_data(la);
+    const unsigned char *b = (const unsigned char *)narr_data(lb);
+    size_t n = (size_t)w * h * d;
+    unsigned char *rg = (unsigned char *)malloc(n * 2);
+    if (!rg) return;
+    /* light is x + w * (z + d * y); the texture wants x fastest, then y, then z,
+     * matching the occupancy layout the shader already addresses -- and THROUGH
+     * THE TOROIDAL WRAP, like every other writer. Writing at window-local
+     * coordinates instead was right only while the origin was zero: after one
+     * shift this upload and every reader disagreed by the origin, which the
+     * flood oracle caught as 350 000 differing voxels. */
+    for (int64_t z = 0; z < d; z++)
+        for (int64_t y = 0; y < h; y++)
+            for (int64_t x = 0; x < w; x++) {
+                size_t src = (size_t)x + w * ((size_t)z + d * (size_t)y);
+                size_t dst = ((size_t)occ_tx(x) + w * ((size_t)y + h * (size_t)occ_tz(z))) * 2;
+                /* VERBATIM, not scaled to 0..255. The block byte is level in
+                 * the low nibble and the emitter's COLOUR in the high one
+                 * (CubeForge.Light.pack_bl), so there is no room to rescale it
+                 * without losing the colour; the shaders unpack instead, and
+                 * cf_light_check can then compare bytes exactly. Skylight's
+                 * colour nibble is always 0, so its byte is its level. */
+                rg[dst] = a[src];
+                rg[dst + 1] = b[src];
+            }
+    if (!g_lt[0]) glGenTextures(2, g_lt);
+    glActiveTexture(GL_TEXTURE3);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    /* both: [1] is the flood's scratch and has to exist at the same size */
+    for (int i = 1; i >= 0; i--) {
+        glBindTexture(GL_TEXTURE_3D, g_lt[i]);
+        glTexImage3D(GL_TEXTURE_3D, 0, GL_RG8, (GLsizei)w, (GLsizei)h, (GLsizei)d, 0, GL_RG, GL_UNSIGNED_BYTE, rg);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_REPEAT);
+    }
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_REPEAT);
+    free(rg);
+    if (g_u_light >= 0) glUniform1i(g_u_light, 3);
+    glActiveTexture(GL_TEXTURE0);
+}
+void cf_gfx_set_gpulight(int64_t on) { if (g_u_gpulight >= 0) glUniform1i(g_u_gpulight, (int)on); }
+
+/* Sync a box of the light texture from the two light fields, through the same
+ * toroidal wrap the occupancy uses. The fields are indexed
+ * x + w * (z + d * y) (CubeForge.Light.index); the texture wants x fastest then
+ * y then z, so the box is staged in the texture's order and uploaded in at most
+ * four pieces where it straddles the seam. */
+/* Relights land many times a frame -- a retexture slot alone is dozens of
+ * single-column edits -- and each one used to stage and upload its own box,
+ * which cost more than the whole per-fragment change saved (mean frame 4.1 ->
+ * 10.6 ms). So a relight only WIDENS a dirty box here, and the frame flushes it
+ * once before drawing, the way the mesh drain batches its work. */
+static int64_t g_ld[6];
+static int     g_ld_any = 0;
+/* Passes the flood still owes. A dirty box sets it to a full convergence and
+ * the frame spends a few passes at a time: sixteen at once is 7.55 ms, four is
+ * under two, and light changes gradually enough that a frame or two of partial
+ * convergence cannot be seen. The same trade the mesh drain makes. */
+static int64_t g_lf_todo = 0;
+int64_t cf_light_flood(int64_t passes);
+void cf_gfx_light_dirty(int64_t x0, int64_t y0, int64_t z0, int64_t x1, int64_t y1, int64_t z1) {
+    if (x1 < x0 || y1 < y0 || z1 < z0) return;
+    if (!g_ld_any) { g_ld[0] = x0; g_ld[1] = y0; g_ld[2] = z0; g_ld[3] = x1; g_ld[4] = y1; g_ld[5] = z1; g_ld_any = 1; return; }
+    if (x0 < g_ld[0]) g_ld[0] = x0;
+    if (y0 < g_ld[1]) g_ld[1] = y0;
+    if (z0 < g_ld[2]) g_ld[2] = z0;
+    if (x1 > g_ld[3]) g_ld[3] = x1;
+    if (y1 > g_ld[4]) g_ld[4] = y1;
+    if (z1 > g_ld[5]) g_ld[5] = z1;
+}
+/* Passes per frame while the flood is converging. */
+#define CF_LIGHT_STEP 4
+void cf_gfx_sync_light_box(void *la, void *lb, int64_t x0, int64_t y0, int64_t z0, int64_t x1, int64_t y1, int64_t z1);
+void cf_gfx_flush_light(void *la, void *lb) {
+    if (g_ld_any) {
+        g_ld_any = 0;
+        cf_gfx_sync_light_box(la, lb, g_ld[0], g_ld[1], g_ld[2], g_ld[3], g_ld[4], g_ld[5]);
+        g_lf_todo = 16;   /* the seed moved: converge again from here */
+    }
+    if (g_lf_todo > 0) {
+        int64_t n = g_lf_todo < CF_LIGHT_STEP ? g_lf_todo : CF_LIGHT_STEP;
+        g_lf_todo -= cf_light_flood(n);
+        if (g_lf_todo < 0) g_lf_todo = 0;
+    }
+}
+
+void cf_gfx_sync_light_box(void *la, void *lb, int64_t x0, int64_t y0, int64_t z0, int64_t x1, int64_t y1, int64_t z1) {
+    if (!g_lt[0] || !g_occ_w) return;
+    if (narr_len(la) < g_occ_w * g_occ_h * g_occ_d || narr_len(lb) < g_occ_w * g_occ_h * g_occ_d) return;
+    if (x0 < 0) x0 = 0; if (y0 < 0) y0 = 0; if (z0 < 0) z0 = 0;
+    if (x1 >= g_occ_w) x1 = g_occ_w - 1; if (y1 >= g_occ_h) y1 = g_occ_h - 1; if (z1 >= g_occ_d) z1 = g_occ_d - 1;
+    if (x0 > x1 || y0 > y1 || z0 > z1) return;
+    const unsigned char *a = (const unsigned char *)narr_data(la);
+    const unsigned char *b = (const unsigned char *)narr_data(lb);
+    int64_t bw = x1 - x0 + 1, bh = y1 - y0 + 1, bd = z1 - z0 + 1;
+    unsigned char *stage = (unsigned char *)malloc((size_t)(bw * bh * bd * 2));
+    if (!stage) return;
+    for (int64_t z = z0; z <= z1; z++)
+        for (int64_t y = y0; y <= y1; y++)
+            for (int64_t x = x0; x <= x1; x++) {
+                size_t src = (size_t)x + g_occ_w * ((size_t)z + g_occ_d * (size_t)y);
+                size_t dst = ((size_t)(x - x0) + bw * ((size_t)(y - y0) + bh * (size_t)(z - z0))) * 2;
+                stage[dst] = a[src];             /* verbatim: see cf_gfx_upload_light */
+                stage[dst + 1] = b[src];
+            }
+    glActiveTexture(GL_TEXTURE3);
+    glBindTexture(GL_TEXTURE_3D, g_lt[0]);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, (GLint)bw);
+    glPixelStorei(GL_UNPACK_IMAGE_HEIGHT, (GLint)bh);
+    int64_t tx = occ_tx(x0), tz = occ_tz(z0);
+    int64_t xs[2], xw[2], zs[2], zd[2]; int nx, nz;
+    if (tx + bw <= g_occ_w) { xs[0] = 0; xw[0] = bw; nx = 1; }
+    else { xs[0] = 0; xw[0] = g_occ_w - tx; xs[1] = xw[0]; xw[1] = bw - xw[0]; nx = 2; }
+    if (tz + bd <= g_occ_d) { zs[0] = 0; zd[0] = bd; nz = 1; }
+    else { zs[0] = 0; zd[0] = g_occ_d - tz; zs[1] = zd[0]; zd[1] = bd - zd[0]; nz = 2; }
+    for (int i = 0; i < nx; i++)
+        for (int j = 0; j < nz; j++) {
+            glPixelStorei(GL_UNPACK_SKIP_PIXELS, (GLint)xs[i]);
+            glPixelStorei(GL_UNPACK_SKIP_IMAGES, (GLint)zs[j]);
+            glTexSubImage3D(GL_TEXTURE_3D, 0, (GLint)(i == 0 ? tx : 0), (GLint)y0, (GLint)(j == 0 ? tz : 0),
+                            (GLsizei)xw[i], (GLsizei)bh, (GLsizei)zd[j], GL_RG, GL_UNSIGNED_BYTE, stage);
+        }
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    glPixelStorei(GL_UNPACK_IMAGE_HEIGHT, 0);
+    glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
+    glPixelStorei(GL_UNPACK_SKIP_IMAGES, 0);
+    free(stage);
+    glActiveTexture(GL_TEXTURE0);
+}
+
+static void occ_push_off(void) {
+    if (g_u_occ_off >= 0) glUniform2f(g_u_occ_off, (float)g_occ_ox, (float)g_occ_oz);
+}
+void cf_gfx_shift_occupancy(int64_t dx, int64_t dz) {
+    if (!g_occ_w || !g_occ_d) return;
+    g_occ_ox = ((g_occ_ox + 16 * dx) % g_occ_w + g_occ_w) % g_occ_w;
+    g_occ_oz = ((g_occ_oz + 16 * dz) % g_occ_d + g_occ_d) % g_occ_d;
+    occ_push_off();
 }
 
 /* Sync the box [x0..x1] x [y0..y1] x [z0..z1] of the occupancy texture from
- * the world's occupancy array (x + 128 * (y + 256 * z), the texture's own
+ * the world's occupancy array (x + CF_WORLD_SIDE * (y + 256 * z), the texture's own
  * layout, so one glTexSubImage3D with unpack strides does the box), then
  * recount every coarse cell the box touches from the array. A tree edit used
  * to make 729 one-texel calls here (0.6 ms), and each call bumped the coarse
@@ -1003,19 +1335,21 @@ void cf_gfx_sync_box(void *arr, int64_t x0, int64_t y0, int64_t z0, int64_t x1, 
     if (x1 >= g_occ_w) x1 = g_occ_w - 1; if (y1 >= g_occ_h) y1 = g_occ_h - 1; if (z1 >= g_occ_d) z1 = g_occ_d - 1;
     if (x0 > x1 || y0 > y1 || z0 > z1) return;
     const unsigned char *a = (const unsigned char *)narr_data(arr);
-    /* the fine texture: the box straight out of the array. The array holds
-     * 0 / occ_solid; the texture wants 0 / 255, so stage the box. */
+    /* The box straight out of the array, VERBATIM -- 0 air, 2 water, 6 leaves,
+     * 255 solid. This used to normalise to 0/255, which the shadow trace could
+     * not tell apart (it only asks `> 0.5`) but the GPU light flood can: it
+     * subtracts the opacity per step, so flattening water to 0 let light run
+     * straight through it. That also puts this writer back in agreement with
+     * cf_gfx_upload_occupancy, which never normalised. */
     int64_t bw = x1 - x0 + 1, bh = y1 - y0 + 1, bd = z1 - z0 + 1;
     unsigned char *stage = (unsigned char *)malloc((size_t)(bw * bh * bd));
     if (!stage) return;
     for (int64_t z = z0; z <= z1; z++)
         for (int64_t y = y0; y <= y1; y++)
             for (int64_t x = x0; x <= x1; x++)
-                stage[(x - x0) + bw * ((y - y0) + bh * (z - z0))] = a[x + g_occ_w * (y + g_occ_h * z)] == 255 ? 255 : 0;
+                stage[(x - x0) + bw * ((y - y0) + bh * (z - z0))] = a[x + g_occ_w * (y + g_occ_h * z)];
     glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_3D, g_occ);
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    glTexSubImage3D(GL_TEXTURE_3D, 0, (GLint)x0, (GLint)y0, (GLint)z0, (GLsizei)bw, (GLsizei)bh, (GLsizei)bd, GL_RED, GL_UNSIGNED_BYTE, stage);
+    occ_sub_wrapped(g_occ, stage, occ_tx(x0), y0, occ_tz(z0), bw, bh, bd, g_occ_w, g_occ_d);
     free(stage);
     if (g_occ_count && g_occ_c) {
         glActiveTexture(GL_TEXTURE2);
@@ -1028,107 +1362,355 @@ void cf_gfx_sync_box(void *arr, int64_t x0, int64_t y0, int64_t z0, int64_t x1, 
                         for (int64_t y = cy * CF_OCC_CS; y < (cy + 1) * CF_OCC_CS && y < g_occ_h; y++)
                             for (int64_t x = cx * CF_OCC_CS; x < (cx + 1) * CF_OCC_CS && x < g_occ_w; x++)
                                 if (a[x + g_occ_w * (y + g_occ_h * z)] == 255) n++;
-                    size_t ci = (size_t)cx + (size_t)g_occ_cw * ((size_t)cy + (size_t)g_occ_ch * (size_t)cz);
+                    /* the coarse level is toroidal with the fine one; the origin is
+                     * a multiple of 16 so it lands on a whole number of cells */
+                    int64_t tcx = occ_tx(cx * CF_OCC_CS) / CF_OCC_CS;
+                    int64_t tcz = occ_tz(cz * CF_OCC_CS) / CF_OCC_CS;
+                    size_t ci = (size_t)tcx + (size_t)g_occ_cw * ((size_t)cy + (size_t)g_occ_ch * (size_t)tcz);
                     uint16_t before = g_occ_count[ci];
                     g_occ_count[ci] = n;
                     if ((before > 0) != (n > 0)) {
                         unsigned char cv = n ? 255 : 0;
-                        glTexSubImage3D(GL_TEXTURE_3D, 0, (GLint)cx, (GLint)cy, (GLint)cz, 1, 1, 1, GL_RED, GL_UNSIGNED_BYTE, &cv);
+                        glTexSubImage3D(GL_TEXTURE_3D, 0, (GLint)tcx, (GLint)cy, (GLint)tcz, 1, 1, 1, GL_RED, GL_UNSIGNED_BYTE, &cv);
                     }
                 }
     }
     glActiveTexture(GL_TEXTURE0);
 }
 
-/* ── The occupancy oracle ────────────────────────────────────────────────────
- * Read both levels of the occupancy texture back off the GPU and compare them,
- * texel by texel, against the world's own occupancy array -- the same array
- * every upload path here is fed from. Both counts must be 0; a differing texel
- * is a block writer that changed the world and not the texture, or the reverse.
- * Diagnostic only, and slow (two full texture read-backs), so it is called from
- * the dump frame and nowhere else. The first few differences are printed as
- * `x,y,z gpu/cpu` so a drift names the voxel it happened at. */
-void cf_occ_check(void *arr) {
-    if (!g_occ || !g_occ_c) { fprintf(stderr, "occupancy oracle: no texture\n"); return; }
-    if (narr_len(arr) < g_occ_w * g_occ_h * g_occ_d) { fprintf(stderr, "occupancy oracle: array too small\n"); return; }
+/* Oracle for the toroidal occupancy textures: read both levels back and check
+ * every texel against the world's occupancy array, through the same wrap the
+ * shader uses. Returns fine_mismatches * 1000000 + coarse_mismatches, so one
+ * call answers both. Diagnostic only -- glGetTexImage stalls the pipeline. */
+int64_t cf_occ_check(void *arr) {
+    if (!g_occ || !g_occ_count || !g_occ_c) return -1;
+    if (narr_len(arr) < g_occ_w * g_occ_h * g_occ_d) return -2;
     const unsigned char *a = (const unsigned char *)narr_data(arr);
-    size_t fn = (size_t)(g_occ_w * g_occ_h * g_occ_d);
-    size_t cn = (size_t)g_occ_cw * g_occ_ch * g_occ_cd;
-    unsigned char *gf = (unsigned char *)malloc(fn);
-    unsigned char *gc = (unsigned char *)malloc(cn);
-    if (!gf || !gc) { free(gf); free(gc); return; }
-    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    size_t nf = (size_t)g_occ_w * g_occ_h * g_occ_d;
+    unsigned char *tex = (unsigned char *)malloc(nf);
+    if (!tex) return -3;
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_3D, g_occ);
-    glGetTexImage(GL_TEXTURE_3D, 0, GL_RED, GL_UNSIGNED_BYTE, gf);
-    glActiveTexture(GL_TEXTURE2);
-    glBindTexture(GL_TEXTURE_3D, g_occ_c);
-    glGetTexImage(GL_TEXTURE_3D, 0, GL_RED, GL_UNSIGNED_BYTE, gc);
-    glActiveTexture(GL_TEXTURE0);
-
-    char fbuf[512]; fbuf[0] = 0; int fshown = 0;
-    int64_t fdiff = 0;
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glGetTexImage(GL_TEXTURE_3D, 0, GL_RED, GL_UNSIGNED_BYTE, tex);
+    int64_t bad = 0;
     for (int64_t z = 0; z < g_occ_d; z++)
         for (int64_t y = 0; y < g_occ_h; y++)
             for (int64_t x = 0; x < g_occ_w; x++) {
-                size_t i = (size_t)(x + g_occ_w * (y + g_occ_h * z));
-                unsigned char want = a[i] == 255 ? 255 : 0;
-                if (gf[i] != want) {
-                    fdiff++;
-                    if (fshown < 8) {
-                        char one[64];
-                        snprintf(one, sizeof one, " %lld,%lld,%lld %d/%d",
-                                 (long long)x, (long long)y, (long long)z, (int)gf[i], (int)want);
-                        strncat(fbuf, one, sizeof fbuf - strlen(fbuf) - 1);
-                        fshown++;
-                    }
-                }
+                /* The EXACT byte, not just solidity. It used to be solidity,
+                 * because cf_gfx_sync_box normalised to 0/255 where
+                 * cf_gfx_upload_occupancy uploaded verbatim, and the shadow
+                 * trace could not tell the difference. That disagreement was
+                 * invisible until the light flood started subtracting the
+                 * opacity per step, so the oracle now insists on the value the
+                 * flood actually reads. */
+                int want = a[x + g_occ_w * (y + g_occ_h * z)];
+                int got  = tex[occ_tx(x) + g_occ_w * (y + g_occ_h * occ_tz(z))];
+                if (want != got) bad++;
             }
-    char cbuf[512]; cbuf[0] = 0; int cshown = 0;
-    char nbuf[512]; nbuf[0] = 0; int nshown = 0;
-    int64_t cdiff = 0, ndiff = 0;
-    /* The coarse truth is recounted from the array, never taken from
-     * g_occ_count: the count is one of the things under test. */
-    for (int64_t cz = 0; cz < g_occ_cd; cz++)
-        for (int64_t cy = 0; cy < g_occ_ch; cy++)
-            for (int64_t cx = 0; cx < g_occ_cw; cx++) {
-                int64_t n = 0;
-                for (int64_t z = cz * CF_OCC_CS; z < (cz + 1) * CF_OCC_CS && z < g_occ_d; z++)
-                    for (int64_t y = cy * CF_OCC_CS; y < (cy + 1) * CF_OCC_CS && y < g_occ_h; y++)
-                        for (int64_t x = cx * CF_OCC_CS; x < (cx + 1) * CF_OCC_CS && x < g_occ_w; x++)
-                            if (a[x + g_occ_w * (y + g_occ_h * z)] == 255) n++;
-                size_t ci = (size_t)cx + (size_t)g_occ_cw * ((size_t)cy + (size_t)g_occ_ch * (size_t)cz);
-                unsigned char want = n ? 255 : 0;
-                /* the count itself, not just the texel it drives: a cell that
-                 * has been over-counted still reads 255 and looks right, and
-                 * only shows up later as a texel that will not clear. */
-                if (g_occ_count && g_occ_count[ci] != (uint16_t)n) {
-                    ndiff++;
-                    if (nshown < 8) {
-                        char one[80];
-                        snprintf(one, sizeof one, " %lld,%lld,%lld %d/%lld",
-                                 (long long)cx, (long long)cy, (long long)cz, (int)g_occ_count[ci], (long long)n);
-                        strncat(nbuf, one, sizeof nbuf - strlen(nbuf) - 1);
-                        nshown++;
-                    }
+    free(tex);
+    size_t nc = (size_t)g_occ_cw * g_occ_ch * g_occ_cd;
+    unsigned char *ctex = (unsigned char *)malloc(nc);
+    int64_t cbad = 0;
+    if (ctex) {
+        glActiveTexture(GL_TEXTURE2);
+        glBindTexture(GL_TEXTURE_3D, g_occ_c);
+        glGetTexImage(GL_TEXTURE_3D, 0, GL_RED, GL_UNSIGNED_BYTE, ctex);
+        for (int64_t cz = 0; cz < g_occ_cd; cz++)
+            for (int64_t cy = 0; cy < g_occ_ch; cy++)
+                for (int64_t cx = 0; cx < g_occ_cw; cx++) {
+                    int64_t n = 0;
+                    for (int64_t z = cz * CF_OCC_CS; z < (cz + 1) * CF_OCC_CS && z < g_occ_d; z++)
+                        for (int64_t y = cy * CF_OCC_CS; y < (cy + 1) * CF_OCC_CS && y < g_occ_h; y++)
+                            for (int64_t x = cx * CF_OCC_CS; x < (cx + 1) * CF_OCC_CS && x < g_occ_w; x++)
+                                if (a[x + g_occ_w * (y + g_occ_h * z)] == 255) n++;
+                    int64_t tcx = occ_tx(cx * CF_OCC_CS) / CF_OCC_CS, tcz = occ_tz(cz * CF_OCC_CS) / CF_OCC_CS;
+                    unsigned char got = ctex[tcx + g_occ_cw * (cy + g_occ_ch * tcz)];
+                    if ((n > 0) != (got > 0)) cbad++;
                 }
-                if (gc[ci] != want) {
-                    cdiff++;
-                    if (cshown < 8) {
-                        char one[80];
-                        snprintf(one, sizeof one, " %lld,%lld,%lld %d/%d count %d",
-                                 (long long)cx, (long long)cy, (long long)cz, (int)gc[ci], (int)want,
-                                 g_occ_count ? (int)g_occ_count[ci] : -1);
-                        strncat(cbuf, one, sizeof cbuf - strlen(cbuf) - 1);
-                        cshown++;
-                    }
-                }
+        free(ctex);
+    }
+    glActiveTexture(GL_TEXTURE0);
+    return bad * 1000000 + cbad;
+}
+
+/* ── The light flood, on the GPU ─────────────────────────────────────────────
+ * One relaxation pass per light level over the WHOLE field, ping-ponged between
+ * the two light textures. The CPU's rule, exactly: a voxel takes
+ * max(own, neighbour - 1 - its own opacity), and a solid voxel takes nothing
+ * (Light.give_level). Opacity comes from the occupancy texture, which already
+ * stores occ_value -- 0 air, 2 water, 6 leaves, 255 solid.
+ *
+ * Whole field rather than a box on purpose: ping-ponging over a sub-box is not
+ * a smaller version of this, because every pass reads its neighbours and at the
+ * box edge would read scratch nothing has written. A full pass has no edge.
+ * Measured 7.55 ms for sixteen passes, against 16.7 ms for the CPU's band sweep.
+ *
+ * An EVEN number of passes leaves the result in g_lt[0], which is the texture
+ * the world shader samples and the one uploads and box syncs write; g_lt[1] is
+ * pure scratch and is never read except by the next pass.
+ *
+ * The textures are toroidal, so a neighbour that leaves the window wraps to the
+ * far side. The CPU treats outside the window as dark, so the shader converts
+ * each texel back to window-local coordinates through u_occ_off and drops any
+ * neighbour that falls outside -- otherwise light would crawl in from the
+ * opposite edge of the world. */
+static GLuint lb_compile(GLenum k, const char *src);   /* defined with the cost probe below */
+static GLuint g_lf_fbo = 0, g_lf_prog = 0, g_lf_vao = 0;
+static const char *LF_VS =
+    "#version 330 core\n"
+    "flat out int v_lay;\n"
+    "void main(){ vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);\n"
+    "  v_lay = gl_InstanceID;\n"
+    "  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0); }\n";
+static const char *LF_GS =
+    "#version 330 core\n"
+    "layout(triangles) in; layout(triangle_strip, max_vertices = 3) out;\n"
+    "flat in int v_lay[]; flat out int g_lay;\n"
+    "void main(){ for (int i = 0; i < 3; i++) { gl_Layer = v_lay[0]; g_lay = v_lay[0]; gl_Position = gl_in[i].gl_Position; EmitVertex(); } EndPrimitive(); }\n";
+static const char *LF_FS =
+    "#version 330 core\n"
+    "uniform sampler3D u_src;\n"
+    "uniform sampler3D u_occ_f;\n"
+    "uniform vec3 u_dim;\n"
+    "uniform vec2 u_off;\n"
+    "flat in int g_lay;\n"
+    "out vec2 o_light;\n"
+    /* the window-local x, z of a texel, through the toroidal origin */
+    "vec2 localOf(vec2 texel){ return mod(texel - u_off + u_dim.xz, u_dim.xz); }\n"
+    /* The stored BYTES, not a 0..1 shade. Skylight is a bare level 0..15; the
+     * block byte is level in the low nibble and the emitter's colour in the
+     * high one (CubeForge.Light.pack_bl), so it cannot be compared or
+     * interpolated as a number -- a bright warm voxel and a dim cold one would
+     * order by colour. Everything below works in levels and carries the colour
+     * along beside them, which is what the CPU sweep does (Light.list_go). */
+    "vec2 rawAt(vec3 texel){ return texture(u_src, (texel + 0.5) / u_dim).rg * 255.0; }\n"
+    "float lvlOf(float b){ return floor(mod(b + 0.5, 16.0)); }\n"
+    "float colOf(float b){ return floor((b + 0.5) / 16.0); }\n"
+    /* One neighbour: the brightest sky level wins outright, and the brightest
+     * BLOCK level brings its own colour with it. */
+    "void take(vec3 texel, inout float ms, inout float mb, inout float mc){\n"
+    "  vec2 nb = rawAt(texel);\n"
+    "  ms = max(ms, nb.r);\n"
+    "  float bl = lvlOf(nb.g);\n"
+    "  if (bl > mb) { mb = bl; mc = colOf(nb.g); }\n"
+    "}\n"
+    "void main(){\n"
+    "  vec3 t = vec3(floor(gl_FragCoord.xy), float(g_lay));\n"
+    "  float op = texture(u_occ_f, (t + 0.5) / u_dim).r * 255.0;\n"
+    "  vec2 me = rawAt(t);\n"
+        /* A solid voxel RECEIVES nothing (Light.give_level returns 0 for it) but
+     * KEEPS what it was seeded with: a glowing mycelium block is solid and
+     * holds its own emission, and zeroing it here put out every light. */
+    "  if (op > 254.5) { o_light = me / 255.0; return; }\n"
+    "  vec2 loc = localOf(t.xz);\n"
+    "  float ms = 0.0, mb = 0.0, mc = 0.0;\n"
+    /* the four horizontal neighbours, dropped when they leave the window */
+    "  if (loc.x > 0.5)            take(t + vec3(-1, 0, 0), ms, mb, mc);\n"
+    "  if (loc.x < u_dim.x - 1.5)  take(t + vec3( 1, 0, 0), ms, mb, mc);\n"
+    "  if (loc.y > 0.5)            take(t + vec3(0, 0, -1), ms, mb, mc);\n"
+    "  if (loc.y < u_dim.z - 1.5)  take(t + vec3(0, 0,  1), ms, mb, mc);\n"
+    "  if (t.y > 0.5)              take(t + vec3(0, -1, 0), ms, mb, mc);\n"
+    "  if (t.y < u_dim.y - 1.5)    take(t + vec3(0,  1, 0), ms, mb, mc);\n"
+    "  float atten = 1.0 + op;\n"
+    "  float gs = max(ms - atten, 0.0);\n"
+    "  float gb = max(mb - atten, 0.0);\n"
+    /* The colour changes only where the level is RAISED, and a tie keeps what
+     * this voxel already had -- the CPU writes level and colour together and
+     * only when it strictly raises (Light.give_level returns 0 otherwise), so
+     * anything else would drift from it on the very first pass. */
+    "  float mine = lvlOf(me.g);\n"
+    "  float ob = (gb > mine) ? (gb + 16.0 * mc) : me.g;\n"
+    "  o_light = vec2(max(me.r, gs), ob) / 255.0;\n"
+    "}\n";
+int64_t cf_light_flood(int64_t passes) {
+    if (!g_lt[0] || !g_occ_w) return -1;
+    if (!g_lf_prog) {
+        GLuint vs = lb_compile(GL_VERTEX_SHADER, LF_VS);
+        GLuint gs = lb_compile(GL_GEOMETRY_SHADER, LF_GS);
+        GLuint fs = lb_compile(GL_FRAGMENT_SHADER, LF_FS);
+        if (!vs || !gs || !fs) return -1;
+        g_lf_prog = glCreateProgram();
+        glAttachShader(g_lf_prog, vs); glAttachShader(g_lf_prog, gs); glAttachShader(g_lf_prog, fs);
+        glLinkProgram(g_lf_prog);
+        GLint ok = 0; glGetProgramiv(g_lf_prog, GL_LINK_STATUS, &ok);
+        if (!ok) { char log[1024]; glGetProgramInfoLog(g_lf_prog, 1024, NULL, log); fprintf(stderr, "cf: light flood link: %s\n", log); return -1; }
+        glGenVertexArrays(1, &g_lf_vao);
+        glGenFramebuffers(1, &g_lf_fbo);
+    }
+    if (passes % 2 != 0) passes++;   /* even, so the result lands back in g_lt[0] */
+    glUseProgram(g_lf_prog);
+    glUniform1i(glGetUniformLocation(g_lf_prog, "u_src"), 4);
+    glUniform1i(glGetUniformLocation(g_lf_prog, "u_occ_f"), 1);
+    glUniform3f(glGetUniformLocation(g_lf_prog, "u_dim"), (float)g_occ_w, (float)g_occ_h, (float)g_occ_d);
+    glUniform2f(glGetUniformLocation(g_lf_prog, "u_off"), (float)g_occ_ox, (float)g_occ_oz);
+    glBindVertexArray(g_lf_vao);
+    glBindFramebuffer(GL_FRAMEBUFFER, g_lf_fbo);
+    glViewport(0, 0, (GLsizei)g_occ_w, (GLsizei)g_occ_h);
+    glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE); glDisable(GL_BLEND);
+    for (int64_t k = 0; k < passes; k++) {
+        int src = (int)(k & 1), dst = 1 - src;
+        glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_3D, g_lt[src]);
+        glFramebufferTexture(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, g_lt[dst], 0);
+        glDrawArraysInstanced(GL_TRIANGLES, 0, 3, (GLsizei)g_occ_d);
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glEnable(GL_DEPTH_TEST); glEnable(GL_CULL_FACE);
+    glUseProgram(g_prog);
+    glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_3D, g_lt[0]);
+    glActiveTexture(GL_TEXTURE0);
+    glViewport(0, 0, cf_win_fb_w(), cf_win_fb_h());
+    return passes;
+}
+
+/* Oracle: read the flooded texture back and compare it with the CPU's fields,
+ * voxel for voxel, through the toroidal wrap. Returns how many sky and block
+ * levels differ, packed sky * 10000000 + block. Diagnostic; it stalls. */
+int64_t cf_light_check(void *la, void *lb) {
+    if (!g_lt[0] || !g_occ_w) return -1;
+    if (narr_len(la) < g_occ_w * g_occ_h * g_occ_d) return -2;
+    const unsigned char *a = (const unsigned char *)narr_data(la);
+    const unsigned char *b = (const unsigned char *)narr_data(lb);
+    size_t n = (size_t)g_occ_w * g_occ_h * g_occ_d;
+    unsigned char *tex = (unsigned char *)malloc(n * 2);
+    if (!tex) return -3;
+    glActiveTexture(GL_TEXTURE3);
+    glBindTexture(GL_TEXTURE_3D, g_lt[0]);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glGetTexImage(GL_TEXTURE_3D, 0, GL_RG, GL_UNSIGNED_BYTE, tex);
+    int64_t bad_s = 0, bad_b = 0;
+    for (int64_t z = 0; z < g_occ_d; z++)
+        for (int64_t y = 0; y < g_occ_h; y++)
+            for (int64_t x = 0; x < g_occ_w; x++) {
+                size_t src = (size_t)x + g_occ_w * ((size_t)z + g_occ_d * (size_t)y);
+                size_t t = ((size_t)occ_tx(x) + g_occ_w * ((size_t)y + g_occ_h * (size_t)occ_tz(z))) * 2;
+                /* the exact byte, colour nibble included: a flood that
+                 * spread the right level with the wrong emitter's colour is a
+                 * difference this has to see */
+                if ((int)a[src] != tex[t]) bad_s++;
+                if ((int)b[src] != tex[t + 1]) bad_b++;
             }
-    printf("  occupancy oracle: fine %lld coarse %lld texels differ from the world (both must be 0),"
-           " %lld coarse counts off; first fine:%s first coarse:%s first count:%s\n",
-           (long long)fdiff, (long long)cdiff, (long long)ndiff, fbuf, cbuf, nbuf);
-    fflush(stdout);
-    free(gf); free(gc);
+    free(tex);
+    glActiveTexture(GL_TEXTURE0);
+    return bad_s * 10000000 + bad_b;
+}
+
+/* ── Light flood on the GPU: a cost probe ────────────────────────────────────
+ * Not the real thing. The question is only whether the MECHANISM can beat the
+ * CPU's worklist sweep, so this runs the exact memory pattern a GPU flood would
+ * -- one relaxation pass per light level over a box of a 3D texture, each voxel
+ * reading its six neighbours and its own opacity, ping-ponged between two
+ * textures -- against dummy data, and times it with a GL query.
+ *
+ * Layered rendering: the 3D texture is attached whole and a geometry shader
+ * sends the triangle to gl_Layer = z0 + gl_InstanceID, so one instanced draw
+ * covers the box's z range. That is how a 3D texture is written without compute
+ * or image load/store, neither of which GL 4.1 has.
+ *
+ * Returns microseconds for `passes` passes, or -1 if it could not set up. */
+static GLuint g_lb_tex[2] = {0, 0}, g_lb_fbo = 0, g_lb_prog = 0, g_lb_vao = 0, g_lb_q = 0;
+static const char *LB_VS =
+    "#version 330 core\n"
+    "flat out int v_lay;\n"
+    "void main(){ vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);\n"
+    "  v_lay = gl_InstanceID;\n"
+    "  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0); }\n";
+/* One instanced draw covers every z layer: the instance id IS the layer, passed
+ * VS -> GS (gl_InstanceID is not visible in a geometry shader). Drawing a layer
+ * at a time instead cost 192 draws a pass and was entirely draw-call bound --
+ * 11.7 ms for a single pass that does 1.1 M voxels of work. */
+static const char *LB_GS =
+    "#version 330 core\n"
+    "layout(triangles) in; layout(triangle_strip, max_vertices = 3) out;\n"
+    "flat in int v_lay[]; flat out int g_lay;\n"
+    "void main(){ for (int i = 0; i < 3; i++) { gl_Layer = v_lay[0]; g_lay = v_lay[0]; gl_Position = gl_in[i].gl_Position; EmitVertex(); } EndPrimitive(); }\n";
+static const char *LB_FS =
+    "#version 330 core\n"
+    "uniform sampler3D u_src;\n"
+    "uniform sampler3D u_occ_b;\n"
+    "uniform vec3 u_dim;\n"
+    "flat in int g_lay;\n"
+    "out vec2 o_light;\n"
+    "void main(){\n"
+    "  vec3 p = vec3(gl_FragCoord.xy, float(g_lay) + 0.5);\n"
+    "  vec3 t = vec3(p.x, p.y, p.z) / u_dim;\n"
+    "  vec2 me = texture(u_src, t).rg;\n"
+    "  vec2 m = me;\n"
+    "  m = max(m, texture(u_src, t + vec3( 1.0 / u_dim.x, 0.0, 0.0)).rg);\n"
+    "  m = max(m, texture(u_src, t + vec3(-1.0 / u_dim.x, 0.0, 0.0)).rg);\n"
+    "  m = max(m, texture(u_src, t + vec3(0.0,  1.0 / u_dim.y, 0.0)).rg);\n"
+    "  m = max(m, texture(u_src, t + vec3(0.0, -1.0 / u_dim.y, 0.0)).rg);\n"
+    "  m = max(m, texture(u_src, t + vec3(0.0, 0.0,  1.0 / u_dim.z)).rg);\n"
+    "  m = max(m, texture(u_src, t + vec3(0.0, 0.0, -1.0 / u_dim.z)).rg);\n"
+    "  float op = texture(u_occ_b, t).r;\n"
+    "  o_light = max(me, (m - 1.0 / 15.0) * (1.0 - step(0.5, op)));\n"
+    "}\n";
+static GLuint lb_compile(GLenum k, const char *src) {
+    GLuint sh = glCreateShader(k); glShaderSource(sh, 1, &src, NULL); glCompileShader(sh);
+    GLint ok = 0; glGetShaderiv(sh, GL_COMPILE_STATUS, &ok);
+    if (!ok) { char log[1024]; glGetShaderInfoLog(sh, 1024, NULL, log); fprintf(stderr, "cf: light bench shader: %s\n", log); return 0; }
+    return sh;
+}
+int64_t cf_light_bench(int64_t passes, int64_t bw, int64_t bh, int64_t bd) {
+    if (bw <= 0 || bh <= 0 || bd <= 0) return -1;
+    static int64_t lb_w = 0, lb_h = 0, lb_d = 0;
+    if (!g_lb_prog) {
+        GLuint vs = lb_compile(GL_VERTEX_SHADER, LB_VS);
+        GLuint gs = lb_compile(GL_GEOMETRY_SHADER, LB_GS);
+        GLuint fs = lb_compile(GL_FRAGMENT_SHADER, LB_FS);
+        if (!vs || !gs || !fs) return -1;
+        g_lb_prog = glCreateProgram();
+        glAttachShader(g_lb_prog, vs); glAttachShader(g_lb_prog, gs); glAttachShader(g_lb_prog, fs);
+        glLinkProgram(g_lb_prog);
+        GLint ok = 0; glGetProgramiv(g_lb_prog, GL_LINK_STATUS, &ok);
+        if (!ok) { char log[1024]; glGetProgramInfoLog(g_lb_prog, 1024, NULL, log); fprintf(stderr, "cf: light bench link: %s\n", log); return -1; }
+        glGenVertexArrays(1, &g_lb_vao);
+        glGenFramebuffers(1, &g_lb_fbo);
+        glGenQueries(1, &g_lb_q);
+        glGenTextures(2, g_lb_tex);
+    }
+    if (bw != lb_w || bh != lb_h || bd != lb_d) {
+        lb_w = bw; lb_h = bh; lb_d = bd;
+        for (int i = 0; i < 2; i++) {
+            glBindTexture(GL_TEXTURE_3D, g_lb_tex[i]);
+            glTexImage3D(GL_TEXTURE_3D, 0, GL_RG8, (GLsizei)bw, (GLsizei)bh, (GLsizei)bd, 0, GL_RG, GL_UNSIGNED_BYTE, NULL);
+            glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+        }
+    }
+    glUseProgram(g_lb_prog);
+    glUniform1i(glGetUniformLocation(g_lb_prog, "u_src"), 4);
+    glUniform1i(glGetUniformLocation(g_lb_prog, "u_occ_b"), 1);
+    glUniform3f(glGetUniformLocation(g_lb_prog, "u_dim"), (float)bw, (float)bh, (float)bd);
+    glBindVertexArray(g_lb_vao);
+    glBindFramebuffer(GL_FRAMEBUFFER, g_lb_fbo);
+    glViewport(0, 0, (GLsizei)bw, (GLsizei)bh);
+    glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE); glDisable(GL_BLEND);
+    /* Eight timed repetitions, minimum reported: a single one is dominated by
+     * whatever the driver was still doing (measured 13 ms for a band and 7.6 ms
+     * for a field eight times its size, in that order, which is only warm-up). */
+    GLuint64 best = 0;
+    for (int rep = 0; rep < 8; rep++) {
+        glBeginQuery(GL_TIME_ELAPSED, g_lb_q);
+        for (int64_t k = 0; k < passes; k++) {
+            int src = (int)(k & 1), dst = 1 - src;
+            glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_3D, g_lb_tex[src]);
+            glFramebufferTexture(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, g_lb_tex[dst], 0);
+            glDrawArraysInstanced(GL_TRIANGLES, 0, 3, (GLsizei)bd);
+        }
+        glEndQuery(GL_TIME_ELAPSED);
+        GLuint64 t = 0; glGetQueryObjectui64v(g_lb_q, GL_QUERY_RESULT, &t);
+        if (rep == 0 || t < best) best = t;
+    }
+    GLuint64 ns = best;
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glEnable(GL_DEPTH_TEST); glEnable(GL_CULL_FACE);
+    glUseProgram(g_prog);
+    glActiveTexture(GL_TEXTURE0);
+    return (int64_t)(ns / 1000);
 }
 
 /* Translucent pass: blend, keep depth test, no depth writes, no culling (water
@@ -1207,11 +1789,11 @@ static float pcl_rnd(int64_t a, int64_t b) {
     return (float)((h >> 40) & 0xFFFFFF) / 16777216.0f;
 }
 
-/* Skylight lookup, matching CubeForge.Light.index: x + 128 * (z + 128 * y),
+/* Skylight lookup, matching CubeForge.Light.index: x + CF_WORLD_SIDE * (z + CF_WORLD_SIDE * y),
  * and 0 (sealed) outside the world. */
 static int pcl_sky(const unsigned char *la, int x, int y, int z) {
-    if (x < 0 || x >= 128 || y < 0 || y >= 256 || z < 0 || z >= 128) return 0;
-    return la[(size_t)x + 128 * ((size_t)z + 128 * (size_t)y)];
+    if (x < 0 || x >= CF_WORLD_SIDE || y < 0 || y >= 256 || z < 0 || z >= CF_WORLD_SIDE) return 0;
+    return la[(size_t)x + CF_WORLD_SIDE * ((size_t)z + CF_WORLD_SIDE * (size_t)y)];
 }
 
 static void pcl_respawn(int64_t i, float ex, float ey, float ez, int64_t tick) {
@@ -1324,7 +1906,7 @@ void cf_precip_frame(void *light, int64_t live, int64_t snow,
  * quads is 98k vertices, far past what March can push per tick (GAPS G68). Drawn
  * through the marker path (unlit, untextured, depth-tested) at y = 259, under
  * the marker at 260 and above any terrain. */
-#define CF_BIOME_SLOT 248
+#define CF_BIOME_SLOT 504
 #define CF_BIOME_Y    259.0f
 /* Order matches CubeForge.Biome: tundra, taiga, grassland, forest, desert,
  * wetland, beach, alpine, oasis, grove. */
@@ -1376,7 +1958,7 @@ void cf_biome_map_upload(void *biomes, void *active, int64_t n) {
  * Same shape as the biome map, one layer above it. Species colours mirror
  * CubeForge.Species.colour_*; brightness is vigour. A column with no species
  * gets a degenerate quad so the draw count stays n*n*6. */
-#define CF_MYC_SLOT 244
+#define CF_MYC_SLOT 500
 static const float CF_MYC_RGB[7][3] = {
     {0.0f, 0.0f, 0.0f},
     {200/255.0f, 230/255.0f, 255/255.0f}, {120/255.0f, 90/255.0f, 60/255.0f}, {230/255.0f, 200/255.0f, 90/255.0f},
@@ -1437,7 +2019,7 @@ int64_t cf_spring_count(void) { return g_nsprings; }
  * White, short-lived, up then down. Fed by an emitter queue March fills from
  * the water actors' drop entries, by every spring's mouth bubbling, and by a
  * burst when a spring is placed. Same idioms as the precipitation pool. */
-#define CF_SPRAY_SLOT 246
+#define CF_SPRAY_SLOT 502
 #define CF_SPRAY_LIFE 0.6f
 static float  *g_spray = NULL;     /* x y z vx vy vz life, 7 floats */
 static float  *g_spray_vtx = NULL;
@@ -1936,11 +2518,14 @@ static double cf_brightness(double p) { double h = floor(p / 2.0); return (p - 2
  * A layer of 1000 or more is Texture.selflit_bias: the block lights its own
  * faces with its own colour, and the bias is how that one bit reaches here
  * without a second array through the FFI. Strip it and set effect 12. */
-static void cf_vert(float *o, double x, double y, double z, double u, double v, double layer, double shade, double face, int64_t col) {
+static void cf_vert(float *o, double x, double y, double z, double u, double v, double layer, double shade, double face) {
     double blk = floor(shade * 0.5);
-    /* the block light's colour index rides in bits 16 and up of fx (Vertex.light_colour_of) */
-    double fx = 255.0 + 65536.0 * (double)col;
-    if (layer >= 1000.0) { layer -= 1000.0; fx = 12.0 * 256.0 + 255.0 + 65536.0 * (double)col; }
+    /* No block-light colour in fx: a terrain face does not carry one any more.
+     * It used to ride here from bit 56 of the face key, which split the greedy
+     * merge by emitter; the fragment shader reads the colour out of the light
+     * texture instead (litColAt), so the face keeps nothing about its light. */
+    double fx = 255.0;
+    if (layer >= 1000.0) { layer -= 1000.0; fx = 12.0 * 256.0 + 255.0; }
     o[0] = (float)x; o[1] = (float)y; o[2] = (float)z; o[3] = (float)u; o[4] = (float)v;
     o[5] = (float)layer; o[6] = (float)(shade - 2.0 * blk); o[7] = (float)face; o[8] = (float)fx;
     o[9] = (float)(blk / 255.0);
@@ -2009,7 +2594,6 @@ static void cf_quad_into(float *o, int64_t d, int64_t sy, int64_t a, int64_t u, 
     int64_t id = key % 256;
     int64_t c0 = (key / 256) % 1024, c1 = (key / 262144) % 1024, c2 = (key / 268435456) % 1024, c3 = (key / 274877906944LL) % 1024;
     int64_t sp = (key / 281474976710656LL) % 256;
-    int64_t col = (key / 72057594037927936LL) % 4;   /* the face's block-light colour, bits 56.. */
     double layer;
     if (id >= 26 && id <= 46 && sp > 0) {
         int64_t k = (id - 26) / 3;
@@ -2062,40 +2646,40 @@ static void cf_quad_into(float *o, int64_t d, int64_t sy, int64_t a, int64_t u, 
     double face = (double)d;
     int flip = cf_brightness(S[0]) + cf_brightness(S[2]) < cf_brightness(S[1]) + cf_brightness(S[3]);
     if (flip) {
-        cf_vert(o + 0,  X[1], Y[1], Z[1], uw,  0.0, layer, S[1], face, col);
-        cf_vert(o + 10,  X[2], Y[2], Z[2], uw,  vh,  layer, S[2], face, col);
-        cf_vert(o + 20, X[3], Y[3], Z[3], 0.0, vh,  layer, S[3], face, col);
-        cf_vert(o + 30, X[1], Y[1], Z[1], uw,  0.0, layer, S[1], face, col);
-        cf_vert(o + 40, X[3], Y[3], Z[3], 0.0, vh,  layer, S[3], face, col);
-        cf_vert(o + 50, X[0], Y[0], Z[0], 0.0, 0.0, layer, S[0], face, col);
+        cf_vert(o + 0,  X[1], Y[1], Z[1], uw,  0.0, layer, S[1], face);
+        cf_vert(o + 10,  X[2], Y[2], Z[2], uw,  vh,  layer, S[2], face);
+        cf_vert(o + 20, X[3], Y[3], Z[3], 0.0, vh,  layer, S[3], face);
+        cf_vert(o + 30, X[1], Y[1], Z[1], uw,  0.0, layer, S[1], face);
+        cf_vert(o + 40, X[3], Y[3], Z[3], 0.0, vh,  layer, S[3], face);
+        cf_vert(o + 50, X[0], Y[0], Z[0], 0.0, 0.0, layer, S[0], face);
     } else {
-        cf_vert(o + 0,  X[0], Y[0], Z[0], 0.0, 0.0, layer, S[0], face, col);
-        cf_vert(o + 10,  X[1], Y[1], Z[1], uw,  0.0, layer, S[1], face, col);
-        cf_vert(o + 20, X[2], Y[2], Z[2], uw,  vh,  layer, S[2], face, col);
-        cf_vert(o + 30, X[0], Y[0], Z[0], 0.0, 0.0, layer, S[0], face, col);
-        cf_vert(o + 40, X[2], Y[2], Z[2], uw,  vh,  layer, S[2], face, col);
-        cf_vert(o + 50, X[3], Y[3], Z[3], 0.0, vh,  layer, S[3], face, col);
+        cf_vert(o + 0,  X[0], Y[0], Z[0], 0.0, 0.0, layer, S[0], face);
+        cf_vert(o + 10,  X[1], Y[1], Z[1], uw,  0.0, layer, S[1], face);
+        cf_vert(o + 20, X[2], Y[2], Z[2], uw,  vh,  layer, S[2], face);
+        cf_vert(o + 30, X[0], Y[0], Z[0], 0.0, 0.0, layer, S[0], face);
+        cf_vert(o + 40, X[2], Y[2], Z[2], uw,  vh,  layer, S[2], face);
+        cf_vert(o + 50, X[3], Y[3], Z[3], 0.0, vh,  layer, S[3], face);
     }
 }
 
-/* ── Relight box helpers: the light field is x + 128 * (z + 128 * y) ─────────
+/* ── Relight box helpers: the light field is x + CF_WORLD_SIDE * (z + CF_WORLD_SIDE * y) ──
  * Zero the box [x0..x1] x [y0..y1] x [z0..z1] of a light field: one memset per
  * row. Same rc == 1 contract as cf_u8_blit. Light.zero_box_go did this a byte
  * at a time; a tree's relight clears ~35k voxels twice (sky and block light). */
 void *cf_u8_zero_box(void *a, int64_t x0, int64_t x1, int64_t y0, int64_t y1, int64_t z0, int64_t z1) {
     int64_t rc = *(int64_t *)a;
     if (rc != 1) { fprintf(stderr, "cf_u8_zero_box: field is shared (rc=%lld); refusing to write in place\n", (long long)rc); abort(); }
-    if (x0 < 0 || y0 < 0 || z0 < 0 || x1 >= 128 || y1 >= 256 || z1 >= 128 || narr_len(a) < 4194304) {
+    if (x0 < 0 || y0 < 0 || z0 < 0 || x1 >= CF_WORLD_SIDE || y1 >= 256 || z1 >= CF_WORLD_SIDE || narr_len(a) < CF_WORLD_VOL) {
         fprintf(stderr, "cf_u8_zero_box: out of range\n"); abort();
     }
     unsigned char *d = (unsigned char *)narr_data(a);
     for (int64_t y = y0; y <= y1; y++)
         for (int64_t z = z0; z <= z1; z++)
-            memset(d + x0 + 128 * (z + 128 * y), 0, (size_t)(x1 - x0 + 1));
+            memset(d + x0 + CF_WORLD_SIDE * (z + CF_WORLD_SIDE * y), 0, (size_t)(x1 - x0 + 1));
     return a;
 }
 
-/* Mark, in a 1024-int marks array (slot cx + 8 * cz + 64 * sy), every chunk
+/* Mark, in a marks array of CF_CHUNK_SLOTS * 16 ints (slot cx + CF_WORLD_CHUNKS * cz + CF_CHUNK_SLOTS * sy), every chunk
  * section in which the two light fields differ inside the box. Light.mark_box
  * compared a voxel at a time in March; here a row is one memcmp and only a
  * differing row is walked. [marks] is consumed and returned; [a] and [b] are
@@ -2103,22 +2687,144 @@ void *cf_u8_zero_box(void *a, int64_t x0, int64_t x1, int64_t y0, int64_t y1, in
 void *cf_mark_box(void *marks, void *a, void *b, int64_t x0, int64_t x1, int64_t y0, int64_t y1, int64_t z0, int64_t z1) {
     int64_t rc = *(int64_t *)marks;
     if (rc != 1) { fprintf(stderr, "cf_mark_box: marks are shared (rc=%lld); refusing to write in place\n", (long long)rc); abort(); }
-    if (x0 < 0 || y0 < 0 || z0 < 0 || x1 >= 128 || y1 >= 256 || z1 >= 128 || narr_len(marks) < 1024) {
+    if (x0 < 0 || y0 < 0 || z0 < 0 || x1 >= CF_WORLD_SIDE || y1 >= 256 || z1 >= CF_WORLD_SIDE || narr_len(marks) < CF_CHUNK_SLOTS * 16) {
         fprintf(stderr, "cf_mark_box: out of range\n"); abort();
     }
-    int64_t need = x1 + 128 * (z1 + 128 * y1) + 1;
+    int64_t need = x1 + CF_WORLD_SIDE * (z1 + CF_WORLD_SIDE * y1) + 1;
     if (narr_len(a) < need || narr_len(b) < need) { fprintf(stderr, "cf_mark_box: fields too short\n"); abort(); }
     const unsigned char *pa = (const unsigned char *)narr_data(a);
     const unsigned char *pb = (const unsigned char *)narr_data(b);
     int64_t *m = (int64_t *)narr_data(marks);
     for (int64_t y = y0; y <= y1; y++)
         for (int64_t z = z0; z <= z1; z++) {
-            int64_t row = x0 + 128 * (z + 128 * y);
+            int64_t row = x0 + CF_WORLD_SIDE * (z + CF_WORLD_SIDE * y);
             if (memcmp(pa + row, pb + row, (size_t)(x1 - x0 + 1)) == 0) continue;
             for (int64_t x = x0; x <= x1; x++)
-                if (pa[row + x - x0] != pb[row + x - x0]) m[(x / 16) + 8 * (z / 16) + 64 * (y / 16)] = 1;
+                if (pa[row + x - x0] != pb[row + x - x0]) m[(x / 16) + CF_WORLD_CHUNKS * (z / 16) + CF_CHUNK_SLOTS * (y / 16)] = 1;
         }
     return marks;
+}
+
+/* ── Chunk store: how an actor gets a chunk without one crossing a message ───
+ * GAPS.md G44: NativeU8Arr is in the typechecker's non_sendable_types, so a
+ * message cannot carry a chunk and every WaterChunk actor regenerated its own
+ * from (cx, cz, seed) -- and its four neighbours too, for the edge mirrors.
+ * Five chunk generations per load, and a second implementation of world
+ * generation living inside the actor.
+ *
+ * Nothing here violates the rule: only integers cross the message. The main
+ * thread, which already has every chunk, leaves them where the actors can read
+ * them, and an actor asks by coordinate. The same shape as the lake tile memo
+ * above, and the same reason -- actors share a process and this is the only
+ * thing they can share.
+ *
+ * Keyed by WORLD chunk coordinate, so a chunk keeps its identity across a
+ * window shift. Enough slots for a 12-chunk window and its apron; the oldest
+ * entry is evicted, and a miss just means the actor generates as it used to. */
+/* Not CF_CHUNK_SLOTS: that is the mesh slot count (the window in
+ * chunks, squared). This is the chunk STORE's capacity. */
+#define CF_CHUNK_STORE_SLOTS 256
+#define CF_CHUNK_BYTES 65536
+static struct { int64_t cx, cz; unsigned char *bytes; int used; } g_chunks[CF_CHUNK_STORE_SLOTS];
+static int64_t g_chunk_next = 0;
+static pthread_mutex_t g_chunk_mu = PTHREAD_MUTEX_INITIALIZER;
+
+void cf_chunk_put(int64_t cx, int64_t cz, void *arr) {
+    if (narr_len(arr) < CF_CHUNK_BYTES) return;
+    const unsigned char *src = (const unsigned char *)narr_data(arr);
+    pthread_mutex_lock(&g_chunk_mu);
+    int slot = -1;
+    for (int i = 0; i < CF_CHUNK_STORE_SLOTS; i++)
+        if (g_chunks[i].used && g_chunks[i].cx == cx && g_chunks[i].cz == cz) { slot = i; break; }
+    if (slot < 0) {
+        slot = (int)(g_chunk_next % CF_CHUNK_STORE_SLOTS);
+        g_chunk_next++;
+    }
+    if (!g_chunks[slot].bytes) g_chunks[slot].bytes = (unsigned char *)malloc(CF_CHUNK_BYTES);
+    if (g_chunks[slot].bytes) {
+        memcpy(g_chunks[slot].bytes, src, CF_CHUNK_BYTES);
+        g_chunks[slot].cx = cx; g_chunks[slot].cz = cz; g_chunks[slot].used = 1;
+    }
+    pthread_mutex_unlock(&g_chunk_mu);
+}
+
+/* Fill [out] -- CF_CHUNK_BYTES plus ONE, the last byte coming back 1 on a hit
+ * and 0 on a miss, so the test and the fetch are one call and cannot race. */
+void *cf_chunk_get(void *out, int64_t cx, int64_t cz) {
+    int64_t rc = *(int64_t *)out;
+    if (rc != 1) { fprintf(stderr, "cf_chunk_get: destination is shared (rc=%lld)\n", (long long)rc); abort(); }
+    if (narr_len(out) < CF_CHUNK_BYTES + 1) { fprintf(stderr, "cf_chunk_get: destination too small\n"); abort(); }
+    unsigned char *d = (unsigned char *)narr_data(out);
+    d[CF_CHUNK_BYTES] = 0;
+    pthread_mutex_lock(&g_chunk_mu);
+    for (int i = 0; i < CF_CHUNK_STORE_SLOTS; i++)
+        if (g_chunks[i].used && g_chunks[i].cx == cx && g_chunks[i].cz == cz) {
+            memcpy(d, g_chunks[i].bytes, CF_CHUNK_BYTES);
+            d[CF_CHUNK_BYTES] = 1;
+            break;
+        }
+    pthread_mutex_unlock(&g_chunk_mu);
+    return out;
+}
+
+/* ── Lake tile cache ─────────────────────────────────────────────────────────
+ * CubeForge.Lakes.tile pours a priority-flood over a 128x128 tile: 157-214 ms
+ * measured. Every water actor called it on WLoad, so 144 actors poured the
+ * same handful of tiles -- the whole cost of a chunk reload, and the 35-110 ms
+ * frame on the first water tick after a window shift.
+ *
+ * The pour is a pure function of (seed, tx, tz), so it is memoised here: the
+ * actors share one process, and this is the only place they can share anything
+ * (a message may not carry a native array -- GAPS G44).
+ *
+ * cf_lake_get is one call, not a hit test followed by a fetch, so two threads
+ * cannot race between them: the hit flag is the LAST byte of the caller's
+ * array, which is sized one longer than the tile for it. Called from actor
+ * threads, so both entry points take the lock. */
+#define CF_LAKE_SLOTS 32
+static struct { int64_t seed, tx, tz; unsigned char *bytes; size_t n; int used; } g_lake[CF_LAKE_SLOTS];
+static int64_t g_lake_next = 0;
+static pthread_mutex_t g_lake_mu = PTHREAD_MUTEX_INITIALIZER;
+
+void *cf_lake_get(void *out, int64_t seed, int64_t tx, int64_t tz) {
+    int64_t rc = *(int64_t *)out;
+    if (rc != 1) { fprintf(stderr, "cf_lake_get: destination is shared (rc=%lld)\n", (long long)rc); abort(); }
+    int64_t len = narr_len(out);
+    if (len < 1) { fprintf(stderr, "cf_lake_get: destination too small\n"); abort(); }
+    size_t n = (size_t)(len - 1);            /* the last byte is the hit flag */
+    unsigned char *d = (unsigned char *)narr_data(out);
+    d[n] = 0;
+    pthread_mutex_lock(&g_lake_mu);
+    for (int i = 0; i < CF_LAKE_SLOTS; i++) {
+        if (g_lake[i].used && g_lake[i].seed == seed && g_lake[i].tx == tx && g_lake[i].tz == tz && g_lake[i].n == n) {
+            memcpy(d, g_lake[i].bytes, n);
+            d[n] = 1;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_lake_mu);
+    return out;
+}
+
+void cf_lake_put(int64_t seed, int64_t tx, int64_t tz, void *arr) {
+    size_t n = (size_t)narr_len(arr);
+    if (n == 0) return;
+    const unsigned char *src = (const unsigned char *)narr_data(arr);
+    pthread_mutex_lock(&g_lake_mu);
+    /* already there (another thread poured the same tile): keep the first */
+    for (int i = 0; i < CF_LAKE_SLOTS; i++)
+        if (g_lake[i].used && g_lake[i].seed == seed && g_lake[i].tx == tx && g_lake[i].tz == tz) {
+            pthread_mutex_unlock(&g_lake_mu); return;
+        }
+    int i = (int)(g_lake_next % CF_LAKE_SLOTS);
+    g_lake_next++;
+    unsigned char *b = (unsigned char *)malloc(n);
+    if (!b) { pthread_mutex_unlock(&g_lake_mu); return; }
+    memcpy(b, src, n);
+    free(g_lake[i].bytes);
+    g_lake[i].bytes = b; g_lake[i].n = n;
+    g_lake[i].seed = seed; g_lake[i].tx = tx; g_lake[i].tz = tz; g_lake[i].used = 1;
+    pthread_mutex_unlock(&g_lake_mu);
 }
 
 /* Diagnostic: the refcount word of a March array, as the extern sees it (the
@@ -2287,7 +2993,7 @@ static void cf_shift_particles(int64_t dx, int64_t dz) {
     for (int64_t i = 0; i < g_nemit; i++) { g_emit[i][0] -= (int32_t)(16 * dx); g_emit[i][2] -= (int32_t)(16 * dz); }
     for (int64_t i = 0; i < g_nsprings; ) {
         g_springs[i][0] -= (int32_t)(16 * dx); g_springs[i][2] -= (int32_t)(16 * dz);
-        if (g_springs[i][0] < 0 || g_springs[i][0] >= 128 || g_springs[i][2] < 0 || g_springs[i][2] >= 128) {
+        if (g_springs[i][0] < 0 || g_springs[i][0] >= CF_WORLD_SIDE || g_springs[i][2] < 0 || g_springs[i][2] >= CF_WORLD_SIDE) {
             g_springs[i][0] = g_springs[g_nsprings - 1][0]; g_springs[i][1] = g_springs[g_nsprings - 1][1]; g_springs[i][2] = g_springs[g_nsprings - 1][2];
             g_nsprings--;
         } else i++;

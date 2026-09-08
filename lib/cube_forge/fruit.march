@@ -86,7 +86,7 @@ mod CubeForge.Fruit do
 
   -- ── World edits ──────────────────────────────────────────────────────────
   pfn in_world(x : Int, y : Int, z : Int) : Bool do
-    if x < 0 || z < 0 || x >= 128 || z >= 128 do false else y >= 0 && y < 256 end
+    if x < 0 || z < 0 || x >= 192 || z >= 192 do false else y >= 0 && y < 256 end
   end
   -- Gathered, then written in one World.set_blocks (a chunk copy per chunk, not per block).
   pfn stamp_go(w : CubeForge.World.World, sp : Int, bx : Int, base : Int, bz : Int, seed : Int, i : Int, rows : Int, acc : List(Int)) : List(Int) do

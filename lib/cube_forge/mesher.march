@@ -46,11 +46,14 @@ mod CubeForge.Mesher do
 
   -- Mask key: block id in the low 8 bits, four 10-bit corners in mask (u, v)
   -- order, then the column's shown species in bits 48..55. Two faces merge only
-  -- when all of it agrees: block, light at every corner, and species.
-  fn key_of(id : Int, c0 : Int, c1 : Int, c2 : Int, c3 : Int, sp : Int) : Int do key_of_col(id, c0, c1, c2, c3, sp, 0) end
-  doc "A face key carrying the block light's COLOUR (Light.colour_warm / colour_cold) in bits 56 and 57, above the species: two faces lit by different emitters do not merge, and the shim reads it into the fx word so the shader can tint the glow."
-  fn key_of_col(id : Int, c0 : Int, c1 : Int, c2 : Int, c3 : Int, sp : Int, col : Int) : Int do
-    id + 256 * c0 + 262144 * c1 + 268435456 * c2 + 274877906944 * c3 + 281474976710656 * sp + 72057594037927936 * col
+  -- when all of it agrees. The corners USED to carry light and ambient
+  -- occlusion, which is what stopped otherwise identical faces from merging;
+  -- they are now the same constant everywhere (flat_corner) and the shape is
+  -- kept because the overlays still pack colour through the same field.
+  doc "The corner every terrain face now carries: full skylight, no ambient occlusion, no block light. The shader replaces both channels; this is only what the vertex holds so the overlays can keep using the attribute."
+  fn flat_corner() : Int do pack_corner(15, 3, 0) end
+  fn key_of(id : Int, c0 : Int, c1 : Int, c2 : Int, c3 : Int, sp : Int) : Int do
+    id + 256 * c0 + 262144 * c1 + 268435456 * c2 + 274877906944 * c3 + 281474976710656 * sp
   end
   fn key_col(k : Int) : Int do (k / 72057594037927936) % 4 end
   fn key_sp(k : Int) : Int do (k / 281474976710656) % 256 end
@@ -174,47 +177,6 @@ mod CubeForge.Mesher do
     else if z < 0 do C.get(n, x, y, z + 16)
     else if z >= 16 do C.get(s, x, y, z - 16)
     else C.get(c, x, y, z) end end end end end
-  end
-
-  -- One corner of a face. [nx,ny,nz] is the voxel just outside the face; [a] and
-  -- [b] are the two tangent steps toward this corner, so the corner is touched
-  -- by n, n+a, n+b and n+a+b. AO counts the three occluders; light is the mean
-  -- over those of the four that are not opaque (n never is).
-  --
-  -- Occluders are read from the world occupancy field rather than the five-chunk
-  -- neighbourhood. The diagonal occluder can leave the chunk on BOTH axes at
-  -- once, which lands in a chunk the mesher is not given; reading it as air used
-  -- to soften ambient occlusion on the four corner columns of every chunk.
-  -- Occupancy is world-space, so the seam is simply gone.
-  @[no_alloc]
-  pfn occluded(occ : NativeU8Arr, oxi : Int, ozi : Int, x : Int, y : Int, z : Int) : Bool do
-    let wx = oxi + x
-    let wz = ozi + z
-    if wx < 0 || wx >= 128 || y < 0 || y >= 256 || wz < 0 || wz >= 128 do false
-    else NativeArray.get_u8(occ, CubeForge.Light.occ_index(wx, y, wz)) == CubeForge.Light.occ_solid() end
-  end
-
-  pfn corner_pack(la : NativeU8Arr, lb : NativeU8Arr, sps : NativeU8Arr, occ : NativeU8Arr, oxi : Int, ozi : Int, nx : Int, ny : Int, nz : Int, aux : Int, auz : Int, avy : Int, avz : Int) : Int do
-    let s1x = nx + aux
-    let s1z = nz + auz
-    let s2y = ny + avy
-    let s2z = nz + avz
-    let ccx = nx + aux
-    let ccy = ny + avy
-    let ccz = nz + auz + avz
-    let o1 = occluded(occ, oxi, ozi, s1x, ny, s1z)
-    let o2 = occluded(occ, oxi, ozi, nx, s2y, s2z)
-    let oc = occluded(occ, oxi, ozi, ccx, ccy, ccz)
-    let ln = CubeForge.Light.get(la, oxi + nx, ny, ozi + nz)
-    let l1 = if o1 do 0 else CubeForge.Light.get(la, oxi + s1x, ny, ozi + s1z) end
-    let l2 = if o2 do 0 else CubeForge.Light.get(la, oxi + nx, s2y, ozi + s2z) end
-    let lc = if oc do 0 else CubeForge.Light.get(la, oxi + ccx, ccy, ozi + ccz) end
-    let bn = CubeForge.Light.get(lb, oxi + nx, ny, ozi + nz)
-    let b1 = if o1 do 0 else CubeForge.Light.get(lb, oxi + s1x, ny, ozi + s1z) end
-    let b2 = if o2 do 0 else CubeForge.Light.get(lb, oxi + nx, s2y, ozi + s2z) end
-    let bc = if oc do 0 else CubeForge.Light.get(lb, oxi + ccx, ccy, ozi + ccz) end
-    let cnt = 1 + (if o1 do 0 else 1 end) + (if o2 do 0 else 1 end) + (if oc do 0 else 1 end)
-    pack_corner((ln + l1 + l2 + lc) / cnt, corner_ao(o1, o2, oc), (bn + b1 + b2 + bc) / cnt)
   end
 
   -- Opaque block at (x, y, z): emit each face whose neighbour is air or water.
@@ -385,16 +347,18 @@ mod CubeForge.Mesher do
       let uz = t1z(d)
       let vy = t2y(d)
       let vz = t2z(d)
-      -- corners c0..c3 at (du, dv) = (-,-) (+,-) (+,+) (-,+) in mask order
-      let k0 = corner_pack(la, lb, sps, occ, oxi, ozi, nx, ny, nz, 0 - ux, 0 - uz, 0 - vy, 0 - vz)
-      let k1 = corner_pack(la, lb, sps, occ, oxi, ozi, nx, ny, nz, ux, uz, 0 - vy, 0 - vz)
-      let k2 = corner_pack(la, lb, sps, occ, oxi, ozi, nx, ny, nz, ux, uz, vy, vz)
-      let k3 = corner_pack(la, lb, sps, occ, oxi, ozi, nx, ny, nz, 0 - ux, 0 - uz, vy, vz)
+      -- Light is NOT in the key any more. It is sampled per fragment from the
+      -- light texture (smoothLight in the shader, which is corner_pack moved
+      -- across), so two faces that differ only in their light merge -- and that
+      -- is where a third of the vertices went: 517 098 against 334 878.
+      --
+      -- The vertex keeps its shade attribute, because the overlays and the HUD
+      -- push colour through it; terrain writes the constant below, full sky and
+      -- no block light, and the shader overwrites both channels.
+      let kc = flat_corner()
       -- mycelium takes its texture from the column's shown species
       let sp = if C.is_myc(id) do NativeArray.get_u8(sps, oxi + x + CubeForge.Biome.side_of(sps) * (ozi + z)) else 0 end
-      -- the block light's colour is read at the voxel just outside the face:
-      -- one lookup, and the one the light actually reaches the face from
-      key_of_col(id, k0, k1, k2, k3, sp, CubeForge.Light.colour(lb, oxi + nx, ny, ozi + nz))
+      key_of(id, kc, kc, kc, kc, sp)
     end
   end
 
