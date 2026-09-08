@@ -2494,6 +2494,85 @@ void *cf_u8_blit(void *dst, int64_t di, void *src, int64_t si, int64_t n) {
     return dst;
 }
 
+/* One chunk's occupancy written into the world occupancy field, as
+ * Light.occ_chunk_go does it a voxel at a time in March. [lut] is a 256-byte
+ * table of Light.occ_value(id) built on the March side, so the block table
+ * stays the one in Chunk and this does not become a second copy of it.
+ *
+ * A chunk's cells are ordered x fastest, then z, then y; the occupancy field is
+ * x + CF_WORLD_SIDE * (y + 256 * z). So a run of 16 cells is 16 contiguous
+ * bytes at both ends, and the loop is 16 lookups per run rather than three
+ * divisions and a bounds-checked store per voxel.
+ *
+ * Same rc == 1 contract as cf_u8_blit. */
+void *cf_occ_fill_chunk(void *o, void *cells, void *lut, int64_t cx, int64_t cz, int64_t stop) {
+    int64_t rc = *(int64_t *)o;
+    if (rc != 1) { fprintf(stderr, "cf_occ_fill_chunk: field is shared (rc=%lld); refusing to write in place\n", (long long)rc); abort(); }
+    if (narr_len(o) < CF_WORLD_VOL || narr_len(cells) < 65536 || narr_len(lut) < 256
+        || cx < 0 || cz < 0 || 16 * cx + 15 >= CF_WORLD_SIDE || 16 * cz + 15 >= CF_WORLD_SIDE
+        || stop < 0 || stop > 65536) {
+        fprintf(stderr, "cf_occ_fill_chunk: out of range\n"); abort();
+    }
+    unsigned char *d = (unsigned char *)narr_data(o);
+    const unsigned char *c = (const unsigned char *)narr_data(cells);
+    const unsigned char *t = (const unsigned char *)narr_data(lut);
+    int64_t ny = stop / 256;                 /* whole 16x16 layers */
+    for (int64_t ly = 0; ly < ny; ly++)
+        for (int64_t lz = 0; lz < 16; lz++) {
+            const unsigned char *src = c + (ly << 8) + (lz << 4);
+            unsigned char *dst = d + 16 * cx + CF_WORLD_SIDE * (ly + 256 * (16 * cz + lz));
+            for (int k = 0; k < 16; k++) dst[k] = t[src[k]];
+        }
+    return o;
+}
+
+/* The chunk's topmost non-air layer, as Light.chunk_top computes it: a chunk's
+ * cells run x fastest, then z, then y, so scanning down from the last cell
+ * stops at the highest non-air voxel and its layer is the answer.
+ *
+ * In March this is one bounds-checked get_idx per voxel, and above the terrain
+ * it is all air: with a surface near y 133 that is ~32k wasted reads a chunk,
+ * and Light.sky_floor does it for all 144. Here the scan is eight bytes at a
+ * time, so the empty sky costs a load per 8 voxels. */
+int64_t cf_chunk_top(void *cells) {
+    int64_t n = narr_len(cells);
+    if (n > CF_CHUNK_BYTES) n = CF_CHUNK_BYTES;
+    const unsigned char *c = (const unsigned char *)narr_data(cells);
+    int64_t i = n - 8;
+    for (; i >= 0; i -= 8) {
+        uint64_t w;
+        memcpy(&w, c + i, 8);
+        if (w) {
+            for (int64_t k = i + 7; k >= i; k--) if (c[k]) return k / 256;
+        }
+    }
+    for (int64_t k = i + 7; k >= 0; k--) if (c[k]) return k / 256;
+    return 0;
+}
+
+/* World.hash_voxels: the rolling hash h = (h * 131 + cell) % 1073741789 over
+ * every cell of a chunk, starting from [h]. The same value, byte for byte --
+ * it is written into saves and compared against an evicted chunk's stored hash,
+ * so it may not drift. In March it is 65536 bounds-checked reads and a modulo
+ * per byte; a shift hashes ~24 chunks (the band in, the evictions out). */
+int64_t cf_hash_voxels(void *cells, int64_t h) {
+    int64_t n = narr_len(cells);
+    if (n > CF_CHUNK_BYTES) n = CF_CHUNK_BYTES;
+    const unsigned char *c = (const unsigned char *)narr_data(cells);
+    for (int64_t i = 0; i < n; i++) h = (h * 131 + (int64_t)c[i]) % 1073741789;
+    return h;
+}
+
+/* Diagnostic: how many bytes of two equal-length byte arrays differ. */
+int64_t cf_u8_diff(void *a, void *b) {
+    int64_t n = narr_len(a) < narr_len(b) ? narr_len(a) : narr_len(b);
+    const unsigned char *x = (const unsigned char *)narr_data(a);
+    const unsigned char *y = (const unsigned char *)narr_data(b);
+    int64_t bad = 0;
+    for (int64_t i = 0; i < n; i++) if (x[i] != y[i]) bad++;
+    return bad;
+}
+
 /* Sun level 0..1, eye position, look direction, and the flashlight toggle.
  * Called once per frame before the world passes. */
 void cf_gfx_set_light(double sun, double ex, double ey, double ez,

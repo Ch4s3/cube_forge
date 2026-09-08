@@ -197,10 +197,20 @@ mod CubeForge.Light do
   -- y: scanning one chunk downward from the end stops at its topmost opaque
   -- voxel. The chunk is fetched once -- World.block_at per voxel here costs more
   -- than the scan it is meant to save (GAPS.md G64, learned the hard way twice).
-  pfn chunk_top(c : CubeForge.Chunk.Chunk, i : Int) : Int do
+  doc "Reference: the downward scan a voxel at a time. chunk_top is the shim's; chunk_top_test pins them equal."
+  fn chunk_top_ref(c : CubeForge.Chunk.Chunk, i : Int) : Int do
     if i < 0 do 0
     else if CubeForge.Chunk.get_idx(c, i) != 0 do i / chunk_layer()
-    else chunk_top(c, i - 1) end end
+    else chunk_top_ref(c, i - 1) end end
+  end
+  -- The scan itself is in the shim (cf_chunk_top): above the terrain the chunk
+  -- is all air, so this walked ~32k empty voxels a chunk and sky_floor did it
+  -- for all 144 -- 8.2 ms to compute one number. chunk_top_test pins the two
+  -- together over a generated world.
+  doc "The chunk's topmost non-air layer; [i] is the cell to scan down from and is 65535 on every path but the reference's own."
+  fn chunk_top(c : CubeForge.Chunk.Chunk, i : Int) : Int do
+    if i == 65535 do CubeForge.Ffi.Window.chunk_top(CubeForge.Chunk.raw(c))
+    else chunk_top_ref(c, i) end
   end
   pfn sky_floor_go(w : CubeForge.World.World, ci : Int, n : Int, acc : Int) : Int do
     if ci >= n * n do acc
@@ -1026,9 +1036,26 @@ mod CubeForge.Light do
     sweep_box_lists(lb1, w, clampi(16 * cx0 - r, 0, size_x() - 1), clampi(16 * cx1 + 15 + r, 0, size_x() - 1), 0, top,
                     clampi(16 * cz0 - r, 0, size_z() - 1), clampi(16 * cz1 + 15 + r, 0, size_z() - 1))
   end
+  doc "Reference: the band filled a voxel at a time in March. occ_band is the shim's; occ_band_test pins them equal."
+  fn occ_band_ref(o : NativeU8Arr, w : CubeForge.World.World, cx0 : Int, cx1 : Int, cz0 : Int, cz1 : Int) : NativeU8Arr do
+    occ_band_go(o, w, cx0, cx1, cz0, cz1, cx0, cz0, (sky_floor(w) + 1) * chunk_layer())
+  end
+
+  -- The same band through the shim: one call per chunk, with occ_value as a
+  -- 256-byte table so the block table stays Chunk's and is not copied into C.
+  pfn occ_lut_go(t : NativeU8Arr, i : Int) : NativeU8Arr do
+    if i >= 256 do t else occ_lut_go(NativeArray.set_u8(t, i, occ_value(i)), i + 1) end
+  end
+  doc "occ_value for every block id, as a 256-byte table the shim can index."
+  fn occ_lut() : NativeU8Arr do occ_lut_go(NativeArray.make_u8(256, 0), 0) end
+  pfn occ_band_c_go(o : NativeU8Arr, w : CubeForge.World.World, lut : NativeU8Arr, cx0 : Int, cx1 : Int, cz0 : Int, cz1 : Int, cx : Int, cz : Int, stop : Int) : NativeU8Arr do
+    if cz > cz1 do o
+    else if cx > cx1 do occ_band_c_go(o, w, lut, cx0, cx1, cz0, cz1, cx0, cz + 1, stop)
+    else occ_band_c_go(CubeForge.Ffi.Window.occ_fill_chunk(o, C.raw(CubeForge.World.chunk_at(w, cx, cz)), lut, cx, cz, stop), w, lut, cx0, cx1, cz0, cz1, cx + 1, cz, stop) end end
+  end
   doc "The occupancy of the band of chunks [cx0, cx1] x [cz0, cz1] written into [o] (a fresh shift_occ result)."
   fn occ_band(o : NativeU8Arr, w : CubeForge.World.World, cx0 : Int, cx1 : Int, cz0 : Int, cz1 : Int) : NativeU8Arr do
-    occ_band_go(o, w, cx0, cx1, cz0, cz1, cx0, cz0, (sky_floor(w) + 1) * chunk_layer())
+    occ_band_c_go(o, w, occ_lut(), cx0, cx1, cz0, cz1, cx0, cz0, (sky_floor(w) + 1) * chunk_layer())
   end
 
   doc "Byte stored for an occluding voxel. 255, not 1: the GPU side is a normalized GL_R8 texture, where a stored 1 samples back as 1/255 and would never register as solid."
@@ -1041,7 +1068,8 @@ mod CubeForge.Light do
     -- A chunk's flat index is ordered by y, so stopping past the highest non-air
     -- layer skips the empty sky. The buffer starts zeroed, which is exactly the
     -- right answer up there.
-    occ_go(new(), w, 0, CubeForge.World.side(w), (sky_floor(w) + 1) * chunk_layer())
+    let n = CubeForge.World.side(w)
+    occ_band_c_go(new(), w, occ_lut(), 0, n - 1, 0, n - 1, 0, 0, (sky_floor(w) + 1) * chunk_layer())
   end
 
 end

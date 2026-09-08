@@ -127,6 +127,48 @@ mod CubeForge.Test.Stream do
     end
   end
 
+  -- Three loops moved into the shim when the fields stage was profiled: the
+  -- chunk-top scan (8.2 ms of sky_floor), the generation hash (4.2 ms over the
+  -- band) and the occupancy fill. Each keeps its March original as the
+  -- reference, and each of these pins the two together over a real world --
+  -- the hash especially, which is written into saves and compared against an
+  -- evicted chunk's stored hash, so it may not drift by a single value.
+  pfn tops_agree(w : CubeForge.World.World, n : Int, i : Int) : Int do
+    if i >= n * n do -1
+    else
+      let c = W.chunk_at(w, i % n, i / n)
+      if L.chunk_top_ref(c, 65535) == L.chunk_top(c, 65535) do tops_agree(w, n, i + 1) else i end
+    end
+  end
+  pfn hashes_agree(w : CubeForge.World.World, n : Int, i : Int) : Int do
+    if i >= n * n do -1
+    else
+      let c = W.chunk_at(w, i % n, i / n)
+      if W.hash_voxels_ref(c, 0, 7) == W.hash_voxels(c, 0, 7) do hashes_agree(w, n, i + 1) else i end
+    end
+  end
+
+  describe "the loops the shim took over" do
+    test "chunk_top in the shim is the March scan, chunk for chunk" do
+      let w0 = W.generate(8, seed(), 1)
+      Test.assert_eq_int(tops_agree(w0, 8, 0), -1, "every chunk's top agrees (the index of the first that does not)")
+      Test.assert_eq_int(L.chunk_top(C.new(), 65535), 0, "an empty chunk's top is layer 0")
+    end
+    test "the generation hash in the shim is the March hash, value for value" do
+      let w0 = W.generate(8, seed(), 1)
+      Test.assert_eq_int(hashes_agree(w0, 8, 0), -1, "every chunk's hash agrees (the index of the first that does not)")
+      Test.assert_eq_int(W.hash_voxels(W.chunk_at(w0, 2, 3), 0, 7), W.hash_voxels_ref(W.chunk_at(w0, 2, 3), 0, 7), "and one of them spelled out")
+    end
+    test "the occupancy band the shim fills is the band March filled" do
+      let w0 = W.generate(8, seed(), 1)
+      let h = W.shift_chunks(w0, 1, 0, seed(), 1, Nil)
+      let w1 = W.shift_fields(h, 1, 0, 1)
+      let o = W.occupancy(w1)
+      let ref = L.occ_band_ref(L.shift_occ(W.occupancy(w0), 1, 0), w1, W.band_x0(8, 1), W.band_x1(8, 1), W.band_z0(8, 0), W.band_z1(8, 0))
+      Test.assert_eq_int(CubeForge.Ffi.Window.u8_diff(o, ref), 0, "not one byte of the occupancy field differs")
+    end
+  end
+
   describe "the fields shift" do
     test "the biome field slides and scans the band" do
       let w0 = W.generate(8, seed(), 1)

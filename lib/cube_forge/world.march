@@ -523,18 +523,42 @@ mod CubeForge.World do
   end
   -- The generation hashes after the shift: a moved chunk keeps its hash, a
   -- restored one brings its own, a generated one is hashed now (0.15 ms).
-  pfn shift_hash_go(gh : NativeIntArr, cs1 : CubeForge.Tree.Tree(CubeForge.Chunk.Chunk), out : NativeIntArr, n : Int, dx : Int, dz : Int, ox1 : Int, oz1 : Int, ca : List(Evicted), i : Int) : NativeIntArr do
+  pfn int_head(l : List(Int), d : Int) : Int do
+    match l do
+      Nil -> d
+      Cons(h, _) -> h
+    end
+  end
+  pfn int_tail(l : List(Int)) : List(Int) do
+    match l do
+      Nil -> Nil
+      Cons(_, r) -> r
+    end
+  end
+  -- [hs] is one hash per band index, ascending, as band_indices_of orders them
+  -- and band_hashes computes them: the band walks past here in that same
+  -- ascending order, so the head is always this index's. A restored chunk
+  -- brings its own hash and its entry in [hs] goes unused -- a restore is rare
+  -- and hashing it anyway costs less than threading a second list.
+  pfn shift_hash_go(gh : NativeIntArr, out : NativeIntArr, n : Int, dx : Int, dz : Int, ox1 : Int, oz1 : Int, ca : List(Evicted), hs : List(Int), i : Int) : NativeIntArr do
     if i >= n * n do out
     else
       let sx = i % n + dx
       let sz = i / n + dz
-      let v = if sx >= 0 && sx < n && sz >= 0 && sz < n do NativeArray.get_int(gh, sx + n * sz)
-              else match cached_go(ca, ox1 + i % n, oz1 + i / n) do
-                Cons(e, _) -> ev_hash(e)
-                Nil -> hash_voxels(CubeForge.Tree.get(cs1, i), 0, 7)
-              end end
-      shift_hash_go(gh, cs1, NativeArray.set_int(out, i, v), n, dx, dz, ox1, oz1, ca, i + 1)
+      if sx >= 0 && sx < n && sz >= 0 && sz < n do
+        shift_hash_go(gh, NativeArray.set_int(out, i, NativeArray.get_int(gh, sx + n * sz)), n, dx, dz, ox1, oz1, ca, hs, i + 1)
+      else
+        let v = match cached_go(ca, ox1 + i % n, oz1 + i / n) do
+                  Cons(e, _) -> ev_hash(e)
+                  Nil -> int_head(hs, 0)
+                end
+        shift_hash_go(gh, NativeArray.set_int(out, i, v), n, dx, dz, ox1, oz1, ca, int_tail(hs), i + 1)
+      end
     end
+  end
+  doc "The generation hash of every chunk the band brought in, ascending, hashed in parallel. One chunk's hash is 0.22 ms and there are twelve; in series that was 2.7 ms at the head of the fields stage, ahead of its pmap."
+  fn band_hashes(cs1 : CubeForge.Tree.Tree(CubeForge.Chunk.Chunk), n : Int, dx : Int, dz : Int, workers : Int) : List(Int) do
+    List.pmap_n(band_indices_of(n, dx, dz), fn i -> hash_voxels(CubeForge.Tree.get(cs1, i), 0, 7), workers)
   end
   -- The dirty flags after the shift: a moved chunk keeps its flag, a restored
   -- chunk is dirty (it differs from its generation), a generated one clean.
@@ -699,7 +723,7 @@ mod CubeForge.World do
             let c = 16 * n
             let sh1 = restore_shown_go(shift_shown_go(sh, NativeArray.make_u8(c * c, 0), c, 16 * dx, 16 * dz, 0), rs, n, ox1, oz1)
             let dt1 = shift_dirty_go(dt, NativeArray.make_u8(n * n, 0), n, dx, dz, ox1, oz1, ca1, 0)
-            let gh1 = shift_hash_go(gh, cs1, NativeArray.make_int(n * n, 0), n, dx, dz, ox1, oz1, ca1, 0)
+            let gh1 = shift_hash_go(gh, NativeArray.make_int(n * n, 0), n, dx, dz, ox1, oz1, ca1, band_hashes(cs1, n, dx, dz, workers), 0)
             let ca2 = drop_restored(ca1, rs)
             -- The three fields slide independently, and the occupancy band goes
             -- with the occupancy slide: reading it needs only the chunks, which
@@ -726,6 +750,24 @@ mod CubeForge.World do
   doc "Stages one and two together: every caller that does not care about frame budget."
   fn shift_blocks(w : World, dx : Int, dz : Int, seed : Int, workers : Int, blobs : List(Blob)) : World do
     shift_fields(shift_chunks(w, dx, dz, seed, workers, blobs), dx, dz, workers)
+  end
+
+  doc "Bench only (CF_FIELDS_BENCH): the three per-chunk arrays a shift slides -- shown, dirty, hash -- timed apart from the fields. Returns a value derived from all three so none of it is dead code."
+  fn bench_arrays(w : World, dx : Int, dz : Int, which : Int, workers : Int) : Int do
+    match w do
+      World(cs, _, _, _, sh, n, _, ox, oz, dt, _, rs, _, gh) ->
+        let c = 16 * n
+        if which == 0 do
+          let sh1 = restore_shown_go(shift_shown_go(sh, NativeArray.make_u8(c * c, 0), c, 16 * dx, 16 * dz, 0), rs, n, ox, oz)
+          NativeArray.get_u8(sh1, 0)
+        else if which == 1 do
+          let dt1 = shift_dirty_go(dt, NativeArray.make_u8(n * n, 0), n, dx, dz, ox, oz, Nil, 0)
+          NativeArray.get_u8(dt1, 0)
+        else
+          let gh1 = shift_hash_go(gh, NativeArray.make_int(n * n, 0), n, dx, dz, ox, oz, Nil, band_hashes(cs, n, dx, dz, workers), 0)
+          NativeArray.get_int(gh1, 0)
+        end end
+    end
   end
 
   doc "Stage two of a shift: re-seed the band that [shift_chunks] brought in. Only the seed -- sky columns and emitters -- because the GPU does the spreading (cf_light_flood), and it derives what the CPU sweep derived, proved voxel for voxel on the dump frame."
@@ -760,9 +802,20 @@ mod CubeForge.World do
 
   -- A rolling hash over every voxel of every chunk. Four million reads, so this
   -- is a diagnostic run once on demand at the dump frame, never on the frame path.
-  pfn hash_voxels(c : CubeForge.Chunk.Chunk, i : Int, h : Int) : Int do
+  doc "Reference: the rolling hash a voxel at a time. hash_voxels is the shim's; the hash_voxels test pins them equal."
+  fn hash_voxels_ref(c : CubeForge.Chunk.Chunk, i : Int, h : Int) : Int do
     if i >= 65536 do h
-    else hash_voxels(c, i + 1, (h * 131 + C.get_idx(c, i)) % 1073741789) end
+    else hash_voxels_ref(c, i + 1, (h * 131 + C.get_idx(c, i)) % 1073741789) end
+  end
+  -- The loop is in the shim (cf_hash_voxels). Not a diagnostic any more: a
+  -- shift hashes ~24 chunks -- the band coming in (shift_hash_go) and the
+  -- chunks going out (evict_go) -- and 1.6M March-level reads with a modulo
+  -- each was 4.2 ms of the fields stage. The VALUE may not drift: it is
+  -- written into saves and compared against an evicted chunk's stored hash.
+  -- hash_voxels_test pins the two together.
+  doc "The generation hash of a chunk's cells from [h]; [i] is the starting cell and is 0 on every path but the reference's own."
+  fn hash_voxels(c : CubeForge.Chunk.Chunk, i : Int, h : Int) : Int do
+    if i == 0 do CubeForge.Ffi.Window.hash_voxels(C.raw(c), h) else hash_voxels_ref(c, i, h) end
   end
   pfn hash_chunks(w : World, ci : Int, n : Int, h : Int) : Int do
     if ci >= n * n do h

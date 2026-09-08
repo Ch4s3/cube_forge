@@ -3813,3 +3813,76 @@ The lesson is the profile's. "It is one chunk generation, so splitting the band
 cannot help" was a reasonable inference from the stage's cost and the band's
 size, and it was wrong, and it survived two commits because nobody measured the
 generation on its own. The coordinates in the log were what settled it.
+
+## The fields stage: 16.5 ms, and none of it was the fields
+
+`fields` was the last stage near the line, and the plan was to split it in two.
+The split was priced first, with `CF_FIELDS_BENCH=1` -- each piece of
+`World.shift_fields` run on its own, in the order the stage runs them, in all
+four shift directions. What came back was not a stage that needed splitting.
+
+| piece | before | after |
+|---|---|---|
+| `shown` slide | 0.008 ms | 0.008 |
+| `dirty` slide | 0.002 | 0.002 |
+| **generation hashes** | **4.2** | **2.0** |
+| skylight slide (9.4 MB) | 0.25-0.9 | 0.25-0.9 |
+| block-light slide (9.4 MB) | 0.27-0.9 | 0.27-0.9 |
+| occupancy slide (9.4 MB) | 0.23-1.2 | 0.23-1.2 |
+| **`occ_band`** | **10.8** | **0.55** |
+| -- of which `sky_floor` | 8.2 | 0.29 |
+
+Pmapped, that predicts hashes + max(leg) = 4.2 + 11.4 = 15.6 ms against a stage
+that measured 15.38, so the pieces are the stage.
+
+**The three 9.4 MB field slides are not the cost.** They run at about 40 GB/s --
+memcpy speed -- and together come to under a millisecond. The story about
+memory traffic, and the toroidal CPU fields that would have removed it, was
+about work that was never there.
+
+What was there:
+
+- **`Light.sky_floor` -- 8.2 ms to compute the integer 133.** It walks all 144
+  chunks through `chunk_top`, which scans *down from cell 65535 through empty
+  sky*, one bounds-checked `get_idx` at a time, until it meets a non-air voxel.
+  The surface is near y 133, so that is ~32k wasted reads a chunk and 4.6
+  million a call. It is called from `occ_band`, from `Biome.scan`, from the
+  light sweep and seed paths, and from `Light.occupancy`.
+- **`World.hash_voxels` -- 4.2 ms.** Its own comment reads "a diagnostic run
+  once on demand at the dump frame, never on the frame path", and
+  `shift_hash_go` called it on the frame path for each of the twelve incoming
+  chunks, in series, ahead of the stage's pmap.
+- **2.6 ms of the fill the stage exists for.**
+
+Three loops moved into the shim, each keeping its March original as a public
+reference and a test pinning the two together over a generated world:
+`cf_chunk_top` (a backwards eight-byte scan, so empty sky costs one load per
+eight voxels), `cf_hash_voxels` (the same rolling hash -- the value is written
+into saves and compared against an evicted chunk's stored hash, so it may not
+drift by one), and `cf_occ_fill_chunk` (a run of sixteen at a time, with
+`occ_value` passed in as a 256-byte table so the block table stays Chunk's and
+is not copied into C). The band's twelve hashes then went through `pmap_n`.
+
+| stage | before | after |
+|---|---|---|
+| chunks | 9.6 ms | 9.6 ms |
+| **fields** | **16.5** | **5.3** |
+| light | 7.2 | 7.0 |
+| mesh | 5.3 | 5.6 |
+
+Medians over eleven shifts. Identical behaviour, and checked as such rather than
+assumed: on the pinned scenario every oracle and every state hash comes back
+bit-for-bit what the previous commit gives -- light 117, occupancy 5/1, seed
+104, `biome 462447413 myc 885438814 world 728250889 mesh 523764710` -- and the
+mesh the deferred queue drains matches a full rebuild. 508 tests, 0 failures.
+
+The split was never built. It would have moved an 8.2 ms scan and a 4.2 ms
+diagnostic into a different frame and bought a sixth frame of staging latency
+to hide them in.
+
+Two things the profile turned up that are still open. `Light.occupancy` at
+startup did not move (39 ms), though it lost the same 8 ms of `sky_floor` --
+its cost is somewhere this has not looked. And the twelve-way `pmap_n` over the
+band hashes returned 4.2 -> 2.0 ms where twelve independent 0.22 ms tasks over
+fourteen workers should approach 0.4; the same shape as the `chunks` stage's
+task overhead, and not yet explained.
