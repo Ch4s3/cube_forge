@@ -907,8 +907,16 @@ mod CubeForge.Fauna do
   end
 
   -- ── Drawing ───────────────────────────────────────────────────────────────
-  doc "Mesh slot for the fauna buffer. 192..243 are free; the chunk meshes end at 191 and the overlays start at 244."
-  fn slot() : Int do 243 end
+  -- The fauna slot was 243, free while the window was 8 chunks a side and the
+  -- chunk meshes ended at 191. The 12-chunk window pushed them to 431, so 243 became water
+  -- chunk 99 and every frame's fauna upload landed in that chunk's vertex
+  -- buffer: an empty fauna blob left the buffer with no data store while the
+  -- shim's capacity bookkeeping still claimed one, and the first window shift
+  -- that gave chunk 99 water drew 36 vertices out of it, straight through a
+  -- null pointer inside the GL driver. world_size_test now checks the whole
+  -- named list against the chunk range.
+  doc "Mesh slot for the fauna buffer, one of the named slots above the chunk meshes -- see the slot map in cube_forge.march, which lists it."
+  fn slot() : Int do 499 end
 
   doc "Stamp species [sp] in pose [p] with its CENTRE at (x, y, z), heading [yaw] radians (0 is +x), at [shade] (Vertex.pack_shade), at an explicit size."
   fn stamp_s(b : CubeForge.F32Buf.F32Buf, s : Poses, sp : Int, p : Int, x : Float, y : Float, z : Float, yaw : Float, shade : Float, scale : Float) : CubeForge.F32Buf.F32Buf do

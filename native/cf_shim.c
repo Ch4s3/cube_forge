@@ -638,6 +638,16 @@ static unsigned char g_vbo_cur[CF_MAX_MESHES];
 static int64_t g_vbo_cap[2][CF_MAX_MESHES];   /* floats allocated per buffer; grown, never shrunk */
 static inline GLuint vbo_of(int64_t slot) { return g_vbo_cur[slot] ? g_vbo_b[slot] : g_vbo[slot]; }
 /* A VAO per mesh slot was tried (2026-09-05 perf pass): 192 chunk draws a frame as one bind and one draw each. A/B over six alternating runs was noise, so the shared VAO stays. */
+/* Replace a mesh slot's whole data store and record what it now holds. Every
+ * glBufferData on a slot goes through here: g_vbo_cap is what cf_gfx_draw
+ * checks a vertex count against and what cf_gfx_upload_begin decides to
+ * reallocate on, so a store written behind its back is a store those two
+ * believe the wrong size of. */
+static void slot_buffer_data(int64_t slot, int64_t nfloats, const void *data, GLenum usage) {
+    glBindBuffer(GL_ARRAY_BUFFER, vbo_of(slot));
+    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(nfloats * 4), data, usage);
+    g_vbo_cap[g_vbo_cur[slot]][slot] = nfloats;
+}
 static int g_debug = -1;
 static inline int cf_debug(void) { if (g_debug < 0) g_debug = getenv("CF_DEBUG") != NULL; return g_debug; }
 static GLint  g_u_species = -1;
@@ -758,9 +768,14 @@ void cf_gfx_upload(int64_t slot, void *arr, int64_t nfloats) {
     if (slot < 0 || slot >= CF_MAX_MESHES) return;
     g_off[slot][0] = g_off[slot][1] = 0.0f;   /* baked at the current local origin */
     if (nfloats > narr_len(arr)) nfloats = narr_len(arr);
+    /* glBufferData REPLACES the store, so the capacity after this is exactly
+     * nfloats -- smaller than it was whenever this upload is smaller than the
+     * last, and zero for an empty one. Left at the old high-water mark it told
+     * cf_gfx_upload_begin the store was big enough to skip reallocating, so the
+     * slot's parts went into a buffer with no room for them (or no store at
+     * all) and the draw read past its end. */
     g_vbo_cur[slot] ^= 1;
-    glBindBuffer(GL_ARRAY_BUFFER, vbo_of(slot));
-    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(nfloats * 4), narr_data(arr), GL_STATIC_DRAW);
+    slot_buffer_data(slot, nfloats, narr_data(arr), GL_STATIC_DRAW);
     if (cf_debug()) { const float *f = narr_data(arr); fprintf(stderr, "cf: upload slot=%lld nfloats=%lld arrlen=%lld first=%g %g %g %g %g %g %g glerr=%d\n", (long long)slot, (long long)nfloats, (long long)narr_len(arr), f[0],f[1],f[2],f[3],f[4],f[5],f[6], (int)glGetError()); }
 }
 
@@ -860,6 +875,17 @@ void cf_gfx_draw(int64_t slot, int64_t nverts) {
     glEnableVertexAttribArray(4); glVertexAttribPointer(4, 1, GL_FLOAT, GL_FALSE, stride, (void *)(7 * 4));
     glEnableVertexAttribArray(5); glVertexAttribPointer(5, 1, GL_FLOAT, GL_FALSE, stride, (void *)(8 * 4));
     glEnableVertexAttribArray(6); glVertexAttribPointer(6, 1, GL_FLOAT, GL_FALSE, stride, (void *)(9 * 4));
+    /* A vertex count that outruns the bound store is not a GL error the driver
+     * reports: it reads off the end of the data store, and with no store at all
+     * it dereferences NULL inside glDrawArrays and takes the process with it (no
+     * March frame on the stack, so nothing names the cause). A stale count is a
+     * bug in the caller either way; dropping the draw makes it a missing mesh to
+     * be found rather than a crash with no backtrace. */
+    if (nverts * CF_VERT_FLOATS > g_vbo_cap[g_vbo_cur[slot]][slot]) {
+        fprintf(stderr, "cf: draw slot=%lld wants %lld verts, buffer holds %lld floats -- skipped\n",
+                (long long)slot, (long long)nverts, (long long)g_vbo_cap[g_vbo_cur[slot]][slot]);
+        return;
+    }
     glDrawArrays(GL_TRIANGLES, 0, (GLsizei)nverts);
     if (cf_debug()) { fprintf(stderr, "cf: draw slot=%lld nverts=%lld glerr=%d prog=%u vao=%u\n", (long long)slot, (long long)nverts, (int)glGetError(), g_prog, g_vao); }
 }
@@ -1821,10 +1847,7 @@ void cf_precip_frame(void *light, int64_t live, int64_t snow,
         pcl_vert(v + 5 * CF_VERT_FLOATS, x - qx, y + qh, z - qz, cr, cg, cb, fx);
     }
 
-    glBindBuffer(GL_ARRAY_BUFFER, g_vbo[CF_PRECIP_SLOT]);
-    glBufferData(GL_ARRAY_BUFFER,
-                 (GLsizeiptr)(live * CF_PRECIP_VTX * (int64_t)sizeof(float)),
-                 g_pcl_vtx, GL_STREAM_DRAW);
+    slot_buffer_data(CF_PRECIP_SLOT, live * CF_PRECIP_VTX, g_pcl_vtx, GL_STREAM_DRAW);
 }
 
 /* ── Biome map ──────────────────────────────────────────────────────────────
@@ -1876,8 +1899,7 @@ void cf_biome_map_upload(void *biomes, void *active, int64_t n) {
         pcl_vert(v + 4 * CF_VERT_FLOATS, x1, CF_BIOME_Y, z1, c[0], c[1], c[2], 255.0f);
         pcl_vert(v + 5 * CF_VERT_FLOATS, x1, CF_BIOME_Y, z0, c[0], c[1], c[2], 255.0f);
     }
-    glBindBuffer(GL_ARRAY_BUFFER, g_vbo[CF_BIOME_SLOT]);
-    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(cells * 6 * CF_VERT_FLOATS * (int64_t)sizeof(float)), g_biome_vtx, GL_STATIC_DRAW);
+    slot_buffer_data(CF_BIOME_SLOT, cells * 6 * CF_VERT_FLOATS, g_biome_vtx, GL_STATIC_DRAW);
 }
 
 /* ── Mycelium map overlay ──────────────────────────────────────────────────
@@ -1920,8 +1942,7 @@ void cf_myc_map_upload(void *species, void *vigour, int64_t n) {
         pcl_vert(v + 4 * CF_VERT_FLOATS, x1, y, z1, r, g, bl, 255.0f);
         pcl_vert(v + 5 * CF_VERT_FLOATS, x1, y, z0, r, g, bl, 255.0f);
     }
-    glBindBuffer(GL_ARRAY_BUFFER, g_vbo[CF_MYC_SLOT]);
-    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(cells * 6 * CF_VERT_FLOATS * (int64_t)sizeof(float)), g_myc_vtx, GL_STATIC_DRAW);
+    slot_buffer_data(CF_MYC_SLOT, cells * 6 * CF_VERT_FLOATS, g_myc_vtx, GL_STATIC_DRAW);
 }
 
 /* ── Springs ────────────────────────────────────────────────────────────────
@@ -2002,8 +2023,7 @@ int64_t cf_spray_frame(double dt, int64_t tick) {
         pcl_vert(v + 5 * CF_VERT_FLOATS, p[0] - h, p[1] + h, p[2],     0.95f, 0.97f, 1.0f, fx);
     }
     if (g_spray_live > 0) {
-        glBindBuffer(GL_ARRAY_BUFFER, g_vbo[CF_SPRAY_SLOT]);
-        glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(g_spray_live * CF_PRECIP_VTX * (int64_t)sizeof(float)), g_spray_vtx, GL_STREAM_DRAW);
+        slot_buffer_data(CF_SPRAY_SLOT, g_spray_live * CF_PRECIP_VTX, g_spray_vtx, GL_STREAM_DRAW);
     }
     return g_spray_live * 6;
 }

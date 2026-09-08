@@ -289,8 +289,13 @@ mod CubeForge do
   -- 0..143 opaque chunks, 144..287 water, 288..431 foliage, then the named slots
   -- below. They are all one array in the shim (CF_MAX_MESHES = 512), so a slot
   -- used twice silently overwrites; keep this list complete. They were bare
-  -- numbers at the top of a 256-slot array before the window grew, which is
-  -- exactly the collision this naming now prevents.
+  -- numbers at the top of a 256-slot array before the window grew, and naming
+  -- them here was meant to prevent exactly that collision -- but a name only
+  -- helps if it is on this list, and Fauna's was not: it sat at 243, which the
+  -- 12-chunk window turned into water chunk 99. world_size_test asserts the
+  -- whole list against the chunk range now, so the next window growth fails a
+  -- test instead of a draw call.
+  -- 499 fauna template blob (CubeForge.Fauna.slot)
   fn myc_map_slot() : Int do 500 end
   fn spray_slot() : Int do 502 end
   fn menu_slot() : Int do 503 end

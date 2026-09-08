@@ -3886,3 +3886,70 @@ its cost is somewhere this has not looked. And the twelve-way `pmap_n` over the
 band hashes returned 4.2 -> 2.0 ms where twelve independent 0.22 ms tasks over
 fourteen workers should approach 0.4; the same shape as the `chunks` stage's
 task overhead, and not yet explained.
+
+## The SIGSEGV at frame 449: a mesh slot with two owners (2026-09-08)
+
+`CF_AUTOROAM` gave the scripted walk somewhere to go, and the walk found a
+crash. On the pinned scenario
+
+    MARCH_PIN_MAIN=1 CF_NOMOUSE=1 CF_VSYNC=0 CF_SEED=7 CF_SUN=45 CF_TIME=0 \
+        CF_AUTOSTART=1 CF_AUTOWALK=1 CF_AUTOJUMP=1 CF_AUTOROAM=500 \
+        CF_FRAME_LOG=1 CF_FRAMES=8000 .march/build/release/cube_forge
+
+the process died at frame 449 with exit 139, no message and no crash report in
+`~/Library/Logs/DiagnosticReports`. It reproduced on `origin/main` with the
+roam knob alone, so none of the fields or light work was involved.
+
+**The silence had two causes and they hid each other.** `lldb` cannot pause
+this process to attach, and the runtime's own SIGSEGV handler -- the one that
+grows a green thread's stack lazily -- ends its non-growth path in `_exit(128 +
+signo)` rather than re-raising, deliberately (a re-raise from a green thread's
+altstack wedges the thread in an uninterruptible kernel wait). So a genuine
+fault gets a shell-visible 139 and nothing else. `lldb` CAN launch the process,
+though, and a temporary SIGSEGV/SIGBUS probe in the shim that walked the frame
+pointer chain and then chained to the runtime's handler printed both the
+lazy-growth faults (all handled, ~1 KB of stack at a time) and the one that was
+not:
+
+    CFSEGV sig=11 code=2 addr=0x24 pc=... gleDrawArraysOrElements_ExecCore
+      glDrawArrays_ACC_GL3Exec / cf_gfx_draw / cf_gfx_draw_translucent / draw_water
+
+`0x24` is 36 bytes -- attribute 6's offset in the 10-float vertex. A null data
+store plus an attribute offset: the draw was reading vertices out of a buffer
+that had none.
+
+**The bug.** `CubeForge.Fauna.slot()` was 243, and its doc string said why:
+"192..243 are free; the chunk meshes end at 191". True for an 8-chunk window.
+The 12-chunk window made the chunk meshes 3 x 144 = 432 slots, and 243 became
+water chunk 99. The slot map in `cube_forge.march` warns that "a slot used twice
+silently overwrites" and asks that the list be kept complete -- Fauna's slot was
+never on it.
+
+So every frame, `Win.gfx_upload(Fauna.slot(), ...)` replaced water chunk 99's
+vertex buffer with the fauna blob. `cf_gfx_upload` calls `glBufferData`, which
+REPLACES the store, but it did not update `g_vbo_cap` -- so an empty fauna blob
+left the buffer with no data store at all while the capacity bookkeeping still
+claimed 1564 floats. A buffer-size check added to `cf_gfx_draw` caught it one
+draw before the fault:
+
+    CFDRAW OVERRUN slot=243 nverts=36 need=1440 bufsize=0 vbo=232 cur=0 cap=1564
+
+The window shift is what made it fatal rather than merely wrong: until chunk 99
+had water, its count was zero and nothing was drawn.
+
+**Fixed** by moving the fauna blob to slot 499, in the named block above the
+chunk meshes, and listing it in the slot map. Two hardenings on the same path,
+neither of which is the fix: every `glBufferData` on a mesh slot now goes
+through `slot_buffer_data`, which records the capacity it just allocated (four
+shim-side uploads -- precipitation, spray, the biome and mycelium overlays --
+were writing stores behind the bookkeeping's back the same way); and
+`cf_gfx_draw` drops a draw whose vertex count outruns the bound store rather
+than handing it to the driver, so the next stale count is a missing mesh with a
+line on stderr instead of a crash with no backtrace.
+
+`world_size_test` now asserts every named slot against `3 * World.size()^2` and
+against itself, which fails on the old 243 and is the test the next window
+growth will trip. 509 tests, 0 failures; `scratch/frame_budget.sh` 12.57 ms
+against its 16 ms budget with the drained mesh matching a full rebuild; and the
+scenario above runs all 8000 frames, exit 0, three times over, with the new
+draw guard never firing.
