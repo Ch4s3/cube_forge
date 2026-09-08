@@ -3726,3 +3726,90 @@ If it is wanted, the cheap version is copy-on-send -- allow the array in a
 payload and have the runtime deep-copy it, which is semantically a snapshot and
 needs no linearity. For this project it would save the 64 KB memcpy the store
 already costs, and nothing else: the store is what actually removed the cost.
+
+
+## Toolchain updated, and the water seed drift priced (2026-09-07)
+
+**March 0.3.0 from `origin/main` (680790da)**, built and installed. It carries
+`march-language/march#424` (native arrays finally have a header tag, so a
+generic walker no longer reads their payload as pointers) and, more usefully
+here, **G80** -- a closure's captures are released when its environment dies.
+505 tests, fixed-camera 109.8 fps, worst frame 32.3 ms: no change either way
+that this project can measure.
+
+### The water seed drift: fixed, measured, reverted
+
+Water moves through `set_cells`, which changes a column's sunlight -- air is
+clear, water attenuates by two -- and nothing re-seeded those columns, so the
+seed the GPU floods was stale by 64-134 sky voxels. The documented "water moves
+without a relight" approximation, in its new clothes.
+
+Re-seeding the touched chunks each water tick fixes it exactly:
+
+| | before | after |
+|---|---|---|
+| seed vs a fresh seed | sky 64-100 | **0** |
+| live texture vs a CPU flood, fully converged | sky 65-134 | **sky 0, block 0** |
+| **fixed-camera fps** | **109.8** | **80.5** |
+| water tick apply | ~2 ms | 13.2 ms med, 21 max |
+
+**Reverted.** 27% of the frame rate to correct 0.001% of the voxels, none of
+them anywhere a player looks, is not a trade worth making. The approximation
+stays, now with a number on it.
+
+The cost is not the seeding itself but its shape: re-seeding is per COLUMN and
+cheap, while the copy-on-write copy is per CALL and 9.4 MB. Batching the whole
+tick into one copy (which this did) still re-seeds every flagged chunk, most of
+which ticked without changing a cell. The affordable version collects the
+columns that actually took a write -- `apply_reply` already has them, it is what
+`sync_water_occ` is handed -- and re-seeds exactly those in one batch. That is
+the shape to build if the drift ever matters; it is not worth building for a
+defect nobody can see.
+
+
+## The chunks stage was task overhead, not generation (2026-09-07)
+
+`chunks` was the last stage meaningfully over budget at 27 ms, and the assumption
+all along -- written into two commit messages -- was that it is one chunk
+generation's latency and therefore irreducible. **It was not.** Profiling
+`Chunk.generate_lakes` by phase says a chunk costs:
+
+| phase | share | median |
+|---|---|---|
+| fill | 48% | 1.30 ms |
+| heights | 34% | 0.42 ms |
+| caves | 16% | 0.00 (4.17 when a chunk has any) |
+| lakes | 2% | 0.09 ms |
+| **an in-window chunk, total** | | **~1.9 ms** |
+
+The profile's tail looked alarming -- totals of 42, 34, 27 ms -- until the
+coordinates went into the log with the times: every slow chunk was at
+`wx`/`wz` of `-16` or `192`, which is *outside* a 12-chunk window. Those are the
+apron neighbours a water actor generates on a store miss, timed while competing
+for threads. In-window chunks are uniformly ~2 ms.
+
+Twelve chunks at 2 ms over fourteen workers is a couple of milliseconds. The
+stage measured 27. The difference was the pmap: it fanned out **all n\*n = 144
+indices**, of which 132 existed only to copy a chunk reference the tree already
+held. The task overhead was the stage.
+
+Now only the band goes through `pmap_n` (twelve tasks), and the list the new
+tree is built from is walked sequentially, taking a moved chunk straight out of
+the old tree.
+
+| stage | before | after |
+|---|---|---|
+| chunks | 27.1 ms | **9.6 ms** |
+| fields | 16.7 | 16.5 |
+| light | 7.1 | 7.2 |
+| mesh | 5.4 | 5.3 |
+| commit | 9.1 | 11.0 |
+| worst frame over 19 899 | ~42 | **31.4 ms** |
+
+**Every stage of a shift is now at or under the 16.67 ms budget.** Fixed-camera
+fps is unchanged at 110 -- this was never throughput, it was one stage's latency.
+
+The lesson is the profile's. "It is one chunk generation, so splitting the band
+cannot help" was a reasonable inference from the stage's cost and the band's
+size, and it was wrong, and it survived two commits because nobody measured the
+generation on its own. The coordinates in the log were what settled it.
