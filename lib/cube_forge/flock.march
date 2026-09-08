@@ -111,8 +111,24 @@ mod CubeForge.Flock do
   fn fish_depth() : Float do 2.0 end
   doc "How far a flock strays from its home before it is steered back."
   fn home_radius() : Float do 14.0 end
-  doc "Closer than this and flockmates push apart. It is a function of the SPECIES because it was a constant 1.6 blocks and a Mossmoa is 4.6 blocks long: nine of them inside a fourteen-block home radius, pushing apart only once their centres were closer than a third of a body, stood in each other. A flock reads as clumped when its spacing is set by a number smaller than its animals."
-  fn separation(sp : Int) : Float do 1.6 +. Fa.body_scale(sp) *. 1.6 end
+  doc """
+  Closer than this and flockmates push apart: a floor of 1.6 blocks, or one and
+  a half body lengths for anything big enough to need more.
+
+  It was a flat 1.6 for every species, and a Mossmoa is 4.6 blocks long: nine
+  of them inside a fourteen-block home radius pushed apart only once their
+  centres were closer than a third of a body, so they stood in each other.
+
+  The floor is why this is a max and not a sum. The first pass at it was
+  `1.6 + 1.6 * scale`, which also gives the moa its room but widens the radius
+  for every mid-sized flyer that did not need it -- and a wider radius is a
+  wider circle of neighbours all pushing at once, which a Ridgehawk flock spent
+  on turning rather than going anywhere: measured over fifty seconds it walked
+  a path of 9.2 blocks where the flat 1.6 walked 26.1. Under a max, anything
+  under a blocks body keeps exactly the spacing it always had, bit for bit,
+  and only the animals the fix was for are touched.
+  """
+  fn separation(sp : Int) : Float do if Fa.body_scale(sp) *. 1.5 < 1.6 do 1.6 else Fa.body_scale(sp) *. 1.5 end end
   doc "The player closer than this puts the flock up and away. What makes scanning a skill rather than a formality."
   fn flee_radius() : Float do 7.0 end
   doc "Blocks a second, feeding."

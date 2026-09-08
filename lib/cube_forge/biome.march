@@ -741,11 +741,11 @@ mod CubeForge.Biome do
   tick kept. Before this, every tick eased and reclassified all 16,384 columns
   to discover that almost none of them had moved.
   """
-  fn tick(f : Field, w : CubeForge.World.World, seed : Int, rate : Float, pulls : NativeF32Arr, prow : NativeU8Arr, scale : Float) : Field do
+  fn tick(f : Field, w : CubeForge.World.World, _seed : Int, rate : Float, pulls : NativeF32Arr, prow : NativeU8Arr, scale : Float) : Field do
     tick_slice(tick_begin(f, w), w, rate, pulls, prow, scale, 0, cols(w) * cols(w))
   end
   doc "The whole tick with the network in view (see tick_slice_net): for tests."
-  fn tick_net(f : Field, w : CubeForge.World.World, seed : Int, rate : Float, pulls : NativeF32Arr, prow : NativeU8Arr, scale : Float,
+  fn tick_net(f : Field, w : CubeForge.World.World, _seed : Int, rate : Float, pulls : NativeF32Arr, prow : NativeU8Arr, scale : Float,
               sps : NativeU8Arr, vg : NativeF32Arr, drow : NativeU8Arr) : Field do
     tick_slice_net(tick_begin(f, w), w, rate, pulls, prow, scale, 0, cols(w) * cols(w), sps, vg, drow)
   end

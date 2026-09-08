@@ -149,7 +149,7 @@ mod CubeForge.Poi do
     else if k == k_canyon() do 0.66 else if k == k_atoll() do 0.38 else if k == k_delta() do 0.74 else 0.60 end end end end end end
   end
   doc "How wide the country's edge band is."
-  fn cty_band(k : Int) : Float do 0.10 end
+  fn cty_band(_k : Int) : Float do 0.10 end
   doc "How far outside a chunk an instance may sit and still write into it."
   fn reach(k : Int) : Int do
     if k == k_butte() do 12 else if k == k_arch() do 26 else if k == k_cavern() do 54

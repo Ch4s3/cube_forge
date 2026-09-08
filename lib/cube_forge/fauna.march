@@ -89,7 +89,7 @@ mod CubeForge.Fauna do
   doc "End of the season, in percent of the year. The Frostgull is a winter bird on this coast; the Marshheron a summer one. They are never here together."
   fn season_hi(sp : Int) : Int do if sp == 4 do 100 else if sp == 5 do 50 else 100 end end end
   doc "The direction a migrant leaves in, x part: the gull goes north up the coast, the heron south. It arrives from the same way, so a departing flock and an arriving one cross the same sky."
-  fn leave_dx(sp : Int) : Float do 0.0 end
+  fn leave_dx(_sp : Int) : Float do 0.0 end
   fn leave_dz(sp : Int) : Float do if sp == 4 do 0.0 -. 1.0 else 1.0 end end
 
   doc "Whether [sp] is here at [year], 0..1 through the year."

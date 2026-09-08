@@ -566,7 +566,7 @@ mod CubeForge.Water do
     else nb_chunk(x, z, cx, cz, seed, lk) end
   end
 
-  pfn load_sim(cx : Int, cz : Int, n : Int, seed : Int) : Sim do
+  pfn load_sim(cx : Int, cz : Int, _n : Int, seed : Int) : Sim do
     let t0 = CubeForge.Ffi.Window.time()
     let lk = CubeForge.Lakes.tile_of_chunk(seed, cx, cz)
     let t1 = CubeForge.Ffi.Window.time()
@@ -607,7 +607,7 @@ mod CubeForge.Water do
   the chunk the frame loop has already read. When March lets a message carry a
   byte array, the frame loop sends the chunk and this function goes away.
   """
-  fn load_sim_from_slot(cx : Int, cz : Int, n : Int, seed : Int, d : String, slot : Int) : Result(Sim, String) do
+  fn load_sim_from_slot(cx : Int, cz : Int, _n : Int, seed : Int, d : String, slot : Int) : Result(Sim, String) do
     match Save.read_chunk_any(d, slot, cx, cz) do
       Err(e) -> Err(e)
       Ok(c) ->

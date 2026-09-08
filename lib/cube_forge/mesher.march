@@ -332,8 +332,13 @@ mod CubeForge.Mesher do
   -- The face key for direction d of the block [id] at (x, y, z): 0 when there
   -- is no visible face, else the block id plus the four corner light/AO values
   -- in mask (u, v) order. Directions: 0 +y, 1 -y, 2 +x, 3 -x, 4 +z, 5 -z.
+  -- [_la], [_lb] and [_occ] are vestigial: the corners carried light and
+  -- ambient occlusion until the shader started sampling the light texture per
+  -- fragment, and every caller still threads all three down to here, where
+  -- nothing reads them. Taking them out means editing eight signatures and
+  -- their call sites in the meshing hot path, which is its own change.
   pfn key_for(c : CubeForge.Chunk.Chunk, n : CubeForge.Chunk.Chunk, s : CubeForge.Chunk.Chunk, e : CubeForge.Chunk.Chunk, w : CubeForge.Chunk.Chunk,
-              la : NativeU8Arr, lb : NativeU8Arr, sps : NativeU8Arr, occ : NativeU8Arr, oxi : Int, ozi : Int, x : Int, y : Int, z : Int, d : Int, id : Int) : Int do
+              _la : NativeU8Arr, _lb : NativeU8Arr, sps : NativeU8Arr, _occ : NativeU8Arr, oxi : Int, ozi : Int, x : Int, y : Int, z : Int, d : Int, id : Int) : Int do
     let nb = if d == 0 do nb_get(c, n, s, e, w, x, y + 1, z) else if d == 1 do nb_get(c, n, s, e, w, x, y - 1, z)
              else if d == 2 do nb_get(c, n, s, e, w, x + 1, y, z) else if d == 3 do nb_get(c, n, s, e, w, x - 1, y, z)
              else if d == 4 do nb_get(c, n, s, e, w, x, y, z + 1) else nb_get(c, n, s, e, w, x, y, z - 1) end end end end end

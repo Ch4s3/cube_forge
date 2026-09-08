@@ -5116,3 +5116,61 @@ now a haze the world fades into rather than a line it stops at.
 
 567 tests, lint --strict clean; the pinned scenario's mesh hash is unchanged at
 74139816, as it should be for a change that is all shading and behaviour.
+
+## A bucket you cannot put down, a flock that will not go anywhere (2026-09-08)
+
+**Mining under water collected water.** `Raycast.blocks_ray` takes an
+`ignore_water`, and its own comment says it is for "while the eye is submerged,
+and whenever no water item is held". The caller only ever passed the second
+half: `!Chunk.is_water(Inv.selected_id(inv0))`. Above water that is right --
+the ray falls through water so the bed can be worked from the surface. Under
+water, holding water, the cell in front of your face IS water, so the ray
+stopped on it and every swing scooped another bucket. One bucket put you in
+that state and nothing took you out of it. The condition now includes the half
+that was written down and never implemented.
+
+**"Birds are flying in little circles", and it was mine.** The separation fix
+in the entry above -- flockmates push apart at 1.6 blocks, which is a third of
+a Mossmoa, so make it `1.6 + 1.6 * body_scale` -- gives the moa its room and
+also widens the radius for every mid-sized flyer that never needed it. A wider
+radius is a wider circle of neighbours all pushing at once, and a flock spends
+that on turning rather than on going anywhere.
+
+Measured over fifty seconds, the path animal 0 walks against the straight-line
+distance it ends up from where it started:
+
+| Ridgehawk, eight of them | path | displacement |
+|---|---|---|
+| flat 1.6, as it was | 26.1 | 5.6 |
+| `1.6 + 1.6 * scale` | **9.2** | 4.0 |
+| `max(1.6, 1.5 * scale)` | 24.5 | **12.0** |
+
+A max rather than a sum, and the floor does the work: anything with a body
+under a block long gets exactly 1.6 and is bit-for-bit what it always was --
+the Grasspipit rows are identical to the flat-1.6 rows, not merely close --
+while a Mossmoa still gets 6.9 blocks and a Stoneratite 4.8. Only the animals
+the fix was for are touched.
+
+Two things worth keeping from how this was found. The first metric was net
+heading rotation, on the theory that a circling bird winds up a turn a lap: it
+read 5.5 turns for the Ridgehawk and pointed at the right culprit, then read
+106 turns for a variant that had actually brought the flock to a near halt,
+because the heading of an animal that is barely moving is noise. Path against
+displacement says the same thing about circling and does not lie about
+stillness. The second is that a smooth taper on the separation force -- the
+textbook fix for a hard cutoff -- was tried before the max and made it worse:
+paths of 7 blocks in fifty seconds, a flock that had stopped. It is not in the
+tree.
+
+**And the fourteen unused-parameter warnings**, which were the actual request.
+Twelve are parameters kept for a signature's shape -- `leave_dx` returns 0 for
+every species where `leave_dz` does not, `gx` needs `v` because `gz` does -- and
+they are `_`-prefixed now. Three are not: `key_for`'s `la`, `lb` and `occ` are
+vestigial, left over from when the corners carried light and ambient occlusion,
+and every caller still threads all three down to a function that reads none of
+them. Underscored, with a note: removing them means eight signatures and their
+call sites in the meshing hot path, which is its own change and wants the mesh
+hash watching it.
+
+588 tests, lint --strict clean, no warnings, pinned mesh hash unchanged at
+74139816.

@@ -309,8 +309,8 @@ mod CubeForge.Model do
     if x < 0 || y < 0 || z < 0 || x >= 8 || y >= 8 || z >= 8 do 0 else NativeArray.get_u8(g, idx(x, y, z)) end
   end
   -- Grid coordinates of mask cell (u, v) in slice a of direction d.
-  pfn gx(d : Int, a : Int, u : Int, v : Int) : Int do if d <= 1 do u else if d <= 3 do a else u end end end
-  pfn gy(d : Int, a : Int, u : Int, v : Int) : Int do if d <= 1 do a else v end end
+  pfn gx(d : Int, a : Int, u : Int, _v : Int) : Int do if d <= 1 do u else if d <= 3 do a else u end end end
+  pfn gy(d : Int, a : Int, _u : Int, v : Int) : Int do if d <= 1 do a else v end end
   pfn gz(d : Int, a : Int, u : Int, v : Int) : Int do if d <= 1 do v else if d <= 3 do u else a end end end
   -- The colour of the face at (u, v) in the slice, or 0 when there is none.
   pfn face_at(g : NativeU8Arr, n : Int, d : Int, a : Int, u : Int, v : Int) : Int do

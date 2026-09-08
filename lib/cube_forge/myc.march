@@ -571,7 +571,7 @@ mod CubeForge.Myc do
   end
 
   doc "The species column [i] should display: its species once vigour reaches show_vigour(), else 0."
-  fn wanted(f : Net, n : Int, i : Int) : Int do
+  fn wanted(f : Net, _n : Int, i : Int) : Int do
     match f do
       Net(sps, vg, _, _, _, _, cs, pl, pr) ->
         let sp = NativeArray.get_u8(sps, i)
