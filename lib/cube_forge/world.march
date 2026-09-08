@@ -23,6 +23,63 @@ mod CubeForge.World do
   -- A column blob for local chunk index i, supplied by the caller for the chunks about to leave.
   type Blob = Blob(Int, NativeU8Arr)
 
+  -- ── A band prepared ahead of the shift that will need it ─────────────────
+  -- Everything the incoming band costs -- the lake tiles it pours against and
+  -- the chunks themselves -- is a pure function of the seed and the world
+  -- chunk coordinates, so it can be computed before the window moves and
+  -- handed to `shift_with`. `CubeForge.Streamer` does that on an actor while
+  -- the frame loop runs; a `Band` is the result, keyed by the shift it was
+  -- prepared for (the origin BEFORE the move, and the direction).
+  type Band = Band(Int, Int, Int, Int, List(Int), List(CubeForge.Chunk.Chunk), CubeForge.Lakes.Tile, CubeForge.Lakes.Tile)   -- ox, oz, dx, dz, the incoming local indices, their chunks in the same order, the two lake tiles they generated against
+  doc "The empty band: no shift is prepared, so `shift_with` generates inline."
+  fn band_none() : Band do Band(0, 0, 0, 0, Nil, Nil, CubeForge.Lakes.none(), CubeForge.Lakes.none()) end
+  doc "The band, keyed by the shift it was prepared for: [ox], [oz] is the origin before the move."
+  fn band_of(ox : Int, oz : Int, dx : Int, dz : Int, idx : List(Int), cs : List(CubeForge.Chunk.Chunk), ta : CubeForge.Lakes.Tile, tb : CubeForge.Lakes.Tile) : Band do
+    Band(ox, oz, dx, dz, idx, cs, ta, tb)
+  end
+  doc "Was this band prepared for the shift by ([dx], [dz]) from origin ([ox], [oz])? An empty band never matches: its index list is empty."
+  fn band_matches(b : Band, ox : Int, oz : Int, dx : Int, dz : Int) : Bool do
+    match b do
+      Band(bx, bz, bdx, bdz, idx, _, _, _) ->
+        match idx do
+          Nil -> false
+          Cons(_, _) -> bx == ox && bz == oz && bdx == dx && bdz == dz
+        end
+    end
+  end
+  fn band_ta(b : Band) : CubeForge.Lakes.Tile do match b do Band(_, _, _, _, _, _, ta, _) -> ta end end
+  fn band_tb(b : Band) : CubeForge.Lakes.Tile do match b do Band(_, _, _, _, _, _, _, tb) -> tb end end
+  -- A chunk looked up in the band by its local index: at most eight entries, so a walk.
+  type Found = Found(Bool, CubeForge.Chunk.Chunk)
+  pfn band_find_go(idx : List(Int), cs : List(CubeForge.Chunk.Chunk), d : Int) : Found do
+    match idx do
+      Nil -> Found(false, C.new())
+      Cons(i, irest) ->
+        match cs do
+          Nil -> Found(false, C.new())
+          Cons(c, crest) -> if i == d do Found(true, c) else band_find_go(irest, crest, d) end
+        end
+    end
+  end
+  pfn band_find(b : Band, d : Int) : Found do
+    match b do Band(_, _, _, _, idx, cs, _, _) -> band_find_go(idx, cs, d) end
+  end
+  pfn band_incoming_go(n : Int, dx : Int, dz : Int, d : Int, acc : List(Int)) : List(Int) do
+    if d < 0 do acc
+    else
+      let sx = d % n + dx
+      let sz = d / n + dz
+      band_incoming_go(n, dx, dz, d - 1, if sx >= 0 && sx < n && sz >= 0 && sz < n do acc else Cons(d, acc) end)
+    end
+  end
+  doc "The local indices a shift by ([dx], [dz]) brings in, for a world [n] chunks a side."
+  fn band_incoming(n : Int, dx : Int, dz : Int) : List(Int) do band_incoming_go(n, dx, dz, n * n - 1, Nil) end
+  doc "The lake tile the band that a shift by ([dx], [dz]) brings in generates against: the corner (bx0, bz0) of the band, and its far corner (bx1, bz1). See `shift_with`."
+  fn band_x0(n : Int, dx : Int) : Int do if dx > 0 do n - 1 else 0 end end
+  fn band_x1(n : Int, dx : Int) : Int do if dx < 0 do 0 else n - 1 end end
+  fn band_z0(n : Int, dz : Int) : Int do if dz > 0 do n - 1 else 0 end end
+  fn band_z1(n : Int, dz : Int) : Int do if dz < 0 do 0 else n - 1 end end
+
   -- The poured tile holding world chunk (cx, cz) from the list, or a fresh pour.
   pfn tile_for(tl : List(CubeForge.Lakes.Tile), seed : Int, cx : Int, cz : Int) : CubeForge.Lakes.Tile do
     match tl do
@@ -404,7 +461,7 @@ mod CubeForge.World do
     end
   end
   pfn shifted_chunk(cs : CubeForge.Tree.Tree(CubeForge.Chunk.Chunk), n : Int, i : Int, dx : Int, dz : Int, ox1 : Int, oz1 : Int, seed : Int,
-                    ta : CubeForge.Lakes.Tile, tb : CubeForge.Lakes.Tile, ca : List(Evicted)) : CubeForge.Chunk.Chunk do
+                    ta : CubeForge.Lakes.Tile, tb : CubeForge.Lakes.Tile, ca : List(Evicted), bd : Band) : CubeForge.Chunk.Chunk do
     let lx = i % n
     let lz = i / n
     let sx = lx + dx
@@ -414,10 +471,16 @@ mod CubeForge.World do
       let cx = ox1 + lx
       let cz = oz1 + lz
       match cached_go(ca, cx, cz) do
+        -- an edited chunk the window dropped outranks anything prepared: the
+        -- band is what the seed generates, and this is what the player left
         Cons(e, _) -> ev_chunk(e)
         Nil ->
-          let t = if CubeForge.Lakes.tile_holds(ta, cx, cz) do ta else tb end
-          C.generate_lakes(16 * cx, 16 * cz, seed, t)
+          match band_find(bd, i) do
+            Found(true, c) -> c
+            Found(false, _) ->
+              let t = if CubeForge.Lakes.tile_holds(ta, cx, cz) do ta else tb end
+              C.generate_lakes(16 * cx, 16 * cz, seed, t)
+          end
       end
     end
   end
@@ -522,27 +585,51 @@ mod CubeForge.World do
       else shift_shown_go(src, CubeForge.Ffi.Window.u8_blit(dst, z * c + xd0, src, sz * c + xs0, len), c, s, dzc, z + 1) end
     end
   end
+  -- The tile covering world chunk (cx, cz): the world's own list first (no
+  -- pour), then the band's pair, then a pour. `||` does not short-circuit
+  -- (GAPS G33) and a pour is 38 ms, so these are nested ifs, not one guard.
+  pfn tile_cached(tl : List(CubeForge.Lakes.Tile), cx : Int, cz : Int) : Bool do
+    match tl do
+      Nil -> false
+      Cons(t, rest) -> if CubeForge.Lakes.tile_holds(t, cx, cz) do true else tile_cached(rest, cx, cz) end
+    end
+  end
+  pfn prepared_tile(tl : List(CubeForge.Lakes.Tile), bd : Band, seed : Int, cx : Int, cz : Int, far : Bool) : CubeForge.Lakes.Tile do
+    if tile_cached(tl, cx, cz) do tile_for(tl, seed, cx, cz)
+    else
+      let bt = if far do band_tb(bd) else band_ta(bd) end
+      if CubeForge.Lakes.tile_holds(bt, cx, cz) do bt else tile_for(tl, seed, cx, cz) end
+    end
+  end
+
   doc "Slide the window by ([dx], [dz]) chunks, one of them zero and the other -1 or 1: see the section comment. [blobs] are the column blobs of the chunks leaving (by local index; only the dirty ones are kept); the cache gives back what it holds for the band that comes in, and `restored` lists it."
   fn shift(w : World, dx : Int, dz : Int, seed : Int, workers : Int, blobs : List(Blob)) : World do
+    shift_with(w, dx, dz, seed, workers, blobs, band_none())
+  end
+
+  doc "`shift`, given a band prepared for exactly this move (see `Band`): its tiles are taken instead of poured and its chunks instead of generated. A band that does not match, or is empty, costs nothing and the shift generates inline."
+  fn shift_with(w : World, dx : Int, dz : Int, seed : Int, workers : Int, blobs : List(Blob), bd0 : Band) : World do
     match w do
       World(cs, la, lb, o, sh, n, mo, ox, oz, dt, ca, _, tl, gh, sd) ->
         let ox1 = ox + dx
         let oz1 = oz + dz
         -- the band that comes in, in local chunk coordinates
-        let bx0 = if dx > 0 do n - 1 else 0 end
-        let bx1 = if dx < 0 do 0 else n - 1 end
-        let bz0 = if dz > 0 do n - 1 else 0 end
-        let bz1 = if dz < 0 do 0 else n - 1 end
-        -- its lake tiles: a band of eight chunks spans at most two, and a
-        -- tile poured before (a shift within it) is taken from the world's
-        -- tile list rather than poured again
-        let ta = tile_for(tl, seed, ox1 + bx0, oz1 + bz0)
+        let bx0 = band_x0(n, dx)
+        let bx1 = band_x1(n, dx)
+        let bz0 = band_z0(n, dz)
+        let bz1 = band_z1(n, dz)
+        let bd = if band_matches(bd0, ox, oz, dx, dz) do bd0 else band_none() end
+        -- its lake tiles: a band of eight chunks spans at most two. A tile
+        -- poured before (a shift within it) is taken from the world's tile
+        -- list rather than poured again, and one the band brought was poured
+        -- off the frame; only an unprepared shift into new water pours here.
+        let ta = prepared_tile(tl, bd, seed, ox1 + bx0, oz1 + bz0, false)
         let tl1 = remember_tile(tl, ta)
-        let tb = if CubeForge.Lakes.tile_holds(ta, ox1 + bx1, oz1 + bz1) do ta else tile_for(tl1, seed, ox1 + bx1, oz1 + bz1) end
+        let tb = if CubeForge.Lakes.tile_holds(ta, ox1 + bx1, oz1 + bz1) do ta else prepared_tile(tl1, bd, seed, ox1 + bx1, oz1 + bz1, true) end
         let tl2 = remember_tile(tl1, tb)
         let ca1 = evict_go(cs, dt, n, dx, dz, ox, oz, blobs, 0, ca, gh)
         let rs = restored_go(ca1, n, dx, dz, ox1, oz1, 0, Nil)
-        let cs1 = CubeForge.Tree.from_list(List.pmap_n(coords(n), fn i -> shifted_chunk(cs, n, i, dx, dz, ox1, oz1, seed, ta, tb, ca1), workers), C.new())
+        let cs1 = CubeForge.Tree.from_list(List.pmap_n(coords(n), fn i -> shifted_chunk(cs, n, i, dx, dz, ox1, oz1, seed, ta, tb, ca1, bd), workers), C.new())
         let c = 16 * n
         let sh1 = restore_shown_go(shift_shown_go(sh, NativeArray.make_u8(c * c, 0), c, 16 * dx, 16 * dz, 0), rs, n, ox1, oz1)
         let dt1 = shift_dirty_go(dt, NativeArray.make_u8(n * n, 0), n, dx, dz, ox1, oz1, ca1, 0)

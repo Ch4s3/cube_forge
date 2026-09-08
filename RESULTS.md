@@ -3564,3 +3564,98 @@ radius came down together until the rock showed between them again.
 `CF_POI_SLICE=j+1` slices chamber j; the camera work was done in chamber 2 of
 seed 18, the largest. 538 tests; `CF_POI=0` still 31924079; worst frame
 standing in chamber 2, 8.9 ms.
+
+### Two drops a shift, and both off the frame (2026-09-08)
+
+"I'm seeing large framerate drops walking around." Read with a new switch,
+`CF_SLOW_LOG=<ms>`: the slow-frame line the CF_AUTOFLOW gate already printed,
+at a bar of the caller's choosing and without the canal that gate also lays,
+so a walk can be read against an untouched world. The recipe throughout is
+
+```
+MARCH_PIN_MAIN=1 CF_SEED=18 CF_AUTOSTART=1 CF_AUTOWALK=1 CF_AUTOJUMP=1 \
+CF_PREFETCH=$p CF_STREAM_LOG=1 CF_SLOW_LOG=20 CF_FRAMES=1500 ./cube_forge
+```
+
+which walks south from the seed 18 spawn across two window shifts. Machine
+otherwise idle -- the first pass of this was taken while three other builds
+were running and every frame number in it was noise, which is the warning.
+
+A walk of 1500 frames had **four** frames over 20 ms, and they came in pairs:
+two per shift, not one. Three runs of the walk each way:
+
+| | before | after |
+|---|---|---|
+| the frame the shift lands in | 102, 114 ms | **50, 56, 58 ms** |
+| the water tick a period or two later | 162, 190 ms | under the 20 ms bar |
+| frames over 20 ms in 1500 | 4 | **2** |
+| the shift into a new lake tile | 99, 100 ms | **42, 45, 47 ms** |
+| a shift within a tile | 60, 65 ms | **43, 45, 45 ms** |
+
+**The shift's own frame.** Its breakdown, from `CF_STREAM_LOG` plus a
+temporary set of timers inside `World.shift` (taken out again; the shim
+channel they needed is not in the tree):
+
+| stage | ms |
+|---|---|
+| lake tile pour, when the band enters a new one | 38 |
+| generate the band's eight chunks (`pmap_n`) | 19-21 |
+| light the band: sky 13, block 5, occupancy 6 | 25 |
+| mesh the band, gl + remaps, biome, actors, springs | 20 |
+
+The generation does not fall with more workers -- 18-19 ms at 4, 8 and 14
+schedulers -- so it is one chunk's serial cost and the floor of doing it
+inline. But it is also a pure function of the seed and the world chunk
+coordinates, as the tile pour is, and so is anything else the band needs
+before the window moves. `CubeForge.Streamer` is two actors that build it
+ahead: the frame loop names the shift each axis would make next (in the
+window's stable band the player's local chunk is 3 or 4, so the direction on
+each axis is known a chunk of walking ahead; which axis they reach first is
+not, hence two), and the actor pours the tiles on the first message for a key
+and adds one chunk on each after -- one chunk per message so it never holds a
+scheduler thread for a whole band. `World.shift_with` takes what it has;
+`World.shift` is the same call with an empty band. A band that does not match
+the shift the player actually made costs nothing, and a half-built one costs
+only the chunks it is short of, because `shifted_chunk` generates whatever the
+band does not carry. An evicted chunk from the cache still outranks it.
+
+Result: tiles 38 -> 0.002 ms, generation 19 -> 0.1 ms, a shift **95-100 -> 42-47
+ms** and the frame it lands in 102-114 -> 50-58. `CF_PREFETCH=0` turns the
+prediction off and every shift generates its own band again, which is the A/B
+above; the log says `band prepared` or `band GENERATED INLINE` per shift, and
+on this walk the prediction hit every time.
+
+**The bigger one, a period or two later.** Always at phase 0, the
+water slot. A shift hands the band's eight slots to the actors of the chunks
+that left and sends each a `WLoad` -- five chunk generations, ~90 ms, eight of
+them over four scheduler threads -- and `Water.call_tick` is a blocking
+`Actor.call` queued behind that in the same mailbox; the band's first tick
+also applies eight chunks of change at once and remeshes what moved. Both
+landed on the first period after the shift.
+
+The band now arrives with a staggered water flag instead of 1: chunk d comes
+in at `water_settle() + d % settle_spread()`, 5..8, and `settle_flags` counts
+it down a period at a time, so the band's first tick is four to seven periods
+after the shift and the eight are spread over four of them. Two periods was
+tried first and landed behind the reload half the time (95 ms against 43 on
+two runs of the same walk); four clears it. The band is at the far edge of the
+window, six chunks and more from the player -- half a second of its water
+standing still cannot be seen from there.
+
+**Held.** All three pinned hashes are unchanged: seed 7 `CF_POI=0` at frames
+30 / dump 20 gives mesh **31924079** and at 400 / 390 **33247928**, and POIs
+on at 400 / 390 gives **629446512**. A prepared chunk is the chunk the shift
+would have generated, so the world cannot move; the settle changes only WHEN
+the band's water first ticks, and no band comes in on a run that does not
+walk.
+
+542 tests (538 plus four in `stream_test`: a prepared shift and a plain one
+give the same `state_hash`, a band caught at three of eight gives the same,
+a band prepared for the other direction is ignored, and an edited chunk
+coming back from the cache still outranks the band).
+
+**Left standing.** The 42 ms that remain in a shift are the light and
+occupancy sweeps over the band (25 of it), the band's mesh, and the field
+remaps -- none of them pure in the window's coordinates the way the chunks
+are, so none of them prefetchable without moving the 4 MB fields through an
+actor. That is the next cut if a shift needs to fit in a frame.

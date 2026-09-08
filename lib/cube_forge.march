@@ -40,6 +40,7 @@ mod CubeForge do
   alias CubeForge.Wind as Wind
   alias CubeForge.Ffi.Audio as Aud
   alias CubeForge.Myc as Myc
+  alias CubeForge.Streamer as Streamer
   alias CubeForge.Species as Species
   alias CubeForge.Fruit as Fruit
   alias CubeForge.Effects as Effects
@@ -597,6 +598,34 @@ mod CubeForge do
     if i < 0 do acc else flagged(flags, i - 1, n, if NativeArray.get_int(flags, i) == 1 do Cons(i, acc) else acc end) end
   end
 
+  doc "The water flag a chunk that just came in gets, before the stagger below is added to it. `flagged` only takes 1, and `settle_flags` counts anything above it down a period at a time."
+  -- A shift hands the band's eight slots to the actors of the chunks that
+  -- left and sends each a WLoad -- five chunk generations, ~90 ms, eight of
+  -- them over four scheduler threads. `Water.call_tick` is a blocking
+  -- `Actor.call` queued behind that in the same mailbox, and the band's first
+  -- tick also applies eight chunks' worth of change at once and remeshes what
+  -- moved. Both landed on the first period after a shift: 150-210 ms, the
+  -- worst frame of a walk by a wide margin -- worse than the shift that
+  -- caused it.
+  --
+  -- So the band waits, and does not arrive all together: chunk d comes in at
+  -- water_settle() + d % settle_spread(), which is 5..8, so its first tick is
+  -- four to seven periods after the shift and the eight are spread over four
+  -- of them. Four periods because the reload is the longer of the two waits:
+  -- at two the tick still landed behind it half the time (95 ms against 43 on
+  -- two runs of the same walk). The band is at the far edge of the window, six
+  -- chunks and more from the player; half a second of its water standing still
+  -- cannot be seen from there.
+  fn water_settle() : Int do 5 end
+  fn settle_spread() : Int do 4 end
+  pfn settle_flags(flags : NativeIntArr, i : Int) : NativeIntArr do
+    if i < 0 do flags
+    else
+      let v = NativeArray.get_int(flags, i)
+      settle_flags(if v > 1 do NativeArray.set_int(flags, i, v - 1) else flags end, i - 1)
+    end
+  end
+
   -- Result of applying one reply: world and flags are both threaded (a NativeIntArr update
   -- returns the array — discarding it loses the write when the array is shared, GAPS.md G47).
   type Rep = Rep(CubeForge.World.World, NativeIntArr)
@@ -943,13 +972,15 @@ mod CubeForge do
     match sc do
       Scene(w, counts, outline, hit, sel, pids, flags, meshes, bio, pend, myc) ->
         let n = World.side(w)
-        let cis = flagged(flags, n * n - 1, n, Nil)
+        -- count the band that just came in one period closer to its first tick
+        let flags0 = settle_flags(flags, n * n - 1)
+        let cis = flagged(flags0, n * n - 1, n, Nil)
         match cis do
-          Nil -> sc
+          Nil -> Scene(w, counts, outline, hit, sel, pids, flags0, meshes, bio, pend, myc)
           _ ->
             let t0 = Win.time()
             -- clear flags first; replies (pending markers, spills) re-flag as needed
-            let flags1 = clear_flags(flags, cis)
+            let flags1 = clear_flags(flags0, cis)
             let replies = List.pmap_n(cis, fn ci -> Water.call_tick(Array.get(pids, ci)), workers)
             let t1 = Win.time()
             match apply_all(w, pids, flags1, counts, meshes, cis, replies, Chunk.new(), 0, pend) do
@@ -1444,6 +1475,22 @@ mod CubeForge do
     let lz = World.floor_div16(float_to_int(Math.floor(V.z(Player.position(p)))))
     if lz < 3 do -1 else if lz > 4 do 1 else 0 end end
   end
+  -- Which shift each axis would make next, told to the streamers so the band
+  -- is generated before the frame that needs it. In the window's stable band
+  -- the player's local chunk is 3 or 4, and the trigger below 3 is a -1 shift
+  -- while the one above 4 is +1: the direction on each axis is known a whole
+  -- chunk of walking ahead of the crossing. Which AXIS they cross first is not
+  -- known, so both are prepared, one actor each.
+  pfn prep_bands(bpids, w : CubeForge.World.World, p : CubeForge.Player.Player, seed : Int) : Unit do
+    let n = World.side(w)
+    let ox = World.origin_x(w)
+    let oz = World.origin_z(w)
+    let lx = World.floor_div16(float_to_int(Math.floor(V.x(Player.position(p)))))
+    let lz = World.floor_div16(float_to_int(Math.floor(V.z(Player.position(p)))))
+    Streamer.send_prep(Array.get(bpids, 0), ox, oz, if lx <= 3 do -1 else 1 end, 0, n, seed)
+    Streamer.send_prep(Array.get(bpids, 1), ox, oz, 0, if lz <= 3 do -1 else 1 end, n, seed)
+  end
+
   -- Local chunk index [d]'s source index after a shift, or -1 when it came in.
   pfn shift_src(d : Int, n : Int, dx : Int, dz : Int) : Int do
     let sx = d % n + dx
@@ -1507,7 +1554,7 @@ mod CubeForge do
       let h = Biome.height_of(f, x, z)
       if is_world_spring(w, x, h, z) do
         Win.spring_set(x, h, z, true)
-        spring_chunk_go(w, f, n, cx, cz, j + 1, NativeArray.set_int(flags, cx + n * cz, 1))
+        spring_chunk_go(w, f, n, cx, cz, j + 1, if NativeArray.get_int(flags, cx + n * cz) > 0 do flags else NativeArray.set_int(flags, cx + n * cz, water_settle()) end)
       else spring_chunk_go(w, f, n, cx, cz, j + 1, flags) end
     end
   end
@@ -1558,6 +1605,13 @@ mod CubeForge do
       Cons(e, rest) -> restore_myc(Myc.restore_chunk(myc, 16 * n, World.ev_cx(e) - World.origin_x(w1), World.ev_cz(e) - World.origin_z(w1), World.ev_cols(e)), w1, n, rest)
     end
   end
+  -- The water flags of the band that came in: staggered, so neither its
+  -- reload nor its first tick lands in one frame. See water_settle.
+  pfn settle_band_go(flags : NativeIntArr, n : Int, dx : Int, dz : Int, d : Int) : NativeIntArr do
+    if d >= n * n do flags
+    else if shift_src(d, n, dx, dz) >= 0 do settle_band_go(flags, n, dx, dz, d + 1)
+    else settle_band_go(NativeArray.set_int(flags, d, water_settle() + d % settle_spread()), n, dx, dz, d + 1) end end
+  end
   pfn mark_moved_go(counts : NativeIntArr, n : Int, dx : Int, dz : Int, d : Int) : NativeIntArr do
     if d >= n * n do counts
     else mark_moved_go(NativeArray.set_int(counts, moved_base() + d, if shift_src(d, n, dx, dz) >= 0 do 1 else 0 end), n, dx, dz, d + 1) end
@@ -1567,12 +1621,23 @@ mod CubeForge do
     else if shift_src(d, n, dx, dz) < 0 do owe_moved_go(pend, n, dx, dz, d + 1)
     else owe_moved_go(owe_sections(pend, d % n, d / n, 65535, 0, n), n, dx, dz, d + 1) end end
   end
-  pfn shift_scene(sc, dx : Int, dz : Int, seed : Int, workers : Int) do
+  -- The band the streamer holds for this move, or the empty band when the
+  -- player went the way that was not predicted (a reversal inside a chunk) --
+  -- in which case the shift generates inline, as it always did.
+  pfn take_band(bpids, dx : Int, dz : Int) : CubeForge.World.Band do
+    match Streamer.call_take(Array.get(bpids, if dx != 0 do 0 else 1 end)) do
+      Ok(b) -> b
+      Err(_) -> CubeForge.World.band_none()
+    end
+  end
+  pfn shift_scene(sc, dx : Int, dz : Int, seed : Int, workers : Int, bpids) do
     match sc do
       Scene(w, counts, outline, hit, ui, pids, flags, meshes, bio, pend, myc) ->
         let n = World.side(w)
         let t0 = Win.time()
-        let w1 = World.shift(w, dx, dz, seed, workers, leaving_blobs(w, myc, n, dx, dz, n * n - 1, Nil))
+        let bd = take_band(bpids, dx, dz)
+        let prepared = World.band_matches(bd, World.origin_x(w), World.origin_z(w), dx, dz)
+        let w1 = World.shift_with(w, dx, dz, seed, workers, leaving_blobs(w, myc, n, dx, dz, n * n - 1, Nil), bd)
         let t1 = Win.time()
         let bio1 = Biome.shift(bio, w1, dx, dz, seed)
         let t1b = Win.time()
@@ -1585,7 +1650,7 @@ mod CubeForge do
         -- drain rebakes it at the new origin over the coming frames
         let counts1 = mark_moved_go(counts0, n, dx, dz, 0)
         let pend1 = owe_moved_go(remap_bases_go(pend, NativeArray.make_int(1024, 0), n, dx, dz, 64, 16, 0, 0), n, dx, dz, 0)
-        let flags1 = remap_ints_go(flags, NativeArray.make_int(n * n, 0), n, dx, dz, 0, 1, 0)
+        let flags1 = settle_band_go(remap_ints_go(flags, NativeArray.make_int(n * n, 0), n, dx, dz, 0, 0, 0), n, dx, dz, 0)
         let t3 = Win.time()
         let band = band_indices(n, dx, dz, n * n - 1, Nil)
         let fresh = List.pmap_n(band, fn d -> CM.build(w1, d % n, d / n, Chunk.new()), workers)
@@ -1598,6 +1663,7 @@ mod CubeForge do
             -- CF_STREAM_LOG=1: one line per shift with where its time went
             if Env.get_int("CF_STREAM_LOG", 0) == 1 do
               println("window shift (" ++ int_to_string(dx) ++ "," ++ int_to_string(dz) ++ ") -> origin (" ++ int_to_string(World.origin_x(w1)) ++ "," ++ int_to_string(World.origin_z(w1)) ++ ") in " ++ ms(Win.time() -. t0)
+                      ++ " (band " ++ (if prepared do "prepared" else "GENERATED INLINE" end) ++ ")"
                       ++ ": world " ++ ms(t1 -. t0) ++ " biome " ++ ms(t1b -. t1) ++ " myc " ++ ms(t2 -. t1b) ++ " gl+remap " ++ ms(t3 -. t2) ++ " mesh " ++ ms(t4 -. t3) ++ " actors+springs " ++ ms(Win.time() -. t4))
             else () end
             Scene(w1, counts2, outline, hit, ui, pids1, flags2, Array.from_list(mlist), bio1, pend1, myc1)
@@ -2161,7 +2227,7 @@ mod CubeForge do
 
   -- Frame loop. `max_frames < 0` means run until the window closes.
   -- Run-time knobs read once, outside the frame loop (an Env read allocates).
-  type Knobs = Knobs(Int, Int, String, Bool, Float, Int, Bool, Int, Int, Int, Float, Int, Int, Int, Int, Int, Int, Bool, Int, Int, Int, Int, Int, Int, Int, Bool, Bool, Int, Int, Bool, Int, Int, Int, Int, Int, Int, Bool, Int, Int, Int, Int, Int, Int, Int, CubeForge.Settings.Settings, Int, Int, Int, Int, Int, Bool)   -- max_frames, dump_frame, dump_path, autowalk, autospin, autoedit frame (<0 = off), autoswim, autoflow frame (<0 = off), workers, automap frame (<0 = off; forces map view on from this frame, for headless verification), day length in seconds, sun angle override in degrees (<0 = follow the clock), autobreak frame (<0 = off): break the column under the player every 20 frames, for a repeatable edit benchmark, weather pin 0..100 (<0 = follow the actor), CF_PRECIP raw cap override (<0 = the precipitation setting), biome ease rate in percent (100 = one CF_DAY per full swing), draw the biome map in map view, autocanal frame (<0 = off): lay a 9-block line of water three columns east of the player, aim-independent, for the biome end-to-end test, biome migration budget: surface columns retextured per tick, vegetation budget: trees grown or felled per tick, time pin in seconds (<0 = live clock) for the water animation, remesh-all frame (<0 = off): rebuild every section of every chunk at that frame, a ground truth for stale-mesh hunts, automenu frame (<0 = off): open the escape menu at that frame and start a new game five frames later, for the restart test, audio mode (0 off, 1 device, 2 null device -- render a tick per push straight into the WAV, for reproducible headless dumps), audio log, autodive, autoglow frame (<0 = off): place a glow cap three columns east of the player, through edit_block, for the block-light end-to-end check, myc rate in percent, draw the mycelium map overlay in map view, autoplant frame (<0 = off): plant the fittest species three columns east of the player, myc migration budget (surface columns per retexture slot; glow changes batch under one relight per slot), autoplant species override (0 = fittest), autospore frame (<0 = off): give three spores and plant one through the item path thirty frames later, fruit budget (bodies per fruit slot), fruit rate in percent, autostart (skip the start screen), autosave frame (<0 = off) and slot, autoload frame (<0 = off, first session only) and slot, autoslots frame (<0 = off): open the slots page at that frame, for a headless look at it, climate feedback from the network in percent (0 = none), autosettings frame (<0 = off): open the settings page at that frame and click the shadow row's right arrow five frames later, for the settings file end-to-end check, the settings as read from disk and the mask of fields an environment variable overrides (both for writing the file, see Settings.merge), autopage: which menu page CF_AUTOSETTINGS opens (2 hub, 3 graphics, 4 sound), autosurvey frame (<0 = off): open the survey panel from that frame, autoscan frame (<0 = off): scan the column three east of the player, fauna demo (CF_FAUNA_DEMO: 0 the game -- flocks placed by the populations; 1 a circling flock and school on the clock; 2 the whole roster still and broadside; 100 + n one species alone, close and turning, the only size a body can be judged at; 200 + n the same at roost), fauna on at all (CF_FAUNA=0 turns the populations, the flocks and their draw off: the A/B for what they cost, and a switch for a weak machine), which is slice 1's proof that the body stamp works before any AI exists to be blamed for what they do
+  type Knobs = Knobs(Int, Int, String, Bool, Float, Int, Bool, Int, Int, Int, Float, Int, Int, Int, Int, Int, Int, Bool, Int, Int, Int, Int, Int, Int, Int, Bool, Bool, Int, Int, Bool, Int, Int, Int, Int, Int, Int, Bool, Int, Int, Int, Int, Int, Int, Int, CubeForge.Settings.Settings, Int, Int, Int, Int, Int, Bool, Int, Bool)   -- max_frames, dump_frame, dump_path, autowalk, autospin, autoedit frame (<0 = off), autoswim, autoflow frame (<0 = off), workers, automap frame (<0 = off; forces map view on from this frame, for headless verification), day length in seconds, sun angle override in degrees (<0 = follow the clock), autobreak frame (<0 = off): break the column under the player every 20 frames, for a repeatable edit benchmark, weather pin 0..100 (<0 = follow the actor), CF_PRECIP raw cap override (<0 = the precipitation setting), biome ease rate in percent (100 = one CF_DAY per full swing), draw the biome map in map view, autocanal frame (<0 = off): lay a 9-block line of water three columns east of the player, aim-independent, for the biome end-to-end test, biome migration budget: surface columns retextured per tick, vegetation budget: trees grown or felled per tick, time pin in seconds (<0 = live clock) for the water animation, remesh-all frame (<0 = off): rebuild every section of every chunk at that frame, a ground truth for stale-mesh hunts, automenu frame (<0 = off): open the escape menu at that frame and start a new game five frames later, for the restart test, audio mode (0 off, 1 device, 2 null device -- render a tick per push straight into the WAV, for reproducible headless dumps), audio log, autodive, autoglow frame (<0 = off): place a glow cap three columns east of the player, through edit_block, for the block-light end-to-end check, myc rate in percent, draw the mycelium map overlay in map view, autoplant frame (<0 = off): plant the fittest species three columns east of the player, myc migration budget (surface columns per retexture slot; glow changes batch under one relight per slot), autoplant species override (0 = fittest), autospore frame (<0 = off): give three spores and plant one through the item path thirty frames later, fruit budget (bodies per fruit slot), fruit rate in percent, autostart (skip the start screen), autosave frame (<0 = off) and slot, autoload frame (<0 = off, first session only) and slot, autoslots frame (<0 = off): open the slots page at that frame, for a headless look at it, climate feedback from the network in percent (0 = none), autosettings frame (<0 = off): open the settings page at that frame and click the shadow row's right arrow five frames later, for the settings file end-to-end check, the settings as read from disk and the mask of fields an environment variable overrides (both for writing the file, see Settings.merge), autopage: which menu page CF_AUTOSETTINGS opens (2 hub, 3 graphics, 4 sound), autosurvey frame (<0 = off): open the survey panel from that frame, autoscan frame (<0 = off): scan the column three east of the player, fauna demo (CF_FAUNA_DEMO: 0 the game -- flocks placed by the populations; 1 a circling flock and school on the clock; 2 the whole roster still and broadside; 100 + n one species alone, close and turning, the only size a body can be judged at; 200 + n the same at roost), fauna on at all (CF_FAUNA=0 turns the populations, the flocks and their draw off: the A/B for what they cost, and a switch for a weak machine), which is slice 1's proof that the body stamp works before any AI exists to be blamed for what they do, and CF_SLOW_LOG: print every frame after the warmup that took longer than this many milliseconds (0 = off), which is what a report of "drops while walking" is read with -- the worst frame alone says how bad, this says how often and where, and CF_PREFETCH=0: stop telling the streamers what is coming, so every shift generates its own band inline the way it did before they existed (the A/B for what the prefetch is worth)
 
   doc "Write the session into [slot]. Prints the outcome; true on success."
   -- The fields blob: species, vigour, reach, shown, then the eased axes.
@@ -2231,11 +2297,11 @@ mod CubeForge do
 
   -- [first]: the process's first session (the only one that shows the start screen or honours CF_AUTOLOAD).
   -- [t0]: the clock at session start; [day0]: seconds into the day at that moment, so the sun continues from a save.
-  fn frame_loop(f : Frame, k : Knobs, sc_in, nchunks : Int, proj : NativeFloatArr, map_proj : NativeFloatArr, fps : Fps, wxpid, fpids, seed : Int, first : Bool, t0 : Float, day0 : Float) : Frame do
+  fn frame_loop(f : Frame, k : Knobs, sc_in, nchunks : Int, proj : NativeFloatArr, map_proj : NativeFloatArr, fps : Fps, wxpid, fpids, bpids, seed : Int, first : Bool, t0 : Float, day0 : Float) : Frame do
     match f do
       Frame(frame, last_t, player_in, sample, view, vp, map_mode, marker, flash, wcache, bcache, inv_open, drag_from, menu, menubuf, next_seed, worst, worst_at, sched, survey, known, faunap, faunab, herd, pop, kfauna) ->
         match k do
-        Knobs(max_frames, dump_frame, dump_path, autowalk, autospin, autoedit, autoswim, autoflow, workers, automap, day_len, sun_deg, autoinv, autobreak, weather_pin, precip_cap, biome_rate, biome_map, autocanal, biome_budget, veg_budget, time_pin, remesh_all_at, automenu, audio_mode, audio_log, autodive, autoglow, myc_rate, myc_map, autoplant, myc_budget, autoplant_species, autospore, fruit_budget, fruit_rate, autostart, autosave, autosave_slot, autoload, autoload_slot, autoslots, myc_feedback, autosettings, settings_disk, settings_mask, autopage, autosurvey, autoscan, fauna_demo, fauna_on_knob) ->
+        Knobs(max_frames, dump_frame, dump_path, autowalk, autospin, autoedit, autoswim, autoflow, workers, automap, day_len, sun_deg, autoinv, autobreak, weather_pin, precip_cap, biome_rate, biome_map, autocanal, biome_budget, veg_budget, time_pin, remesh_all_at, automenu, audio_mode, audio_log, autodive, autoglow, myc_rate, myc_map, autoplant, myc_budget, autoplant_species, autospore, fruit_budget, fruit_rate, autostart, autosave, autosave_slot, autoload, autoload_slot, autoslots, myc_feedback, autosettings, settings_disk, settings_mask, autopage, autosurvey, autoscan, fauna_demo, fauna_on_knob, slow_log, prefetch) ->
         if Win.should_close() || (max_frames >= 0 && frame >= max_frames) || !is_no_start(next_seed) do
           Frame(frame, last_t, player_in, sample, view, vp, map_mode, marker, flash, wcache, bcache, inv_open, drag_from, menu, menubuf, next_seed, worst, worst_at, sched, survey, known, faunap, faunab, herd, pop, kfauna)
         else
@@ -2244,7 +2310,7 @@ mod CubeForge do
           -- their chunk is off the window's centre (see shift_scene).
           let sdx = shift_dx(player_in)
           let sdz = if sdx != 0 do 0 else shift_dz(player_in) end
-          let sc = if sdx != 0 || sdz != 0 do shift_scene(sc_in, sdx, sdz, seed, workers) else sc_in end
+          let sc = if sdx != 0 || sdz != 0 do shift_scene(sc_in, sdx, sdz, seed, workers, bpids) else sc_in end
           -- The populations and the flocks slide with the window. Chunks that
           -- left are archived under their world key; chunks that came in are
           -- restored from the archive and caught up against the world as it
@@ -2260,6 +2326,12 @@ mod CubeForge do
           else pop end
           let herd_s = if sdx != 0 || sdz != 0 do shift_herd(herd, fpids, sdx, sdz, World.side(scene_world(sc))) else herd end
           let player = if sdx != 0 || sdz != 0 do Player.translate(player_in, int_to_float(0 - 16 * sdx), int_to_float(0 - 16 * sdz)) else player_in end
+          -- Tell the streamers which shift to have ready next, from where the
+          -- player stands in the window it stands in now. Every tick rather
+          -- than every frame: a band takes a fraction of a second to build,
+          -- the window takes seconds to reach its edge, and the shift's own
+          -- call queues behind these in the same mailbox.
+          if prefetch && (frame % tick_period() == 0 || sdx != 0 || sdz != 0) do prep_bands(bpids, scene_world(sc), player, seed) else () end
           -- I toggles the inventory. While it is open the cursor is released and no
           -- input reaches the player; the world keeps ticking, as in the map view.
           -- I is ignored while the menu is up, so the two panels can never be open together.
@@ -2303,6 +2375,13 @@ mod CubeForge do
           -- seeing. Uncapped runs (CF_VSYNC=0) measure the work; with vsync on
           -- this measures the wait as well, so a budget is checked uncapped.
           let elapsed = now -. last_t
+          -- CF_SLOW_LOG=<ms>: the same line as the CF_AUTOFLOW one below, at a
+          -- bar of the caller's choosing and without the canal that gate also
+          -- lays -- so a report of drops while walking can be read against an
+          -- untouched world.
+          if slow_log > 0 && frame > warmup_frames() && elapsed *. 1000.0 > int_to_float(slow_log) do
+            println("slow frame " ++ int_to_string(frame - 1) ++ " phase " ++ int_to_string((frame - 1) % tick_period()) ++ ": " ++ ms(elapsed))
+          else () end
           let worst1 = if frame > warmup_frames() && elapsed > worst do elapsed else worst end
           let worst_at1 = if frame > warmup_frames() && elapsed > worst do frame - 1 else worst_at end
           -- Under CF_AUTOFLOW (the diagnostics gate), every frame over 4 ms names
@@ -2959,7 +3038,7 @@ mod CubeForge do
           if frame == 200 do
             println("live-object delta over frames 100..200: " ++ int_to_string(Win.live_allocs() - sample1) ++ " (" ++ int_to_string((Win.live_allocs() - sample1) / 100) ++ " per frame); resident " ++ int_to_string(Win.rss_bytes() / 1048576) ++ " MB")
           else () end
-          frame_loop(Frame(frame + 1, now, player1, sample1, view1, vp1, map_mode1, marker1, flash1, wnow, bnow, inv_open2, drag2, menu5, menubuf1, next_seed1, worst1, worst_at1, sched1, survey1, known1, faunap, faunab1, herd1, pop1, kfauna1), k, sc2, nchunks, proj, map_proj, fps1, wxpid, fpids, seed, first, t0, day0)
+          frame_loop(Frame(frame + 1, now, player1, sample1, view1, vp1, map_mode1, marker1, flash1, wnow, bnow, inv_open2, drag2, menu5, menubuf1, next_seed1, worst1, worst_at1, sched1, survey1, known1, faunap, faunab1, herd1, pop1, kfauna1), k, sc2, nchunks, proj, map_proj, fps1, wxpid, fpids, bpids, seed, first, t0, day0)
         end
         end
     end
@@ -3541,13 +3620,19 @@ mod CubeForge do
         else () end
       else () end
       let knobs = Knobs(max_frames, Env.get_int("CF_DUMP_FRAME", 30), Env.get("CF_DUMP", ""), Env.get_int("CF_AUTOWALK", 0) == 1,
-                        int_to_float(Env.get_int("CF_AUTOSPIN", 0)) /. 1000.0 /. Player.mouse_sens(), Env.get_int("CF_AUTOEDIT", -1), autoswim, Env.get_int("CF_AUTOFLOW", -1), workers, Env.get_int("CF_AUTOMAP", -1), int_to_float(Env.get_int("CF_DAY", 1800)), Env.get_int("CF_SUN", -1), Env.get_int("CF_AUTOINV", -1), Env.get_int("CF_AUTOBREAK", -1), Env.get_int("CF_WEATHER", -1), Env.get_int("CF_PRECIP", -1), Env.get_int("CF_BIOME_RATE", 100), Env.get_int("CF_BIOME_MAP", 0) == 1, Env.get_int("CF_AUTOCANAL", -1), Env.get_int("CF_BIOME_BUDGET", 32), Env.get_int("CF_VEG_BUDGET", 1), Env.get_int("CF_TIME", -1), Env.get_int("CF_REMESH_ALL_AT", -1), Env.get_int("CF_AUTOMENU", -1), audio_mode, Env.get_int("CF_AUDIO_LOG", 0) == 1, Env.get_int("CF_AUTODIVE", 0) == 1, Env.get_int("CF_AUTOGLOW", -1), Env.get_int("CF_MYC_RATE", 100), Env.get_int("CF_MYC_MAP", 0) == 1, Env.get_int("CF_AUTOPLANT", -1), Env.get_int("CF_MYC_BUDGET", 64), Env.get_int("CF_AUTOPLANT_SPECIES", 0), Env.get_int("CF_AUTOSPORE", -1), Env.get_int("CF_FRUIT_BUDGET", 1), Env.get_int("CF_FRUIT_RATE", 100), Env.get_int("CF_AUTOSTART", 0) == 1, Env.get_int("CF_AUTOSAVE", -1), Env.get_int("CF_AUTOSAVE_SLOT", 1), Env.get_int("CF_AUTOLOAD", -1), Env.get_int("CF_AUTOLOAD_SLOT", 1), Env.get_int("CF_AUTOSLOTS", -1), Env.get_int("CF_MYC_FEEDBACK", 100), Env.get_int("CF_AUTOSETTINGS", -1), settings_disk, settings_mask, Env.get_int("CF_AUTOPAGE", Menu.page_graphics()), Env.get_int("CF_AUTOSURVEY", -1), Env.get_int("CF_AUTOSCAN", -1), Env.get_int("CF_FAUNA_DEMO", 0), Env.get_int("CF_FAUNA", 1) == 1)
+                        int_to_float(Env.get_int("CF_AUTOSPIN", 0)) /. 1000.0 /. Player.mouse_sens(), Env.get_int("CF_AUTOEDIT", -1), autoswim, Env.get_int("CF_AUTOFLOW", -1), workers, Env.get_int("CF_AUTOMAP", -1), int_to_float(Env.get_int("CF_DAY", 1800)), Env.get_int("CF_SUN", -1), Env.get_int("CF_AUTOINV", -1), Env.get_int("CF_AUTOBREAK", -1), Env.get_int("CF_WEATHER", -1), Env.get_int("CF_PRECIP", -1), Env.get_int("CF_BIOME_RATE", 100), Env.get_int("CF_BIOME_MAP", 0) == 1, Env.get_int("CF_AUTOCANAL", -1), Env.get_int("CF_BIOME_BUDGET", 32), Env.get_int("CF_VEG_BUDGET", 1), Env.get_int("CF_TIME", -1), Env.get_int("CF_REMESH_ALL_AT", -1), Env.get_int("CF_AUTOMENU", -1), audio_mode, Env.get_int("CF_AUDIO_LOG", 0) == 1, Env.get_int("CF_AUTODIVE", 0) == 1, Env.get_int("CF_AUTOGLOW", -1), Env.get_int("CF_MYC_RATE", 100), Env.get_int("CF_MYC_MAP", 0) == 1, Env.get_int("CF_AUTOPLANT", -1), Env.get_int("CF_MYC_BUDGET", 64), Env.get_int("CF_AUTOPLANT_SPECIES", 0), Env.get_int("CF_AUTOSPORE", -1), Env.get_int("CF_FRUIT_BUDGET", 1), Env.get_int("CF_FRUIT_RATE", 100), Env.get_int("CF_AUTOSTART", 0) == 1, Env.get_int("CF_AUTOSAVE", -1), Env.get_int("CF_AUTOSAVE_SLOT", 1), Env.get_int("CF_AUTOLOAD", -1), Env.get_int("CF_AUTOLOAD_SLOT", 1), Env.get_int("CF_AUTOSLOTS", -1), Env.get_int("CF_MYC_FEEDBACK", 100), Env.get_int("CF_AUTOSETTINGS", -1), settings_disk, settings_mask, Env.get_int("CF_AUTOPAGE", Menu.page_graphics()), Env.get_int("CF_AUTOSURVEY", -1), Env.get_int("CF_AUTOSCAN", -1), Env.get_int("CF_FAUNA_DEMO", 0), Env.get_int("CF_FAUNA", 1) == 1, Env.get_int("CF_SLOW_LOG", 0), Env.get_int("CF_PREFETCH", 1) == 1)
       let pids = Array.from_list(spawn_water(n * n - 1, n, Nil))
       let wxpid = Weather.spawn_weather()
       -- The flock pool, like the water pool: created once for the process and
       -- reloaded per session, since spawning actors per new game leaks them.
       let fpids = Array.from_list(spawn_flocks(Flocks.cap() - 1, Nil))
-      session_loop(FromSeed(seed), settings0, true, n, workers, headless, seed_env >= 0, knobs, proj, map_proj, pids, wxpid, fpids, autoswim)
+      -- One band actor per axis: the frame loop knows which way along x and
+      -- which way along z the window would move next, not which of the two
+      -- the player will reach first, so both are kept ready. Like the water
+      -- and flock pools, created once for the process (spawning per session
+      -- leaks actors) and re-keyed every session by the prediction itself.
+      let bpids = Array.from_list(Cons(Streamer.spawn_bander(), Cons(Streamer.spawn_bander(), Nil)))
+      session_loop(FromSeed(seed), settings0, true, n, workers, headless, seed_env >= 0, knobs, proj, map_proj, pids, wxpid, fpids, bpids, autoswim)
       if audio_mode > 0 do Aud.close() else () end
       Win.close()
     end
@@ -3588,7 +3673,7 @@ mod CubeForge do
     end
   end
   pfn run_session(start : Start, settings0 : CubeForge.Settings.Settings, first : Bool, n_max : Int, workers : Int, headless : Bool, from_env : Bool, k : Knobs,
-                  proj : NativeFloatArr, map_proj : NativeFloatArr, pids, wxpid, fpids, autoswim : Bool) : Next do
+                  proj : NativeFloatArr, map_proj : NativeFloatArr, pids, wxpid, fpids, bpids, autoswim : Bool) : Next do
     -- A slot is read first; everything after "terrain" is the same for both.
     let loaded = match start do
       FromSlot(slot) -> load_slot(slot)
@@ -3774,7 +3859,7 @@ mod CubeForge do
       -- The flock pool is loaded per session, from the world this session has:
       -- the actors outlive the game, their contents do not.
       if Env.get_int("CF_FAUNA_STATS", 0) == 1 do println(Fauna.stats()) else () end
-      match frame_loop(Frame(0, t4, player, 0, NativeArray.make_float(16, 0.0), NativeArray.make_f32(16, 0.0), false, F32Buf.new(64), Env.get_int("CF_FLASH", 0) == 1, 0.0, 0.0, false, -1, menu0, F32Buf.new(2048), NoStart, 0.0, -1, Audio.sched_start(0), false, known0, poses0, F32Buf.new(4096), CubeForge.Flocks.new(), pop0, kfauna0), k, scene, n * n, proj, map_proj, fps0, wxpid, fpids, seed, first, t4, day0) do
+      match frame_loop(Frame(0, t4, player, 0, NativeArray.make_float(16, 0.0), NativeArray.make_f32(16, 0.0), false, F32Buf.new(64), Env.get_int("CF_FLASH", 0) == 1, 0.0, 0.0, false, -1, menu0, F32Buf.new(2048), NoStart, 0.0, -1, Audio.sched_start(0), false, known0, poses0, F32Buf.new(4096), CubeForge.Flocks.new(), pop0, kfauna0), k, scene, n * n, proj, map_proj, fps0, wxpid, fpids, bpids, seed, first, t4, day0) do
         Frame(frames, _, p, _, _, _, _, _, _, _, _, _, _, mfin, _, ns, worst, worst_at, _, _, _, _, _, _, _, _) ->
           let t5 = Win.time()
           println("ran " ++ int_to_string(frames) ++ " frames in " ++ ms(t5 -. t4) ++ " (" ++ float_to_string(int_to_float(frames) /. (t5 -. t4)) ++ " fps, vsync on); player ended at " ++ V.to_string(Player.position(p)))
@@ -3787,11 +3872,11 @@ mod CubeForge do
   -- Run sessions until one asks to stop.
   -- Settings outlive a session: a new game reseeds the world, not the options.
   pfn session_loop(start : Start, settings0 : CubeForge.Settings.Settings, first : Bool, n : Int, workers : Int, headless : Bool, from_env : Bool, k : Knobs,
-                   proj : NativeFloatArr, map_proj : NativeFloatArr, pids, wxpid, fpids, autoswim : Bool) : Unit do
-    match run_session(start, settings0, first, n, workers, headless, from_env, k, proj, map_proj, pids, wxpid, fpids, autoswim) do
+                   proj : NativeFloatArr, map_proj : NativeFloatArr, pids, wxpid, fpids, bpids, autoswim : Bool) : Unit do
+    match run_session(start, settings0, first, n, workers, headless, from_env, k, proj, map_proj, pids, wxpid, fpids, bpids, autoswim) do
       Next(next, s1) ->
         if is_no_start(next) do ()
-        else session_loop(next, s1, false, n, workers, headless, false, k, proj, map_proj, pids, wxpid, fpids, autoswim) end
+        else session_loop(next, s1, false, n, workers, headless, false, k, proj, map_proj, pids, wxpid, fpids, bpids, autoswim) end
     end
   end
 
