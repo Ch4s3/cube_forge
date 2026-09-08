@@ -44,9 +44,9 @@ mod CubeForge.Ffi.Window do
     fn x_gfx_set_sky(sx: Float, sy: Float, sz: Float, mx: Float, my: Float, mz: Float): Unit = "cf_gfx_set_sky"
     fn x_gfx_set_shadow(dist: Float, soft: Int): Unit = "cf_gfx_set_shadow"
     fn x_gfx_upload_occupancy(occ: NativeU8Arr, w: Int, h: Int, d: Int): Unit = "cf_gfx_upload_occupancy"
-    fn x_gfx_set_voxel(x: Int, y: Int, z: Int, solid: Int): Unit = "cf_gfx_set_voxel"
     fn x_gfx_shift(dx: Int, dz: Int): Unit = "cf_gfx_shift"
     fn x_gfx_sync_box(occ: NativeU8Arr, x0: Int, y0: Int, z0: Int, x1: Int, y1: Int, z1: Int): Unit = "cf_gfx_sync_box"
+    fn x_occ_check(occ: NativeU8Arr): Unit = "cf_occ_check"
     fn x_gfx_draw(slot: Int, nverts: Int): Unit = "cf_gfx_draw"
     fn x_gfx_draw_model(slot: Int, first: Int, count: Int, x: Float, y: Float, z: Float, c: Float, s: Float, scale: Float, sky: Float, blk: Float): Unit = "cf_gfx_draw_model"
     fn x_gfx_read_pixel(x: Int, y: Int): Int = "cf_gfx_read_pixel"
@@ -153,12 +153,12 @@ mod CubeForge.Ffi.Window do
   doc "Upload the world occupancy field (1 byte per voxel) as the shadow ray-marcher's 3D texture."
   fn gfx_upload_occupancy(occ : NativeU8Arr, w : Int, h : Int, d : Int) : Unit do x_gfx_upload_occupancy(occ, w, h, d) end
 
-  doc "Update one voxel of the occupancy field after a block edit."
-  fn gfx_set_voxel(x : Int, y : Int, z : Int, solid : Bool) : Unit do x_gfx_set_voxel(x, y, z, if solid do 1 else 0 end) end
   doc "The window slid by (dx, dz) chunks: the chunk mesh slots move with their chunks (a moved slot draws 16 blocks over), and every particle and spring the shim holds moves 16 blocks the other way."
   fn gfx_shift(dx : Int, dz : Int) : Unit do x_gfx_shift(dx, dz) end
   doc "Sync a box of the shadow occupancy texture from the world's occupancy array, recounting the coarse cells it touches: see cf_gfx_sync_box."
   fn gfx_sync_box(occ : NativeU8Arr, x0 : Int, y0 : Int, z0 : Int, x1 : Int, y1 : Int, z1 : Int) : Unit do x_gfx_sync_box(occ, x0, y0, z0, x1, y1, z1) end
+  doc "The occupancy oracle: read both levels of the occupancy texture back and compare them with the world's occupancy array, printing the counts that differ. Diagnostic; see cf_occ_check."
+  fn occ_check(occ : NativeU8Arr) : Unit do x_occ_check(occ) end
   fn gfx_draw(slot : Int, nverts : Int) : Unit do x_gfx_draw(slot, nverts) end
   doc "Draw [count] vertices from [first] of a static slot as one body: the unit-cube template placed at (x, y, z), turned by (c, s) about +y, scaled, lit by (sky, blk). See cf_gfx_draw_model."
   fn gfx_draw_model(slot : Int, first : Int, count : Int, x : Float, y : Float, z : Float, c : Float, s : Float, scale : Float, sky : Float, blk : Float) : Unit do

@@ -1097,7 +1097,13 @@ mod CubeForge do
         let is_spring = is_world_spring(w0, x, y, z)
         if was_spring != is_spring do Win.spring_set(x, y, z, is_spring) else () end
         if is_spring && !was_spring do Win.spray_at(x, y, z, 40) else () end
-        Win.gfx_set_voxel(x, y, z, CubeForge.Light.occludes(id))
+        -- One voxel of the shadow occupancy texture, synced from the world's
+        -- own occupancy array rather than from the block id: the array is the
+        -- one truth, and the box sync recounts the coarse cell from it instead
+        -- of stepping a count that an edit which did not change occlusion --
+        -- water laid over air, a break on air -- would step anyway. That drift
+        -- was invisible until a cell it had under-counted refused to clear.
+        Win.gfx_sync_box(World.occupancy(w0), x, y, z, x, y, z)
         let n = World.side(w0)
         -- accessors, not a match: a dotted constructor pattern does not parse (GAPS.md G24/G25)
         let relit = World.relight_marked(w0, x, y, z)
@@ -3000,6 +3006,10 @@ mod CubeForge do
                     ++ " block " ++ int_to_string(count_diff_u8(World.block_light(scene_world(sc1)), CubeForge.Light.flood_block(scene_world(sc1)), 0, 4194304, 0)) ++ " voxels differ;"
                     ++ " first sky:" ++ first_diffs(World.light(scene_world(sc1)), CubeForge.Light.flood(scene_world(sc1)), 0, 4194304, 6, "")
                     ++ " first block:" ++ first_diffs(World.block_light(scene_world(sc1)), CubeForge.Light.flood_block(scene_world(sc1)), 0, 4194304, 4, ""))
+            -- The occupancy oracle: the shadow texture against the world's own
+            -- occupancy array. Both counts must be 0; a differing texel is a
+            -- block writer that moved the world without moving the texture.
+            Win.occ_check(World.occupancy(scene_world(sc1)))
             println("  fruit: small " ++ int_to_string(Fruit.count_bodies(scene_world(sc1), scene_biome(sc1), 0)) ++ " medium " ++ int_to_string(Fruit.count_bodies(scene_world(sc1), scene_biome(sc1), 1)) ++ " giant " ++ int_to_string(Fruit.count_bodies(scene_world(sc1), scene_biome(sc1), 2)) ++ " orphans " ++ int_to_string(Fruit.count_orphans(scene_world(sc1), scene_biome(sc1), World.shown(scene_world(sc1)))))
             -- the column three east of the player: where CF_AUTOPLANT plants
             let mx = pcx + 3

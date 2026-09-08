@@ -931,11 +931,23 @@ void cf_gfx_upload_occupancy(void *arr, int64_t w, int64_t h, int64_t d) {
     }
     if (!g_occ) glGenTextures(1, &g_occ);
     g_occ_w = w; g_occ_h = h; g_occ_d = d;
+    /* The array holds 0 / opacity / occ_solid; the texture wants 0 / 255, the
+     * same staging cf_gfx_sync_box does. Uploading the raw bytes left water and
+     * leaves in the texture as 2 and 6 -- below the shader's 0.5, so they
+     * shadowed nothing either way, but not what any other writer here puts in a
+     * texel, and so a read-back could not be compared against the world. */
+    unsigned char *up = (unsigned char *)malloc((size_t)(w * h * d));
+    if (!up) { fprintf(stderr, "cf: occupancy staging allocation failed\n"); return; }
+    {
+        const unsigned char *src = (const unsigned char *)narr_data(arr);
+        for (size_t i = 0, n = (size_t)(w * h * d); i < n; i++) up[i] = src[i] == 255 ? 255 : 0;
+    }
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_3D, g_occ);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
     glTexImage3D(GL_TEXTURE_3D, 0, GL_R8, (GLsizei)w, (GLsizei)h, (GLsizei)d, 0,
-                 GL_RED, GL_UNSIGNED_BYTE, narr_data(arr));
+                 GL_RED, GL_UNSIGNED_BYTE, up);
+    free(up);
     glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -976,37 +988,6 @@ void cf_gfx_upload_occupancy(void *arr, int64_t w, int64_t h, int64_t d) {
     glUseProgram(g_prog);
     glUniform1i(g_u_occ, 1);
     glUniform1i(g_u_occ_c, 2);
-}
-
-/* One voxel changed: a single texel beats rebuilding 4 MB. */
-void cf_gfx_set_voxel(int64_t x, int64_t y, int64_t z, int64_t solid) {
-    if (!g_occ) return;
-    if (x < 0 || y < 0 || z < 0 || x >= g_occ_w || y >= g_occ_h || z >= g_occ_d) return;
-    unsigned char v = solid ? 255 : 0;   /* normalized R8: 255 samples as 1.0 */
-    glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_3D, g_occ);
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    glTexSubImage3D(GL_TEXTURE_3D, 0, (GLint)x, (GLint)y, (GLint)z, 1, 1, 1,
-                    GL_RED, GL_UNSIGNED_BYTE, &v);
-    /* Keep the coarse level exact. The count is what makes a break able to clear
-     * a coarse texel: without it a broken block could only be handled
-     * conservatively and the cell would stay marked solid forever. */
-    if (g_occ_count && g_occ_c) {
-        size_t ci = (size_t)(x / CF_OCC_CS)
-                  + (size_t)g_occ_cw * ((size_t)(y / CF_OCC_CS)
-                  + (size_t)g_occ_ch * (size_t)(z / CF_OCC_CS));
-        uint16_t before = g_occ_count[ci];
-        if (solid) g_occ_count[ci]++;
-        else if (g_occ_count[ci]) g_occ_count[ci]--;
-        if ((before > 0) != (g_occ_count[ci] > 0)) {
-            unsigned char cv = g_occ_count[ci] ? 255 : 0;
-            glActiveTexture(GL_TEXTURE2);
-            glBindTexture(GL_TEXTURE_3D, g_occ_c);
-            glTexSubImage3D(GL_TEXTURE_3D, 0, (GLint)(x / CF_OCC_CS), (GLint)(y / CF_OCC_CS),
-                            (GLint)(z / CF_OCC_CS), 1, 1, 1, GL_RED, GL_UNSIGNED_BYTE, &cv);
-        }
-    }
-    glActiveTexture(GL_TEXTURE0);
 }
 
 /* Sync the box [x0..x1] x [y0..y1] x [z0..z1] of the occupancy texture from
@@ -1057,6 +1038,97 @@ void cf_gfx_sync_box(void *arr, int64_t x0, int64_t y0, int64_t z0, int64_t x1, 
                 }
     }
     glActiveTexture(GL_TEXTURE0);
+}
+
+/* ── The occupancy oracle ────────────────────────────────────────────────────
+ * Read both levels of the occupancy texture back off the GPU and compare them,
+ * texel by texel, against the world's own occupancy array -- the same array
+ * every upload path here is fed from. Both counts must be 0; a differing texel
+ * is a block writer that changed the world and not the texture, or the reverse.
+ * Diagnostic only, and slow (two full texture read-backs), so it is called from
+ * the dump frame and nowhere else. The first few differences are printed as
+ * `x,y,z gpu/cpu` so a drift names the voxel it happened at. */
+void cf_occ_check(void *arr) {
+    if (!g_occ || !g_occ_c) { fprintf(stderr, "occupancy oracle: no texture\n"); return; }
+    if (narr_len(arr) < g_occ_w * g_occ_h * g_occ_d) { fprintf(stderr, "occupancy oracle: array too small\n"); return; }
+    const unsigned char *a = (const unsigned char *)narr_data(arr);
+    size_t fn = (size_t)(g_occ_w * g_occ_h * g_occ_d);
+    size_t cn = (size_t)g_occ_cw * g_occ_ch * g_occ_cd;
+    unsigned char *gf = (unsigned char *)malloc(fn);
+    unsigned char *gc = (unsigned char *)malloc(cn);
+    if (!gf || !gc) { free(gf); free(gc); return; }
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_3D, g_occ);
+    glGetTexImage(GL_TEXTURE_3D, 0, GL_RED, GL_UNSIGNED_BYTE, gf);
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_3D, g_occ_c);
+    glGetTexImage(GL_TEXTURE_3D, 0, GL_RED, GL_UNSIGNED_BYTE, gc);
+    glActiveTexture(GL_TEXTURE0);
+
+    char fbuf[512]; fbuf[0] = 0; int fshown = 0;
+    int64_t fdiff = 0;
+    for (int64_t z = 0; z < g_occ_d; z++)
+        for (int64_t y = 0; y < g_occ_h; y++)
+            for (int64_t x = 0; x < g_occ_w; x++) {
+                size_t i = (size_t)(x + g_occ_w * (y + g_occ_h * z));
+                unsigned char want = a[i] == 255 ? 255 : 0;
+                if (gf[i] != want) {
+                    fdiff++;
+                    if (fshown < 8) {
+                        char one[64];
+                        snprintf(one, sizeof one, " %lld,%lld,%lld %d/%d",
+                                 (long long)x, (long long)y, (long long)z, (int)gf[i], (int)want);
+                        strncat(fbuf, one, sizeof fbuf - strlen(fbuf) - 1);
+                        fshown++;
+                    }
+                }
+            }
+    char cbuf[512]; cbuf[0] = 0; int cshown = 0;
+    char nbuf[512]; nbuf[0] = 0; int nshown = 0;
+    int64_t cdiff = 0, ndiff = 0;
+    /* The coarse truth is recounted from the array, never taken from
+     * g_occ_count: the count is one of the things under test. */
+    for (int64_t cz = 0; cz < g_occ_cd; cz++)
+        for (int64_t cy = 0; cy < g_occ_ch; cy++)
+            for (int64_t cx = 0; cx < g_occ_cw; cx++) {
+                int64_t n = 0;
+                for (int64_t z = cz * CF_OCC_CS; z < (cz + 1) * CF_OCC_CS && z < g_occ_d; z++)
+                    for (int64_t y = cy * CF_OCC_CS; y < (cy + 1) * CF_OCC_CS && y < g_occ_h; y++)
+                        for (int64_t x = cx * CF_OCC_CS; x < (cx + 1) * CF_OCC_CS && x < g_occ_w; x++)
+                            if (a[x + g_occ_w * (y + g_occ_h * z)] == 255) n++;
+                size_t ci = (size_t)cx + (size_t)g_occ_cw * ((size_t)cy + (size_t)g_occ_ch * (size_t)cz);
+                unsigned char want = n ? 255 : 0;
+                /* the count itself, not just the texel it drives: a cell that
+                 * has been over-counted still reads 255 and looks right, and
+                 * only shows up later as a texel that will not clear. */
+                if (g_occ_count && g_occ_count[ci] != (uint16_t)n) {
+                    ndiff++;
+                    if (nshown < 8) {
+                        char one[80];
+                        snprintf(one, sizeof one, " %lld,%lld,%lld %d/%lld",
+                                 (long long)cx, (long long)cy, (long long)cz, (int)g_occ_count[ci], (long long)n);
+                        strncat(nbuf, one, sizeof nbuf - strlen(nbuf) - 1);
+                        nshown++;
+                    }
+                }
+                if (gc[ci] != want) {
+                    cdiff++;
+                    if (cshown < 8) {
+                        char one[80];
+                        snprintf(one, sizeof one, " %lld,%lld,%lld %d/%d count %d",
+                                 (long long)cx, (long long)cy, (long long)cz, (int)gc[ci], (int)want,
+                                 g_occ_count ? (int)g_occ_count[ci] : -1);
+                        strncat(cbuf, one, sizeof cbuf - strlen(cbuf) - 1);
+                        cshown++;
+                    }
+                }
+            }
+    printf("  occupancy oracle: fine %lld coarse %lld texels differ from the world (both must be 0),"
+           " %lld coarse counts off; first fine:%s first coarse:%s first count:%s\n",
+           (long long)fdiff, (long long)cdiff, (long long)ndiff, fbuf, cbuf, nbuf);
+    fflush(stdout);
+    free(gf); free(gc);
 }
 
 /* Translucent pass: blend, keep depth test, no depth writes, no culling (water
