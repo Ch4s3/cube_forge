@@ -169,6 +169,48 @@ mod CubeForge.Test.Stream do
     end
   end
 
+  -- The band a shift brings in, built the way CubeForge.Streamer builds it on
+  -- its actor: one chunk at a time, the tiles poured once. `steps` stops
+  -- early, which is what a shift that catches a half-built band gets.
+  pfn built_band(w : CubeForge.World.World, dx : Int, dz : Int, steps : Int) : CubeForge.World.Band do
+    let ox = W.origin_x(w)
+    let oz = W.origin_z(w)
+    build_go(CubeForge.Streamer.part_start(ox, oz, dx, dz, W.side(w), seed()), steps)
+  end
+  pfn build_go(pt : CubeForge.Streamer.Part, k : Int) : CubeForge.World.Band do
+    if k <= 0 do CubeForge.Streamer.part_band(pt) else build_go(CubeForge.Streamer.part_step(pt, 8, seed()), k - 1) end
+  end
+
+  describe "a prepared band" do
+    test "a shift given the band it was prepared for is the shift that generates inline" do
+      let w0 = W.relight_all(W.generate(8, seed(), 1))
+      let plain = W.shift(w0, 1, 0, seed(), 1, Nil)
+      let prep = W.shift_with(w0, 1, 0, seed(), 1, Nil, built_band(w0, 1, 0, 8))
+      Test.assert_eq_int(W.state_hash(prep), W.state_hash(plain), "the whole window is the same world")
+      Test.assert_eq_int(W.origin_x(prep), 1, "and it moved")
+    end
+    test "a band caught half-built is used for what it holds and the rest is generated" do
+      let w0 = W.relight_all(W.generate(8, seed(), 1))
+      let plain = W.shift(w0, 0, -1, seed(), 1, Nil)
+      let prep = W.shift_with(w0, 0, -1, seed(), 1, Nil, built_band(w0, 0, -1, 3))
+      Test.assert_eq_int(W.state_hash(prep), W.state_hash(plain), "three of eight prepared, five generated, same world")
+    end
+    test "a band prepared for another shift is ignored" do
+      let w0 = W.relight_all(W.generate(8, seed(), 1))
+      let plain = W.shift(w0, 1, 0, seed(), 1, Nil)
+      -- prepared for the shift the player did NOT make
+      let prep = W.shift_with(w0, 1, 0, seed(), 1, Nil, built_band(w0, -1, 0, 8))
+      Test.assert_true(!W.band_matches(built_band(w0, -1, 0, 8), 0, 0, 1, 0), "its key does not match")
+      Test.assert_eq_int(W.state_hash(prep), W.state_hash(plain), "so the shift generated its own band")
+    end
+    test "an edited chunk coming back from the cache outranks the band" do
+      let w0 = W.set_block(W.generate(8, seed(), 1), 5, 200, 5, 3)
+      let w1 = W.shift(w0, 1, 0, seed(), 1, Nil)          -- local (0,0) leaves, dirty, and is cached
+      let back = W.shift_with(w1, -1, 0, seed(), 1, Nil, built_band(w1, -1, 0, 8))
+      Test.assert_eq_int(W.block_at(back, 5, 200, 5), 3, "the edit came back, not the band's generated chunk")
+    end
+  end
+
   describe "the fields shift" do
     test "the biome field slides and scans the band" do
       let w0 = W.generate(8, seed(), 1)
@@ -176,7 +218,12 @@ mod CubeForge.Test.Stream do
       let w1 = W.shift(w0, 1, 0, seed(), 1, Nil)
       let f1 = CubeForge.Biome.shift(f0, w1, 1, 0, seed())
       Test.assert_eq_int(CubeForge.Biome.height_of(f1, 0, 5), CubeForge.Biome.height_of(f0, 16, 5), "a height slid")
-      Test.assert_eq_int(CubeForge.Biome.height_of(f1, 120, 9), W.surface_y(w1, 120, 9), "the band was scanned")
+      -- the biome's height is the water's surface where a column is under the
+      -- sea (its climate reads water as ground); World.surface_y is the bed.
+      -- They agree on land, which every band column was until open ocean existed.
+      let bh = CubeForge.Biome.height_of(f1, 120, 9)
+      let sy = W.surface_y(w1, 120, 9)
+      Test.assert_true(bh == sy || (sy < CubeForge.Chunk.sea_level() && bh == CubeForge.Chunk.sea_level()), "the band was scanned")
       Test.assert_true(CubeForge.Biome.temp_of(f1, 40, 40) == CubeForge.Biome.temp_of(f0, 56, 40), "temperature slid")
     end
     test "the mycelium field slides" do

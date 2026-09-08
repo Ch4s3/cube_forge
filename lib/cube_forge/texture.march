@@ -54,6 +54,48 @@ mod CubeForge.Texture do
 
   -- Bedded rock: horizontal laminae [every] pixels apart, a shade darker, over
   -- a speckle -- sandstone's thick pale beds, shale's thin grey-blue ones.
+  -- Layer 92: the crystal item's cube face (blocks draw the model, not this).
+  -- Selenite cream, like the beams it belongs with.
+  pfn crystal_go(a : NativeU8Arr, i : Int) : NativeU8Arr do
+    if i >= 256 do a
+    else
+      let x = i % 16
+      let y = i / 16
+      -- two crossing diagonal families make facets rather than a speckle
+      let f = ((x + y) / 3 + (x - y + 32) / 4) % 4
+      let d = f * 26 - 32
+      crystal_go(put_rgba(a, 92 * 1024 + i * 4, 236 + d, 238 + d, 232 + d, 255), i + 1)
+    end
+  end
+
+  -- Layer 93: a selenite beam's face. Naica's crystals are MILKY CREAM, not
+  -- mint: gypsum with a faint warm cast, almost white where the light hits a
+  -- face and grey-beige in the shade. The first version was a saturated
+  -- blue-green, and no amount of tuning the beams' size fixed the fact that
+  -- they did not look like the reference because they were the wrong colour.
+  --
+  -- Long, low-contrast bands along the face rather than a speckle, so a shaft
+  -- greedy-meshed into one big quad still reads as a grown prism.
+  --
+  -- Near-white, not cream: the rock it grows in is sandstone as often as not,
+  -- and a cream crystal in a sandstone chamber is one beige mass. What separates
+  -- selenite from its host in every photograph is that it is PALER than
+  -- anything around it.
+  -- Nearly uniform, on purpose. The greedy mesher merges a beam's coplanar faces
+  -- into long quads, and any per-block banding in the texel repeats every block
+  -- along that quad -- which made every beam read as stacked masonry. A face
+  -- that varies by a few counts across the whole texel reads as one selenite
+  -- plane. The variation that remains is a soft wash, not a stripe.
+  pfn beam_go(a : NativeU8Arr, i : Int) : NativeU8Arr do
+    if i >= 256 do a
+    else
+      let x = i % 16
+      let y = i / 16
+      let wash = ((x + y) % 5) - 2
+      beam_go(put_rgba(a, 93 * 1024 + i * 4, 246 + wash, 244 + wash, 236 + wash, 255), i + 1)
+    end
+  end
+
   pfn bedded_go(a : NativeU8Arr, layer : Int, i : Int, r : Int, g : Int, b : Int, every : Int) : NativeU8Arr do
     if i >= 256 do a
     else
@@ -151,14 +193,14 @@ mod CubeForge.Texture do
   11 pine leaves, 12 pine bark, 13 gravel, 14 clay, 15 spring (icon only), 16 foam,
   17 basalt, 18 ice, 19 mud, 20 glow cap, 21..62 mycelium over (grass, dirt, sand, snow,
   gravel, clay, stone) x six species, 63..68 spore icons per species, 69..86 fruit
-  (small, stem, cap) x six species, 87 palm bark, 88 palm frond, 89 sandstone, 90 shale, 91 the model palette
+  (small, stem, cap) x six species, 87 palm bark, 88 palm frond, 89 sandstone, 90 shale, 91 the model palette, 92 crystal, 93 crystal beam
   (texel k is Model.colour k).
   """
   fn checkerboard() : NativeU8Arr do checkerboard_tinted(myc_tint()) end
 
   doc "The texture atlas. [tint] scales how strongly mycelium shows on a surface (see myc_tint)."
   fn checkerboard_tinted(tint : Int) : NativeU8Arr do
-    let a0 = checker_go(NativeArray.make_u8(92 * 16 * 16 * 4, 0), 0)
+    let a0 = checker_go(NativeArray.make_u8(94 * 16 * 16 * 4, 0), 0)
     let a1 = water_go(a0, 0)
     let a2 = speckle_go(a1, 2, 0, 134, 96, 67)
     let a3 = speckle_go(a2, 3, 0, 128, 128, 132)
@@ -183,7 +225,7 @@ mod CubeForge.Texture do
     let a22 = fronds_go(a21, 88, 0)
     let a23 = bedded_go(a22, 89, 0, 206, 178, 128, 3)
     let a24 = bedded_go(a23, 90, 0, 96, 104, 118, 2)
-    let a25 = fauna_palette_go(palette_go(a24, 0), 0)
+    let a25 = beam_go(crystal_go(fauna_palette_go(palette_go(a24, 0), 0), 0), 0)
     fruit_all_go(spore_all_go(myc_all_go(a25, tint, 0), 1), 0)
   end
 
@@ -203,15 +245,27 @@ mod CubeForge.Texture do
   doc "Texture layer for an item's HUD icon: as layer_for, except the spring item (id 4) shows its ring. The sea is also id 4 and must keep rendering as water, which is why this is not layer_for."
   fn icon_layer(id : Int) : Float do if id == 4 do 15.0 else if CubeForge.Species.is_spore(id) do spore_layer(CubeForge.Species.species_of_item(id)) else layer_for(id) end end end
 
-  fn layers() : Int do 92 end
+  fn layers() : Int do 94 end
 
   -- ── The layer table for the shim's quad emitter ─────────────────────────
   pfn layer_tab_go(t : NativeF32Arr, i : Int) : NativeF32Arr do
-    if i >= 1536 do t else layer_tab_go(NativeArray.set_f32(t, i, layer_for_face(i / 6, i % 6)), i + 1) end
+    if i >= 1536 do t
+    else layer_tab_go(NativeArray.set_f32(t, i, layer_for_face(i / 6, i % 6) +. (if is_selflit(i / 6) do selflit_bias() else 0.0 end)), i + 1) end
   end
   pfn myc_tab_go(t : NativeF32Arr, j : Int) : NativeF32Arr do
     if j >= 42 do t else myc_tab_go(NativeArray.set_f32(t, 1536 + j, myc_layer(j / 6, j % 6 + 1)), j + 1) end
   end
+  doc """
+  Added to a face's layer in the table the shim reads to mark it SELF-LIT
+  (Vertex.fx_selflit): the greedy quad writer takes everything it knows from
+  the key and this table, so this is where a per-block flag can travel without
+  a second array through the FFI. Only `layer_table` carries the bias; every
+  March path reads `layer_for` and is unaffected.
+  """
+  fn selflit_bias() : Float do 1000.0 end
+  doc "Does block [id] light its own faces with its own colour."
+  fn is_selflit(id : Int) : Bool do id == CubeForge.Chunk.crystal_beam() || id == CubeForge.Chunk.crystal() end
+
   doc "Every block face's texture layer in one array: layer_for_face(id, d) at id * 6 + d for ids 0..255, then myc_layer(k, sp) at 1536 + k * 6 + (sp - 1). cf_mesh_quad reads it instead of calling back into layer_for per rectangle, which was a chain of boxed-Float returns."
   fn layer_table() : NativeF32Arr do myc_tab_go(layer_tab_go(NativeArray.make_f32(1536 + 42, 0.0), 0), 0) end
   fn water_layer() : Float do 1.0 end
@@ -245,13 +299,15 @@ mod CubeForge.Texture do
     else if id == 23 do 18.0
     else if id == 24 do 19.0
     else if id == 25 do 20.0
+    else if id == CubeForge.Chunk.crystal() do 92.0
+    else if id == CubeForge.Chunk.crystal_beam() do 93.0
     else if id == CubeForge.Chunk.sandstone() do 89.0
     else if id == CubeForge.Chunk.shale() do 90.0
     else if id == CubeForge.Chunk.palm_log() do 87.0
     else if id == CubeForge.Chunk.palm_frond() do 88.0
     else if CubeForge.Chunk.is_myc(id) do layer_for(CubeForge.Chunk.myc_base(id))
     else if CubeForge.Chunk.is_fruit(id) do fruit_layer(fruit_kind(id), CubeForge.Chunk.fruit_species(id))
-    else 0.0 end end end end end end end end end end end end end end end end end end end end end end end
+    else 0.0 end end end end end end end end end end end end end end end end end end end end end end end end end
   end
 
 

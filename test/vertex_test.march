@@ -21,7 +21,10 @@ mod CubeForge.Test.Vertex do
     test "round-trips every alpha step at low, mid and high effects" do
       Test.assert_eq_int(alpha_roundtrip(0, 0), -1, "effect 0")
       Test.assert_eq_int(alpha_roundtrip(1, 0), -1, "effect 1 (precipitation)")
-      Test.assert_eq_int(alpha_roundtrip(65535, 0), -1, "effect at the 16-bit ceiling")
+      -- an effect is eight bits: bits 16 and up carry the block light's colour
+      -- (Vertex.light_colour_of), so the ceiling is 255, not 65535
+      Test.assert_eq_int(alpha_roundtrip(255, 0), -1, "effect at the 8-bit ceiling")
+      Test.assert_eq_int(Vx.effect_of(Vx.with_light_colour(Vx.pack(255, 1.0), 1)), 255, "and the colour above it does not leak into the effect")
     end
 
     test "plain() is effect 0, fully opaque" do
@@ -42,6 +45,28 @@ mod CubeForge.Test.Vertex do
       Test.assert_eq_int(Vx.speed_of(p), 5, "speed round-trips")
       Test.assert_eq_int(Vx.speed_of(Vx.pack_flow(Vx.fx_fall(), 7)), 7, "falling at full speed")
       Test.assert_eq_int(Vx.speed_of(Vx.pack_flow(Vx.fx_still(), 0)), 0, "still")
+    end
+  end
+
+  describe "Vertex light colour" do
+    test "rides above the effect and alpha, and the other decoders ignore it" do
+      let p = Vx.with_light_colour(Vx.pack_flow(Vx.fx_dir(3), 5), 1)
+      Test.assert_eq_int(Vx.light_colour_of(p), 1, "the colour comes back")
+      Test.assert_eq_int(Vx.effect_of(p), 5, "the effect is unchanged by it")
+      Test.assert_eq_int(Vx.speed_of(p), 5, "and so is the byte below")
+      Test.assert_eq_int(Vx.light_colour_of(Vx.plain()), 0, "a plain face is lit warm")
+    end
+  end
+
+  describe "Vertex.pack_depth" do
+    test "still water carries its depth in blocks where flowing water carries speed" do
+      let p = Vx.pack_depth(7)
+      Test.assert_eq_int(Vx.effect_of(p), Vx.fx_still(), "still")
+      Test.assert_eq_int(Vx.depth_of(p), 7, "seven blocks of water below")
+      -- the byte is the depth itself, not a 0..1 alpha: the shader needs no scale
+      Test.assert_eq_int(Vx.depth_of(Vx.pack_depth(0)), 0, "a one-block puddle has nothing below it and so no tint at all")
+      Test.assert_eq_int(Vx.depth_of(Vx.pack_depth(Vx.depth_max() + 40)), Vx.depth_max(), "deeper than the cap reads as the cap")
+      Test.assert_eq_int(Vx.depth_of(Vx.pack_depth(0 - 3)), 0, "and a negative depth is none")
     end
   end
 

@@ -156,6 +156,31 @@ mod CubeForge.F32Buf do
     end
   end
 
+  doc "Append one crystal beam block, cut and meshed by the shim (cf_beam_block): unlit, the block index [bi] in its light slot. See Mesher.beam_block."
+  fn push_beam_block(b : F32Buf, tbl : NativeF32Arr, x0 : Float, y0 : Float, z0 : Float, bi : Int, pu : Float, pv : Float, layer : Float, fx : Float) : F32Buf do
+    match b do
+      F32Buf(dd, n, cap) ->
+        let room = CubeForge.Ffi.Window.beam_block_floats()
+        let need = n + room + 1
+        let cap1 = if need <= cap do cap else grow_to(cap, need) end
+        let d1 = if need <= cap do dd else grow(dd, n, cap1) end
+        let d2 = CubeForge.Ffi.Window.beam_block(d1, n, tbl, x0, y0, z0, bi, pu, pv, layer, fx)
+        -- the count sits past the room, as push_slice reads it
+        let k = float_to_int(NativeArray.get_f32(d2, n + room))
+        F32Buf(d2, n + k, cap1)
+    end
+  end
+
+  doc "Append [n] floats of vertices from [src] at [si], re-lit from the light fields at window origin (oxi, ozi) by the block index each vertex carries (cf_f32_relight): the cached beam geometry of a section, lit for this remesh."
+  fn relight(b : F32Buf, src : NativeF32Arr, si : Int, n : Int, la : NativeU8Arr, lb : NativeU8Arr, oxi : Int, ozi : Int) : F32Buf do
+    match b do
+      F32Buf(d, len, cap) ->
+        let cap1 = if len + n <= cap do cap else grow_to(cap, len + n) end
+        let d1 = if len + n <= cap do d else grow(d, len, cap1) end
+        F32Buf(CubeForge.Ffi.Window.f32_relight(d1, len, src, si, n, la, lb, oxi, ozi), len + n, cap1)
+    end
+  end
+
   doc "stamp with a yaw and a uniform scale (cf_f32_stamp_xf): the template is a body centred on (0.5, 0.5, 0.5), placed with its centre at (dx, dy, dz). For animals, which turn continuously and come in sizes."
   fn stamp_xf(b : F32Buf, src : NativeF32Arr, si : Int, n : Int, dx : Float, dy : Float, dz : Float, shade : Float, cosv : Float, sinv : Float, scale : Float) : F32Buf do
     match b do

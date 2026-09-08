@@ -1,0 +1,132 @@
+-- Streamer — the window's next band, generated before the window needs it.
+--
+-- A shift is synchronous work in a frame, and the frame it lands in is the
+-- worst frame of a walk (RESULTS.md, "the shift itself"). Two of its costs are
+-- pure functions of the seed and the world chunk coordinates, and together
+-- they are most of it: pouring the lake tile the incoming band generates
+-- against (38 ms, on one shift in eight) and generating the band's eight
+-- chunks (19 ms, on every shift -- and it does not fall with more workers,
+-- so it is one chunk's cost and the floor of doing it inline).
+--
+-- Neither depends on anything the player has done, so neither has to wait for
+-- the shift. The frame loop names the shift it expects next, once a tick; the
+-- actor pours the tiles on the first of those and adds one chunk on each one
+-- after, and the frame that shifts asks for what it has. A hit costs the
+-- shift a round trip; a miss costs what a shift has always cost, and a band
+-- caught half-built costs only the chunks it is short of.
+--
+-- Two of these run: the frame loop cannot know whether the player will leave
+-- the window's centre along x or z, but it knows which way along EACH axis
+-- (their local chunk is 3 or 4 in the stable band, so the trigger below them
+-- is -1 and above is +1). One actor takes the x candidate, one the z, and
+-- whichever the player actually crosses is ready.
+mod CubeForge.Streamer do
+
+  needs IO.Spawn
+
+  alias CubeForge.Chunk as C
+  alias CubeForge.World as W
+
+  -- The chunk local index [d] generates to after the predicted shift, against
+  -- whichever of the band's two tiles covers it. The same choice
+  -- `World.shifted_chunk` makes, so a prepared chunk is the chunk the shift
+  -- would have generated, byte for byte.
+  pfn prep_chunk(ox1 : Int, oz1 : Int, n : Int, d : Int, seed : Int, ta : CubeForge.Lakes.Tile, tb : CubeForge.Lakes.Tile) : CubeForge.Chunk.Chunk do
+    let cx = ox1 + d % n
+    let cz = oz1 + d / n
+    let t = if CubeForge.Lakes.tile_holds(ta, cx, cz) do ta else tb end
+    C.generate_lakes(16 * cx, 16 * cz, seed, t)
+  end
+
+  -- One chunk per message, not a band per message. A band is eight chunks and
+  -- a lake tile -- around 190 ms of work -- and an actor that takes it all in
+  -- one handler holds a scheduler thread for that whole time, which the frame
+  -- loop's own `pmap_n` wants (the mesh drain, the water tick). Broken up, the
+  -- longest a band build occupies a worker is one chunk, and the band is still
+  -- ready in under a second of walking.
+  --
+  -- A band that is only partly built is still safe to hand over: `shift_with`
+  -- generates any local index the band does not carry, so a short band costs
+  -- exactly the chunks it is missing.
+  type Part = Part(Int, Int, Int, Int, List(Int), List(Int), List(CubeForge.Chunk.Chunk), CubeForge.Lakes.Tile, CubeForge.Lakes.Tile)   -- ox, oz, dx, dz, the indices still to generate, the indices done, their chunks (both newest first), the two lake tiles
+
+  pfn part_none() : Part do Part(0, 0, 0, 0, Nil, Nil, Nil, CubeForge.Lakes.none(), CubeForge.Lakes.none()) end
+
+  pfn part_is(pt : Part, ox : Int, oz : Int, dx : Int, dz : Int) : Bool do
+    match pt do Part(px, pz, pdx, pdz, _, _, _, _, _) -> px == ox && pz == oz && pdx == dx && pdz == dz end
+  end
+
+  doc "The first step of a key: pour the two lake tiles the band generates against (38 ms, and the shift's own worst spike when it lands inline). Public for stream_test, which builds a band the way the actor does."
+  fn part_start(ox : Int, oz : Int, dx : Int, dz : Int, n : Int, seed : Int) : Part do
+    let ox1 = ox + dx
+    let oz1 = oz + dz
+    let bx0 = W.band_x0(n, dx)
+    let bx1 = W.band_x1(n, dx)
+    let bz0 = W.band_z0(n, dz)
+    let bz1 = W.band_z1(n, dz)
+    let ta = CubeForge.Lakes.tile_of_chunk(seed, ox1 + bx0, oz1 + bz0)
+    let tb = if CubeForge.Lakes.tile_holds(ta, ox1 + bx1, oz1 + bz1) do ta else CubeForge.Lakes.tile_of_chunk(seed, ox1 + bx1, oz1 + bz1) end
+    Part(ox, oz, dx, dz, W.band_incoming(n, dx, dz), Nil, Nil, ta, tb)
+  end
+
+  doc "One more chunk of the band the actor is already on."
+  fn part_step(pt : Part, n : Int, seed : Int) : Part do
+    match pt do
+      Part(ox, oz, dx, dz, todo, done, cs, ta, tb) ->
+        match todo do
+          Nil -> pt
+          Cons(d, rest) -> Part(ox, oz, dx, dz, rest, Cons(d, done), Cons(prep_chunk(ox + dx, oz + dz, n, d, seed, ta, tb), cs), ta, tb)
+        end
+    end
+  end
+
+  doc "The band built so far, as `World.shift_with` takes it. Short until the last step; a short band is generated the rest of the way inline."
+  fn part_band(pt : Part) : CubeForge.World.Band do
+    match pt do
+      Part(ox, oz, dx, dz, _, done, cs, ta, tb) -> W.band_of(ox, oz, dx, dz, done, cs, ta, tb)
+    end
+  end
+
+  -- The key arrives every tick: a key the actor is already on advances by one
+  -- chunk, a new one starts over.
+  pfn advance(pt : Part, ox : Int, oz : Int, dx : Int, dz : Int, n : Int, seed : Int) : Part do
+    if part_is(pt, ox, oz, dx, dz) do part_step(pt, n, seed) else part_start(ox, oz, dx, dz, n, seed) end
+  end
+
+  pfn handle_take(reply_to, pt : Part) : Part do
+    Actor.reply(reply_to, part_band(pt))
+    pt
+  end
+
+  type STakeReq = STakeReq
+
+  actor Bander do
+    state { pt : Part }
+    init { pt: part_none() }
+
+    -- call handler first (tag 0): hand over whatever band is held; the caller
+    -- checks its key (World.shift_with does) and generates inline on a miss
+    on STake(reply_to) do
+      { pt: handle_take(reply_to, state.pt) }
+    end
+
+    -- the shift the frame loop expects next
+    on SPrep(ox : Int, oz : Int, dx : Int, dz : Int, n : Int, seed : Int) do
+      { pt: advance(state.pt, ox, oz, dx, dz, n, seed) }
+    end
+  end
+
+  -- Message constructors are in scope only inside this module and only after
+  -- the actor declaration (GAPS.md G46), so the frame loop drives it through
+  -- these. A call is nullary in this codebase (see Flock): the key goes by
+  -- send, the band comes back by call.
+  fn spawn_bander() do spawn(Bander) end
+  doc "Tell the actor which shift to have ready: by ([dx], [dz]) from origin ([ox], [oz]). One of these advances the band by one chunk, so it takes nine to build one."
+  fn send_prep(pid, ox : Int, oz : Int, dx : Int, dz : Int, n : Int, seed : Int) : Unit do
+    let _ = send(pid, SPrep(ox, oz, dx, dz, n, seed))
+    ()
+  end
+  doc "The band the actor has built so far. Its key says which shift it was prepared for, and it may be short of the full eight."
+  fn call_take(pid) : Result(CubeForge.World.Band, String) do Actor.call(pid, STakeReq, 2000) end
+
+end

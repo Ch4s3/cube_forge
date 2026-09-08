@@ -371,8 +371,10 @@ mod CubeForge.Fauna do
     else 128 end end end end end end end end end end end end end end end end end end 
   end
 
-  doc "Poses per species: wings down/mid/up for a bird, tail centre/left/right for a fish."
-  fn poses() : Int do 3 end
+  doc "Poses per species: wings down / level / up / FOLDED for a bird, tail centre / left / right for a fish (whose fourth is its first: a fish at rest still holds its tail)."
+  fn poses() : Int do 4 end
+  doc "The pose of a bird at roost: wings folded to its flanks."
+  fn pose_roost() : Int do 3 end
   doc "Template id of [sp] in pose [p]."
   fn template_of(sp : Int, p : Int) : Int do (sp - 1) * poses() + p end
   fn template_count() : Int do count() * poses() end
@@ -530,6 +532,15 @@ mod CubeForge.Fauna do
     if is_fish(sp) do body_cy(sp) else body_cy(sp) +. (u -. 0.5) *. body_ry(sp) *. 0.5 end
   end
 
+  doc "Half the body's width at slice [x], row [y]: where its surface is, so a part can sit exactly against it."
+  fn body_half_z(sp : Int, x : Int, y : Int) : Float do
+    let p = body_prof_at(sp, x)
+    let ry = fmax(body_ry(sp) *. p, 0.6)
+    let rz = fmax(body_rz(sp) *. (if is_fish(sp) do fsqrt(p) else p end), 0.6)
+    let f = (int_to_float(y) -. body_cy_at(sp, x)) /. ry
+    rz *. fsqrt(1.0 -. f *. f)
+  end
+
   pfn body_go(g : NativeU8Arr, sp : Int, x : Int) : NativeU8Arr do
     if x > body_x1(sp) do g
     else
@@ -622,7 +633,11 @@ mod CubeForge.Fauna do
     else u *. u *. body_ry(sp) *. 1.6 end end
   end
   pfn wing_col(g : NativeU8Arr, sp : Int, x0 : Int, x1 : Int, ylo : Int, yhi : Int, z : Int, k : Int, fingers : Bool) : NativeU8Arr do
-    if !fingers do bx(g, sp, x0, ylo, z, x1, yhi, z, k)
+    if !fingers do
+      -- the inner wing's trailing edge is feathered: one cell cut every fourth
+      -- column, which reads as a row of feather tips rather than a straight rule
+      let g1 = bx(g, sp, x0, ylo, z, x1, yhi, z, k)
+      if z % 4 == 1 do bx(g1, sp, x0, ylo, z, x0, ylo, z, 0) else g1 end
     else
       -- primaries: the rear half of the column with every third cell cut
       let mid = (x0 + x1) / 2
@@ -714,13 +729,17 @@ mod CubeForge.Fauna do
     let hip_x = int_to_float(body_x0(sp)) +. body_len_f(sp) *. 0.5
     let hip_y = body_cy(sp) -. body_ry(sp) *. 0.3
     let len = int_to_float(cells(sp, plan_leg(sp)))
-    let knee_x = hip_x -. len *. 0.25
-    let knee_y = hip_y -. len *. 0.45
+    -- The HOCK: what reads as a backward knee on a ratite is its ankle, set well
+    -- back, with the shank angled forward to the foot. A knee only a little
+    -- behind the hip read as a bend in a post; this reads as a joint.
+    let knee_x = hip_x -. len *. 0.38
+    let knee_y = hip_y -. len *. 0.42
     let foot_y = 0.0 +. w
-    let g1 = tube(g, sp, hip_x, hip_y, zc, knee_x, knee_y, zc, w *. 1.3, w, c_dark(sp))
-    let g2 = tube(g1, sp, knee_x, knee_y, zc, knee_x +. len *. 0.1, foot_y, zc, w, w *. 0.9, c_dark(sp))
+    let g0 = tube(g, sp, hip_x, hip_y, zc, knee_x, knee_y, zc, w *. 1.3, w, c_dark(sp))
+    let g1 = ball(g0, sp, knee_x, knee_y, zc, w *. 1.5, w *. 1.5, w *. 1.5, c_dark(sp))
+    let g2 = tube(g1, sp, knee_x, knee_y, zc, knee_x +. len *. 0.22, foot_y, zc, w, w *. 0.9, c_dark(sp))
     -- the foot: a short plate forward, three toes fanning from it
-    let fx = knee_x +. len *. 0.1
+    let fx = knee_x +. len *. 0.22
     let g3 = tube(g2, sp, fx, foot_y *. 0.6, zc, fx +. len *. 0.28, foot_y *. 0.6, zc, w *. 0.9, w *. 0.6, c_dark(sp))
     let g4 = tube(g3, sp, fx, foot_y *. 0.6, zc, fx +. len *. 0.24, foot_y *. 0.6, zc -. len *. 0.12, w *. 0.7, w *. 0.4, c_dark(sp))
     tube(g4, sp, fx, foot_y *. 0.6, zc, fx +. len *. 0.24, foot_y *. 0.6, zc +. len *. 0.12, w *. 0.7, w *. 0.4, c_dark(sp))
@@ -737,15 +756,46 @@ mod CubeForge.Fauna do
   -- as standing on its tail end -- so its "length" is its height, the head goes
   -- on the nose end, and the pale underside becomes a front. The stamp turns
   -- it upright.
-  doc "A bird of species [sp] in pose [p]: 0 wings down, 1 level, 2 up."
+  -- Folded wings: a shell one cell thick against each flank, from the
+  -- shoulder back toward the tail, following the body's actual surface row by
+  -- row so it sits on the bird rather than beside it. Dark at the rear, where
+  -- the primaries cross.
+  pfn fold_row(g : NativeU8Arr, sp : Int, x : Int, y : Int, k : Int) : NativeU8Arr do
+    let half = body_half_z(sp, x, y)
+    let zl = round_i(body_cz(sp) -. half) - 1
+    let zr = round_i(body_cz(sp) +. half) + 1
+    Mdl.put_n(Mdl.put_n(g, grid_of(sp), x, y, zl, k), grid_of(sp), x, y, zr, k)
+  end
+  pfn fold_col(g : NativeU8Arr, sp : Int, x : Int, yhi : Int, k : Int, y : Int) : NativeU8Arr do
+    if y > yhi do g else fold_col(fold_row(g, sp, x, y, k), sp, x, yhi, k, y + 1) end
+  end
+  pfn fold_go(g : NativeU8Arr, sp : Int, x : Int, x1 : Int) : NativeU8Arr do
+    if x > x1 do g
+    else
+      let u = int_to_float(x1 - x) /. int_to_float(imax(x1 - body_x0(sp), 1))
+      let cy = body_cy_at(sp, x)
+      let ry = fmax(body_ry(sp) *. body_prof_at(sp, x), 0.6)
+      -- the shell narrows toward the tail, as a folded wing does
+      let ylo = round_i(cy -. ry *. (0.35 -. u *. 0.2))
+      let yhi = round_i(cy +. ry *. (0.55 -. u *. 0.25))
+      let k = if u > 0.6 do c_dark(sp) else c_body(sp) end
+      fold_go(fold_col(g, sp, x, yhi, k, ylo), sp, x + 1, x1)
+    end
+  end
+  pfn folded_wings(g : NativeU8Arr, sp : Int) : NativeU8Arr do
+    fold_go(g, sp, body_x0(sp) + 1, round_i(shoulder_x(sp)))
+  end
+
+  doc "A bird of species [sp] in pose [p]: 0 wings down, 1 level, 2 up, 3 folded at roost. An upright bird paddles its flippers instead, and a flightless one just walks."
   fn bird(sp : Int, p : Int) : NativeU8Arr do
     let g0 = body(Mdl.empty_n(grid_of(sp)), sp)
     let g1 = head(g0, sp)
     let g2 = if plan_upright(sp) do g1 else tail_go(g1, sp, 0, cells(sp, plan_tail(sp)), 0) end
     let span = cells(sp, plan_span(sp))
     let g3 = if span <= 0 do g2
-             else if plan_upright(sp) do flipper_go(g2, sp, p, 1, span)
-             else wing_go(g2, sp, p, 1, span) end end
+             else if plan_upright(sp) do flipper_go(g2, sp, (if p == pose_roost() do 1 else p end), 1, span)
+             else if p == pose_roost() do folded_wings(g2, sp)
+             else wing_go(g2, sp, p, 1, span) end end end
     legs(g3, sp)
   end
 
@@ -840,7 +890,7 @@ mod CubeForge.Fauna do
   fn fish(sp : Int, p : Int) : NativeU8Arr do
     let g0 = body(Mdl.empty_n(grid_of(sp)), sp)
     let g1 = dorsal_go(g0, sp, 0, cells(sp, plan_dorsal(sp)))
-    let g2 = caudal_go(pectorals(under_fins(g1, sp), sp), sp, p, 0, cells(sp, plan_tail(sp)), 0, 0)
+    let g2 = caudal_go(pectorals(under_fins(g1, sp), sp), sp, (if p == pose_roost() do 0 else p end), 0, cells(sp, plan_tail(sp)), 0, 0)
     fish_eyes(mouth(g2, sp), sp)
   end
 
@@ -898,6 +948,16 @@ mod CubeForge.Fauna do
     end
   end
 
+  doc "How far template [k] reaches from the body's centre line in z, in grid cells: a spread wing reaches a wingspan, a folded one the body's flank."
+  fn extent_z(s : Poses, k : Int) : Float do ez_go(blob(s), offset(s, k), offset(s, k) + floats(s, k), 0.0) end
+  pfn ez_go(d : NativeF32Arr, i : Int, stop : Int, best : Float) : Float do
+    if i >= stop do best
+    else
+      let z = Math.abs(NativeArray.get_f32(d, i + 2) -. 0.5)
+      ez_go(d, i + Vx.floats(), stop, if z > best do z else best end)
+    end
+  end
+
   doc "A number over every float of template [k]: what tells two poses apart when their quad counts happen to match."
   fn blob_hash(s : Poses, k : Int) : Int do bh_go(blob(s), offset(s, k), offset(s, k) + floats(s, k), 2166136261) end
   pfn bh_go(d : NativeF32Arr, i : Int, stop : Int, acc : Int) : Int do
@@ -907,16 +967,24 @@ mod CubeForge.Fauna do
   end
 
   -- ── Drawing ───────────────────────────────────────────────────────────────
-  -- The fauna slot was 243, free while the window was 8 chunks a side and the
-  -- chunk meshes ended at 191. The 12-chunk window pushed them to 431, so 243 became water
-  -- chunk 99 and every frame's fauna upload landed in that chunk's vertex
-  -- buffer: an empty fauna blob left the buffer with no data store while the
-  -- shim's capacity bookkeeping still claimed one, and the first window shift
-  -- that gave chunk 99 water drew 36 vertices out of it, straight through a
-  -- null pointer inside the GL driver. world_size_test now checks the whole
-  -- named list against the chunk range.
-  doc "Mesh slot for the fauna buffer, one of the named slots above the chunk meshes -- see the slot map in cube_forge.march, which lists it."
+  -- The template blob was at 243 and the demo buffer at 242, free while the
+  -- window was 8 chunks a side and the chunk meshes ended at 191. The 12-chunk
+  -- window pushed them to 431, so 243 became water chunk 99 and every frame's
+  -- fauna upload landed in that chunk's vertex buffer: an empty blob left the
+  -- buffer with no data store while the shim's capacity bookkeeping still
+  -- claimed one, and the first window shift that gave chunk 99 water drew 36
+  -- vertices out of it, straight through a null pointer inside the GL driver.
+  -- Both now sit in the named block above the chunk meshes, and
+  -- world_size_test checks the whole named list against the chunk range.
+  doc "Mesh slot the template blob lives in, uploaded ONCE at startup and never touched again: every animal is drawn from it with its transform as uniforms (cf_gfx_draw_model). One of the named slots above the chunk meshes -- see the slot map in cube_forge.march, which lists it."
   fn slot() : Int do 499 end
+  doc "Mesh slot the demo modes stamp into and re-upload each frame: their own, so the static blob is never clobbered."
+  fn demo_slot() : Int do 498 end
+  doc "Floats in the whole blob."
+  fn blob_len(s : Poses) : Int do offset(s, template_count()) end
+  doc "First vertex of template [k] in the blob, and its vertex count: what a draw call takes."
+  fn first_vertex(s : Poses, k : Int) : Int do offset(s, k) / Vx.floats() end
+  fn vertex_span(s : Poses, k : Int) : Int do floats(s, k) / Vx.floats() end
 
   doc "Stamp species [sp] in pose [p] with its CENTRE at (x, y, z), heading [yaw] radians (0 is +x), at [shade] (Vertex.pack_shade), at an explicit size."
   fn stamp_s(b : CubeForge.F32Buf.F32Buf, s : Poses, sp : Int, p : Int, x : Float, y : Float, z : Float, yaw : Float, shade : Float, scale : Float) : CubeForge.F32Buf.F32Buf do
@@ -1016,15 +1084,6 @@ mod CubeForge.Fauna do
                           Vx.pack_shade(1.0, 0.0), specimen_scale()),
                   s, cx, cy, cz, fx, fz, i + 1)
     end
-  end
-
-  doc "One species alone, close and large: the only way to actually judge a body, since a roster board is 25 pixels an animal."
-  fn demo_one(b : CubeForge.F32Buf.F32Buf, s : Poses, sp : Int, cx : Float, cy : Float, cz : Float, fx : Float, fz : Float, t : Float) : CubeForge.F32Buf.F32Buf do
-    let ahead = 6.0
-    -- turning slowly, because a body that only ever faces one way hides half of
-    -- whatever is wrong with it
-    stamp_s(B.clear(b), s, sp, rest_pose(sp), cx +. ahead *. fx, cy +. 1.0, cz +. ahead *. fz,
-            t *. 0.5, Vx.pack_shade(1.0, 0.0), 5.0)
   end
 
   doc """

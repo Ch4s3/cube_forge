@@ -321,7 +321,17 @@ Each slice is independently verifiable and independently useful.
    ground it says which known species this chunk would hold and what the
    nearest miss needs, in terms a shovel can act on: a depth, a pond, open
    water, a biome, or a season to wait for.
-6. **Day and night.** Roosting, the nocturnal shift, crepuscular depth changes.
+6. **Day and night.** *(done)* Roosting and the nocturnal shift were live
+   from slice 2; what this added is the roosting POSE -- a fourth template per
+   bird with the wings folded as a one-cell shell against each flank, worn by
+   a still animal whenever its flock's mode is roost (a bird put up by the
+   player flaps like any other). A fish's fourth pose is its first. With it,
+   feathered trailing edges on the inner wing and a hock on the ratites.
+   Fish read the clock too: a twilight species comes up toward the surface at
+   dawn and dusk and goes deep at midday, a night species comes up in the
+   dark, a day species holds its depth. The day cycle, seen from under water.
+
+The spec is built. Everything in the build order above is on `main`.
 
 ## Seasons, and the migrants to come
 

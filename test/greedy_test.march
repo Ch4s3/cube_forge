@@ -11,6 +11,11 @@ mod CubeForge.Test.Greedy do
 
   pfn near(a : Float, b : Float) : Bool do Math.abs(a -. b) < 0.0001 end
 
+  -- a column of source water at (5, z=5) from y0 to y1
+  pfn water_col_go(c : CubeForge.Chunk.Chunk, y : Int, y1 : Int) : CubeForge.Chunk.Chunk do
+    if y > y1 do c else water_col_go(C.set(c, 5, y, 5, C.water()), y + 1, y1) end
+  end
+
   -- flat stone slab at y = 9 across the chunk
   pfn slab_go(c : CubeForge.Chunk.Chunk, i : Int) : CubeForge.Chunk.Chunk do
     if i >= 256 do c else slab_go(C.set(c, i % 16, 9, i / 16, 3), i + 1) end
@@ -60,7 +65,7 @@ mod CubeForge.Test.Greedy do
   end
   pfn foliage_of(c : CubeForge.Chunk.Chunk, models : CubeForge.Model.Templates) : CubeForge.F32Buf.F32Buf do
     let e = C.new()
-    Mesher.mesh_section_foliage(c, e, e, e, e, CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.World.shown_new(8), CubeForge.Light.new(), 0, 0.0, 0.0, models)
+    Mesher.mesh_section_foliage(c, e, e, e, e, CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.World.shown_new(8), CubeForge.Light.new(), 0, 0.0, 0.0, models, CubeForge.Mesher.no_beam_geo())
   end
   pfn nverts(b : CubeForge.F32Buf.F32Buf) : Int do B.len(b) / CubeForge.Vertex.floats() end
   pfn tverts(m : CubeForge.Model.Templates, k : Int) : Int do CubeForge.Model.floats(m, k) / CubeForge.Vertex.floats() end
@@ -107,7 +112,7 @@ mod CubeForge.Test.Greedy do
       -- and the stamp of a whole palm crown uses no cube faces
       let w = grass_top16_world()
       let w2 = CubeForge.Veg.plant(w, 8, 8, 69, 6, CubeForge.Trees.palm())
-      let b = Mesher.mesh_section_foliage(CubeForge.World.chunk_at(w2, 0, 0), e, e, e, e, CubeForge.World.light(w2), CubeForge.World.block_light(w2), CubeForge.World.shown(w2), CubeForge.World.occupancy(w2), 4, 0.0, 0.0, m)
+      let b = Mesher.mesh_section_foliage(CubeForge.World.chunk_at(w2, 0, 0), e, e, e, e, CubeForge.World.light(w2), CubeForge.World.block_light(w2), CubeForge.World.shown(w2), CubeForge.World.occupancy(w2), 4, 0.0, 0.0, m, CubeForge.Mesher.no_beam_geo())
       Test.assert_true(nverts(b) > 17 * 36, "seventeen fronds stamped as templates outweigh seventeen cubes")
     end
   end
@@ -167,6 +172,21 @@ mod CubeForge.Test.Greedy do
       Test.assert_eq_int(Mesher.flow_effect(Mesher.flow_of(w7, w7, w7, w7, 0, 3)), CubeForge.Vertex.fx_dir(6), "-z is air: that way")
       Test.assert_eq_int(Mesher.flow_effect(Mesher.flow_of(w7, w7, w7, w7, w7, 0)), CubeForge.Vertex.fx_fall(), "air below: falling")
       Test.assert_eq_int(Mesher.flow_effect(Mesher.flow_of(w7, C.water(), w7, w7, w7, 3)), CubeForge.Vertex.fx_still(), "a source beside is not lower")
+    end
+  end
+
+  describe "Mesher.water_depth_go" do
+    -- What the still-water depth byte is built from: water below the cell, in
+    -- blocks, capped. A lone puddle block reads 0 and so is left exactly as it
+    -- was before the depth tint existed.
+    test "counts the water under a cell and stops at the cap" do
+      let c0 = C.set(C.set(C.new(), 5, 9, 5, 3), 5, 10, 5, C.water())
+      Test.assert_eq_int(Mesher.water_depth_go(c0, c0, c0, c0, c0, 5, 10, 5, 0), 0, "a single block has nothing below it")
+      let c1 = water_col_go(C.set(C.new(), 5, 9, 5, 3), 10, 15)
+      Test.assert_eq_int(Mesher.water_depth_go(c1, c1, c1, c1, c1, 5, 15, 5, 0), 5, "five blocks under the surface of a six-block column")
+      Test.assert_eq_int(Mesher.water_depth_go(c1, c1, c1, c1, c1, 5, 12, 5, 0), 2, "and two under the third")
+      let deep = water_col_go(C.set(C.new(), 5, 9, 5, 3), 10, 200)
+      Test.assert_eq_int(Mesher.water_depth_go(deep, deep, deep, deep, deep, 5, 200, 5, 0), CubeForge.Vertex.depth_max(), "past the cap it reads the cap")
     end
   end
 

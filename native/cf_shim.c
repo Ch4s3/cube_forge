@@ -232,6 +232,18 @@ static const char *VS =
     /* The slot's offset: a chunk mesh is baked at the window-local origin it
      * had when meshed, and the window has since slid (cf_gfx_shift). */
     "uniform vec2 u_off;\n"
+    /* Model mode (cf_gfx_draw_model): the vertices are a template in the unit
+     * cube, a body centred on (0.5, 0.5, 0.5), and the transform arrives as
+     * uniforms -- placed at u_mpos, turned about +y by u_mrot (cos, sin),
+     * scaled by u_mscale, lit by u_msky / u_mblk. The normal turns with the
+     * body. This is what lets an animal's template be uploaded ONCE and drawn
+     * with six floats a frame instead of re-stamped and re-uploaded whole. */
+    "uniform int u_model;\n"
+    "uniform vec3 u_mpos;\n"
+    "uniform vec2 u_mrot;\n"
+    "uniform float u_mscale;\n"
+    "uniform float u_msky;\n"
+    "uniform float u_mblk;\n"
     "out vec2 v_uv; out float v_layer; out float v_shade; out float v_blk;\n"
     "out vec3 v_world; out vec3 v_normal; out float v_fx;\n"
     "const vec3 NORMALS[6] = vec3[6](vec3(0,1,0), vec3(0,-1,0), vec3(1,0,0), vec3(-1,0,0), vec3(0,0,1), vec3(0,0,-1));\n"
@@ -240,10 +252,17 @@ static const char *VS =
     /* Water bobs: a small vertical wave on any water effect (>= 2). Cosmetic
      * only -- v_world stays at the true position so lighting, shadows and
      * fog see the block the game logic sees. */
-    "  int fe = int(a_fx + 0.5) >> 8;\n"
+    "  int fe = (int(a_fx + 0.5) >> 8) & 255;\n"
     "  vec3 p = a_pos;\n"
-    "  p.xz += u_off;\n"
-    "  if (fe >= 2) p.y += 0.03 * sin(u_time * 1.7 + p.x * 1.3 + p.z * 0.9);\n"
+    "  vec3 n = NORMALS[f];\n"
+    "  if (u_model == 1) {\n"
+    "    vec3 q = (a_pos - vec3(0.5)) * u_mscale;\n"
+    "    p = vec3(q.x * u_mrot.x - q.z * u_mrot.y, q.y, q.x * u_mrot.y + q.z * u_mrot.x) + u_mpos;\n"
+    "    n = vec3(n.x * u_mrot.x - n.z * u_mrot.y, n.y, n.x * u_mrot.y + n.z * u_mrot.x);\n"
+    "  } else {\n"
+    "    p.xz += u_off;\n"
+    "    if (fe >= 2 && fe <= 11) p.y += 0.03 * sin(u_time * 1.7 + p.x * 1.3 + p.z * 0.9);\n"
+    "  }\n"
     "  gl_Position = u_vp * vec4(p,1.0);\n"
     "  v_uv=a_uv; v_layer=a_layer;\n"
     /* v_shade is the packed shade word (see Vertex.pack_shade): sky x AO in
@@ -251,9 +270,9 @@ static const char *VS =
      * the fragment shader unpacks it. The per-face directional constant that
      * used to be folded in here is replaced by a real N.L against a sun that
      * moves, computed per fragment. */
-    "  v_shade = a_shade;\n"
-    "  v_blk = a_blk;\n"
-    "  v_world = a_pos + vec3(u_off.x, 0.0, u_off.y); v_normal = NORMALS[f];\n"
+    "  v_shade = (u_model == 1) ? u_msky : a_shade;\n"
+    "  v_blk = (u_model == 1) ? u_mblk : a_blk;\n"
+    "  v_world = (u_model == 1) ? p : a_pos + vec3(u_off.x, 0.0, u_off.y); v_normal = n;\n"
     "  v_fx = a_fx;\n"
     "}\n";
 static const char *FS =
@@ -306,6 +325,20 @@ static const char *FS =
     /* Block light (glowing fungus, later any emissive block): warm, and its own
      * source rather than a sun term. */
     "const vec3  GLOW = vec3(1.00, 0.90, 0.70);\n"
+    /* Block light carries a colour index (Light.colour_cold, a name now slightly
+     * wrong): selenite's light. Naica under lamps is a warm white-gold, brighter
+     * and far whiter than the orange a glowing mushroom throws -- a blue tint,
+     * the first choice here, read as an ice cave. */
+    "const vec3  GLOW_COLD = vec3(1.00, 0.97, 0.90);\n"
+    /* Deep water. A water fragment has no idea how much water is under it --
+     * its colour is a texture times the light -- so a 24-block lagoon rendered
+     * exactly like a puddle. Still water (effect 10) carries its depth in
+     * blocks in the byte a flowing cell uses for speed, which the shader never
+     * reads for effect 10, so this costs no vertex float, no uniform, no pass
+     * and not one extra vertex. Scaled by the baked skylight, so a flooded
+     * cave stays black rather than glowing blue. */
+    "const vec3  DEEP = vec3(0.05, 0.22, 0.40);\n"
+    "const float DEEP_K = 0.16;\n"
     "const float MOON_LEVEL = 0.13;\n"
     "const float MOON_UNTIL = 0.25;\n"
     /* Sunlight reddens as it nears the horizon. SUN_WARM is dawn/dusk, SUN_WHITE
@@ -386,7 +419,14 @@ static const char *FS =
      * merge. 25 texture fetches a fragment: one shared light tap, then three
      * occupancy and three light taps per corner. */
     "float occAt(vec3 v){ return texture(u_occ, (v + vec3(u_occ_off.x, 0.0, u_occ_off.y) + 0.5) / WORLD).r > 0.5 ? 1.0 : 0.0; }\n"
-    "vec2 litAt(vec3 v){ return texture(u_light, (v + vec3(u_occ_off.x, 0.0, u_occ_off.y) + 0.5) / WORLD).rg; }\n"
+    /* The light texture holds the March bytes verbatim: sky is a bare level
+     * 0..15, the block byte is level in the low nibble and the emitter's colour
+     * above it (CubeForge.Light.pack_bl). litAt gives back the two LEVELS as
+     * 0..1 shades, which is what the corner blend averages; the colour is a
+     * separate lookup, because averaging colour indices is meaningless. */
+    "vec2 rawLit(vec3 v){ return texture(u_light, (v + vec3(u_occ_off.x, 0.0, u_occ_off.y) + 0.5) / WORLD).rg * 255.0; }\n"
+    "vec2 litAt(vec3 v){ vec2 r = rawLit(v); return vec2(r.r, floor(mod(r.g + 0.5, 16.0))) / 15.0; }\n"
+    "float litColAt(vec3 v){ return floor((rawLit(v).g + 0.5) / 16.0); }\n"
     "vec2 cornerLight(vec3 av, vec3 du, vec3 dv, vec2 nl){\n"
     "  float o1 = occAt(av + du), o2 = occAt(av + dv), oc = occAt(av + du + dv);\n"
     "  vec2 l1 = o1 > 0.5 ? vec2(0.0) : litAt(av + du);\n"
@@ -398,7 +438,7 @@ static const char *FS =
     "  float ao = (o1 > 0.5 && o2 > 0.5) ? 0.0 : (3.0 - side - oc) / 3.0;\n"
     "  return ((nl + l1 + l2 + lc) / cnt) * mix(0.55, 1.0, ao);\n"
     "}\n"
-    "vec2 smoothLight(vec3 p, vec3 n){\n"
+    "vec3 smoothLight(vec3 p, vec3 n){\n"
     "  vec3 av = floor(p + n * 0.5);\n"
     /* the two in-face axes */
     "  vec3 du = abs(n.x) > 0.5 ? vec3(0,1,0) : vec3(1,0,0);\n"
@@ -411,7 +451,12 @@ static const char *FS =
     "  vec2 c10 = cornerLight(av,  du, -dv, nl);\n"
     "  vec2 c01 = cornerLight(av, -du,  dv, nl);\n"
     "  vec2 c11 = cornerLight(av,  du,  dv, nl);\n"
-    "  return mix(mix(c00, c10, fu), mix(c01, c11, fu), fv);\n"
+    /* The colour is READ, not blended: it comes from the air voxel the face
+     * sits against -- the one the light actually reaches the face from, which
+     * is the voxel the mesher used to read it at when the colour rode in the
+     * face key. Two emitters meeting on one face take the nearer one's colour
+     * rather than some average of two palette indices. */
+    "  return vec3(mix(mix(c00, c10, fu), mix(c01, c11, fu), fv), litColAt(av));\n"
     "}\n"
     "float traceDist(vec3 p, vec3 dir, float maxDist){\n"
     /* Skipping empty space only pays when there IS empty space. A ray near the
@@ -501,7 +546,11 @@ static const char *FS =
     "const vec2 DIRS[8] = vec2[8](vec2(1,0), vec2(0.7071,0.7071), vec2(0,1), vec2(-0.7071,0.7071), vec2(-1,0), vec2(-0.7071,-0.7071), vec2(0,-1), vec2(0.7071,-0.7071));\n"
     "void main(){\n"
     "  int  fxw = int(v_fx + 0.5);\n"
-    "  int  fe  = fxw >> 8;\n"
+    "  int  fe  = (fxw >> 8) & 255;\n"
+    /* The block light's colour index: from the light texture per fragment on
+     * the GPU path below, and from the vertex only for the overlays, which
+     * push their own fx word. */
+    "  int  lci = fxw >> 16;\n"
     /* The shade float packs two channels (see Vertex.pack_shade): sky shade in
      * [0, 1], and block-light shade in even integers above it. Overlays push a
      * plain shade in [0, 1], which decodes as sky-only and leaves them alone. */
@@ -510,8 +559,11 @@ static const char *FS =
     /* PROTOTYPE: take the same two channels from the light texture instead of
      * the vertex, computed per fragment. Uniform branch, so it is coherent
      * across the draw and the off case pays nothing. */
-    "  if (u_gpulight == 1 && u_unlit != 1 && (fxw >> 8) != 1) { vec2 g = smoothLight(v_world, v_normal); sk = g.r; bl = g.g; }\n"
+    "  if (u_gpulight == 1 && u_unlit != 1 && (fxw >> 8) != 1) { vec3 g = smoothLight(v_world, v_normal); sk = g.r; bl = g.g; lci = int(g.b + 0.5); }\n"
     "  float spd = float(fxw & 255) / 255.0 * 7.0;\n"
+    /* Effect 10's byte is depth in blocks, not speed (see Vertex.pack_depth). */
+    "  float wdep = (fe == 10) ? float(fxw & 255) : 0.0;\n"
+    "  float deep = 1.0 - exp(-wdep * DEEP_K);\n"
     /* Flowing water scrolls its ripple along the flow; still water drifts;
      * fast or falling water blends toward the foam layer. */
     "  vec2 uv = v_uv;\n"
@@ -587,10 +639,31 @@ static const char *FS =
     /* Block light is its own source: independent of the sun, so it is what
      * you see at midnight. max, not +, so a glowing patch at noon is not
      * brighter than the noon around it. */
-    "  vec3  world = max(baked, bl * GLOW) + vec3(flash);\n"
+    /* A self-lit block glows in its OWN colour: block light is one channel and
+     * GLOW is warm, so a near-white selenite beam came out the same orange as a
+     * glowing mushroom. This fixes the emitter's own faces; the light it casts
+     * on the rock around it is still warm, and fixing that needs three
+     * block-light fields. */
+    /* A self-lit face is also SHADED by its direction, a fixed top-bright,
+     * bottom-dark factor, because without it every face of a beam came out the
+     * same clipped white and a chamber of beams was a wall of white cubes with
+     * no edges. Selenite is not a light source; it is a pale solid under lamps,
+     * and a solid reads as a solid by its faces differing. The glow is a flat
+     * 1.18 so the texel's own colour is applied once (t.rgb * glow), not
+     * squared: squared, cream came out grey. */
+    "  float sdir = (v_normal.y > 0.5) ? 1.00 : ((v_normal.y < -0.5) ? 0.52 : (abs(v_normal.x) > 0.5 ? 0.80 : 0.68));\n"
+    /* And a glassy rim: a face seen edge-on is brighter than one seen square,
+     * the way light comes back off the sides of anything translucent. Cheap
+     * Fresnel, one dot with the eye vector the flashlight already has. */
+    "  float rim  = 1.0 - abs(dot(v_normal, normalize(u_eye - v_world)));\n"
+    "  vec3  glow = (fe == 12) ? vec3(1.10 * sdir * (0.80 + 0.55 * rim * rim)) : ((lci == 1) ? GLOW_COLD : GLOW);\n"
+    "  vec3  world = max(baked, bl * glow) + vec3(flash);\n"
     /* Overlays (HUD, outline, map marker) share this program but are not part of
      * the world: they keep their own vertex shade and skip lighting entirely. */
     "  vec3 lit = t.rgb * ((u_unlit == 1) ? vec3(sk) : world);\n"
+    /* Before the fog, so distant deep water still fades into the sky rather
+     * than standing on the horizon as a blue slab. */
+    "  if (deep > 0.0) lit = mix(lit, DEEP * (0.35 + 0.65 * sk), deep);\n"
     "  int  fx  = fxw;\n"
     /* Water effects carry speed in the alpha byte, not alpha. */
     "  float a  = (fe >= 2) ? 1.0 : float(fx & 255) / 255.0;\n"
@@ -604,8 +677,10 @@ static const char *FS =
      * rain out exactly as the storm peaked.
      *
      * Exponential fog, so the far plane does not enter into it. */
-    "  if (u_unlit != 1 && (fx >> 8) != 1) lit = mix(lit, u_fog_color, fogf);\n"
-    "  o_color = vec4(lit, t.a * a);\n"
+    "  if (u_unlit != 1 && ((fx >> 8) & 255) != 1) lit = mix(lit, u_fog_color, fogf);\n"
+    /* Deep water is more opaque than shallow: you can read the bottom of a
+     * puddle and not the bottom of a lagoon. */
+    "  o_color = vec4(lit, mix(t.a * a, 1.0, 0.7 * deep));\n"
     "}\n";
 
 static GLuint compile(GLenum kind, const char *src) {
@@ -648,6 +723,20 @@ static void slot_buffer_data(int64_t slot, int64_t nfloats, const void *data, GL
     glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(nfloats * 4), data, usage);
     g_vbo_cap[g_vbo_cur[slot]][slot] = nfloats;
 }
+/* Does slot [slot]'s current buffer actually hold vertices [first, first+n)?
+ * A count that outruns the store is not a GL error the driver reports: it reads
+ * off the end of the data store, and with no store at all it dereferences NULL
+ * inside glDrawArrays and takes the process with it -- no March frame on the
+ * stack, so nothing names the cause. A count that outruns its buffer is a bug
+ * in the caller either way; dropping the draw makes it a missing mesh with a
+ * line on stderr rather than a crash with no backtrace. */
+static int slot_holds(int64_t slot, int64_t first, int64_t n) {
+    int64_t cap = g_vbo_cap[g_vbo_cur[slot]][slot];
+    if ((first + n) * CF_VERT_FLOATS <= cap) return 1;
+    fprintf(stderr, "cf: draw slot=%lld wants vertices %lld..%lld, buffer holds %lld floats -- skipped\n",
+            (long long)slot, (long long)first, (long long)(first + n), (long long)cap);
+    return 0;
+}
 static int g_debug = -1;
 static inline int cf_debug(void) { if (g_debug < 0) g_debug = getenv("CF_DEBUG") != NULL; return g_debug; }
 static GLint  g_u_species = -1;
@@ -674,6 +763,7 @@ static GLuint g_lt[2] = {0, 0};
 static void occ_push_off(void);
 static GLint  g_u_fog_density = -1, g_u_fog_color = -1, g_u_overcast = -1, g_u_bolt = -1;
 static GLint  g_u_off = -1;
+static GLint  g_u_model = -1, g_u_mpos = -1, g_u_mrot = -1, g_u_mscale = -1, g_u_msky = -1, g_u_mblk = -1;
 /* Per-slot window offset (blocks, x and z): zero for a slot uploaded since the
  * last shift, -16 per chunk the window has slid since for one that was not. */
 static float  g_off[CF_MAX_MESHES][2];
@@ -719,6 +809,12 @@ int64_t cf_gfx_init(void) {
     g_u_sundir = glGetUniformLocation(g_prog, "u_sundir");
     g_u_moondir = glGetUniformLocation(g_prog, "u_moondir");
     g_u_unlit = glGetUniformLocation(g_prog, "u_unlit");
+    g_u_model = glGetUniformLocation(g_prog, "u_model");
+    g_u_mpos = glGetUniformLocation(g_prog, "u_mpos");
+    g_u_mrot = glGetUniformLocation(g_prog, "u_mrot");
+    g_u_mscale = glGetUniformLocation(g_prog, "u_mscale");
+    g_u_msky = glGetUniformLocation(g_prog, "u_msky");
+    g_u_mblk = glGetUniformLocation(g_prog, "u_mblk");
     g_u_occ = glGetUniformLocation(g_prog, "u_occ");
     g_u_shadow = glGetUniformLocation(g_prog, "u_shadow");
     g_u_soft = glGetUniformLocation(g_prog, "u_soft");
@@ -863,6 +959,40 @@ void cf_gfx_set_view_proj(void *arr) {
     if (cf_debug()) { const float *f = narr_data(arr); fprintf(stderr, "cf: vp loc=%d diag=%g %g %g %g glerr=%d\n", g_u_vp, f[0], f[5], f[10], f[15], (int)glGetError()); }
 }
 
+static void cf_bind_slot(int64_t slot) {
+    glUniform2f(g_u_off, g_off[slot][0], g_off[slot][1]);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo_of(slot));
+    GLsizei stride = CF_VERT_FLOATS * sizeof(float);
+    glEnableVertexAttribArray(0); glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void *)0);
+    glEnableVertexAttribArray(1); glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, stride, (void *)(3 * 4));
+    glEnableVertexAttribArray(2); glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, stride, (void *)(5 * 4));
+    glEnableVertexAttribArray(3); glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, stride, (void *)(6 * 4));
+    glEnableVertexAttribArray(4); glVertexAttribPointer(4, 1, GL_FLOAT, GL_FALSE, stride, (void *)(7 * 4));
+    glEnableVertexAttribArray(5); glVertexAttribPointer(5, 1, GL_FLOAT, GL_FALSE, stride, (void *)(8 * 4));
+    glEnableVertexAttribArray(6); glVertexAttribPointer(6, 1, GL_FLOAT, GL_FALSE, stride, (void *)(9 * 4));
+}
+
+/* Draw [count] vertices from [first] of a STATIC slot as one body: the
+ * template in the unit cube placed at (x, y, z), turned by (c, s), scaled by
+ * [scale], lit by (sky, blk). The fauna path: the whole template blob is
+ * uploaded once at startup and every animal is one of these a frame. Before
+ * this, 23 animals were re-stamped into a buffer and ~10 MB re-uploaded every
+ * frame -- a tenth of the frame rate, for six floats' worth of change. */
+void cf_gfx_draw_model(int64_t slot, int64_t first, int64_t count, double x, double y, double z,
+                       double c, double s, double scale, double sky, double blk) {
+    if (slot < 0 || slot >= CF_MAX_MESHES || count <= 0 || first < 0) return;
+    if (!slot_holds(slot, first, count)) return;
+    cf_bind_slot(slot);
+    glUniform1i(g_u_model, 1);
+    glUniform3f(g_u_mpos, (float)x, (float)y, (float)z);
+    glUniform2f(g_u_mrot, (float)c, (float)s);
+    glUniform1f(g_u_mscale, (float)scale);
+    glUniform1f(g_u_msky, (float)sky);
+    glUniform1f(g_u_mblk, (float)blk);
+    glDrawArrays(GL_TRIANGLES, (GLint)first, (GLsizei)count);
+    glUniform1i(g_u_model, 0);
+}
+
 void cf_gfx_draw(int64_t slot, int64_t nverts) {
     if (slot < 0 || slot >= CF_MAX_MESHES || nverts <= 0) return;
     glUniform2f(g_u_off, g_off[slot][0], g_off[slot][1]);
@@ -875,17 +1005,7 @@ void cf_gfx_draw(int64_t slot, int64_t nverts) {
     glEnableVertexAttribArray(4); glVertexAttribPointer(4, 1, GL_FLOAT, GL_FALSE, stride, (void *)(7 * 4));
     glEnableVertexAttribArray(5); glVertexAttribPointer(5, 1, GL_FLOAT, GL_FALSE, stride, (void *)(8 * 4));
     glEnableVertexAttribArray(6); glVertexAttribPointer(6, 1, GL_FLOAT, GL_FALSE, stride, (void *)(9 * 4));
-    /* A vertex count that outruns the bound store is not a GL error the driver
-     * reports: it reads off the end of the data store, and with no store at all
-     * it dereferences NULL inside glDrawArrays and takes the process with it (no
-     * March frame on the stack, so nothing names the cause). A stale count is a
-     * bug in the caller either way; dropping the draw makes it a missing mesh to
-     * be found rather than a crash with no backtrace. */
-    if (nverts * CF_VERT_FLOATS > g_vbo_cap[g_vbo_cur[slot]][slot]) {
-        fprintf(stderr, "cf: draw slot=%lld wants %lld verts, buffer holds %lld floats -- skipped\n",
-                (long long)slot, (long long)nverts, (long long)g_vbo_cap[g_vbo_cur[slot]][slot]);
-        return;
-    }
+    if (!slot_holds(slot, 0, nverts)) return;
     glDrawArrays(GL_TRIANGLES, 0, (GLsizei)nverts);
     if (cf_debug()) { fprintf(stderr, "cf: draw slot=%lld nverts=%lld glerr=%d prog=%u vao=%u\n", (long long)slot, (long long)nverts, (int)glGetError(), g_prog, g_vao); }
 }
@@ -991,6 +1111,10 @@ void cf_gfx_upload_occupancy(void *arr, int64_t w, int64_t h, int64_t d) {
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_3D, g_occ);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    /* VERBATIM -- 0 air, 2 water, 6 leaves, 255 solid. The shadow trace only
+     * asks `> 0.5`, but the GPU light flood subtracts this byte per step, so
+     * normalising to 0/255 here would let light run straight through water.
+     * cf_gfx_sync_box writes the same values, and cf_occ_check compares them. */
     glTexImage3D(GL_TEXTURE_3D, 0, GL_R8, (GLsizei)w, (GLsizei)h, (GLsizei)d, 0,
                  GL_RED, GL_UNSIGNED_BYTE, narr_data(arr));
     glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
@@ -1097,8 +1221,14 @@ void cf_gfx_upload_light(void *la, void *lb, int64_t w, int64_t h, int64_t d) {
             for (int64_t x = 0; x < w; x++) {
                 size_t src = (size_t)x + w * ((size_t)z + d * (size_t)y);
                 size_t dst = ((size_t)occ_tx(x) + w * ((size_t)y + h * (size_t)occ_tz(z))) * 2;
-                rg[dst] = (unsigned char)(a[src] * 17);   /* 0..15 -> 0..255 */
-                rg[dst + 1] = (unsigned char)(b[src] * 17);
+                /* VERBATIM, not scaled to 0..255. The block byte is level in
+                 * the low nibble and the emitter's COLOUR in the high one
+                 * (CubeForge.Light.pack_bl), so there is no room to rescale it
+                 * without losing the colour; the shaders unpack instead, and
+                 * cf_light_check can then compare bytes exactly. Skylight's
+                 * colour nibble is always 0, so its byte is its level. */
+                rg[dst] = a[src];
+                rg[dst + 1] = b[src];
             }
     if (!g_lt[0]) glGenTextures(2, g_lt);
     glActiveTexture(GL_TEXTURE3);
@@ -1218,8 +1348,8 @@ void cf_gfx_sync_light_box(void *la, void *lb, int64_t x0, int64_t y0, int64_t z
             for (int64_t x = x0; x <= x1; x++) {
                 size_t src = (size_t)x + g_occ_w * ((size_t)z + g_occ_d * (size_t)y);
                 size_t dst = ((size_t)(x - x0) + bw * ((size_t)(y - y0) + bh * (size_t)(z - z0))) * 2;
-                stage[dst] = (unsigned char)(a[src] * 17);
-                stage[dst + 1] = (unsigned char)(b[src] * 17);
+                stage[dst] = a[src];             /* verbatim: see cf_gfx_upload_light */
+                stage[dst + 1] = b[src];
             }
     if (lfl_on()) g_stage_ms = now_ms() - g_t_stage0;
     double tu0 = lfl_on() ? now_ms() : 0;
@@ -1258,39 +1388,6 @@ void cf_gfx_shift_occupancy(int64_t dx, int64_t dz) {
     g_occ_ox = ((g_occ_ox + 16 * dx) % g_occ_w + g_occ_w) % g_occ_w;
     g_occ_oz = ((g_occ_oz + 16 * dz) % g_occ_d + g_occ_d) % g_occ_d;
     occ_push_off();
-}
-
-/* One voxel changed: a single texel beats rebuilding 4 MB. */
-/* [occ] is CubeForge.Light.occ_value: 0 air, 2 water, 6 leaves, 255 solid --
- * not a flag, because the light flood subtracts it per step. */
-void cf_gfx_set_voxel(int64_t x, int64_t y, int64_t z, int64_t occ) {
-    if (!g_occ) return;
-    if (x < 0 || y < 0 || z < 0 || x >= g_occ_w || y >= g_occ_h || z >= g_occ_d) return;
-    unsigned char v = (unsigned char)occ;   /* normalized R8: 255 samples as 1.0 */
-    glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_3D, g_occ);
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    glTexSubImage3D(GL_TEXTURE_3D, 0, (GLint)occ_tx(x), (GLint)y, (GLint)occ_tz(z), 1, 1, 1,
-                    GL_RED, GL_UNSIGNED_BYTE, &v);
-    /* Keep the coarse level exact. The count is what makes a break able to clear
-     * a coarse texel: without it a broken block could only be handled
-     * conservatively and the cell would stay marked solid forever. */
-    if (g_occ_count && g_occ_c) {
-        size_t ci = (size_t)(occ_tx(x) / CF_OCC_CS)
-                  + (size_t)g_occ_cw * ((size_t)(y / CF_OCC_CS)
-                  + (size_t)g_occ_ch * (size_t)(occ_tz(z) / CF_OCC_CS));
-        uint16_t before = g_occ_count[ci];
-        if (occ == 255) g_occ_count[ci]++;
-        else if (g_occ_count[ci]) g_occ_count[ci]--;
-        if ((before > 0) != (g_occ_count[ci] > 0)) {
-            unsigned char cv = g_occ_count[ci] ? 255 : 0;
-            glActiveTexture(GL_TEXTURE2);
-            glBindTexture(GL_TEXTURE_3D, g_occ_c);
-            glTexSubImage3D(GL_TEXTURE_3D, 0, (GLint)(occ_tx(x) / CF_OCC_CS), (GLint)(y / CF_OCC_CS),
-                            (GLint)(occ_tz(z) / CF_OCC_CS), 1, 1, 1, GL_RED, GL_UNSIGNED_BYTE, &cv);
-        }
-    }
-    glActiveTexture(GL_TEXTURE0);
 }
 
 /* Sync the box [x0..x1] x [y0..y1] x [z0..z1] of the occupancy texture from
@@ -1449,26 +1546,50 @@ static const char *LF_FS =
     "out vec2 o_light;\n"
     /* the window-local x, z of a texel, through the toroidal origin */
     "vec2 localOf(vec2 texel){ return mod(texel - u_off + u_dim.xz, u_dim.xz); }\n"
-    "vec2 lightAt(vec3 texel){ return texture(u_src, (texel + 0.5) / u_dim).rg; }\n"
+    /* The stored BYTES, not a 0..1 shade. Skylight is a bare level 0..15; the
+     * block byte is level in the low nibble and the emitter's colour in the
+     * high one (CubeForge.Light.pack_bl), so it cannot be compared or
+     * interpolated as a number -- a bright warm voxel and a dim cold one would
+     * order by colour. Everything below works in levels and carries the colour
+     * along beside them, which is what the CPU sweep does (Light.list_go). */
+    "vec2 rawAt(vec3 texel){ return texture(u_src, (texel + 0.5) / u_dim).rg * 255.0; }\n"
+    "float lvlOf(float b){ return floor(mod(b + 0.5, 16.0)); }\n"
+    "float colOf(float b){ return floor((b + 0.5) / 16.0); }\n"
+    /* One neighbour: the brightest sky level wins outright, and the brightest
+     * BLOCK level brings its own colour with it. */
+    "void take(vec3 texel, inout float ms, inout float mb, inout float mc){\n"
+    "  vec2 nb = rawAt(texel);\n"
+    "  ms = max(ms, nb.r);\n"
+    "  float bl = lvlOf(nb.g);\n"
+    "  if (bl > mb) { mb = bl; mc = colOf(nb.g); }\n"
+    "}\n"
     "void main(){\n"
     "  vec3 t = vec3(floor(gl_FragCoord.xy), float(g_lay));\n"
     "  float op = texture(u_occ_f, (t + 0.5) / u_dim).r * 255.0;\n"
-    "  vec2 me = lightAt(t);\n"
+    "  vec2 me = rawAt(t);\n"
         /* A solid voxel RECEIVES nothing (Light.give_level returns 0 for it) but
      * KEEPS what it was seeded with: a glowing mycelium block is solid and
      * holds its own emission, and zeroing it here put out every light. */
-    "  if (op > 254.5) { o_light = me; return; }\n"
+    "  if (op > 254.5) { o_light = me / 255.0; return; }\n"
     "  vec2 loc = localOf(t.xz);\n"
-    "  vec2 m = vec2(0.0);\n"
+    "  float ms = 0.0, mb = 0.0, mc = 0.0;\n"
     /* the four horizontal neighbours, dropped when they leave the window */
-    "  if (loc.x > 0.5)            m = max(m, lightAt(t + vec3(-1, 0, 0)));\n"
-    "  if (loc.x < u_dim.x - 1.5)  m = max(m, lightAt(t + vec3( 1, 0, 0)));\n"
-    "  if (loc.y > 0.5)            m = max(m, lightAt(t + vec3(0, 0, -1)));\n"
-    "  if (loc.y < u_dim.z - 1.5)  m = max(m, lightAt(t + vec3(0, 0,  1)));\n"
-    "  if (t.y > 0.5)              m = max(m, lightAt(t + vec3(0, -1, 0)));\n"
-    "  if (t.y < u_dim.y - 1.5)    m = max(m, lightAt(t + vec3(0,  1, 0)));\n"
-    "  vec2 gave = max(m - (1.0 + op) / 15.0, vec2(0.0));\n"
-    "  o_light = max(me, gave);\n"
+    "  if (loc.x > 0.5)            take(t + vec3(-1, 0, 0), ms, mb, mc);\n"
+    "  if (loc.x < u_dim.x - 1.5)  take(t + vec3( 1, 0, 0), ms, mb, mc);\n"
+    "  if (loc.y > 0.5)            take(t + vec3(0, 0, -1), ms, mb, mc);\n"
+    "  if (loc.y < u_dim.z - 1.5)  take(t + vec3(0, 0,  1), ms, mb, mc);\n"
+    "  if (t.y > 0.5)              take(t + vec3(0, -1, 0), ms, mb, mc);\n"
+    "  if (t.y < u_dim.y - 1.5)    take(t + vec3(0,  1, 0), ms, mb, mc);\n"
+    "  float atten = 1.0 + op;\n"
+    "  float gs = max(ms - atten, 0.0);\n"
+    "  float gb = max(mb - atten, 0.0);\n"
+    /* The colour changes only where the level is RAISED, and a tie keeps what
+     * this voxel already had -- the CPU writes level and colour together and
+     * only when it strictly raises (Light.give_level returns 0 otherwise), so
+     * anything else would drift from it on the very first pass. */
+    "  float mine = lvlOf(me.g);\n"
+    "  float ob = (gb > mine) ? (gb + 16.0 * mc) : me.g;\n"
+    "  o_light = vec2(max(me.r, gs), ob) / 255.0;\n"
     "}\n";
 int64_t cf_light_flood(int64_t passes) {
     if (!g_lt[0] || !g_occ_w) return -1;
@@ -1539,8 +1660,11 @@ int64_t cf_light_check(void *la, void *lb) {
             for (int64_t x = 0; x < g_occ_w; x++) {
                 size_t src = (size_t)x + g_occ_w * ((size_t)z + g_occ_d * (size_t)y);
                 size_t t = ((size_t)occ_tx(x) + g_occ_w * ((size_t)y + g_occ_h * (size_t)occ_tz(z))) * 2;
-                if ((int)a[src] != (tex[t] + 8) / 17) bad_s++;
-                if ((int)b[src] != (tex[t + 1] + 8) / 17) bad_b++;
+                /* the exact byte, colour nibble included: a flood that
+                 * spread the right level with the wrong emitter's colour is a
+                 * difference this has to see */
+                if ((int)a[src] != tex[t]) bad_s++;
+                if ((int)b[src] != tex[t + 1]) bad_b++;
             }
     free(tex);
     glActiveTexture(GL_TEXTURE0);
@@ -2152,6 +2276,229 @@ void *cf_f32_stamp(void *dst, int64_t di, void *src, int64_t si, int64_t n, doub
     return dst;
 }
 
+/* ── Crystal beams (CubeForge.Poi's beam field) ─────────────────────────────
+ * A beam table is eight floats a beam (Poi.beam_stride): both ends of the
+ * axis, the radius, one spare. The signed distance of a point to a beam's
+ * surface is the March function Poi.beam_sd, transcribed: the nearest point
+ * on the axis, the offset from it, the offset split into a horizontal
+ * cross-section basis (e1 = (dz, 0, -dx), and the rest by Pythagoras), an
+ * OCTAGONAL norm, minus the radius tapered to a chisel point over the last
+ * 28% at each end (Poi.beam_taper). The March versions stay as the reference
+ * and a test holds these to them; they are here because a cavern chunk asks
+ * the distance 864 thousand times and March took 320 ns a call. */
+static double cf_beam_sd1(const float *b, double px, double py, double pz) {
+    double ax = b[0], ay = b[1], az = b[2];
+    double dx = b[3] - ax, dy = b[4] - ay, dz = b[5] - az;
+    double rad = b[6];
+    double len2 = dx * dx + dy * dy + dz * dz;
+    double t = 0.0;
+    if (len2 > 0.0001) {
+        t = ((px - ax) * dx + (py - ay) * dy + (pz - az) * dz) / len2;
+        if (t < 0.0) t = 0.0; else if (t > 1.0) t = 1.0;
+    }
+    double ox = px - (ax + dx * t), oy = py - (ay + dy * t), oz = pz - (az + dz * t);
+    double r2 = ox * ox + oy * oy + oz * oz;
+    double h = sqrt(dx * dx + dz * dz);
+    double a = (h < 0.0001) ? ox : (ox * dz - oz * dx) / h;
+    double b2 = r2 - a * a;
+    double bb = (b2 <= 0.0) ? 0.0 : sqrt(b2);
+    double fa = fabs(a);
+    double d = fa > bb ? fa : bb;
+    double oct = (fa + bb) * 0.7071;
+    if (oct > d) d = oct;
+    double e = fabs(2.0 * t - 1.0);
+    double taper = (e <= 0.72) ? 1.0 : (1.0 - e) / 0.28;
+    return d - rad * taper;
+}
+/* Signed distance, in blocks, from (x, y, z) to the nearest beam surface of the table; 9 when the table is empty. */
+double cf_beam_min_sd(void *tbl, double x, double y, double z) {
+    const float *t = (const float *)narr_data(tbl);
+    int64_t n = narr_len(tbl) / 8;
+    double best = 9.0;
+    for (int64_t i = 0; i < n; i++) {
+        double d = cf_beam_sd1(t + 8 * i, x, y, z);
+        if (d < best) best = d;
+    }
+    return best;
+}
+/* Fill a Model grid gn a side for the block whose min corner is (x0, y0, z0):
+ * cell (gx, gy, gz) is the sub-cube at ((g - 1) + 0.5) / 8 from the corner,
+ * so the outer ring is a one-sub-cube margin from the neighbouring blocks,
+ * and a cell is set to [colour] when its centre is inside any beam. Cells
+ * with two or more margin coordinates (the margin's edges and corners) touch
+ * no face of the inner cube and are skipped. Poi.beam_grid_ref is the same
+ * in March. Same rc == 1 contract as cf_f32_blit. */
+void *cf_beam_grid(void *grid, void *tbl, double x0, double y0, double z0, int64_t gn, int64_t colour) {
+    int64_t rc = *(int64_t *)grid;
+    if (rc != 1) { fprintf(stderr, "cf_beam_grid: grid is shared (rc=%lld); refusing to write in place\n", (long long)rc); abort(); }
+    if (gn < 3 || narr_len(grid) < gn * gn * gn) { fprintf(stderr, "cf_beam_grid: grid too small\n"); abort(); }
+    unsigned char *g = (unsigned char *)narr_data(grid);
+    const float *t = (const float *)narr_data(tbl);
+    int64_t n = narr_len(tbl) / 8;
+    for (int64_t y = 0; y < gn; y++) {
+        int my = (y == 0 || y == gn - 1);
+        for (int64_t z = 0; z < gn; z++) {
+            int mz = (z == 0 || z == gn - 1);
+            if (my + mz >= 2) continue;
+            for (int64_t x = 0; x < gn; x++) {
+                int mx = (x == 0 || x == gn - 1);
+                if (mx + my + mz >= 2) continue;
+                double px = x0 + ((double)(x - 1) + 0.5) / 8.0;
+                double py = y0 + ((double)(y - 1) + 0.5) / 8.0;
+                double pz = z0 + ((double)(z - 1) + 0.5) / 8.0;
+                for (int64_t i = 0; i < n; i++) {
+                    if (cf_beam_sd1(t + 8 * i, px, py, pz) < 0.0) { g[x + gn * (z + gn * y)] = (unsigned char)colour; break; }
+                }
+            }
+        }
+    }
+    return grid;
+}
+
+/* A whole beam block, cut and greedy-meshed: the beams of the table within a
+ * block's half-diagonal are found, the 10-cube margin grid is filled from
+ * them, and the inner cube's faces are merged per direction the way
+ * Model.template_inner merges them (a face where a cell is filled and its
+ * neighbour in that direction -- possibly a margin cell -- is not), each
+ * rectangle wound as Model.emit winds it, in block coordinates (grid cell c
+ * is at (c - 1) / 8 from the block's min corner). Vertices are UNLIT: sky 0,
+ * and the block's local index [bi] in the block-light slot as bi / 255, for
+ * cf_f32_relight. The caller reserves CF_BEAM_BLOCK_FLOATS + 1 floats at
+ * dst[at..]; the count written lands in the last of them, as cf_mesh_slice
+ * does. The March path -- Poi.beam_near, beam_grid_ref, Model.template_inner,
+ * F32Buf.stamp_xf -- is the reference (Mesher.beam_block_ref), and a test
+ * holds this to it. It is here because the March path took 130 microseconds
+ * a block and a section of beams has a thousand of them. */
+#define CF_BEAM_GN 10
+#define CF_BEAM_BLOCK_FLOATS (3 * 512 * 2 * 6 * CF_VERT_FLOATS)   /* every exposed face of a checkerboard: the bound */
+static void cf_beam_vert(float *o, double x, double y, double z, double pu, double pv, double layer, double d, double fx, double blk) {
+    o[0] = (float)x; o[1] = (float)y; o[2] = (float)z; o[3] = (float)pu; o[4] = (float)pv; o[5] = (float)layer;
+    o[6] = 0.0f; o[7] = (float)d; o[8] = (float)fx; o[9] = (float)blk;
+}
+void *cf_beam_block(void *dst, int64_t at, void *tbl, double x0, double y0, double z0, int64_t bi,
+                    double pu, double pv, double layer, double fx) {
+    int64_t rc = *(int64_t *)dst;
+    if (rc != 1) { fprintf(stderr, "cf_beam_block: destination is shared (rc=%lld); refusing to write in place\n", (long long)rc); abort(); }
+    if (at < 0 || at + CF_BEAM_BLOCK_FLOATS + 1 > narr_len(dst)) {
+        fprintf(stderr, "cf_beam_block: out of range (at=%lld dst=%lld)\n", (long long)at, (long long)narr_len(dst));
+        abort();
+    }
+    float *o = (float *)narr_data(dst) + at;
+    const float *t = (const float *)narr_data(tbl);
+    int64_t n = narr_len(tbl) / 8;
+    /* the beams that reach this block */
+    const float *near[256]; int64_t nn = 0;
+    for (int64_t i = 0; i < n && nn < 256; i++)
+        if (cf_beam_sd1(t + 8 * i, x0 + 0.5, y0 + 0.5, z0 + 0.5) < 0.9) near[nn++] = t + 8 * i;
+    int64_t written = 0;
+    if (nn > 0) {
+        const int gn = CF_BEAM_GN;
+        unsigned char g[CF_BEAM_GN * CF_BEAM_GN * CF_BEAM_GN];
+        memset(g, 0, sizeof g);
+        for (int y = 0; y < gn; y++) {
+            int my = (y == 0 || y == gn - 1);
+            for (int z = 0; z < gn; z++) {
+                int mz = (z == 0 || z == gn - 1);
+                if (my + mz >= 2) continue;
+                for (int x = 0; x < gn; x++) {
+                    int mx = (x == 0 || x == gn - 1);
+                    if (mx + my + mz >= 2) continue;
+                    double px = x0 + ((double)(x - 1) + 0.5) / 8.0;
+                    double py = y0 + ((double)(y - 1) + 0.5) / 8.0;
+                    double pz = z0 + ((double)(z - 1) + 0.5) / 8.0;
+                    for (int64_t i = 0; i < nn; i++)
+                        if (cf_beam_sd1(near[i], px, py, pz) < 0.0) { g[x + gn * (z + gn * y)] = 1; break; }
+                }
+            }
+        }
+        #define G(x, y, z) g[(x) + gn * ((z) + gn * (y))]
+        double blk = (double)bi / 255.0;
+        static const int dox[6] = {0, 0, 1, -1, 0, 0}, doy[6] = {1, -1, 0, 0, 0, 0}, doz[6] = {0, 0, 0, 0, 1, -1};
+        unsigned char mask[CF_BEAM_GN * CF_BEAM_GN];
+        for (int d = 0; d < 6; d++) {
+            for (int a = 1; a <= 8; a++) {
+                /* the slice's mask over (u, v) in 1..8: gx/gy/gz of Model */
+                for (int v = 1; v <= 8; v++) for (int u = 1; u <= 8; u++) {
+                    int x = (d <= 1) ? u : (d <= 3 ? a : u);
+                    int y = (d <= 1) ? a : v;
+                    int z = (d <= 1) ? v : (d <= 3 ? u : a);
+                    int k = G(x, y, z);
+                    mask[u + gn * v] = (k != 0 && G(x + dox[d], y + doy[d], z + doz[d]) == 0) ? 1 : 0;
+                }
+                for (int v = 1; v <= 8; v++) for (int u = 1; u <= 8; u++) {
+                    if (!mask[u + gn * v]) continue;
+                    int wd = 1; while (u + wd <= 8 && mask[u + wd + gn * v]) wd++;
+                    int h = 1;
+                    for (; v + h <= 8; h++) { int ok = 1; for (int j = 0; j < wd; j++) if (!mask[u + j + gn * (v + h)]) { ok = 0; break; } if (!ok) break; }
+                    for (int jv = 0; jv < h; jv++) for (int ju = 0; ju < wd; ju++) mask[u + ju + gn * (v + jv)] = 0;
+                    double fa = (a - 1) / 8.0, fa1 = fa + 1.0 / 8.0;
+                    double fu = (u - 1) / 8.0, fu1 = fu + wd / 8.0;
+                    double fv = (v - 1) / 8.0, fv1 = fv + h / 8.0;
+                    double q[4][3];
+                    switch (d) {
+                    case 0: q[0][0]=fu; q[0][1]=fa1; q[0][2]=fv;  q[1][0]=fu; q[1][1]=fa1; q[1][2]=fv1; q[2][0]=fu1; q[2][1]=fa1; q[2][2]=fv1; q[3][0]=fu1; q[3][1]=fa1; q[3][2]=fv;  break;
+                    case 1: q[0][0]=fu; q[0][1]=fa;  q[0][2]=fv;  q[1][0]=fu1; q[1][1]=fa; q[1][2]=fv;  q[2][0]=fu1; q[2][1]=fa;  q[2][2]=fv1; q[3][0]=fu; q[3][1]=fa;   q[3][2]=fv1; break;
+                    case 2: q[0][0]=fa1; q[0][1]=fv; q[0][2]=fu;  q[1][0]=fa1; q[1][1]=fv1; q[1][2]=fu; q[2][0]=fa1; q[2][1]=fv1; q[2][2]=fu1; q[3][0]=fa1; q[3][1]=fv; q[3][2]=fu1; break;
+                    case 3: q[0][0]=fa; q[0][1]=fv;  q[0][2]=fu1; q[1][0]=fa; q[1][1]=fv1; q[1][2]=fu1; q[2][0]=fa; q[2][1]=fv1; q[2][2]=fu;  q[3][0]=fa; q[3][1]=fv;   q[3][2]=fu;  break;
+                    case 4: q[0][0]=fu1; q[0][1]=fv; q[0][2]=fa1; q[1][0]=fu1; q[1][1]=fv1; q[1][2]=fa1; q[2][0]=fu; q[2][1]=fv1; q[2][2]=fa1; q[3][0]=fu; q[3][1]=fv; q[3][2]=fa1; break;
+                    default: q[0][0]=fu; q[0][1]=fv; q[0][2]=fa;  q[1][0]=fu; q[1][1]=fv1; q[1][2]=fa;  q[2][0]=fu1; q[2][1]=fv1; q[2][2]=fa; q[3][0]=fu1; q[3][1]=fv; q[3][2]=fa;  break;
+                    }
+                    static const int order[6] = {0, 1, 2, 0, 2, 3};
+                    for (int k = 0; k < 6; k++) {
+                        const double *p = q[order[k]];
+                        cf_beam_vert(o + written, x0 + p[0], y0 + p[1], z0 + p[2], pu, pv, layer, (double)d, fx, blk);
+                        written += CF_VERT_FLOATS;
+                    }
+                }
+            }
+        }
+        #undef G
+    }
+    o[CF_BEAM_BLOCK_FLOATS] = (float)written;
+    return dst;
+}
+
+/* Copy n floats of vertices from src[si..] to dst[di..], re-lighting each from
+ * the light fields: the cached geometry of a chunk section's crystal beams
+ * (Mesher.beam_geometry) carries, in its block-light slot, the LOCAL INDEX of
+ * the block it was cut from (as index / 255, exact on the way back), and this
+ * looks that block's sky and block light up in [la] / [lb] at the section's
+ * window origin (oxi, ozi). The cut is the expensive part -- 400 ms for a
+ * section of beams -- and it depends only on the beams; the light is what a
+ * remesh changes, so the light is all a remesh recomputes. Same rc == 1
+ * contract as cf_f32_blit. */
+void *cf_f32_relight(void *dst, int64_t di, void *src, int64_t si, int64_t n, void *la, void *lb, int64_t oxi, int64_t ozi) {
+    int64_t rc = *(int64_t *)dst;
+    if (rc != 1) { fprintf(stderr, "cf_f32_relight: destination is shared (rc=%lld); refusing to write in place\n", (long long)rc); abort(); }
+    if (n <= 0) return dst;
+    if (di < 0 || si < 0 || di + n > narr_len(dst) || si + n > narr_len(src) || n % CF_VERT_FLOATS != 0) {
+        fprintf(stderr, "cf_f32_relight: out of range (di=%lld si=%lld n=%lld dst=%lld src=%lld)\n",
+                (long long)di, (long long)si, (long long)n, (long long)narr_len(dst), (long long)narr_len(src));
+        abort();
+    }
+    float *d = (float *)narr_data(dst) + di;
+    const float *s = (const float *)narr_data(src) + si;
+    const unsigned char *A = (const unsigned char *)narr_data(la);
+    const unsigned char *B = (const unsigned char *)narr_data(lb);
+    int64_t la_n = narr_len(la), lb_n = narr_len(lb);
+    for (int64_t i = 0; i < n; i += CF_VERT_FLOATS) {
+        int64_t bi = (int64_t)(s[i + 9] * 255.0f + 0.5f);
+        int64_t x = oxi + bi % 16, y = bi / 256, z = ozi + (bi / 16) % 16;
+        double sky = 0.0, blk = 0.0;
+        if (x >= 0 && x < 128 && y >= 0 && y < 256 && z >= 0 && z < 128) {
+            int64_t idx = x + 128 * (z + 128 * y);
+            if (idx < la_n) sky = (A[idx] & 15) / 15.0;
+            if (idx < lb_n) blk = (B[idx] & 15) / 15.0;
+        }
+        d[i + 0] = s[i + 0]; d[i + 1] = s[i + 1]; d[i + 2] = s[i + 2];
+        d[i + 3] = s[i + 3]; d[i + 4] = s[i + 4]; d[i + 5] = s[i + 5];
+        d[i + 6] = (float)sky;
+        d[i + 7] = s[i + 7]; d[i + 8] = s[i + 8];
+        d[i + 9] = (float)blk;
+    }
+    return dst;
+}
+
 /* Stamp a model template with a yaw rotation and a uniform scale: the same copy
  * as cf_f32_stamp, but the template's unit cell is treated as a body centred on
  * (0.5, 0.5, 0.5), scaled by [scale], turned about +y by the angle whose cosine
@@ -2236,11 +2583,21 @@ static double cf_pack_shade(double sky, double blk) { return 2.0 * (double)(int6
 static double cf_brightness(double p) { double h = floor(p / 2.0); return (p - 2.0 * h) + h / 255.0; }
 /* [shade] arrives packed (see cf_pack_shade / CubeForge.Vertex.pack_shade) and is
  * split HERE, on the CPU, into the two attributes the GPU interpolates. The
- * packed form never reaches a varying -- see the layout note above. */
+ * packed form never reaches a varying -- see the layout note above.
+ *
+ * A layer of 1000 or more is Texture.selflit_bias: the block lights its own
+ * faces with its own colour, and the bias is how that one bit reaches here
+ * without a second array through the FFI. Strip it and set effect 12. */
 static void cf_vert(float *o, double x, double y, double z, double u, double v, double layer, double shade, double face) {
     double blk = floor(shade * 0.5);
+    /* No block-light colour in fx: a terrain face does not carry one any more.
+     * It used to ride here from bit 56 of the face key, which split the greedy
+     * merge by emitter; the fragment shader reads the colour out of the light
+     * texture instead (litColAt), so the face keeps nothing about its light. */
+    double fx = 255.0;
+    if (layer >= 1000.0) { layer -= 1000.0; fx = 12.0 * 256.0 + 255.0; }
     o[0] = (float)x; o[1] = (float)y; o[2] = (float)z; o[3] = (float)u; o[4] = (float)v;
-    o[5] = (float)layer; o[6] = (float)(shade - 2.0 * blk); o[7] = (float)face; o[8] = 255.0f;
+    o[5] = (float)layer; o[6] = (float)(shade - 2.0 * blk); o[7] = (float)face; o[8] = (float)fx;
     o[9] = (float)(blk / 255.0);
 }
 static void cf_quad_into(float *o, int64_t d, int64_t sy, int64_t a, int64_t u, int64_t v, int64_t wd, int64_t h,
@@ -2434,9 +2791,11 @@ void *cf_mark_box(void *marks, void *a, void *b, int64_t x0, int64_t x1, int64_t
  * Keyed by WORLD chunk coordinate, so a chunk keeps its identity across a
  * window shift. Enough slots for a 12-chunk window and its apron; the oldest
  * entry is evicted, and a miss just means the actor generates as it used to. */
-#define CF_CHUNK_SLOTS 256
+/* Not CF_CHUNK_SLOTS: that is the mesh slot count (the window in
+ * chunks, squared). This is the chunk STORE's capacity. */
+#define CF_CHUNK_STORE_SLOTS 256
 #define CF_CHUNK_BYTES 65536
-static struct { int64_t cx, cz; unsigned char *bytes; int used; } g_chunks[CF_CHUNK_SLOTS];
+static struct { int64_t cx, cz; unsigned char *bytes; int used; } g_chunks[CF_CHUNK_STORE_SLOTS];
 static int64_t g_chunk_next = 0;
 static pthread_mutex_t g_chunk_mu = PTHREAD_MUTEX_INITIALIZER;
 
@@ -2445,10 +2804,10 @@ void cf_chunk_put(int64_t cx, int64_t cz, void *arr) {
     const unsigned char *src = (const unsigned char *)narr_data(arr);
     pthread_mutex_lock(&g_chunk_mu);
     int slot = -1;
-    for (int i = 0; i < CF_CHUNK_SLOTS; i++)
+    for (int i = 0; i < CF_CHUNK_STORE_SLOTS; i++)
         if (g_chunks[i].used && g_chunks[i].cx == cx && g_chunks[i].cz == cz) { slot = i; break; }
     if (slot < 0) {
-        slot = (int)(g_chunk_next % CF_CHUNK_SLOTS);
+        slot = (int)(g_chunk_next % CF_CHUNK_STORE_SLOTS);
         g_chunk_next++;
     }
     if (!g_chunks[slot].bytes) g_chunks[slot].bytes = (unsigned char *)malloc(CF_CHUNK_BYTES);
@@ -2468,7 +2827,7 @@ void *cf_chunk_get(void *out, int64_t cx, int64_t cz) {
     unsigned char *d = (unsigned char *)narr_data(out);
     d[CF_CHUNK_BYTES] = 0;
     pthread_mutex_lock(&g_chunk_mu);
-    for (int i = 0; i < CF_CHUNK_SLOTS; i++)
+    for (int i = 0; i < CF_CHUNK_STORE_SLOTS; i++)
         if (g_chunks[i].used && g_chunks[i].cx == cx && g_chunks[i].cz == cz) {
             memcpy(d, g_chunks[i].bytes, CF_CHUNK_BYTES);
             d[CF_CHUNK_BYTES] = 1;

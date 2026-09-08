@@ -205,6 +205,20 @@ mod CubeForge.Test.Flock do
     end
   end
 
+  describe "fish and the clock" do
+    test "a twilight fish comes up at dusk and goes deep at noon; a day fish holds its depth" do
+      -- water at 62, bed at 50: twelve blocks to move in
+      let p = flat_patch(50)
+      let carp_dusk = run(Fl.new(Fa.sp_reedcarp(), 6, 3, 100.0, 58.0, 100.0), p, 0.25, 0.0, 0.0, 0.0, 80)
+      let carp_noon = run(Fl.new(Fa.sp_reedcarp(), 6, 3, 100.0, 58.0, 100.0), p, 1.0, 0.0, 0.0, 0.0, 80)
+      Test.assert_true(min_y(carp_dusk, 0, 999.0) > max_y(carp_noon, 0, 0.0) +. 2.0, "up at dusk, well below it at noon")
+      Test.assert_true(max_y(carp_dusk, 0, 0.0) < 62.0, "and still under the surface")
+      let sun_dusk = run(Fl.new(Fa.sp_sunfin(), 6, 3, 100.0, 58.0, 100.0), p, 0.25, 0.0, 0.0, 0.0, 80)
+      let sun_noon = run(Fl.new(Fa.sp_sunfin(), 6, 3, 100.0, 58.0, 100.0), p, 1.0, 0.0, 0.0, 0.0, 80)
+      Test.assert_true(Math.abs(mean_y(sun_dusk, 0, 0.0) -. mean_y(sun_noon, 0, 0.0)) < 1.0, "a day fish does not care what time it is")
+    end
+  end
+
   describe "the flock behaves" do
     test "birds climb to their cruising height over flat ground and stay there" do
       let f = run(Fl.new(Fa.sp_grasspipit(), 8, 7, 100.0, 71.0, 100.0), flat_patch(70), 1.0, 0.0, 0.0, 0.0, 60)
@@ -235,6 +249,15 @@ mod CubeForge.Test.Flock do
       Test.assert_true(min_y(spooked, 0, 999.0) > min_y(calm, 0, 999.0), "and higher")
     end
 
+    test "at night a still flock folds its wings; by day it flaps" do
+      let p = flat_patch(70)
+      let night = run(Fl.new(Fa.sp_grasspipit(), 6, 9, 100.0, 79.0, 100.0), p, 0.0, 0.0, 0.0, 0.0, 120)
+      Test.assert_eq_int(Fl.mode(night), Fl.m_roost(), "the flock is at roost")
+      Test.assert_true(count_pose(Fl.transforms(night), Fa.pose_roost(), 0) > 0, "and at least one bird has settled and folded")
+      let day = run(Fl.new(Fa.sp_grasspipit(), 6, 9, 100.0, 79.0, 100.0), p, 1.0, 0.0, 0.0, 0.0, 120)
+      Test.assert_eq_int(count_pose(Fl.transforms(day), Fa.pose_roost(), 0), 0, "nobody folds in flight")
+    end
+
     test "at night a diurnal flock comes down to roost" do
       let p = flat_patch(70)
       let day = run(Fl.new(Fa.sp_grasspipit(), 8, 9, 100.0, 79.0, 100.0), p, 1.0, 0.0, 0.0, 0.0, 60)
@@ -261,6 +284,16 @@ mod CubeForge.Test.Flock do
     end
   end
 
+  pfn mean_y(f : CubeForge.Flock.Flock, i : Int, acc : Float) : Float do
+    if i >= Fl.count(f) do acc /. int_to_float(Fl.count(f))
+    else mean_y(f, i + 1, acc +. Fl.pos_y(Fl.bodies(f), i)) end
+  end
+  pfn count_pose(ts : List(Int), pose : Int, acc : Int) : Int do
+    match ts do
+      Nil -> acc
+      Cons(v, rest) -> count_pose(rest, pose, if Fl.un_pose(v) == pose do acc + 1 else acc end)
+    end
+  end
   pfn above_ground(f : CubeForge.Flock.Flock, patch : NativeIntArr, i : Int) : Bool do
     if i >= Fl.count(f) do true
     else

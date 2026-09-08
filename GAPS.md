@@ -1529,3 +1529,33 @@ so this is specific to the call path, not to messages.
 - **Would need:** the call path to marshal a request's fields, or a compile
   error saying it cannot. Silently substituting zeros for a message's payload is
   the worst of the three options.
+
+### G85. `forge lint` parsed with a different parser than `forge build` compiled with
+
+    doc "Face [yaw] radians."
+    @[no_alloc]
+    fn with_yaw(p : Player, yaw : Float) : Player do ... end
+
+built and ran; `forge lint` reported `player.march:1:0: error [parse/error]
+parse error`, pointing at the file's first line. Not a grammar disagreement:
+the project pins `watch-7eb8d76a` in `.march-version`, and `forge build`
+routes `march` through the pin, but `forge lint` parses with the parser
+compiled INTO whichever `forge` is on PATH — here the opam install from
+2026-08-30, four days older than the production that lets a doc string and
+an attribute share a declaration. Swapping the two lines "fixed" lint and
+broke the build, which was the same disagreement seen from the other side.
+
+- **How it showed:** a lint failure on main at a location that named
+  nothing. Found by deleting the attribute (lint passed), then by running the
+  same file through every installed `march` — every build from 2026-09-04
+  on accepted it, every older one did not.
+- **Cost:** an afternoon, most of it spent believing the compiler and the
+  linter shared a parser, which they do — just not the same build of it.
+- **Done instead:** forge now hands every subcommand except `toolchain`,
+  `upgrade`, `help` and `completions` to the pinned toolchain's own forge
+  when that is a different binary (`Toolchain.forge_exe_for`, march
+  2026-09-07), rustup-style, so lint, format and build agree by
+  construction; `forge toolchain which` says which forge will run. The doc
+  string went back on `with_yaw`.
+- **Would need:** nothing further here; a lint parse error that names the
+  line it stopped on would have halved the search.

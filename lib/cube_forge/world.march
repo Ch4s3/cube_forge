@@ -23,6 +23,63 @@ mod CubeForge.World do
   -- A column blob for local chunk index i, supplied by the caller for the chunks about to leave.
   type Blob = Blob(Int, NativeU8Arr)
 
+  -- ── A band prepared ahead of the shift that will need it ─────────────────
+  -- Everything the incoming band costs -- the lake tiles it pours against and
+  -- the chunks themselves -- is a pure function of the seed and the world
+  -- chunk coordinates, so it can be computed before the window moves and
+  -- handed to `shift_with`. `CubeForge.Streamer` does that on an actor while
+  -- the frame loop runs; a `Band` is the result, keyed by the shift it was
+  -- prepared for (the origin BEFORE the move, and the direction).
+  type Band = Band(Int, Int, Int, Int, List(Int), List(CubeForge.Chunk.Chunk), CubeForge.Lakes.Tile, CubeForge.Lakes.Tile)   -- ox, oz, dx, dz, the incoming local indices, their chunks in the same order, the two lake tiles they generated against
+  doc "The empty band: no shift is prepared, so `shift_with` generates inline."
+  fn band_none() : Band do Band(0, 0, 0, 0, Nil, Nil, CubeForge.Lakes.none(), CubeForge.Lakes.none()) end
+  doc "The band, keyed by the shift it was prepared for: [ox], [oz] is the origin before the move."
+  fn band_of(ox : Int, oz : Int, dx : Int, dz : Int, idx : List(Int), cs : List(CubeForge.Chunk.Chunk), ta : CubeForge.Lakes.Tile, tb : CubeForge.Lakes.Tile) : Band do
+    Band(ox, oz, dx, dz, idx, cs, ta, tb)
+  end
+  doc "Was this band prepared for the shift by ([dx], [dz]) from origin ([ox], [oz])? An empty band never matches: its index list is empty."
+  fn band_matches(b : Band, ox : Int, oz : Int, dx : Int, dz : Int) : Bool do
+    match b do
+      Band(bx, bz, bdx, bdz, idx, _, _, _) ->
+        match idx do
+          Nil -> false
+          Cons(_, _) -> bx == ox && bz == oz && bdx == dx && bdz == dz
+        end
+    end
+  end
+  fn band_ta(b : Band) : CubeForge.Lakes.Tile do match b do Band(_, _, _, _, _, _, ta, _) -> ta end end
+  fn band_tb(b : Band) : CubeForge.Lakes.Tile do match b do Band(_, _, _, _, _, _, _, tb) -> tb end end
+  -- A chunk looked up in the band by its local index: at most eight entries, so a walk.
+  type Found = Found(Bool, CubeForge.Chunk.Chunk)
+  pfn band_find_go(idx : List(Int), cs : List(CubeForge.Chunk.Chunk), d : Int) : Found do
+    match idx do
+      Nil -> Found(false, C.new())
+      Cons(i, irest) ->
+        match cs do
+          Nil -> Found(false, C.new())
+          Cons(c, crest) -> if i == d do Found(true, c) else band_find_go(irest, crest, d) end
+        end
+    end
+  end
+  pfn band_find(b : Band, d : Int) : Found do
+    match b do Band(_, _, _, _, idx, cs, _, _) -> band_find_go(idx, cs, d) end
+  end
+  pfn band_incoming_go(n : Int, dx : Int, dz : Int, d : Int, acc : List(Int)) : List(Int) do
+    if d < 0 do acc
+    else
+      let sx = d % n + dx
+      let sz = d / n + dz
+      band_incoming_go(n, dx, dz, d - 1, if sx >= 0 && sx < n && sz >= 0 && sz < n do acc else Cons(d, acc) end)
+    end
+  end
+  doc "The local indices a shift by ([dx], [dz]) brings in, for a world [n] chunks a side."
+  fn band_incoming(n : Int, dx : Int, dz : Int) : List(Int) do band_incoming_go(n, dx, dz, n * n - 1, Nil) end
+  doc "The band that comes in, in local chunk coordinates, for a shift of ([dx], [dz]): the corner (bx0, bz0) and its far corner (bx1, bz1). The band's lake tiles are chosen from these (see `shift_chunks_with`), and the commit syncs just this band of the occupancy texture."
+  fn band_x0(n : Int, dx : Int) : Int do if dx > 0 do n - 1 else 0 end end
+  fn band_x1(n : Int, dx : Int) : Int do if dx < 0 do 0 else n - 1 end end
+  fn band_z0(n : Int, dz : Int) : Int do if dz > 0 do n - 1 else 0 end end
+  fn band_z1(n : Int, dz : Int) : Int do if dz < 0 do 0 else n - 1 end end
+
   -- The poured tile holding world chunk (cx, cz) from the list, or a fresh pour.
   pfn tile_for(tl : List(CubeForge.Lakes.Tile), seed : Int, cx : Int, cz : Int) : CubeForge.Lakes.Tile do
     match tl do
@@ -47,7 +104,7 @@ mod CubeForge.World do
     if has_tile(tl, t) do tl else take_go(Cons(t, tl), 4, Nil) end
   end
 
-  type World = World(CubeForge.Tree.Tree(CubeForge.Chunk.Chunk), NativeU8Arr, NativeU8Arr, NativeU8Arr, NativeU8Arr, Int, CubeForge.Model.Templates, Int, Int, NativeU8Arr, List(Evicted), List(Evicted), List(CubeForge.Lakes.Tile), NativeIntArr)   -- chunks, skylight field, block-light field, occupancy field, shown species per column, side length in chunks, the model templates the mesher stamps, the window origin in chunks (x, z), the dirty flag per local chunk, the evicted cache, the chunks the last shift restored from it, the lake tiles poured so far (a window touches at most four), the hash each local chunk generated to (0 unknown)
+  type World = World(CubeForge.Tree.Tree(CubeForge.Chunk.Chunk), NativeU8Arr, NativeU8Arr, NativeU8Arr, NativeU8Arr, Int, CubeForge.Model.Templates, Int, Int, NativeU8Arr, List(Evicted), List(Evicted), List(CubeForge.Lakes.Tile), NativeIntArr, Int)   -- chunks, skylight field, block-light field, occupancy field, shown species per column, side length in chunks, the model templates the mesher stamps, the window origin in chunks (x, z), the dirty flag per local chunk, the evicted cache, the chunks the last shift restored from it, the lake tiles poured so far (a window touches at most four), the hash each local chunk generated to (0 unknown), the seed the world was generated from (the mesher re-derives a point of interest's shape from it)
 
   doc "The LARGEST world side in chunks: what the fixed-width fields (light, occupancy, the shader) are written for. A world's own side is World.side(w), from Noise.size_of its seed, 4..8."
   fn size() : Int do 12 end
@@ -55,28 +112,30 @@ mod CubeForge.World do
   doc "Columns per side: size() chunks of 16."
   fn cols() : Int do 16 * size() end
 
-  fn side(w : World) : Int do match w do World(_, _, _, _, _, n, _, _, _, _, _, _, _, _) -> n end end
+  fn side(w : World) : Int do match w do World(_, _, _, _, _, n, _, _, _, _, _, _, _, _, sd) -> n end end
+  doc "The seed the world was generated from. 0 for a world built from a bare chunk list (the constructor tests)."
+  fn seed(w : World) : Int do match w do World(_, _, _, _, _, _, _, _, _, _, _, _, _, _, sd) -> sd end end
   doc "The window's origin in chunks: world chunk (origin_x, origin_z) is local chunk (0, 0). Every coordinate the engine holds is window-local; the origin is what makes it a world coordinate, and the shift moves it."
-  fn origin_x(w : World) : Int do match w do World(_, _, _, _, _, _, _, ox, _, _, _, _, _, _) -> ox end end
-  fn origin_z(w : World) : Int do match w do World(_, _, _, _, _, _, _, _, oz, _, _, _, _, _) -> oz end end
+  fn origin_x(w : World) : Int do match w do World(_, _, _, _, _, _, _, ox, _, _, _, _, _, _, sd) -> ox end end
+  fn origin_z(w : World) : Int do match w do World(_, _, _, _, _, _, _, _, oz, _, _, _, _, _, sd) -> oz end end
   doc "Has local chunk (cx, cz) been written since it was generated or restored: set by set_chunk, the single writer."
-  fn is_dirty(w : World, cx : Int, cz : Int) : Bool do match w do World(_, _, _, _, _, n, _, _, _, dt, _, _, _, _) -> NativeArray.get_u8(dt, cx + n * cz) == 1 end end
+  fn is_dirty(w : World, cx : Int, cz : Int) : Bool do match w do World(_, _, _, _, _, n, _, _, _, dt, _, _, _, _, sd) -> NativeArray.get_u8(dt, cx + n * cz) == 1 end end
   doc "The evicted cache: every dirty chunk the window has dropped, by world coordinates."
-  fn cache(w : World) : List(Evicted) do match w do World(_, _, _, _, _, _, _, _, _, _, ca, _, _, _) -> ca end end
+  fn cache(w : World) : List(Evicted) do match w do World(_, _, _, _, _, _, _, _, _, _, ca, _, _, _, sd) -> ca end end
   doc "The chunks the last shift restored from the cache, with their column blobs, for the fields to take back."
-  fn restored(w : World) : List(Evicted) do match w do World(_, _, _, _, _, _, _, _, _, _, _, rs, _, _) -> rs end end
+  fn restored(w : World) : List(Evicted) do match w do World(_, _, _, _, _, _, _, _, _, _, _, rs, _, _, sd) -> rs end end
   doc "A world over the same chunks with its cache replaced (a load fills it) and its dirty flags set where [dirty] says."
   fn with_cache(w : World, ca : List(Evicted), dirty : NativeU8Arr) : World do
-    match w do World(cs, la, lb, o, sh, n, mo, ox, oz, _, _, rs, tl, gh) -> World(cs, la, lb, o, sh, n, mo, ox, oz, dirty, ca, rs, tl, gh) end
+    match w do World(cs, la, lb, o, sh, n, mo, ox, oz, _, _, rs, tl, gh, sd) -> World(cs, la, lb, o, sh, n, mo, ox, oz, dirty, ca, rs, tl, gh, sd) end
   end
   doc "The hash each local chunk generated to, as a list in grid order, for the save header."
-  fn gen_hashes(w : World) : List(Int) do match w do World(_, _, _, _, _, n, _, _, _, _, _, _, _, gh) -> hashes_go(gh, n * n - 1, Nil) end end
+  fn gen_hashes(w : World) : List(Int) do match w do World(_, _, _, _, _, n, _, _, _, _, _, _, _, gh, sd) -> hashes_go(gh, n * n - 1, Nil) end end
   pfn hashes_go(gh : NativeIntArr, i : Int, acc : List(Int)) : List(Int) do
     if i < 0 do acc else hashes_go(gh, i - 1, Cons(NativeArray.get_int(gh, i), acc)) end
   end
   doc "A world with its generation hashes taken from a list (a load); a short or empty list leaves them unknown."
   fn with_hashes(w : World, l : List(Int)) : World do
-    match w do World(cs, la, lb, o, sh, n, mo, ox, oz, dt, ca, rs, tl, gh) -> World(cs, la, lb, o, sh, n, mo, ox, oz, dt, ca, rs, tl, hashes_in_go(l, gh, 0, n * n)) end
+    match w do World(cs, la, lb, o, sh, n, mo, ox, oz, dt, ca, rs, tl, gh, sd) -> World(cs, la, lb, o, sh, n, mo, ox, oz, dt, ca, rs, tl, hashes_in_go(l, gh, 0, n * n), sd) end
   end
   pfn hashes_in_go(l : List(Int), gh : NativeIntArr, i : Int, count : Int) : NativeIntArr do
     match l do
@@ -86,11 +145,11 @@ mod CubeForge.World do
   end
   doc "A world at window origin (ox, oz) in chunks."
   fn with_origin(w : World, ox1 : Int, oz1 : Int) : World do
-    match w do World(cs, la, lb, o, sh, n, mo, _, _, dt, ca, rs, tl, gh) -> World(cs, la, lb, o, sh, n, mo, ox1, oz1, dt, ca, rs, tl, gh) end
+    match w do World(cs, la, lb, o, sh, n, mo, _, _, dt, ca, rs, tl, gh, sd) -> World(cs, la, lb, o, sh, n, mo, ox1, oz1, dt, ca, rs, tl, gh, sd) end
   end
   doc "A column blob's last 256 bytes filled from the shown array for local chunk (cx, cz): the caller passes Myc.chunk_bytes."
   fn with_shown_bytes(w : World, cx : Int, cz : Int, b : NativeU8Arr) : NativeU8Arr do
-    match w do World(_, _, _, _, sh, n, _, _, _, _, _, _, _, _) -> shown_bytes_go(sh, 16 * n, 16 * cx, 16 * cz, 0, b) end
+    match w do World(_, _, _, _, sh, n, _, _, _, _, _, _, _, _, sd) -> shown_bytes_go(sh, 16 * n, 16 * cx, 16 * cz, 0, b) end
   end
   pfn shown_bytes_go(sh : NativeU8Arr, c : Int, x0 : Int, z0 : Int, i : Int, b : NativeU8Arr) : NativeU8Arr do
     if i >= 256 do b
@@ -101,16 +160,16 @@ mod CubeForge.World do
   fn world_z(w : World, z : Int) : Int do z + 16 * origin_z(w) end
 
   doc "The world's skylight field (see CubeForge.Light)."
-  fn light(w : World) : NativeU8Arr do match w do World(_, la, _, _, _, _, _, _, _, _, _, _, _, _) -> la end end
+  fn light(w : World) : NativeU8Arr do match w do World(_, la, _, _, _, _, _, _, _, _, _, _, _, _, sd) -> la end end
 
   doc "The world's block-light field: light emitted by blocks, independent of the sky (see CubeForge.Light.emission)."
-  fn block_light(w : World) : NativeU8Arr do match w do World(_, _, lb, _, _, _, _, _, _, _, _, _, _, _) -> lb end end
+  fn block_light(w : World) : NativeU8Arr do match w do World(_, _, lb, _, _, _, _, _, _, _, _, _, _, _, sd) -> lb end end
 
   doc "The world's occupancy field: non-zero where a voxel blocks light. Used for ambient occlusion and uploaded to the shadow ray-marcher."
-  fn occupancy(w : World) : NativeU8Arr do match w do World(_, _, _, o, _, _, _, _, _, _, _, _, _, _) -> o end end
+  fn occupancy(w : World) : NativeU8Arr do match w do World(_, _, _, o, _, _, _, _, _, _, _, _, _, _, sd) -> o end end
 
   doc "Replace the occupancy field."
-  fn set_occupancy(w : World, o : NativeU8Arr) : World do match w do World(cs, la, lb, _, sh, n, mo, ox, oz, dt, ca, rs, tl, gh) -> World(cs, la, lb, o, sh, n, mo, ox, oz, dt, ca, rs, tl, gh) end end
+  fn set_occupancy(w : World, o : NativeU8Arr) : World do match w do World(cs, la, lb, _, sh, n, mo, ox, oz, dt, ca, rs, tl, gh, sd) -> World(cs, la, lb, o, sh, n, mo, ox, oz, dt, ca, rs, tl, gh, sd) end end
 
   doc "Build the occupancy field from the current blocks."
   fn rebuild_occupancy(w : World) : World do set_occupancy(w, CubeForge.Light.occupancy(w)) end
@@ -125,42 +184,42 @@ mod CubeForge.World do
   end
 
   doc "Replace the world's skylight field."
-  fn set_light(w : World, la : NativeU8Arr) : World do match w do World(cs, _, lb, o, sh, n, mo, ox, oz, dt, ca, rs, tl, gh) -> World(cs, la, lb, o, sh, n, mo, ox, oz, dt, ca, rs, tl, gh) end end
+  fn set_light(w : World, la : NativeU8Arr) : World do match w do World(cs, _, lb, o, sh, n, mo, ox, oz, dt, ca, rs, tl, gh, sd) -> World(cs, la, lb, o, sh, n, mo, ox, oz, dt, ca, rs, tl, gh, sd) end end
 
   doc "Replace the world's block-light field."
-  fn set_block_light(w : World, lb : NativeU8Arr) : World do match w do World(cs, la, _, o, sh, n, mo, ox, oz, dt, ca, rs, tl, gh) -> World(cs, la, lb, o, sh, n, mo, ox, oz, dt, ca, rs, tl, gh) end end
+  fn set_block_light(w : World, lb : NativeU8Arr) : World do match w do World(cs, la, _, o, sh, n, mo, ox, oz, dt, ca, rs, tl, gh, sd) -> World(cs, la, lb, o, sh, n, mo, ox, oz, dt, ca, rs, tl, gh, sd) end end
 
   @[no_alloc]
   -- Skylight at a world coordinate; 0 outside the world.
   fn light_at(w : World, x : Int, y : Int, z : Int) : Int do
-    match w do World(_, la, _, _, _, _, _, _, _, _, _, _, _, _) -> CubeForge.Light.get(la, x, y, z) end
+    match w do World(_, la, _, _, _, _, _, _, _, _, _, _, _, _, sd) -> CubeForge.Light.get(la, x, y, z) end
   end
 
   @[no_alloc]
   -- Block light at a world coordinate; 0 outside the world.
   fn block_light_at(w : World, x : Int, y : Int, z : Int) : Int do
-    match w do World(_, _, lb, _, _, _, _, _, _, _, _, _, _, _) -> CubeForge.Light.get(lb, x, y, z) end
+    match w do World(_, _, lb, _, _, _, _, _, _, _, _, _, _, _, sd) -> CubeForge.Light.get(lb, x, y, z) end
   end
 
   doc "A fresh, empty shown-species array: one byte per column of a world [n] chunks a side, strided by its width like the biome and mycelium fields."
   fn shown_new(n : Int) : NativeU8Arr do NativeArray.make_u8(16 * n * 16 * n, 0) end
   doc "The species each column's surface currently displays (0 = none). The mesher reads it to pick mycelium textures; the fungus migration writes it in step with the block."
-  fn shown(w : World) : NativeU8Arr do match w do World(_, _, _, _, sh, _, _, _, _, _, _, _, _, _) -> sh end end
+  fn shown(w : World) : NativeU8Arr do match w do World(_, _, _, _, sh, _, _, _, _, _, _, _, _, _, sd) -> sh end end
   doc "The model templates plus the texture layer table, as every World carries them: built once, constant after."
   fn default_models() : CubeForge.Model.Templates do CubeForge.Model.with_layers(CubeForge.Model.build(), CubeForge.Texture.layer_table()) end
   doc "The model templates the mesher stamps for small mushrooms, fronds and bushes: built once with the world, constant after."
-  fn models(w : World) : CubeForge.Model.Templates do match w do World(_, _, _, _, _, _, mo, _, _, _, _, _, _, _) -> mo end end
+  fn models(w : World) : CubeForge.Model.Templates do match w do World(_, _, _, _, _, _, mo, _, _, _, _, _, _, _, sd) -> mo end end
   fn shown_at(w : World, x : Int, z : Int) : Int do
     let c = 16 * side(w)
     if x < 0 || z < 0 || x >= c || z >= c do 0
-    else match w do World(_, _, _, _, sh, _, _, _, _, _, _, _, _, _) -> NativeArray.get_u8(sh, x + c * z) end end
+    else match w do World(_, _, _, _, sh, _, _, _, _, _, _, _, _, _, sd) -> NativeArray.get_u8(sh, x + c * z) end end
   end
   doc "Replace the shown-species array whole (a load)."
-  fn with_shown(w : World, sh : NativeU8Arr) : World do match w do World(cs, la, lb, o, _, n, mo, ox, oz, dt, ca, rs, tl, gh) -> World(cs, la, lb, o, sh, n, mo, ox, oz, dt, ca, rs, tl, gh) end end
+  fn with_shown(w : World, sh : NativeU8Arr) : World do match w do World(cs, la, lb, o, _, n, mo, ox, oz, dt, ca, rs, tl, gh, sd) -> World(cs, la, lb, o, sh, n, mo, ox, oz, dt, ca, rs, tl, gh, sd) end end
   fn set_shown(w : World, x : Int, z : Int, sp : Int) : World do
     let c = 16 * side(w)
     if x < 0 || z < 0 || x >= c || z >= c do w
-    else match w do World(cs, la, lb, o, sh, n, mo, ox, oz, dt, ca, rs, tl, gh) -> World(cs, la, lb, o, NativeArray.set_u8(sh, x + c * z, sp), n, mo, ox, oz, dt, ca, rs, tl, gh) end end
+    else match w do World(cs, la, lb, o, sh, n, mo, ox, oz, dt, ca, rs, tl, gh, sd) -> World(cs, la, lb, o, NativeArray.set_u8(sh, x + c * z, sp), n, mo, ox, oz, dt, ca, rs, tl, gh, sd) end end
   end
 
   doc """
@@ -241,12 +300,12 @@ mod CubeForge.World do
 
   doc "The chunk at grid (cx, cz); panics if out of bounds."
   fn chunk_at(w : World, cx : Int, cz : Int) : CubeForge.Chunk.Chunk do
-    match w do World(cs, _, _, _, _, n, _, _, _, _, _, _, _, _) -> CubeForge.Tree.get(cs, cx + n * cz) end
+    match w do World(cs, _, _, _, _, n, _, _, _, _, _, _, _, _, sd) -> CubeForge.Tree.get(cs, cx + n * cz) end
   end
 
   doc "Replace the chunk at grid (cx, cz)."
   fn set_chunk(w : World, cx : Int, cz : Int, c : CubeForge.Chunk.Chunk) : World do
-    match w do World(cs, la, lb, o, sh, n, mo, ox, oz, dt, ca, rs, tl, gh) -> World(CubeForge.Tree.set(cs, cx + n * cz, c), la, lb, o, sh, n, mo, ox, oz, NativeArray.set_u8(dt, cx + n * cz, 1), ca, rs, tl, gh) end
+    match w do World(cs, la, lb, o, sh, n, mo, ox, oz, dt, ca, rs, tl, gh, sd) -> World(CubeForge.Tree.set(cs, cx + n * cz, c), la, lb, o, sh, n, mo, ox, oz, NativeArray.set_u8(dt, cx + n * cz, 1), ca, rs, tl, gh, sd) end
   end
 
   fn floor_div16(v : Int) : Int do if v >= 0 do v / 16 else (v - 15) / 16 end end
@@ -331,9 +390,9 @@ mod CubeForge.World do
 
   fn set_cells(w : World, cx : Int, cz : Int, cells : List(Int)) : World do
     if !in_bounds(w, cx, cz) do w
-    else match w do World(cs, la, lb, o, sh, n, mo, ox, oz, dt, ca, rs, tl, gh) ->
+    else match w do World(cs, la, lb, o, sh, n, mo, ox, oz, dt, ca, rs, tl, gh, sd) ->
       World(CubeForge.Tree.set(cs, cx + n * cz, apply_cells(CubeForge.Tree.get(cs, cx + n * cz), cells)), la, lb, occ_cells(o, cx, cz, cells), sh, n, mo,
-            ox, oz, NativeArray.set_u8(dt, cx + n * cz, 1), ca, rs, tl, gh) end
+            ox, oz, NativeArray.set_u8(dt, cx + n * cz, 1), ca, rs, tl, gh, sd) end
     end
   end
 
@@ -404,9 +463,9 @@ mod CubeForge.World do
     let cx = floor_div16(x)
     let cz = floor_div16(z)
     if y < 0 || y >= 256 || !in_bounds(w, cx, cz) do w
-    else match w do World(cs, la, lb, o, sh, n, mo, ox, oz, dt, ca, rs, tl, gh) ->
+    else match w do World(cs, la, lb, o, sh, n, mo, ox, oz, dt, ca, rs, tl, gh, sd) ->
       World(CubeForge.Tree.set(cs, cx + n * cz, C.set(CubeForge.Tree.get(cs, cx + n * cz), mod16(x), y, mod16(z), id)), la, lb, occ_write(o, x, y, z, id), sh, n, mo,
-            ox, oz, NativeArray.set_u8(dt, cx + n * cz, 1), ca, rs, tl, gh) end end
+            ox, oz, NativeArray.set_u8(dt, cx + n * cz, 1), ca, rs, tl, gh, sd) end end
   end
 
   -- Grid coordinates in row-major order, as (cx, cz) packed into one Int: cx + n * cz.
@@ -439,7 +498,7 @@ mod CubeForge.World do
     let cs = CubeForge.Tree.from_list(chunks, C.new())
     -- what each chunk generated to: the cache's test for "back to pristine"
     let gh = hashes_in_go(List.pmap_n(coords(n), fn i -> hash_voxels(CubeForge.Tree.get(cs, i), 0, 7), workers), NativeArray.make_int(n * n, 0), 0, n * n)
-    rebuild_occupancy(World(cs, CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), shown_new(n), n, default_models(), 0, 0, NativeArray.make_u8(n * n, 0), Nil, Nil, tl, gh))
+    rebuild_occupancy(World(cs, CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), shown_new(n), n, default_models(), 0, 0, NativeArray.make_u8(n * n, 0), Nil, Nil, tl, gh, seed))
   end
 
   -- ── The shift ─────────────────────────────────────────────────────────────
@@ -504,7 +563,7 @@ mod CubeForge.World do
   end
 
   pfn shifted_chunk(cs : CubeForge.Tree.Tree(CubeForge.Chunk.Chunk), n : Int, i : Int, dx : Int, dz : Int, ox1 : Int, oz1 : Int, seed : Int,
-                    ta : CubeForge.Lakes.Tile, tb : CubeForge.Lakes.Tile, ca : List(Evicted)) : CubeForge.Chunk.Chunk do
+                    ta : CubeForge.Lakes.Tile, tb : CubeForge.Lakes.Tile, ca : List(Evicted), bd : Band) : CubeForge.Chunk.Chunk do
     let lx = i % n
     let lz = i / n
     let sx = lx + dx
@@ -514,10 +573,16 @@ mod CubeForge.World do
       let cx = ox1 + lx
       let cz = oz1 + lz
       match cached_go(ca, cx, cz) do
+        -- an edited chunk the window dropped outranks anything prepared: the
+        -- band is what the seed generates, and this is what the player left
         Cons(e, _) -> ev_chunk(e)
         Nil ->
-          let t = if CubeForge.Lakes.tile_holds(ta, cx, cz) do ta else tb end
-          C.generate_lakes(16 * cx, 16 * cz, seed, t)
+          match band_find(bd, i) do
+            Found(true, c) -> c
+            Found(false, _) ->
+              let t = if CubeForge.Lakes.tile_holds(ta, cx, cz) do ta else tb end
+              C.generate_lakes(16 * cx, 16 * cz, seed, t)
+          end
       end
     end
   end
@@ -646,11 +711,22 @@ mod CubeForge.World do
       else shift_shown_go(src, CubeForge.Ffi.Window.u8_blit(dst, z * c + xd0, src, sz * c + xs0, len), c, s, dzc, z + 1) end
     end
   end
-  doc "The band that comes in, in local chunk coordinates, for a shift of (dx, dz). The commit needs them too, to sync just that band of the occupancy texture."
-  fn band_x0(n : Int, dx : Int) : Int do if dx > 0 do n - 1 else 0 end end
-  fn band_x1(n : Int, dx : Int) : Int do if dx < 0 do 0 else n - 1 end end
-  fn band_z0(n : Int, dz : Int) : Int do if dz > 0 do n - 1 else 0 end end
-  fn band_z1(n : Int, dz : Int) : Int do if dz < 0 do 0 else n - 1 end end
+  -- The tile covering world chunk (cx, cz): the world's own list first (no
+  -- pour), then the band's pair, then a pour. `||` does not short-circuit
+  -- (GAPS G33) and a pour is 38 ms, so these are nested ifs, not one guard.
+  pfn tile_cached(tl : List(CubeForge.Lakes.Tile), cx : Int, cz : Int) : Bool do
+    match tl do
+      Nil -> false
+      Cons(t, rest) -> if CubeForge.Lakes.tile_holds(t, cx, cz) do true else tile_cached(rest, cx, cz) end
+    end
+  end
+  pfn prepared_tile(tl : List(CubeForge.Lakes.Tile), bd : Band, seed : Int, cx : Int, cz : Int, far : Bool) : CubeForge.Lakes.Tile do
+    if tile_cached(tl, cx, cz) do tile_for(tl, seed, cx, cz)
+    else
+      let bt = if far do band_tb(bd) else band_ta(bd) end
+      if CubeForge.Lakes.tile_holds(bt, cx, cz) do bt else tile_for(tl, seed, cx, cz) end
+    end
+  end
 
   -- A shift with its chunks in place but none of its fields: what shift_chunks
   -- hands shift_fields. The world inside has the new chunks and the new origin
@@ -671,20 +747,27 @@ mod CubeForge.World do
   a band costs the same as a whole one.
   """
   fn shift_chunks(w : World, dx : Int, dz : Int, seed : Int, workers : Int, blobs : List(Blob)) : HalfShift do
+    shift_chunks_with(w, dx, dz, seed, workers, blobs, band_none())
+  end
+
+  doc "[shift_chunks], given a band prepared for exactly this move (see `Band`): its tiles are taken instead of poured and its chunks instead of generated. A band that does not match, or is empty, costs nothing and the stage generates inline."
+  fn shift_chunks_with(w : World, dx : Int, dz : Int, seed : Int, workers : Int, blobs : List(Blob), bd0 : Band) : HalfShift do
     match w do
-      World(cs, la, lb, o, sh, n, mo, ox, oz, dt, ca, _, tl, gh) ->
+      World(cs, la, lb, o, sh, n, mo, ox, oz, dt, ca, _, tl, gh, sd) ->
         let ox1 = ox + dx
         let oz1 = oz + dz
         let bx0 = band_x0(n, dx)
         let bx1 = band_x1(n, dx)
         let bz0 = band_z0(n, dz)
         let bz1 = band_z1(n, dz)
-        -- its lake tiles: a band spans at most two, and a tile poured before
-        -- (a shift within it) is taken from the world's tile list rather than
-        -- poured again. Lakes.tile is memoised in the shim besides.
-        let ta = tile_for(tl, seed, ox1 + bx0, oz1 + bz0)
+        let bd = if band_matches(bd0, ox, oz, dx, dz) do bd0 else band_none() end
+        -- its lake tiles: a band of eight chunks spans at most two. A tile
+        -- poured before (a shift within it) is taken from the world's tile
+        -- list rather than poured again, and one the band brought was poured
+        -- off the frame; only an unprepared shift into new water pours here.
+        let ta = prepared_tile(tl, bd, seed, ox1 + bx0, oz1 + bz0, false)
         let tl1 = remember_tile(tl, ta)
-        let tb = if CubeForge.Lakes.tile_holds(ta, ox1 + bx1, oz1 + bz1) do ta else tile_for(tl1, seed, ox1 + bx1, oz1 + bz1) end
+        let tb = if CubeForge.Lakes.tile_holds(ta, ox1 + bx1, oz1 + bz1) do ta else prepared_tile(tl1, bd, seed, ox1 + bx1, oz1 + bz1, true) end
         let tl2 = remember_tile(tl1, tb)
         let ca1 = evict_go(cs, dt, n, dx, dz, ox, oz, blobs, 0, ca, gh)
         let rs = restored_go(ca1, n, dx, dz, ox1, oz1, 0, Nil)
@@ -694,10 +777,10 @@ mod CubeForge.World do
         -- not the generation, was most of the stage: an in-window chunk
         -- generates in ~2 ms, twelve of them over fourteen workers is a couple
         -- of milliseconds, and the stage measured 27.
-        let fresh = List.pmap_n(band_indices_of(n, dx, dz), fn i -> shifted_chunk(cs, n, i, dx, dz, ox1, oz1, seed, ta, tb, ca1), workers)
+        let fresh = List.pmap_n(band_indices_of(n, dx, dz), fn i -> shifted_chunk(cs, n, i, dx, dz, ox1, oz1, seed, ta, tb, ca1, bd), workers)
         let cs1 = CubeForge.Tree.from_list(shifted_list(cs, fresh, n, dx, dz, n * n - 1, Nil), C.new())
         -- the new chunks and the new origin; every field is still the old one
-        HalfShift(World(cs1, la, lb, o, sh, n, mo, ox1, oz1, dt, ca1, rs, tl2, gh), ca1)
+        HalfShift(World(cs1, la, lb, o, sh, n, mo, ox1, oz1, dt, ca1, rs, tl2, gh, sd), ca1)
     end
   end
 
@@ -715,7 +798,7 @@ mod CubeForge.World do
     match h do
       HalfShift(hw, ca1) ->
         match hw do
-          World(cs1, la, lb, o, sh, n, mo, ox1, oz1, dt, _, rs, tl2, gh) ->
+          World(cs1, la, lb, o, sh, n, mo, ox1, oz1, dt, _, rs, tl2, gh, sd) ->
             let bx0 = band_x0(n, dx)
             let bx1 = band_x1(n, dx)
             let bz0 = band_z0(n, dz)
@@ -740,7 +823,7 @@ mod CubeForge.World do
                                             else if i == 1 do CubeForge.Light.shift_field(lb, dx, dz)
                                             else CubeForge.Light.occ_band(CubeForge.Light.shift_occ(o, dx, dz), hw, bx0, bx1, bz0, bz1) end end, workers)
             match parts do
-              Cons(la1, Cons(lb1, Cons(o1, _))) -> World(cs1, la1, lb1, o1, sh1, n, mo, ox1, oz1, dt1, ca2, rs, tl2, gh1)
+              Cons(la1, Cons(lb1, Cons(o1, _))) -> World(cs1, la1, lb1, o1, sh1, n, mo, ox1, oz1, dt1, ca2, rs, tl2, gh1, sd)
               _ -> hw
             end
         end
@@ -755,7 +838,7 @@ mod CubeForge.World do
   doc "Bench only (CF_FIELDS_BENCH): the three per-chunk arrays a shift slides -- shown, dirty, hash -- timed apart from the fields. Returns a value derived from all three so none of it is dead code."
   fn bench_arrays(w : World, dx : Int, dz : Int, which : Int, workers : Int) : Int do
     match w do
-      World(cs, _, _, _, sh, n, _, ox, oz, dt, _, rs, _, gh) ->
+      World(cs, _, _, _, sh, n, _, ox, oz, dt, _, rs, _, gh, _) ->
         let c = 16 * n
         if which == 0 do
           let sh1 = restore_shown_go(shift_shown_go(sh, NativeArray.make_u8(c * c, 0), c, 16 * dx, 16 * dz, 0), rs, n, ox, oz)
@@ -773,7 +856,7 @@ mod CubeForge.World do
   doc "Stage two of a shift: re-seed the band that [shift_chunks] brought in. Only the seed -- sky columns and emitters -- because the GPU does the spreading (cf_light_flood), and it derives what the CPU sweep derived, proved voxel for voxel on the dump frame."
   fn shift_light(w : World, dx : Int, dz : Int) : World do
     match w do
-      World(_, _, _, _, _, n, _, _, _, _, _, _, _, _) ->
+      World(_, _, _, _, _, n, _, _, _, _, _, _, _, _, _) ->
         reseed_exact(w, 16 * band_x0(n, dx), 16 * band_x1(n, dx) + 15,
                         16 * band_z0(n, dz), 16 * band_z1(n, dz) + 15)
     end
@@ -784,20 +867,25 @@ mod CubeForge.World do
     shift_light(shift_blocks(w, dx, dz, seed, workers, blobs), dx, dz)
   end
 
+  doc "[shift], given a band prepared for exactly this move (see `Band`). Only stage one takes the band -- it is the stage that pours and generates -- so this is [shift] with [shift_chunks_with] at the front. A band that does not match, or is empty, costs nothing and the shift generates inline."
+  fn shift_with(w : World, dx : Int, dz : Int, seed : Int, workers : Int, blobs : List(Blob), bd : Band) : World do
+    shift_light(shift_fields(shift_chunks_with(w, dx, dz, seed, workers, blobs, bd), dx, dz, workers), dx, dz)
+  end
+
   doc "A world over chunks read from a save, with empty light fields (rebuilt by the caller); the occupancy field is built here, as every constructor does."
-  fn from_chunks(chunks : Array.PVec(CubeForge.Chunk.Chunk), n : Int) : World do
-    rebuild_occupancy(World(CubeForge.Tree.from_list(Array.to_list(chunks), C.new()), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), shown_new(n), n, default_models(), 0, 0, NativeArray.make_u8(n * n, 0), Nil, Nil, Nil, NativeArray.make_int(n * n, 0)))
+  fn from_chunks(chunks : Array.PVec(CubeForge.Chunk.Chunk), n : Int, seed : Int) : World do
+    rebuild_occupancy(World(CubeForge.Tree.from_list(Array.to_list(chunks), C.new()), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), shown_new(n), n, default_models(), 0, 0, NativeArray.make_u8(n * n, 0), Nil, Nil, Nil, NativeArray.make_int(n * n, 0), seed))
   end
   doc "The chunk array, in grid order, as a PVec for the save format and tests. The World itself keeps a Tree (GAPS G82); this converts."
-  fn chunks(w : World) : Array.PVec(CubeForge.Chunk.Chunk) do match w do World(cs, _, _, _, _, _, _, _, _, _, _, _, _, _) -> Array.from_list(CubeForge.Tree.to_list(cs)) end end
+  fn chunks(w : World) : Array.PVec(CubeForge.Chunk.Chunk) do match w do World(cs, _, _, _, _, _, _, _, _, _, _, _, _, _, sd) -> Array.from_list(CubeForge.Tree.to_list(cs)) end end
   doc "The world over a list of chunks in grid order: the constructor tests use."
   fn of_chunk_list(chunks : List(CubeForge.Chunk.Chunk), n : Int) : World do
-    rebuild_occupancy(World(CubeForge.Tree.from_list(chunks, C.new()), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), shown_new(n), n, default_models(), 0, 0, NativeArray.make_u8(n * n, 0), Nil, Nil, Nil, NativeArray.make_int(n * n, 0)))
+    rebuild_occupancy(World(CubeForge.Tree.from_list(chunks, C.new()), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), shown_new(n), n, default_models(), 0, 0, NativeArray.make_u8(n * n, 0), Nil, Nil, Nil, NativeArray.make_int(n * n, 0), 0))
   end
 
   fn generate_scalar(n : Int, seed : Int, workers : Int) : World do
     let chunks = List.pmap_n(coords(n), fn i -> C.generate_scalar(16 * (i % n), 16 * (i / n), seed), workers)
-    rebuild_occupancy(World(CubeForge.Tree.from_list(chunks, C.new()), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), shown_new(n), n, default_models(), 0, 0, NativeArray.make_u8(n * n, 0), Nil, Nil, Nil, NativeArray.make_int(n * n, 0)))
+    rebuild_occupancy(World(CubeForge.Tree.from_list(chunks, C.new()), CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.Light.new(), shown_new(n), n, default_models(), 0, 0, NativeArray.make_u8(n * n, 0), Nil, Nil, Nil, NativeArray.make_int(n * n, 0), seed))
   end
 
   -- A rolling hash over every voxel of every chunk. Four million reads, so this

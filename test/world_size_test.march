@@ -23,6 +23,7 @@ mod CubeForge.WorldSizeTest do
   doc "Every named mesh slot, in the order the slot map lists them."
   pfn named_slots() : List(Int) do
     Cons(CubeForge.Fauna.slot(),
+    Cons(CubeForge.Fauna.demo_slot(),
     Cons(CubeForge.myc_map_slot(),
     Cons(CubeForge.readout_slot(),
     Cons(CubeForge.spray_slot(),
@@ -34,7 +35,7 @@ mod CubeForge.WorldSizeTest do
     Cons(CubeForge.hotbar_slot(),
     Cons(CubeForge.underwater_slot(),
     Cons(CubeForge.outline_slot(),
-    Cons(CubeForge.fps_slot(), Nil)))))))))))))
+    Cons(CubeForge.fps_slot(), Nil))))))))))))))
   end
   pfn named_in_range(xs : List(Int), lo : Int, hi : Int) : Bool do
     match xs do
@@ -120,11 +121,11 @@ mod CubeForge.WorldSizeTest do
       -- keeps a vertex count after the other has replaced the buffer draws off
       -- the end of it.
       --
-      -- Fauna.slot() was 243, correct while the window was 8 chunks a side and
-      -- the chunk meshes ended at 191. The 12-chunk window moved that boundary
-      -- to 431 and made 243 water chunk 99, whose draw call took the GL driver
-      -- down a few frames after the first window shift. The slot map in
-      -- cube_forge.march is the list; this is the list checked.
+      -- Fauna's two slots were 242 and 243, correct while the window was 8
+      -- chunks a side and the chunk meshes ended at 191. The 12-chunk window
+      -- moved that boundary to 431 and made 243 water chunk 99, whose draw call
+      -- took the GL driver down a few frames after the first window shift. The
+      -- slot map in cube_forge.march is the list; this is the list checked.
       let chunks = 3 * W.size() * W.size()
       Test.assert_eq_int(chunks, 432, "the boundary the slot map is written around")
       Test.assert_true(named_in_range(named_slots(), chunks, 512), "every named slot is clear of the chunks and inside the shim's array")

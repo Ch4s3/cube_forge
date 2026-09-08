@@ -14,12 +14,18 @@ mod CubeForge.ChunkMesh do
   alias CubeForge.World as World
   alias CubeForge.Vertex as Vx
 
-  type ChunkMesh = ChunkMesh(Array.PVec(CubeForge.F32Buf.F32Buf), Array.PVec(CubeForge.F32Buf.F32Buf), Array.PVec(CubeForge.F32Buf.F32Buf))
+  -- opaque, water, foliage sections; then the crystal beam geometry per
+  -- section (Mesher.beam_geometry, unlit, cut once) and the beam key it was
+  -- cut for (Mesher.beam_key), so a remesh that changes only the light does
+  -- not pay for the cut again
+  type ChunkMesh = ChunkMesh(Array.PVec(CubeForge.F32Buf.F32Buf), Array.PVec(CubeForge.F32Buf.F32Buf), Array.PVec(CubeForge.F32Buf.F32Buf), Array.PVec(CubeForge.F32Buf.F32Buf), Array.PVec(Int))
 
-  fn opaque_sections(m : ChunkMesh) : Array.PVec(CubeForge.F32Buf.F32Buf) do match m do ChunkMesh(o, _, _) -> o end end
-  fn water_sections(m : ChunkMesh) : Array.PVec(CubeForge.F32Buf.F32Buf) do match m do ChunkMesh(_, w, _) -> w end end
+  fn opaque_sections(m : ChunkMesh) : Array.PVec(CubeForge.F32Buf.F32Buf) do match m do ChunkMesh(o, _, _, _, _) -> o end end
+  fn water_sections(m : ChunkMesh) : Array.PVec(CubeForge.F32Buf.F32Buf) do match m do ChunkMesh(_, w, _, _, _) -> w end end
   doc "Alpha-cutout foliage (leaves)."
-  fn foliage_sections(m : ChunkMesh) : Array.PVec(CubeForge.F32Buf.F32Buf) do match m do ChunkMesh(_, _, f) -> f end end
+  fn foliage_sections(m : ChunkMesh) : Array.PVec(CubeForge.F32Buf.F32Buf) do match m do ChunkMesh(_, _, f, _, _) -> f end end
+  doc "The cached crystal beam geometry per section, unlit (Mesher.beam_geometry)."
+  fn beam_sections(m : ChunkMesh) : Array.PVec(CubeForge.F32Buf.F32Buf) do match m do ChunkMesh(_, _, _, g, _) -> g end end
 
   pfn total_go(secs : Array.PVec(CubeForge.F32Buf.F32Buf), i : Int, acc : Int) : Int do
     if i >= 16 do acc else total_go(secs, i + 1, acc + B.len(Array.get(secs, i))) end
@@ -27,10 +33,16 @@ mod CubeForge.ChunkMesh do
   doc "Total floats across the 16 sections."
   fn total_floats(secs : Array.PVec(CubeForge.F32Buf.F32Buf)) : Int do total_go(secs, 0, 0) end
 
+  -- The crystal beams the chunk's mesher cuts against, in its local frame (Poi.beam_table).
+  pfn beam_table(world : CubeForge.World.World, cx : Int, cz : Int) : NativeF32Arr do
+    CubeForge.Poi.beam_table(World.seed(world), 16 * (World.origin_x(world) + cx), 16 * (World.origin_z(world) + cz), int_to_float(16 * cx), int_to_float(16 * cz))
+  end
+
   -- Sections of chunk (cx, cz) built in order 0..15.
   pfn build_sections(world : CubeForge.World.World, cx : Int, cz : Int, empty : CubeForge.Chunk.Chunk, sy : Int,
-                     os : List(CubeForge.F32Buf.F32Buf), ws : List(CubeForge.F32Buf.F32Buf), fs : List(CubeForge.F32Buf.F32Buf)) : ChunkMesh do
-    if sy < 0 do ChunkMesh(Array.from_list(os), Array.from_list(ws), Array.from_list(fs))
+                     os : List(CubeForge.F32Buf.F32Buf), ws : List(CubeForge.F32Buf.F32Buf), fs : List(CubeForge.F32Buf.F32Buf),
+                     gs : List(CubeForge.F32Buf.F32Buf), ks : List(Int), beams : NativeF32Arr) : ChunkMesh do
+    if sy < 0 do ChunkMesh(Array.from_list(os), Array.from_list(ws), Array.from_list(fs), Array.from_list(gs), Array.from_list(ks))
     else
       let c = World.chunk_at(world, cx, cz)
       let pick = fn (x, z) -> if World.in_bounds(world, x, z) do World.chunk_at(world, x, z) else empty end
@@ -40,16 +52,19 @@ mod CubeForge.ChunkMesh do
       let w = pick(cx - 1, cz)
       let ox = int_to_float(16 * cx)
       let oz = int_to_float(16 * cz)
+      let key = Mesher.beam_key(c, sy)
+      let geo = if key == 0 do Mesher.no_beam_geo() else Mesher.beam_geometry(c, sy, ox, oz, beams) end
       build_sections(world, cx, cz, empty, sy - 1,
                      Cons(Mesher.mesh_section_opaque(c, n, s, e, w, World.light(world), World.block_light(world), World.shown(world), World.occupancy(world), sy, ox, oz, World.models(world)), os),
                      Cons(Mesher.mesh_section_water(c, n, s, e, w, sy, ox, oz), ws),
-                     Cons(Mesher.mesh_section_foliage(c, n, s, e, w, World.light(world), World.block_light(world), World.shown(world), World.occupancy(world), sy, ox, oz, World.models(world)), fs))
+                     Cons(Mesher.mesh_section_foliage(c, n, s, e, w, World.light(world), World.block_light(world), World.shown(world), World.occupancy(world), sy, ox, oz, World.models(world), geo), fs),
+                     Cons(geo, gs), Cons(key, ks), beams)
     end
   end
 
   doc "Mesh every section of chunk (cx, cz)."
   fn build(world : CubeForge.World.World, cx : Int, cz : Int, empty : CubeForge.Chunk.Chunk) : ChunkMesh do
-    build_sections(world, cx, cz, empty, 15, Nil, Nil, Nil)
+    build_sections(world, cx, cz, empty, 15, Nil, Nil, Nil, Nil, Nil, beam_table(world, cx, cz))
   end
 
   doc "Rebuild only the water pass of section [sy]."
@@ -80,10 +95,18 @@ mod CubeForge.ChunkMesh do
       let ox = int_to_float(16 * cx)
       let oz = int_to_float(16 * cz)
       match m do
-        ChunkMesh(os, ws, fs) ->
+        ChunkMesh(os, ws, fs, gs, ks) ->
+          -- the beam cut is kept while the section's beam blocks are the same
+          let key = if do_foliage do Mesher.beam_key(c, sy) else Array.get(ks, sy) end
+          let geo = if !do_foliage do Array.get(gs, sy)
+                    else if key == Array.get(ks, sy) do Array.get(gs, sy)
+                    else if key == 0 do Mesher.no_beam_geo()
+                    else Mesher.beam_geometry(c, sy, ox, oz, beam_table(world, cx, cz)) end end end
           ChunkMesh(if do_opaque do Array.set(os, sy, Mesher.mesh_section_opaque(c, n, s, e, w, World.light(world), World.block_light(world), World.shown(world), World.occupancy(world), sy, ox, oz, World.models(world))) else os end,
                     if do_water do Array.set(ws, sy, Mesher.mesh_section_water(c, n, s, e, w, sy, ox, oz)) else ws end,
-                    if do_foliage do Array.set(fs, sy, Mesher.mesh_section_foliage(c, n, s, e, w, World.light(world), World.block_light(world), World.shown(world), World.occupancy(world), sy, ox, oz, World.models(world))) else fs end)
+                    if do_foliage do Array.set(fs, sy, Mesher.mesh_section_foliage(c, n, s, e, w, World.light(world), World.block_light(world), World.shown(world), World.occupancy(world), sy, ox, oz, World.models(world), geo)) else fs end,
+                    if do_foliage do Array.set(gs, sy, geo) else gs end,
+                    if do_foliage do Array.set(ks, sy, key) else ks end)
       end
     end
   end

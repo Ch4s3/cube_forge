@@ -39,17 +39,21 @@ mod CubeForge.Flock do
   fn stride() : Int do 6 end
 
   -- species, how many animals, the tick counter (the wander clock), the seed,
-  -- the home point, and the bodies: stride() floats each, x y z vx vy vz.
-  type Flock = Flock(Int, Int, Int, Int, Float, Float, Float, NativeFloatArr)
+  -- the home point, the bodies: stride() floats each, x y z vx vy vz -- and the
+  -- flock's mode from the last step (without the player's term), which is what
+  -- picks the pose: a roosting flock folds its wings.
+  type Flock = Flock(Int, Int, Int, Int, Float, Float, Float, NativeFloatArr, Int)
 
-  fn species(f : Flock) : Int do match f do Flock(s, _, _, _, _, _, _, _) -> s end end
-  fn count(f : Flock) : Int do match f do Flock(_, n, _, _, _, _, _, _) -> n end end
-  fn tick_of(f : Flock) : Int do match f do Flock(_, _, t, _, _, _, _, _) -> t end end
-  fn seed_of(f : Flock) : Int do match f do Flock(_, _, _, s, _, _, _, _) -> s end end
-  fn home_x(f : Flock) : Float do match f do Flock(_, _, _, _, x, _, _, _) -> x end end
-  fn home_y(f : Flock) : Float do match f do Flock(_, _, _, _, _, y, _, _) -> y end end
-  fn home_z(f : Flock) : Float do match f do Flock(_, _, _, _, _, _, z, _) -> z end end
-  fn bodies(f : Flock) : NativeFloatArr do match f do Flock(_, _, _, _, _, _, _, b) -> b end end
+  fn species(f : Flock) : Int do match f do Flock(s, _, _, _, _, _, _, _, _) -> s end end
+  fn count(f : Flock) : Int do match f do Flock(_, n, _, _, _, _, _, _, _) -> n end end
+  fn tick_of(f : Flock) : Int do match f do Flock(_, _, t, _, _, _, _, _, _) -> t end end
+  fn seed_of(f : Flock) : Int do match f do Flock(_, _, _, s, _, _, _, _, _) -> s end end
+  fn home_x(f : Flock) : Float do match f do Flock(_, _, _, _, x, _, _, _, _) -> x end end
+  fn home_y(f : Flock) : Float do match f do Flock(_, _, _, _, _, y, _, _, _) -> y end end
+  fn home_z(f : Flock) : Float do match f do Flock(_, _, _, _, _, _, z, _, _) -> z end end
+  fn bodies(f : Flock) : NativeFloatArr do match f do Flock(_, _, _, _, _, _, _, b, _) -> b end end
+  doc "The flock's mode from its last step: feeding, roosting, or departing (the player's flee is per animal and not kept)."
+  fn mode(f : Flock) : Int do match f do Flock(_, _, _, _, _, _, _, _, m) -> m end end
 
   fn pos_x(b : NativeFloatArr, i : Int) : Float do NativeArray.get_float(b, i * stride()) end
   fn pos_y(b : NativeFloatArr, i : Int) : Float do NativeArray.get_float(b, i * stride() + 1) end
@@ -135,10 +139,18 @@ mod CubeForge.Flock do
     else (if sun > dusk() do m_feed() else m_roost() end) end end end
   end
 
+  doc "How far below the surface a fish holds at [sun]: its ordinary depth by day; a twilight species comes up toward the surface at dawn and dusk and goes deep at midday, a night species comes up in the dark. The day cycle read from under water."
+  fn fish_hold(sp : Int, sun : Float) : Float do
+    let act = Fa.activity(sp)
+    if act == Fa.act_twilight() do
+      (if sun > 0.05 && sun < 0.45 do 0.8 else if sun >= 0.7 do fish_depth() *. 3.0 else fish_depth() end end)
+    else if act == Fa.act_night() do (if sun < 0.1 do 0.8 else fish_depth() *. 3.0 end)
+    else fish_depth() end end
+  end
   doc "The height this animal wants, from the ground under it. A fish is never asked to leave the water, however hard it is fleeing."
-  fn want_y(sp : Int, mode : Int, ground : Int, water_y : Float) : Float do
+  fn want_y(sp : Int, mode : Int, ground : Int, water_y : Float, sun : Float) : Float do
     let g = int_to_float(ground)
-    if Fa.is_fish(sp) do clampf(water_y -. fish_depth(), g +. 0.6, water_y -. 0.6)
+    if Fa.is_fish(sp) do clampf(water_y -. fish_hold(sp, sun), g +. 0.6, water_y -. 0.6)
     else if mode == m_roost() do g +. roost_y()
     else if mode == m_flee() do g +. cruise() +. 4.0
     else if mode == m_depart() do g +. cruise() +. depart_climb()
@@ -207,7 +219,7 @@ mod CubeForge.Flock do
     let near = pdx *. pdx +. pdy *. pdy +. pdz *. pdz < flee_radius() *. flee_radius()
     let mode = mode_of(f_sp, sun, near, in_season)
     let ground = ground_at(patch, hx, hz, x, z)
-    let ty = want_y(f_sp, mode, ground, water_y)
+    let ty = want_y(f_sp, mode, ground, water_y, sun)
 
     let ahx = (cx -. x) *. 0.35
     let ahz = (cz -. z) *. 0.35
@@ -286,15 +298,16 @@ mod CubeForge.Flock do
   fn step(f : Flock, patch : NativeIntArr, water_y : Float, sun : Float,
           px : Float, py : Float, pz : Float, in_season : Bool, dt : Float) : Flock do
     match f do
-      Flock(sp, n, t, seed, hx, hy, hz, b) ->
-        if n <= 0 do Flock(sp, n, t, seed, hx, hy, hz, b)
+      Flock(sp, n, t, seed, hx, hy, hz, b, _) ->
+        let m = mode_of(sp, sun, false, in_season)
+        if n <= 0 do Flock(sp, n, t, seed, hx, hy, hz, b, m)
         else
           -- the centre is read before anything moves, so every animal steers
           -- against the same flock rather than against a half-updated one
           let cx = centre_x(b, n, 0, 0.0)
           let cz = centre_z(b, n, 0, 0.0)
           Flock(sp, n, t + 1, seed, hx, hy, hz,
-                step_go(b, sp, n, 0, seed, t, hx, hz, cx, cz, patch, water_y, sun, px, py, pz, in_season, dt))
+                step_go(b, sp, n, 0, seed, t, hx, hz, cx, cz, patch, water_y, sun, px, py, pz, in_season, dt), m)
         end
     end
   end
@@ -319,7 +332,7 @@ mod CubeForge.Flock do
   doc "The flock moved by (dx, dz) blocks: the window slid under it. Home and every animal move together; nothing about the flock's behaviour changes."
   fn translate(f : Flock, dx : Float, dz : Float) : Flock do
     match f do
-      Flock(sp, n, t, seed, hx, hy, hz, b) -> Flock(sp, n, t, seed, hx +. dx, hy, hz +. dz, translate_go(b, n, dx, dz, 0))
+      Flock(sp, n, t, seed, hx, hy, hz, b, m) -> Flock(sp, n, t, seed, hx +. dx, hy, hz +. dz, translate_go(b, n, dx, dz, 0), m)
     end
   end
   pfn translate_go(b : NativeFloatArr, n : Int, dx : Float, dz : Float, i : Int) : NativeFloatArr do
@@ -333,16 +346,16 @@ mod CubeForge.Flock do
   doc "The flock at [n] animals: the ones it has keep their places, newcomers start at home, and the surplus is dropped from the end. So a school can grow with its pond without every fish jumping back to where it began."
   fn resize(f : Flock, n : Int) : Flock do
     match f do
-      Flock(sp, m, t, seed, hx, hy, hz, b) ->
+      Flock(sp, m, t, seed, hx, hy, hz, b, md) ->
         let k = clampi(n, 0, cap())
-        Flock(sp, k, t, seed, hx, hy, hz, if k > m do place_go(b, k, m, seed, hx, hy, hz) else b end)
+        Flock(sp, k, t, seed, hx, hy, hz, if k > m do place_go(b, k, m, seed, hx, hy, hz) else b end, md)
     end
   end
 
   doc "Every animal moved by (dx, dy, dz), the home left where it is: the start of an arriving flock, which then flies home on the pull it already has."
   fn offset(f : Flock, dx : Float, dy : Float, dz : Float) : Flock do
     match f do
-      Flock(sp, n, t, seed, hx, hy, hz, b) -> Flock(sp, n, t, seed, hx, hy, hz, offset_go(b, n, dx, dy, dz, 0))
+      Flock(sp, n, t, seed, hx, hy, hz, b, m) -> Flock(sp, n, t, seed, hx, hy, hz, offset_go(b, n, dx, dy, dz, 0), m)
     end
   end
   pfn offset_go(b : NativeFloatArr, n : Int, dx : Float, dy : Float, dz : Float, i : Int) : NativeFloatArr do
@@ -366,7 +379,7 @@ mod CubeForge.Flock do
   doc "A flock of [n] animals of [sp] around (hx, hy, hz)."
   fn new(sp : Int, n : Int, seed : Int, hx : Float, hy : Float, hz : Float) : Flock do
     let m = clampi(n, 0, cap())
-    Flock(sp, m, 0, seed, hx, hy, hz, place_go(NativeArray.make_float(cap() * stride(), 0.0), m, 0, seed, hx, hy, hz))
+    Flock(sp, m, 0, seed, hx, hy, hz, place_go(NativeArray.make_float(cap() * stride(), 0.0), m, 0, seed, hx, hy, hz), m_feed())
   end
 
   -- ── The reply ─────────────────────────────────────────────────────────────
@@ -415,23 +428,27 @@ mod CubeForge.Flock do
     if k == 0 do 0 else if k == 1 do 1 else if k == 2 do 2 else 1 end end end
   end
 
-  pfn transforms_go(b : NativeFloatArr, seed : Int, n : Int, t : Int, hx : Float, hz : Float, i : Int, acc : List(Int)) : List(Int) do
+  pfn transforms_go(b : NativeFloatArr, seed : Int, n : Int, t : Int, hx : Float, hz : Float, roost : Bool, i : Int, acc : List(Int)) : List(Int) do
     if i < 0 do acc
     else
       let vx = vel_x(b, i)
       let vz = vel_z(b, i)
+      -- at roost a still animal folds its wings; one that is moving -- put up
+      -- by the player -- is flapping like any other
+      let still = vx *. vx +. vz *. vz < 0.25
       -- an animal that has stopped keeps a heading of its own rather than
       -- snapping east, so a roosting flock does not all face one way
       let yaw = if vx *. vx +. vz *. vz < 0.0001 do wander(seed, i, 0) else Math.atan2(vz, vx) end
       let yaw8 = int_and(float_to_int(yaw /. 6.283185307 *. 256.0 +. 256.5), 255)
-      transforms_go(b, seed, n, t, hx, hz, i - 1,
-                    Cons(pack(i, flap_pose(t + i), yaw8, q_off(pos_x(b, i) -. hx), q_abs(pos_y(b, i)), q_off(pos_z(b, i) -. hz)), acc))
+      let pose = if roost && still do Fa.pose_roost() else flap_pose(t + i) end
+      transforms_go(b, seed, n, t, hx, hz, roost, i - 1,
+                    Cons(pack(i, pose, yaw8, q_off(pos_x(b, i) -. hx), q_abs(pos_y(b, i)), q_off(pos_z(b, i) -. hz)), acc))
     end
   end
 
   doc "The flock's animals as packed transforms, one Int each."
   fn transforms(f : Flock) : List(Int) do
-    transforms_go(bodies(f), seed_of(f), count(f), tick_of(f), home_x(f), home_z(f), count(f) - 1, Nil)
+    transforms_go(bodies(f), seed_of(f), count(f), tick_of(f), home_x(f), home_z(f), mode(f) == m_roost(), count(f) - 1, Nil)
   end
 
   doc "A number that changes when any animal moves: the oracle the behaviour tests hold."

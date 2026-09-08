@@ -190,8 +190,10 @@ mod CubeForge.Noise do
   """
   fn river_mask(xw : Float, zw : Float, seed : Int) : Float do
     let edge = river_edge(age_frac(seed))
-    smooth(clamp01((ridged(xw *. 0.012 +. 2.3, zw *. 0.012 +. 9.9, seed + 950) -. edge) /. (1.0 -. edge)))
+    smooth(clamp01((river_crease(xw, zw, seed) -. edge) /. (1.0 -. edge)))
   end
+  doc "The raw river crease, 0..1 with 1 on the centreline, before the edge is applied: what a point of interest widens a river with."
+  fn river_crease(xw : Float, zw : Float, seed : Int) : Float do ridged(xw *. 0.012 +. 2.3, zw *. 0.012 +. 9.9, seed + 950) end
 
   -- Domain warp: the point every layer is sampled at.
   fn warp_x(x : Float, z : Float, seed : Int) : Float do
@@ -305,8 +307,35 @@ mod CubeForge.Noise do
     glacier_at(wx, wz, seed) && temperature(wx, wz, seed, h) >= glacier_temp(age_frac(seed)) -. moraine_band()
   end
 
-  doc "Terrain height for a world column."
-  fn height(wx : Int, wz : Int, seed : Int) : Int do
+  -- ── Open ocean ─────────────────────────────────────────────────────────
+  -- The sea used to be wherever the land happened to dip under 62: a shelf a
+  -- few blocks deep, nowhere open water. One very broad octave now marks OCEAN
+  -- country, and there the land is pulled down to an abyssal floor with its own
+  -- gentle relief. It is terrain, so it lives here and not in Poi: the lake
+  -- pour, the beaches, the biome's distance-to-water and the atoll's placement
+  -- all read it for free. Rare on purpose -- an ocean is a region, not a pond.
+  doc "How far under the sea the ocean floor lies at its deepest."
+  fn ocean_floor_depth() : Float do 22.0 end
+  doc "1 in ocean country, 0 elsewhere: one broad octave over a high threshold."
+  fn ocean_mask(x : Float, z : Float, seed : Int) : Float do
+    smooth(clamp01((value2(x *. 0.0040 +. 3.3, z *. 0.0040 +. 7.1, seed + 2700) -. 0.62) /. 0.10))
+  end
+  doc "Land up to this far above the sea is pulled all the way down in ocean country; above it the pull fades over ocean_island_fade(), so high ground is an island and a drowned coast is a coast. At 0 (the first version) a coast at sea + 8 kept most of its height and every atoll site went dry."
+  fn ocean_island_rise() : Float do 12.0 end
+  fn ocean_island_fade() : Float do 26.0 end
+  doc "The land [hf] pulled down to the ocean floor by [ocean]: never raised, and the pull fades with height above the sea, so a mountain that sits in ocean country keeps its peak and becomes an island."
+  fn ocean_of(hf : Float, x : Float, z : Float, ocean : Float, seed : Int) : Float do
+    if ocean <= 0.0 do hf
+    else
+      let floor = int_to_float(sea_level()) -. ocean_floor_depth() +. 6.0 *. (fbm(x *. 0.04 +. 9.9, z *. 0.04 +. 2.2, seed + 2701) -. 0.5)
+      let damp = clamp01((int_to_float(sea_level()) +. ocean_island_rise() +. ocean_island_fade() -. hf) /. ocean_island_fade())
+      let pulled = lerp(hf, floor, ocean *. damp)
+      if pulled < hf do pulled else hf end
+    end
+  end
+
+  doc "Terrain height for a world column, without any point-of-interest term: what the POI masks are read against, and the SIMD lanes test's reference."
+  fn height_base(wx : Int, wz : Int, seed : Int) : Int do
     let x = int_to_float(wx)
     let z = int_to_float(wz)
     let a = age_frac(seed)
@@ -334,10 +363,45 @@ mod CubeForge.Noise do
     -- The floodplain: inside the valley the land is pulled toward the
     -- channel's floor, so what the river moved lies flat beside it.
     let floor = land2 +. mountains -. depth
-    let hf = lerp(raw, floor, plain_mask(river, a) *. plain_strength(a))
+    let hf0 = lerp(raw, floor, plain_mask(river, a) *. plain_strength(a))
+    let hf = ocean_of(hf0, x, z, ocean_mask(x, z, seed), seed)
     -- Dunes where it is hot and dry, read against the height without them.
     let dune = dune_mask_of(temp_from_base(value2(x *. 0.018, z *. 0.018, seed + 1700), hf), hf, river) *. dune_of(xw, zw, seed) *. dune_amp()
     let h = float_to_int(hf +. dune)
+    if h < 1 do 1 else if h > 200 do 200 else h end end
+  end
+
+  doc "Terrain height for a world column: height_base plus the landform points of interest (see CubeForge.Poi and the POI design)."
+  fn height(wx : Int, wz : Int, seed : Int) : Int do
+    let x = int_to_float(wx)
+    let z = int_to_float(wz)
+    let a = age_frac(seed)
+    let xw = warp_x(x, z, seed)
+    let zw = warp_z(x, z, seed)
+    let cont = value2(xw *. 0.022, zw *. 0.022, seed)
+    let detail = fbm(xw *. 0.050 +. 5.1, zw *. 0.050 +. 2.6, seed + 2)
+    let dw = detail_weight(a)
+    let base = 37.0 +. (cont *. (1.0 -. dw) +. detail *. dw) *. 64.0
+    let rug = ruggedness(wx, wz, seed)
+    let roll = fbm(xw *. 0.030 +. 3.7, zw *. 0.030 +. 8.2, seed + 5)
+    let hills = (roll -. 0.5) *. hill_amp() *. (1.0 -. 0.6 *. rug)
+    let land = base +. hills
+    let land2 = lerp(land, terrace(land, terrace_sharpness(a)), plateau_mask(xw, zw, seed))
+    let mountains = ridged_fbm(xw *. 0.028, zw *. 0.028, seed + 13) *. rug *. mountain_amp(a)
+    let rv = river_crease(xw, zw, seed)
+    let river = river_mask(xw, zw, seed)
+    let depth = river_depth(a) *. (1.0 -. 0.5 *. rug)
+    let raw = land2 +. mountains -. river *. depth
+    let floor = land2 +. mountains -. depth
+    let hf0 = lerp(raw, floor, plain_mask(river, a) *. plain_strength(a))
+    let hf = ocean_of(hf0, x, z, ocean_mask(x, z, seed), seed)
+    -- The desert mask is shared: the dunes ride on it, and it is what keeps
+    -- buttes out of the grasslands. Computed once, read twice.
+    let dmask = dune_mask_of(temp_from_base(value2(x *. 0.018, z *. 0.018, seed + 1700), hf), hf, river)
+    let hd = hf +. dmask *. dune_of(xw, zw, seed) *. dune_amp()
+    -- the points of interest read what this column has already computed and
+    -- nothing else: the desert mask, the river, its raw crease, the ruggedness
+    let h = float_to_int(hd) + CubeForge.Poi.height_at(wx, wz, seed, dmask, hd, river, rv, rug)
     if h < 1 do 1 else if h > 200 do 200 else h end end
   end
 
@@ -465,7 +529,12 @@ mod CubeForge.Noise do
     let floor = Simd.sub_f32x4(Simd.add_f32x4(land2, mountains), depth)
     let pe = plain_edge(a)
     let plain = smooth_x4(clamp01_x4(Simd.div_f32x4(sub_k(river, pe), Simd.splat_f32x4(1.0 -. pe))))
-    let hf = lerp_x4(raw, floor, mul_k(plain, plain_strength(a)))
+    let hf0 = lerp_x4(raw, floor, mul_k(plain, plain_strength(a)))
+    -- open ocean, as in ocean_of: pulled toward the floor and never raised
+    let ocean = smooth_x4(clamp01_x4(Simd.div_f32x4(sub_k(value2_x4(add_k(mul_k(x, 0.0040), 3.3), add_k(mul_k(z, 0.0040), 7.1), seed + 2700), 0.62), Simd.splat_f32x4(0.10))))
+    let ofloor = add_k(mul_k(sub_k(fbm_x4(add_k(mul_k(x, 0.04), 9.9), add_k(mul_k(z, 0.04), 2.2), seed + 2701), 0.5), 6.0), int_to_float(sea_level()) -. ocean_floor_depth())
+    let damp = clamp01_x4(Simd.div_f32x4(Simd.sub_f32x4(Simd.splat_f32x4(int_to_float(sea_level()) +. ocean_island_rise() +. ocean_island_fade()), hf0), Simd.splat_f32x4(ocean_island_fade())))
+    let hf = Simd.min_f32x4(hf0, lerp_x4(hf0, ofloor, Simd.mul_f32x4(ocean, damp)))
     -- dunes: the mask (hot, dry, out of the valley) times the crest shape
     let sea = int_to_float(sea_level())
     let t = clamp01_x4(Simd.sub_f32x4(value2_x4(mul_k(x, 0.018), mul_k(z, 0.018), seed + 1700), mul_k(sub_k(hf, sea), lapse())))

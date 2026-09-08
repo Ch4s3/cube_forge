@@ -2789,6 +2789,877 @@ desert corner of the same chunk. Honest, and slightly surprising; worth a word
 in the panel if it confuses anyone.
 
 Frame budget 8.29 ms against 16; save/load round trip passes.
+
+## Roost
+
+A bird asleep on the ground with its wings level looked like a bird that had
+landed and forgotten to stop flying. The fourth pose folds them: a shell one
+cell thick against each flank, from the shoulder back toward the tail, placed
+row by row against the body's ACTUAL surface (body_half_z) so it sits on the
+bird rather than beside it, narrowing toward the tail, dark at the rear where
+the primaries cross. The flock keeps its mode from the last step and a still
+animal wears the fold whenever that mode is roost; one that is moving -- put
+up by the player -- flaps like any other. A fish's fourth pose is its first.
+
+With it: the inner wing's trailing edge is feathered (a cell cut every fourth
+column), and the ratite leg has a hock -- the joint set well back and
+thickened, the shank angled forward -- which is the difference between a bend
+in a post and a joint.
+
+**One lesson.** The first build of this "worked": it compiled, linted, and the
+roost render showed a bird with its wings raised. Two of the edits had silently
+not applied -- a text replace on a string that no longer matched -- so pose 3
+fell through the flap's bend to the "up" branch, and the fold functions were
+never in the file. What caught it was a test with the wrong premise: I had
+asserted a folded wing was fewer faces than a spread one, it failed, and
+following that up found that there was no folded wing. The assertion is now the
+true property -- a folded wing reaches under six tenths as far out as a spread
+one -- and every generated edit here is now checked in the same command that
+makes it.
+
+505 tests, frame budget 8.23 ms against 16.
+
+## The spec is built
+
+The last line of it: fish read the clock. A twilight species (Reedcarp) holds
+under a block of water at dawn and dusk and three times its ordinary depth at
+midday; a night species (Glasseel, Deepmaw) comes up in the dark; a day species
+does not care what time it is. One function, `fish_hold`, folded into the
+height a fish wants -- and a test that a Reedcarp at dusk sits two blocks above
+one at noon while a Sunfin at either hour sits within a block of itself.
+
+And the habitat line now says what it is: `THIS CHUNK WOULD HOLD  GRASSPIPIT
+CINDERFINCH`, because the report is per chunk where the rest of the panel is
+per column, and a Cinderfinch reported on a grassland column was a desert
+corner of the same chunk.
+
+Frame budget 6.72 ms against 16.
+
+## A perf pass on the finished fauna
+
+Measured first. On the standard scenario, fauna on against fauna off (a new
+`CF_FAUNA=0` switch, kept for weak machines), interleaved, three runs each:
+**135 fps against 148, worst frame 8.1 ms against 6.6**. A tenth of the frame
+rate. Inside the fauna slot everything was cheap -- pop tick 0.1 ms, assign
+0.02, flock ticks 0.13 -- and the cost was the DRAW: 0.4-0.8 ms to re-stamp 23
+animals into a buffer and ~10 MB re-uploaded every frame, for 260,000 vertices
+whose only change since the last frame was six floats each of position, yaw and
+size.
+
+So the templates are uploaded ONCE, at startup, and each animal is one draw
+call from that static slot with its transform as uniforms: the vertex shader
+gains a model mode -- place at u_mpos, turn by u_mrot, scale by u_mscale, lit
+by u_msky/u_mblk, the normal turned with the body, which also retires the
+quarter-turn face hack the stamp needed. The interpolation between ticks is
+the only per-frame arithmetic left on the March side.
+
+| | before | after |
+|---|---|---|
+| fauna draw, per frame | 0.6-1.0 ms | 0.04-0.10 ms |
+| fauna on / off, frame rate | 135 / 148 fps | 149 / 150 fps |
+| slow frames on the fauna slot, of 600 | 26 | 10 |
+| frame budget gate | 8.2 ms | 6.1 ms |
+
+The demo modes still stamp and upload, into a slot of their own so the static
+blob is never clobbered; they are inspection tools and the stamp path is what
+their tests cover.
+
+What is left on the fauna slot is the population tick's chunk profile, 0.1 ms
+ordinarily and 1.4 on a chunk that is mostly water, once every ten frames.
+Below the vegetation and water ticks now, and not worth a second pass.
+
+The single-specimen inspector (`CF_FAUNA_DEMO=100+n`, `200+n`) now draws
+through the model path too, so the check that a body looks right is a check of
+the shader's transform and turned normal, not of the stamp the game no longer
+uses for animals. That mattered: a draw count of 36 animals is not evidence
+that a new shader path drew anything, and the first in-world screenshot after
+the change caught none. The inspector did.
+## Points of interest, phase 1: buttes and the arch (2026-09-06)
+
+Design `docs/superpowers/specs/2026-09-06-points-of-interest-design.md`, plan
+`docs/superpowers/plans/2026-09-06-poi-phase1.md`.
+
+**The design changed while the plan was being written, and that was the whole
+value of writing it.** The first draft gave every point of interest a hashed
+*site*, resolved once per lake tile into a `Poi.Field` threaded beside
+`Lakes.Tile`. Resolving a site means probing the terrain at its centre, and for
+a landform that probe runs inside `Noise.height` -- called for every column of
+every chunk heightmap, every apron column, every column of a 128x128 lake pour,
+and once per tree and worm placement. It would have had to call `height`
+recursively or pay a second full noise stack per candidate cell per column, and
+the field that hid the cost needed threading through twenty call sites, a seam
+apron, and its own agreement test. None of that was written.
+
+What landed instead is two mechanisms, each already in the codebase:
+
+- **Landforms are masked fields**, the way dunes and glaciers are: a rarity mask
+  times a shape, evaluated per column inside `height`, probing nothing. Nothing
+  threaded, no seam, `height` still a pure function of the column.
+- **Structures are resolved sites**, `Trees.tree_at_cell` exactly, stamped once
+  per chunk. Their suitability *is* free to probe `height`, because height
+  carries no structure term. `CubeForge.Poi.stamp` is one call at the end of
+  `Chunk.generate_lakes` and no signature anywhere changed.
+
+**The regression gate.** `CF_POI=0` zeroes every mask and density, and the
+pinned scenario's frame-30 mesh hash is still **380281180** -- the same number
+this file has been quoting since the greedy mesher. Worst frame 6.50 ms best of
+3 against a 16 ms budget (6.42 before). 473 tests (463 before).
+
+**Cost.** `height` gains one `value2` -- but only after the dune mask is already
+up, which is a few percent of columns, and `CF_POI` is not read at all until
+then. Best of six, whole-world scalar heightmap: seed 7, 38 ms off / 39 ms on;
+seed 15, which has buttes in the window, 37 ms off / 35 ms on. Not measurable.
+
+**Buttes.** The mesa's rise is an **absolute top level** hashed per cell, not a
+height added to the ground: a constant rise gives a top that tilts with the
+slope under it, and no butte does that. A cell whose ground is already within 8
+of its top holds nothing, which is why buttes read as remnants of a former
+surface. The radial step is hard, not eased -- an eased rim left a half-height
+shelf instead of a cliff -- and the blend that keeps the world from snapping is
+the *density* thinning with the country mask, not the mesa shrinking.
+
+Tuning, measured over a 1024-block square at seed 4242 (samples at 8 blocks):
+
+| | desert | country | both | on a mesa |
+|---|---|---|---|---|
+| threshold 0.70, density scaled by cty x dmask | 411 | 3186 | 151 | 5 |
+| threshold 0.62, density `clamp01(2 cty dmask)` | 411 | 4701 | 194 | 13 |
+
+The first is one or two mesas per million blocks -- a lump, not butte country.
+The second is 6.7% coverage inside desert-and-country, which is a field. Tallest
+mesa in that square: 20 blocks. Buttes turn up in the spawn window of 4 seeds in
+40.
+
+**The arch, and two things that were wrong.**
+
+*The span was hashed.* A hashed half-span lands in a real gorge about once in a
+thousand cells: **no arch in 160 cells across 40 seeds.** The span is now read
+off the terrain -- walk out from the channel until the ground stands
+`arch_bank_rise()` above it, both ways, and give up past `arch_max_span()`. An
+arch is the span of a gorge, so the gorge should say how wide it is.
+
+*One candidate column per cell.* A channel is a couple of percent of columns, so
+a single hashed draw in a 96-block cell finds one about once in forty cells, and
+the bank test then throws most of those away. Sixteen hashed candidates per cell
+took it to **6 arches in 160 cells** -- roughly one per 230,000 blocks, one seed
+in eight with an arch in its spawn window. The extra cost is sixteen `river_at`
+evaluations per arch cell and at most four such cells per chunk, about 3% of a
+chunk's noise work, and only for cells that pass the density draw.
+
+*A hole at the crown.* The first arch generated had a one-block gap in it. The
+underside is an ellipse and an ellipse's slope runs away near the feet -- several
+blocks per column, more than the band is thick -- so a band of constant thickness
+does not overlap its own neighbours. Each column's band is now taken against its
+two neighbours' undersides as well as its own. Found by printing a vertical
+cross-section through the arch, which is also how the fix was confirmed:
+
+```
+71 .......##..###..          71 ........#...#...
+70 ......##########          70 .......#########
+69 ....############    <--   69 .....###########
+68 ....############          68 .....#######.###   <- the gap
+67 ....#####.......          67 .....###........
+```
+
+**What is not verified.** Neither shape was confirmed visually. Four rounds of
+yaw sweeps at seeds with a POI in the window landed on a peak, in a lake and
+under water; the spawn column is chosen by the generator and there is no knob to
+put the camera somewhere. The evidence that they are real and right is the
+cross-section above, the `poi:` diagnostic line under `CF_TERRAIN_STATS`, the
+world and mesh hashes moving at a seed with an arch (seed 1: world 79424082 ->
+590784810) and not moving at one without, and the tests. A spawn-position knob
+would pay for itself the next time a rare feature needs looking at.
+
+## Points of interest, phase 2: the crystal cavern and the giant tree (2026-09-06)
+
+Two kinds added to the template. Both are **landmarks with no height term**: a
+cavern is a hole in the rock and a tree is not terrain, so neither belongs in
+`Noise.height`, and `raises(k)` keeps them out of the per-column scan entirely --
+the hot path stays exactly two kinds wide however many kinds exist.
+
+**The template gained a volume op**, orthogonal to scatter/landmark: `vol_carve`
+(an opening, a chamber), `vol_stamp` (a trunk, a canopy) or `vol_none`. One
+function, `vol_block`, decides what a kind does to a voxel, and **the generator
+and the preview both call it** -- a preview that modelled the shape separately
+would drift from what gets built, which is the class of bug this module exists
+to end. Two new rules: a stamp must not also raise the ground, and an
+underground kind must keep a roof's worth of rock over its widest chamber
+whatever depth it draws (`plo(depth) >= phi(wide) + roof()`).
+
+**Three bugs, each caught by a different one of those two.**
+
+*The preview drew an empty sky.* It asked whether an instance happened to be
+placed at the sample cell, and mostly one was not. Shape and placement are now
+separated -- `shape_at` is the shape, `rise_at` is the shape once placement
+agrees -- which is a better split anyway.
+
+*Every cavern was unlit.* The crystals lining a chamber's shell were being
+written under the stamp rule, "only into air", and the voxels they line are rock
+that was just carved. The preview showed them; the world had none. The rule is
+now split by op: **a carve owns the volume it opens**, so what it puts back
+replaces the ground it took; a stamp owns nothing and writes only into air, so a
+tree can never eat the hill it stands on.
+
+*The giant tree was a pole.* 34-50 tall with blobs around it -- a conifer, not a
+live oak. The references are **wider than they are tall**: a short thick trunk
+that boughs leave low down, and boughs that sweep out and *down* before lifting
+to their tips. So the trunk is 14-22 with a flaring foot, the boughs are two
+segments with a dip at the elbow (that dip is what makes a bough read as
+carrying its own weight rather than as a spoke), and the canopy is a flattened
+dome of radius `0.92 * reach` sitting on them. Final proportions: about 40 tall
+and 70 across.
+
+**The crystals are micro-voxel models, not cubes.** One block per crystal read as
+a stack of boxes; Naica's selenite is a shaft. `Model` gained four crystal
+templates -- a blade walked from a floor point to a tip, tapering, plus a shorter
+one across it -- and `crystal` joined `is_cutout`, so it meshes in the foliage
+pass, lets light through and costs no new machinery. The template variant is
+hashed on a **coarse** grid so neighbouring blades lean the same way and a patch
+reads as one growth rather than a bristle. `Model.count()` 20 -> 24, texture
+layers 92 -> 93 (layer 92 is the crystal cube face, still used for the item).
+
+**Numbers.** 478 tests. `CF_POI=0` and `CF_POI=1` agree at seed 7 (mesh
+484802240, world 1012862119). Worst frame 6.04 ms best of 5 against a 16 ms
+budget, unmoved. Landmarks are rare enough to be landmarks: over 40 seeds, 4
+worlds had an arch in the spawn window, 8 a cavern, 3 a giant tree.
+
+`CF_TERRAIN_STATS` now prints a line per landmark with its site, size and
+bearing -- and, for a cavern, the world position of chamber 0, because the site
+column of a cavern is usually solid rock and standing there shows you nothing.
+`docs/poi-arch.png`, `docs/poi-giant-tree.png`, `docs/poi-crystal-cavern.png`.
+
+**Then the beams, the same day.** A model blade cannot be longer than the cell
+it is drawn in, so the long crystals could never come from the model layer at
+all -- they had to be geometry. A **selenite beam** is a segment through a
+chamber, the same primitive the giant tree's boughs already use, made of a
+second block (`crystal_beam`, id 70, texture layer 93) that greedy-meshes into a
+prism. Two per chamber, radius 1.3-2.5 so a shaft is three to five blocks
+across, and half-length 0.95-1.4 of the chamber's radius so each one drives into
+the rock at both ends rather than stopping neatly at the wall. Their offsets
+from the chamber centre are hashed independently, so they cross rather than all
+passing through one point.
+
+Three rounds of tuning, each against the preview rather than a screenshot:
+
+| | beams | radius | half-length | result |
+|---|---|---|---|---|
+| first | 3 x 3 | 1.6 - 3.2 | 0.95-1.4 r | two of them filled the chamber they were meant to cross |
+| second | 3 x 2 | 1.3 - 2.5 | 0.95-1.4 r | still read as pale boulders, not shafts |
+| third | 3 x 5 | 0.7 - 1.8 | mixed | shafts |
+
+What fixed it was not the beams but the **chamber**: radius went 8-13 to 12-18
+and depth 22-34 to 28-42, because the eye reads a crystal's thickness against
+its own length and against the room, and at radius 2.5 in a ten-block chamber
+nothing can look like a ten-metre crystal. The beams then went **slender**
+(0.7-1.8, so two to four blocks across against a length of twenty to fifty) and
+gained a **taper** -- `beam_taper`, full over the middle and drawn to a point at
+both ends, the way a crystal terminates -- which needed `seg_t` beside `seg_d2`
+so a shape can know where along a segment it is.
+
+Then a **size distribution**, and then the numbers Naica actually has: **seven
+beams per chamber, four in five of them large** (radius 1.4-2.4 against a length
+of twenty-five to sixty), the rest short slender stubs broken across them. A
+chamber where the big shafts are the minority reads as a cave that happens to
+have crystal in it; the stubs are what keep the rest from reading as a lattice.
+
+**The angles were the last thing wrong, and the most obvious in hindsight.** The
+elevation band was `hash * 0.9 - 0.45` -- plus or minus twenty-six degrees --
+so every beam in every chamber lay at much the same attitude and the whole thing
+read as a stack of shelves. It is now `hash * 2.4 - 1.2`, plus or minus seventy,
+and they cross at genuinely odd angles.
+
+Raising the beam count to seven collided the hash salts: the direction draws
+take `110 + 4 * (7j + b)`, which now runs to 193 and ran straight over the
+centre offsets at 140 and 161. A salt collision is invisible -- two draws that
+should be independent quietly agree -- so the ranges are now laid out with gaps
+and the layout is written down where they are declared.
+
+The fine blade growth dropped from 0.26 to 0.18 of shell voxels along the way,
+because the beams now carry the look.
+
+Cost: startup meshing 190 ms at a seed with a cavern against 179 with none
+(+6%), and the frame budget unmoved at 6.04 ms best of five. Twenty-one segment
+tests per voxel sounds like a lot and is not, because the whole beam pass is
+behind the `d < 1.45` chamber test.
+
+So the crystals are both things, and each is the mechanism that fits it: the
+fine growth is micro-voxel blades, because a cube read as a box; the shafts are
+geometry, because a model cannot leave its cell.
+
+
+## The crystals, actually looked at (2026-09-06)
+
+Four rounds of tuning the beams' length, thickness, count and angle each made
+them a bit better and none of them made them look like Naica. The two things
+that were wrong were not numbers.
+
+**They were cylinders.** `beam_d` measured a radial distance from the axis, and
+a voxelised cylinder is a staircase — round in principle and lumpy in fact. A
+selenite beam is a **prism**: big flat planes meeting at hard edges, and that is
+most of what makes one read as a crystal rather than as a pale rock. `prism_d`
+measures an **octagonal** cross-section instead (four faces read as a crate,
+eight as a crystal). The basis is free: for an axis `d`, `e1 = (dz, 0, -dx)` is
+perpendicular by inspection and the second component follows from Pythagoras
+against the full perpendicular offset, so there is no cross product and no
+second basis vector.
+
+**They were the wrong colour, and the texture was not why.** Block light is one
+channel and `GLOW` is warm, so every emitter in the game glows the same orange —
+a near-white selenite beam rendered beige, and repainting the texture whiter
+just made it a paler beige. What fixed it is **effect 12, self-lit** (task 6 of
+the phase 1 plan, built early because this is what needed it): an emissive
+block's own faces take their glow colour from their own texture,
+`glow = (fe == 12) ? t.rgb * 1.15 : GLOW`. Selenite now reads white against
+brown rock.
+
+The flag reaches the shim without a second FFI array by riding the **layer
+table**: `Texture.selflit_bias()` adds 1000 to a self-lit face's layer and
+`cf_vert` strips it and sets the effect. Only `layer_table` carries the bias, so
+every March path reads `layer_for` and is unaffected. The water bob had to grow
+an upper bound — it fires on `fe >= 2`, which effect 12 would have joined, and
+crystals would have wobbled.
+
+The limitation is real and worth stating: this fixes the emitter's **own faces**.
+The light it casts on the rock around it is still warm, and making that cold
+needs three block-light fields rather than one.
+
+478 tests. `CF_POI=0` and `CF_POI=1` still agree at seed 7 (mesh 484802240) --
+the bias touches no block that world contains. Worst frame 7.18 ms against 16.
+
+
+## Room to be big (2026-09-06)
+
+The shafts still did not read as big shafts, and again the reason was not the
+shafts. **Five of them in a chamber barely wider than they were long merged into
+one white mass**, and a crystal you cannot see the ends of is not a crystal, it
+is a wall. What was needed was air: the chamber went from radius 8-13 to 12-20
+and depth 22-34 to 30-44, the beam centres spread to 1.5x the chamber radius so
+they stop passing through one point, the count came back to five, and the fine
+blade growth halved again to 0.09 of shell voxels.
+
+Two bugs surfaced doing it, both in placement rather than shape.
+
+**`cham_r` could exceed `p_wide`.** It scaled the radius by 0.70 to 1.25, and
+the roof rule was written against `phi(p_wide)` — a number the chamber could
+therefore beat by a quarter. At the largest radius the caverns broke the surface
+and the sea poured in. The multiplier is now 0.62 to 1.00, so `phi(p_wide)` is a
+true maximum and the rule means what it says.
+
+**`here` checked the ground at the site only.** A cavern spreads its chambers
+thirty blocks sideways, and the site's own column says nothing about the
+hillside they run into: chambers came out of the side of hills and flooded.
+`cover` now takes the *lowest* ground over a cross of five probes at `p_len`,
+and `ground` hangs the chambers off that rather than off the site, so a chamber
+under a slope follows the low side. That is the same shape of fix as the arch's
+foot probes, and it is the second time this session that a landmark's rules were
+right at its centre and wrong over its footprint.
+
+The threshold does far more work than it looks once it has to hold over a
+fifty-block cross: at sea + 26 no world in forty seeds had a cavern at all, and
+it settled at sea + 18 with the density raised to 0.65.
+
+478 tests. `CF_POI=0` and `CF_POI=1` agree at seed 7 (mesh 484802240). Worst
+frame 6.48 ms.
+
+## Points of interest, phase 3a: the canyon and the atoll (2026-09-07)
+
+**A third class: the field.** A canyon is not a thing placed in a valley, it is
+what the valley becomes where canyon country is -- so it has no cells and no
+site. `cls_field` kinds are evaluated at every column from what `height`
+already has in hand (the river mask, its raw crease, the ruggedness, now passed
+into `height_at`), gated by a country mask, and they skip every cell rule. The
+per-column cost stays where it was: the canyon's octave sits behind the same
+cheap gates as the cut itself (above sea + 20, in a valley, in rugged country),
+so open lowland never samples it.
+
+**The canyon.** The river mask sharpened into a slot, dropped by
+`canyon_depth` (40 young, 60 ancient), quantised to six-block benches so the
+walls step, and never cut below the brook's floor. Confirmed by transect before
+any camera found it: at seed 24, z 44..60, a slot 10-17 columns wide and up to
+five benches deep with stepped edges (`345555531`). `CF_POI_TRANSECT=<z>` is the
+new knob -- one character per column across the world, a digit for benches cut,
+`+` for raised -- and it is the right instrument for a slot, which is a thing
+you read across, not from a camera on the rim that happens to be behind a hill.
+`docs/poi-canyon.png`, looking along it.
+
+Canyon country at a threshold of 0.60 put canyons in 20 of 40 seeds, which is
+not a landmark; 0.66 now.
+
+**The atoll, and what it found.** A landmark with a CEILING on its ground
+(`max_ground`, `cover_hi`), the first kind to want one. Its ring is raised to an
+absolute reef flat and its lagoon cut to an absolute floor (rule 3), with one
+gap forced below sea level so the lagoon fills by the sea rule and not by the
+lake pour, which a tile seam would cut.
+
+Three things went wrong, in order:
+
+1. *No atoll in 140 seeds.* `CF_POI_GATE=1` prints each placement gate's value
+   for the atoll's cell, and it said why at once: the ground at hashed sites
+   was 49..105 over thirty seeds, the shallowest barely wet. This terrain has
+   shelf, not ocean, and "eight under the sea across the ring" never held. The
+   lagoon is cut to an absolute floor anyway, so the atoll now only has to
+   START under water: `max_ground` sea - 2, probed at half the ring's radius.
+   Two of 140 seeds have one.
+2. *Placed, but drawing nothing.* `shape_at` at the site said -12 and
+   `height_at` said 0. `kind_go` took `max` against a best of zero, which is
+   right for mesas and throws away every cut; the atoll is the first kind whose
+   shape goes negative. `pick` now lets a nonzero beat zero and only then takes
+   the max -- exact, because an instance never overlaps its own kind. The same
+   `max` in `height_at`'s combination had the same bug.
+3. *A thirty-block wall at the gap.* The gap only suppressed the ring, so the
+   lagoon floor met the shelf in a cliff exactly where the channel should be.
+   In the gap the ring band is the channel at moat depth and the inner foot
+   ramps floor -> moat.
+
+An **apron** -- a moat cut to sea - 6 easing back to the bed over 18 blocks --
+gives the ring water to stand in on a shelf. Even so, in this terrain the atoll
+reads as a crater lake ringed by hills about as often as a reef in open sea
+(`docs/poi-atoll.png`): the surrounding shelf is land a few blocks further out.
+That is a property of the world's oceans, not of the kind, and it is left as is
+rather than tuned again.
+
+**A shell trap that cost an hour.** Four screenshots from four spawn points came
+out identical, twice. `set -- $pos` does not word-split in zsh, so every run got
+`CF_SPAWN_X="98 84 270"`, which parses as -1 and falls back to the default
+spawn. `${=pos}`.
+
+483 tests. `CF_POI=0` is bit-identical (mesh 484802240). Seed 7 now has a
+canyon, so the pinned scenario's mesh with POIs on moves -- to 839500821 at
+the 0.60 threshold and **796267894** at 0.66, which is the baseline now. Worst
+frame 6.69 ms.
+
+## Points of interest, phase 3b: the delta, and a test suite that lied (2026-09-07)
+
+**The delta** is the second field. Where great-river country meets the coast:
+inland, the **trunk** -- the raw crease read against a far lower edge than the
+ordinary river uses, so the channel is 20-40 across instead of 3, with its bed
+cut below the sea so it holds water its whole length; at the mouth, the
+**fan** -- the lobe flattened to a block above the sea and a braid of channels
+cut across it. The sediment pass already puts mud and clay under a floodplain,
+so the land between reads as delta without new rules. The honest limit stands:
+with no flow routing, the river is great only where its country is.
+
+**The crease is a band, not a line.** The river's raw crease is a ridged field,
+`1 - |2n - 1|`, so it is above 0.6 wherever the noise is within 0.2 of a half.
+The ordinary river's edge of 0.86 slices a 0.07-wide band off that; the delta's
+first edge of 0.55 took a band three times wider than intended. Measured by
+transect: forty-five columns across at 0.55, up to seventy-eight at 0.60,
+twenty to forty at 0.72. Read *across* a river a transect gives its width;
+read *along* one it gives its length, which is how a sixty-six-column band at
+seed 13 turned out to be a channel and not a bug.
+
+**The fan flattened whole coasts.** Gated on the crease, the fan fired on every
+coastal column in great-river country: 11,353 of a window's 16,384 columns
+moved at seed 13, fifty-eight columns of seabed raised into land in one row. A
+fan is the mouth of *its own* channel and nothing else, so it is now gated on
+the trunk's width. Great-river country went from 0.62 to 0.74 as well: nine
+seeds in forty have a delta in the spawn window, and one of those has both a
+delta and a canyon.
+
+**A mask should gate a field, not scale it.** Both fields multiplied their cut
+by the raw country value, so at the country's fringe -- which is most of it,
+since a smooth mask is mostly fringe -- the channel was half-dug: the delta's
+trunk at seed 13 read as one bench along its whole length, a dry trough with
+its bed still above the sea, because the mask there was 0.4. `strength` now
+takes the mask to full over most of the country and eases only at the edge,
+and the same trunk reads two benches with its bed under water. The canyon had
+the same defect and the same fix; seed 7's canyon went back to full depth, so
+the pinned scenario's POI-on mesh is **839500821** after all.
+
+**The suite passed with twenty-one tests missing.** `poi_test.march` gained a
+binding named `on` -- a keyword, like `by` -- and failed to parse. `forge test`
+printed the parse error among four hundred lines of refinement hints, dropped
+the module, ran the other 465 of 486 and said `0 failures`. It was caught
+because the total on the `Finished:` line went down. GAPS G85; until the runner
+fails on a parse error, that number is the check and it must not fall.
+
+486 tests. `CF_POI=0` bit-identical (484802240); the pinned scenario with POIs
+on is 839500821 (seed 7 has a canyon and no delta). Worst frame 6.20 ms. Phase 3 is complete: all seven kinds from the original request
+are in.
+
+## Open ocean (2026-09-07)
+
+The atoll had nowhere to be. The sea was wherever the land happened to dip
+under 62 -- a shelf a few blocks deep -- and "eight under the sea across the
+ring" never held; the kind was right and the world was wrong. So the world
+gained an **ocean regime**: one very broad octave (`ocean_mask`, 1/250 blocks,
+over 0.62) marks ocean country, and there `ocean_of` pulls the land down to an
+abyssal floor at sea - 22 with its own gentle relief. It is terrain, so it
+lives in `Noise` and not in `Poi`: the lake pour, the beaches, the biome's
+distance-to-water and the atoll's placement all read it for free. It is in
+`height_x4` too, or the SIMD lanes test would have said so.
+
+**Islands.** The first version pulled everything in ocean country to the floor,
+snow-line peaks included; a glacier test at seed 11 said so. The pull is now
+full up to sea + 12 and fades over the next 26, so a coast drowns and a
+mountain becomes an island. A first attempt at that fade started at the sea
+itself, and a coast at sea + 8 kept most of its height -- every atoll site went
+dry (seed 54's ground went from 41 to 70).
+
+**The atoll's country is the ocean's.** Giving it an octave of its own meant the
+two rarely coincided: a ring probed thirty blocks out from a deep site kept
+finding the coast of the ocean's own patch. One in 140 seeds, then five once
+`country(k_atoll)` became `ocean_mask` and the ring was allowed to want real
+water again (`max_ground` sea - 6, probes at three quarters of the radius).
+`docs/poi-atoll.png` is seed 116 from above: a sand-and-grass ring round a blue
+lagoon in open sea, with the gap on the bearing.
+
+**Three pinned tests broke, and none of them was a bug in what changed.** Each
+was a hunt that asked a simpler question than the generator does, and open
+ocean was the first terrain where the answers differed:
+
+- *the biome band scan* -- `Biome.height_of` reads a column's surface with
+  water counted as ground (its climate wants that); `World.surface_y` stops at
+  the first collidable block, the bed. They agree on land, and every band
+  column had been land. The assertion now allows the sea's surface under water.
+- *the dune column is sand through* -- gravel on top: the generator gives talus
+  precedence over dune sand and reads slope off the PILED heightmap, which a
+  hunt over `Noise.slope` cannot see. The hunt now wants a dead-flat column.
+- *the bog* -- twice. First the same piled-slope trap; then, with that fixed,
+  every bog-shaped flat at seed 11 was the bed of a poured lake, because open
+  ocean makes new closed basins at sea level whose rims pour. The hunt now asks
+  the lake table too, and tries seeds from 11 up until one has bog.
+
+The pattern: **a hunt must ask the generator's own questions**, or the first
+terrain that separates them will fail the test for a reason that is not a bug.
+
+486 tests. Seed 7 now sits partly in ocean country and has an atoll at (94, 11),
+so both pinned hashes move deliberately: `CF_POI=0` **1010970938**, POIs on
+**866428893**. The `CF_POI=0` world is no longer "the world before POIs" -- the
+terrain itself changed -- but it is still the world with every point of
+interest off, which is what the gate is for.
+
+## Merged with main (2026-09-07)
+
+Main brought the fauna (a ten-float vertex layout with block light as its own
+attribute, and a palette of its own at 23..85), the survey, and a tinted atlas.
+Six files conflicted and every one resolved the same way -- both sides kept:
+`cf_vert` splits the shade on the CPU as main does *and* strips the self-lit
+bias; the atlas is main's tinted one at 94 layers with the two crystal layers
+still in it; the crystal's palette entries moved above the fauna's range to 86
+and 87. GAPS renumbered: the silent-test-drop finding is G85.
+
+529 tests. Terrain unchanged by the merge -- seed 7's `world` hash is the same
+before and after -- but the vertex layout is not, so the pinned mesh hashes
+move once more: `CF_POI=0` **360460515**, POIs on **1064367677**. Worst frame
+6.93 ms.
+
+## The crystals, revisited with a slice (2026-09-07)
+
+`CF_POI_SLICE=1` prints a plan of the first cavern's chamber 0 at its centre
+height and a vertical section through it, drawn through `Poi.vol_block` -- the
+same function the generator uses. The preview draws a hypothetical cell on
+flat ground; this draws the chamber the camera is standing in, and it said in
+one screen what six rounds of cameras had not: **the beams had fused into a
+slab** 28 columns wide. Six shafts at radius 2.0-3.3 in an eleven-radius
+chamber, each a third of the room, centred near its middle with free hashed
+directions, lay together and merged.
+
+Three changes, each against the slice:
+
+- **Thin.** Radius 1.0-1.6: a tenth of the room's radius, a metre-thick crystal
+  in a ten-metre chamber, which is Naica's proportion.
+- **Fanned.** Azimuths one slot each round the compass with a hashed jitter,
+  the way the giant tree throws its boughs, so two shafts never lie parallel
+  through the same middle. Elevation +-45 rather than +-70: Naica's lean, they
+  do not stand.
+- **No popcorn.** The blade models on every surface read as white lumps and
+  stole the scene from the shafts; Naica has no fine growth like that. They are
+  floor rubble now, at 3% of shell voxels below the chamber's centre.
+
+After: separable shafts, one long diagonal about four blocks thick crossing the
+chamber end to end with a second across it, in both the plan and the section.
+`docs/poi-crystal-cavern.png` is from the chamber's south side at eye level.
+
+One non-finding worth recording: five floor-level cameras produced frames
+pixel-identical to the previous build's, save the frame counter, across a
+change the slice showed plainly. The world hash at that spawn responds to
+`CF_POI`, so the beams were there; at floor level looking down, a chamber whose
+ceiling is white shafts looks the same whether the shafts are a slab or six.
+The camera was the wrong instrument; the slice was the right one.
+
+## Coloured block light, in the nibble the byte had spare (2026-09-07)
+
+Every emitter lit the world the same warm orange, so a near-white selenite
+beam cast an orange glow on the rock round it, and the self-lit effect (which
+fixes an emitter's own faces) could not fix what it cast. The design note said
+three fields -- 12 MB instead of 4, three sweeps, a wider vertex. It was not
+needed. A block-light byte holds a level of 0..15 in its low nibble and nothing
+in its high one, so the high nibble now carries the emitter's **colour index**,
+swept along with the level: `give1`, `give_level`, `at_level`, `level_go`, the
+gather and the two write sites (`list_go`, `full_row_ip`) compare on the low
+nibble and carry `16 * colour` of the source into every neighbour they light.
+Seeding writes `pack_bl(emission, emission_colour)`. Skylight's colour nibble is
+always zero, so every skylight byte is what it was, bit for bit -- and so is
+every block-light byte in a world without a cold emitter: seed 7's pinned
+hashes did not move.
+
+From the field to the pixel: `Light.get` strips the nibble, so every caller that
+wanted a level still gets one; `Light.colour` reads it. `key_for` reads the
+colour at the voxel just outside a face and puts it in **bits 56 and 57** of the
+greedy key, above the species, so faces lit by different emitters do not merge;
+`cf_quad_into` decodes it and `cf_vert` writes it into bits 16 and up of the fx
+word (`Vertex.light_colour_of`); the shader picks `GLOW_COLD` -- (0.82, 0.94,
+1.00) -- for colour 1 and the old warm `GLOW` otherwise. The effect id is eight
+bits now, not sixteen: the one test that pinned the sixteen-bit ceiling was
+pinning an accident of the old layout, and now pins the eight-bit one and that
+the colour above it does not leak.
+
+The one behaviour deliberately left: two emitters of different colours within
+reach of one voxel do not blend. The voxel takes the colour of whichever gave
+it its level -- a hard seam, not a gradient. No world has both kinds in one
+cavern today; when one does, the seam is a real limit of one index against
+three channels, and it will show.
+
+534 tests. Worst frame 7.90 ms against 16; the drained mesh equals the rebuild.
+`docs/poi-crystal-cavern.png` is the seed 18 chamber under its own light.
+
+## The crystals, built from smaller voxels (2026-09-07)
+
+"Those crystals look awful. They should resemble the crystal caves in Mexico."
+Then, after two more rounds: "Those are just blocks." They were. A beam one or
+two blocks thick drawn as cubes IS a staircase of cubes, and no radius, count,
+angle, texture or light had changed that in seven rounds of tuning. The user's
+original instruction -- "make the crystals out of smaller voxels" -- was the
+answer, and the blade models had been a half-measure: a fixed 8-cube template
+per block cannot follow a beam that crosses blocks at an angle.
+
+**What was built.** A beam block is no longer a cube. The mesher cuts each
+one into 8x8x8 sub-cubes against the exact prisms of the beams that pass
+through it, and greedy-meshes the cut like a mushroom template:
+
+- `Poi.beam_table(seed, wx0, wz0, lx, lz)`: every cavern beam that can reach
+  a chunk, as segments (both ends, radius) in the mesher's window-local frame.
+  `Poi.cell_aux` is the same table in the generator's frame, built once per
+  instance per chunk and threaded through `vol_block` -- the generator no
+  longer re-derives thirty beams from the hashes at every voxel.
+- `Poi.beam_near` (the beams within a block's half-diagonal), `Poi.beam_grid`
+  (the cut, with a one-sub-cube MARGIN from the neighbouring blocks),
+  `Model.template_inner` (greedy over the inner cube only; the margin's cells
+  cull faces and emit none), `F32Buf.stamp_xf` at scale 10/8 about the
+  block's centre to place it. Without the margin a section of beams carried
+  1.65 million floats and a quarter of them were faces buried inside the beam
+  between two of its own blocks; with it, 1.25 million.
+- `crystal_beam` is a cutout: see-through to its neighbours' faces, a model to
+  the mesher (no cube faces), opacity 6 to light. `is_model` says so.
+- The shape: `beam_taper` is a straight prism over the middle 72% and a
+  straight line to a point over the rest -- a chisel end. The quartic taper
+  had made every beam a tusk, and a curved outline is the one thing a crystal
+  never has. Sixteen beams a chamber (the user: "more of them"), centred
+  anywhere in 0.9 of the chamber's radius rather than within 0.5, where ten of
+  them had all passed through one hub and the room read as a starburst.
+- The light: a self-lit face is shaded by direction (top 1.0, sides 0.80 /
+  0.68, bottom 0.52) and by a Fresnel-ish rim, and its glow is a flat 1.10
+  rather than the texel squared -- squared, cream came out grey, and unshaded,
+  a chamber of beams was a wall of white with no edges. `GLOW_COLD` is a warm
+  white-gold now (1.00, 0.97, 0.90): the blue read as an ice cave. No blade
+  models anywhere in a cavern; Naica is the beams and the rock.
+
+**Three findings on the way.**
+
+*The generator and the mesher disagreed by half a block.* The generator
+samples a block at its integer corner (`u_of` takes wx, wz, y); the mesher
+samples sub-cubes outward from the block's min corner. Same beams, two
+frames: 148 of one chunk's 1008 beam blocks held no beam by the mesher's
+reckoning and were see-through holes. The half is folded into `beam_table`'s
+shift once, and `poi_test` now holds the two frames to each other: every
+beam block holds a beam, no air block is inside one.
+
+*A discarded array result is a lost write.* `NativeArray.set_f32` returns the
+array to use from then on; the first table builder wrote through `let _ =`
+and every beam came back as zeros. Both fill passes thread the array now.
+
+*The blue hole that was not a hole.* A sky-coloured wedge below the chamber
+floor survived every fix, a queue-lag frame 200 test, and a transect, until a
+level shot from the chamber's middle showed no hole at all: the camera had
+been standing inside the wall, seeing out through back faces. The chamber is
+narrower at y 36 than at y 42.
+
+**Cost, and where it went.** Timed in a release test on the seed 18 cavern
+chunk at (240, 112):
+
+| | before | after |
+|---|---|---|
+| generate the cavern chunk (plain chunk: 2 ms) | 137 ms | **16 ms** |
+| cut one section of beams (`beam_geometry`, 1.66 M floats) | 391 ms | **143 ms** |
+| remesh that section (re-light from the cache) | 424 ms | **4 ms** |
+| worst frame standing in the chamber, 400 frames | 986 ms | **9.6 ms** |
+
+The 986 ms frames were the mesh drain re-cutting beam sections after the
+light flood: four sections a frame at ~250 ms each. The cut depends only on
+the blocks and the beams, so `ChunkMesh` now keeps it per section
+(`beam_sections`, keyed by `Mesher.beam_key`, a hash of which blocks are
+beams), stamped UNLIT with each vertex's block index in its light slot, and
+every remesh re-lights it through `cf_f32_relight` -- one pass over the
+vertices looking the light up per block. The generator's 137 ms was
+`beam_min_sd`: 864 thousand calls at 320 ns each in March. The distance and
+the grid cut are shim kernels now (`cf_beam_min_sd`, `cf_beam_grid`), and the
+March versions stay as `beam_min_sd_ref` / `beam_grid_ref`, held to the
+kernels by a test at 4000 points and cell for cell on a real block.
+
+What is still paid: the first cut of a cavern chunk's sections, in the
+workers at startup and on a window shift -- 143 ms a section, three or four
+sections a cavern chunk. Not in a frame yet; a shift into a cavern is the
+next thing to measure.
+
+**Held.** `CF_POI=0` is bit-identical to the previous commit, checked by
+building 19a21b2 in a scratch worktree and running both recipes: frames 30 /
+dump 20 gives mesh **31924079**, frames 400 / dump 390 (the frame budget
+script's) gives **33247928**, before and after. (The values pinned at the
+merge were taken with a recipe this entry did not record; these two are the
+recipes from now on.) POIs on at frames 400 / 390: **629446512**, unchanged by
+everything here, so seed 7's window holds no cavern in view. Frame budget 7.48
+ms; the drained mesh equals the rebuild. 538 tests. `docs/poi-crystal-cavern.png`
+is four floor-level views of the seed 18 chamber.
+
+The `World` carries its seed now (`World.seed`; `from_chunks` takes it from
+the save header), because the mesher needs the beams and the beams come from
+the seed.
+
+### The shift into a cavern, and the whole block in the shim (2026-09-07, later)
+
+Measured with `CF_AUTOWALK=1 CF_AUTOJUMP=1 CF_STREAM_LOG=1` walking west from
+(330, 118) at seed 18 across the cavern, which shifts the window through the
+cavern's chunks. A shift is synchronous and already costs 50-90 ms with
+`CF_POI=0` (`world`, the band's chunk generation, is 40-80 of it). With the
+cavern in the band the mesh part was **107, 446 and 348 ms** on three
+successive shifts -- the first cut of the beam sections, three or four to a
+cavern chunk at 143 ms each, serial inside one worker's `CM.build`.
+
+So the whole block went into the shim: `cf_beam_block` finds the beams within
+a block's half-diagonal, fills the margin grid, greedy-meshes the inner cube
+per direction the way `Model.template_inner` does, and writes the block's
+vertices in place, unlit, with the block index in the light slot. A section of
+beams: **143 -> 16 ms**. The three shifts: **86, 128 and 116 ms**, of which
+60-63 is `world`; the mesh part is 20-50 ms now. Worst frame on the walk 94 ms,
+which is a shift, and the baseline's shifts are 80-90.
+
+The March path is kept as `Mesher.beam_block_ref` and `poi_test` holds the
+kernel to it float for float on a real block, having first found a block the
+reference draws anything for -- the first beam block of that chunk was a
+corner sliver with an empty cut, and "the same floats" held vacuously until
+"and some" caught it. `poi_test` was silently dropped once more on the way
+(G85: a missing `end`, 538 tests became 513 with 0 failures); the count is the
+check. Three of four floor-level views are pixel-identical to the previous
+build (the fourth had the camera in the floor). 538 tests; `CF_POI=0` still
+31924079.
+
+### The floor and the walls (2026-09-07, later still)
+
+"Make the floor and walls busier." Two populations of beam now. Twelve FREE
+beams cross the chamber's air, centred anywhere in 0.9 of its radius (the
+spread this entry's parent claimed, and which had not actually landed: that
+edit's script aborted before writing, and the centres were still within half
+a radius -- the section slice, not the prose, is the record). Fourteen
+ANCHORED beams grow out of the shell: each at a hashed point on the wall or
+floor, the elevation squared toward the floor so half stand within thirty
+degrees of it, pointing inward with a lean of up to 0.6 on each axis, a fifth
+to half the room long, slimmer (0.55-1.1) than the crossing beams, and 1.05
+radii out so one end is buried. The first cut was sixteen and twenty at the
+crossing beams' thickness, and the largest chamber (radius 16, overlapping
+two others) was a white mass wall to wall; the counts, the length and the
+radius came down together until the rock showed between them again.
+
+`CF_TERRAIN_STATS=1` now lists every chamber of a cavern with its radius, and
+`CF_POI_SLICE=j+1` slices chamber j; the camera work was done in chamber 2 of
+seed 18, the largest. 538 tests; `CF_POI=0` still 31924079; worst frame
+standing in chamber 2, 8.9 ms.
+
+### Two drops a shift, and both off the frame (2026-09-08)
+
+"I'm seeing large framerate drops walking around." Read with a new switch,
+`CF_SLOW_LOG=<ms>`: the slow-frame line the CF_AUTOFLOW gate already printed,
+at a bar of the caller's choosing and without the canal that gate also lays,
+so a walk can be read against an untouched world. The recipe throughout is
+
+```
+MARCH_PIN_MAIN=1 CF_SEED=18 CF_AUTOSTART=1 CF_AUTOWALK=1 CF_AUTOJUMP=1 \
+CF_PREFETCH=$p CF_STREAM_LOG=1 CF_SLOW_LOG=20 CF_FRAMES=1500 ./cube_forge
+```
+
+which walks south from the seed 18 spawn across two window shifts. Machine
+otherwise idle -- the first pass of this was taken while three other builds
+were running and every frame number in it was noise, which is the warning.
+
+A walk of 1500 frames had **four** frames over 20 ms, and they came in pairs:
+two per shift, not one. Three runs of the walk each way:
+
+| | before | after |
+|---|---|---|
+| the frame the shift lands in | 102, 114 ms | **50, 56, 58 ms** |
+| the water tick a period or two later | 162, 190 ms | under the 20 ms bar |
+| frames over 20 ms in 1500 | 4 | **2** |
+| the shift into a new lake tile | 99, 100 ms | **42, 45, 47 ms** |
+| a shift within a tile | 60, 65 ms | **43, 45, 45 ms** |
+
+**The shift's own frame.** Its breakdown, from `CF_STREAM_LOG` plus a
+temporary set of timers inside `World.shift` (taken out again; the shim
+channel they needed is not in the tree):
+
+| stage | ms |
+|---|---|
+| lake tile pour, when the band enters a new one | 38 |
+| generate the band's eight chunks (`pmap_n`) | 19-21 |
+| light the band: sky 13, block 5, occupancy 6 | 25 |
+| mesh the band, gl + remaps, biome, actors, springs | 20 |
+
+The generation does not fall with more workers -- 18-19 ms at 4, 8 and 14
+schedulers -- so it is one chunk's serial cost and the floor of doing it
+inline. But it is also a pure function of the seed and the world chunk
+coordinates, as the tile pour is, and so is anything else the band needs
+before the window moves. `CubeForge.Streamer` is two actors that build it
+ahead: the frame loop names the shift each axis would make next (in the
+window's stable band the player's local chunk is 3 or 4, so the direction on
+each axis is known a chunk of walking ahead; which axis they reach first is
+not, hence two), and the actor pours the tiles on the first message for a key
+and adds one chunk on each after -- one chunk per message so it never holds a
+scheduler thread for a whole band. `World.shift_with` takes what it has;
+`World.shift` is the same call with an empty band. A band that does not match
+the shift the player actually made costs nothing, and a half-built one costs
+only the chunks it is short of, because `shifted_chunk` generates whatever the
+band does not carry. An evicted chunk from the cache still outranks it.
+
+Result: tiles 38 -> 0.002 ms, generation 19 -> 0.1 ms, a shift **95-100 -> 42-47
+ms** and the frame it lands in 102-114 -> 50-58. `CF_PREFETCH=0` turns the
+prediction off and every shift generates its own band again, which is the A/B
+above; the log says `band prepared` or `band GENERATED INLINE` per shift, and
+on this walk the prediction hit every time.
+
+**The bigger one, a period or two later.** Always at phase 0, the
+water slot. A shift hands the band's eight slots to the actors of the chunks
+that left and sends each a `WLoad` -- five chunk generations, ~90 ms, eight of
+them over four scheduler threads -- and `Water.call_tick` is a blocking
+`Actor.call` queued behind that in the same mailbox; the band's first tick
+also applies eight chunks of change at once and remeshes what moved. Both
+landed on the first period after the shift.
+
+The band now arrives with a staggered water flag instead of 1: chunk d comes
+in at `water_settle() + d % settle_spread()`, 5..8, and `settle_flags` counts
+it down a period at a time, so the band's first tick is four to seven periods
+after the shift and the eight are spread over four of them. Two periods was
+tried first and landed behind the reload half the time (95 ms against 43 on
+two runs of the same walk); four clears it. The band is at the far edge of the
+window, six chunks and more from the player -- half a second of its water
+standing still cannot be seen from there.
+
+**Held.** All three pinned hashes are unchanged: seed 7 `CF_POI=0` at frames
+30 / dump 20 gives mesh **31924079** and at 400 / 390 **33247928**, and POIs
+on at 400 / 390 gives **629446512**. A prepared chunk is the chunk the shift
+would have generated, so the world cannot move; the settle changes only WHEN
+the band's water first ticks, and no band comes in on a run that does not
+walk.
+
+542 tests (538 plus four in `stream_test`: a prepared shift and a plain one
+give the same `state_hash`, a band caught at three of eight gives the same,
+a band prepared for the other direction is ignored, and an edited chunk
+coming back from the cache still outranks the band).
+
+**Left standing.** The 42 ms that remain in a shift are the light and
+occupancy sweeps over the band (25 of it), the band's mesh, and the field
+remaps -- none of them pure in the window's coordinates the way the chunks
+are, so none of them prefetchable without moving the 4 MB fields through an
+actor. That is the next cut if a shift needs to fit in a frame.
+
 ## The window shift, staged over four frames (2026-09-06)
 
 Reported as "big FPS drops and 58 fps most of the time". The 58 fps is vsync:
@@ -3887,6 +4758,99 @@ band hashes returned 4.2 -> 2.0 ms where twelve independent 0.22 ms tasks over
 fourteen workers should approach 0.4; the same shape as the `chunks` stage's
 task overhead, and not yet explained.
 
+## The two mains, merged (2026-09-08)
+
+`main` and `origin/main` had diverged: 33 commits here (points of interest,
+crystal caverns, fauna and the roost, open ocean, coloured block light) against
+21 there (PRs #3 and #4 -- frustum culling, toroidal occupancy, the light flood
+moved to the GPU, the shift staged over four frames, a 12-chunk window). Both
+sides were wanted, so this is a merge and not a rebase: 28 conflict hunks over
+seven files.
+
+Most of it composed. The window widened 128 -> 192 on one side while the light
+byte grew a colour nibble on the other, and those are different bits of
+different things. Three of the hunks were not that.
+
+**The occupancy texture, twice fixed, two ways.** Both sides had found the same
+bug -- `cf_gfx_set_voxel` stepped a coarse cell's count on every edit, whether
+or not the edit changed occlusion, so a cell it had under-counted would not
+clear. Here it was fixed by routing edits through `cf_gfx_sync_box` on their one
+voxel, which recounts from the array; there by making `sync_box` recount
+exactly, while `set_voxel` kept its incremental count beside it. The merge takes
+both halves: `sync_box` recounts, and `set_voxel` is gone.
+
+They disagreed about what the texture holds, though, and there the far side is
+right for a reason this side could not have known: it must be the RAW opacity
+(0 air, 2 water, 6 leaves, 255 solid), because the GPU light flood subtracts it
+per step. Normalising to 0/255 -- which is what the oracle here was taught to
+expect -- would let light run straight through water. The oracle now insists on
+the exact byte instead.
+
+**Coloured light had to move.** It rode in bit 56 of the greedy face key, into
+the fx word, and the shader picked `GLOW_COLD` off it. But the far side had
+taken light out of the mesh entirely: terrain faces carry a constant corner now
+and the fragment shader samples an RG 3D texture, which is most of where a third
+of the vertices went. Keeping the colour in the key would have put that
+fragmentation back, by emitter instead of by level.
+
+So the colour goes where the light went. The texture holds the March byte
+VERBATIM rather than scaled to 0..255 -- there is no room to rescale a byte that
+is a level in one nibble and a colour in the other -- and:
+
+- the flood shader works in levels, not in packed bytes. A `max` over the six
+  neighbours would have ordered a dim cold voxel above a bright warm one; it
+  takes the brightest block LEVEL and carries that neighbour's colour with it,
+  and changes the colour only where it raises the level, which is the one place
+  the CPU sweep writes one.
+- `litAt` splits the byte per fragment, and `smoothLight` returns the colour
+  beside the two blended levels. The colour is READ, not blended, from the air
+  voxel the face sits against -- the same voxel the mesher used to read it at.
+  Averaging two palette indices means nothing.
+- `cf_light_check` compares the exact byte now, colour included, so a flood that
+  spread the right level with the wrong emitter's colour is a difference it
+  sees.
+
+`cf_vert` lost its colour argument and the face key its top two bits: a terrain
+face carries nothing about its light any more.
+
+**A bug the move exposed.** Carrying the colour through the flood meant reading
+what the CPU sweep does with it, and the CPU sweep was only doing it in one
+direction of six. `list_go` added the colour bits to the +x neighbour and wrote
+a bare level to the other five; `full_row_ip`, the overflow fallback, the same.
+A cold crystal lit the rock east of it white and the rock on its other five
+faces orange. Both now carry it all six ways.
+
+**Verified.** 544 tests. `forge lint --strict` clean -- which meant deleting
+seven private functions the merge left unreachable, six of them already dead on
+`origin/main` (`corner_pack` and `occluded` are what `smoothLight` replaced).
+The occupancy oracle reads `fine 0 coarse 0`. The light oracle reads `sky 73
+block 3`, and both numbers have an account:
+
+- the 73 is the sky seed's own pre-existing disagreement, 55 on `origin/main`
+  and 75 here on a world with more terrain in it; the two move together.
+- the 3 are one glow block's light under three voxels the water reached AFTER
+  the light had passed through them. The flood only ever raises, so light
+  spread before the water arrived stays. Marking the light box dirty on a water
+  move does fix it -- converged `block 0` -- but it puts the whole column back
+  to the seed, and at `CF_LIGHT_STEP = 4` that is four frames of re-spreading,
+  which a chunk with water moving in it every tick never finishes. Three stale
+  voxels beat a column that never converges. Lowering light locally, rather
+  than re-seeding a box, is the fix; it is not this change.
+
+The colour itself is checked at night against seed 7, a glow cap and a crystal
+placed on the same column through `edit_block`: the newly lit pixels average
+(40.3, 36.7, 29.5) for the cap and (68.1, 65.9, 60.9) for the crystal -- R/B of
+1.37 and 1.12 against the shader's own 1.43 (`GLOW`) and 1.11 (`GLOW_COLD`).
+Orange and near-white, off the texture, per fragment.
+
+**Not measured.** The frame budget. This machine had other builds on it
+throughout and read 17.5 ms merged, 15.7 for `origin/main` and 16.6 for local
+`main` -- with a 15.7-19.6 ms spread across runs of the SAME tree, which is
+wider than any gap between them, and against the 7.0 ms this file records for
+local `main` on an idle box. The script warns about exactly this. It wants a
+re-run somewhere quiet before any number here means anything. The drained mesh
+equals the full rebuild (703923462).
+
 ## The SIGSEGV at frame 449: a mesh slot with two owners (2026-09-08)
 
 `CF_AUTOROAM` gave the scripted walk somewhere to go, and the walk found a
@@ -3949,7 +4913,23 @@ line on stderr instead of a crash with no backtrace.
 
 `world_size_test` now asserts every named slot against `3 * World.size()^2` and
 against itself, which fails on the old 243 and is the test the next window
-growth will trip. 509 tests, 0 failures; `scratch/frame_budget.sh` 12.57 ms
-against its 16 ms budget with the drained mesh matching a full rebuild; and the
-scenario above runs all 8000 frames, exit 0, three times over, with the new
-draw guard never firing.
+growth will trip.
+
+**After merging `origin/main`.** The static-blob fauna path came with the merge
+and brought a second colliding slot -- `demo_slot()` at 242, water chunk 98 --
+and it moved the failure rather than removing it: the blob is uploaded once at
+startup now, so it is the water uploads that overwrite the fauna, and
+`cf_gfx_draw_model` asks for vertices out of a buffer holding a chunk mesh.
+Both slots moved, to 499 and 498. Putting 243 and 242 back on the merged tree
+is what shows the collision is still the same one: the draw guard fires 263,370
+times in 8000 frames --
+
+    cf: draw slot=243 wants vertices 121674..127998, buffer holds 1564 floats -- skipped
+
+-- which is every one of those draws segfaulting, before the guard existed.
+
+548 tests, 0 failures; `scratch/frame_budget.sh` 15.31 ms against its 16 ms
+budget with the drained mesh matching a full rebuild (703923462); and the
+scenario above runs all 8000 frames, exit 0, three times over, with the guard
+never firing. The budget number is the loaded-machine one this file warns about
+two sections up: the same tree spreads 15.3-19.2 ms across five runs.

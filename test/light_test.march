@@ -491,7 +491,7 @@ mod CubeForge.Test.Light do
       Test.assert_true(L.is_opaque(C.glow_cap()), "a glow cap is a solid block")
     end
     test "the glow cap has its own texture layer" do
-      Test.assert_eq_int(CubeForge.Texture.layers(), 92, "layer count")
+      Test.assert_eq_int(CubeForge.Texture.layers(), 94, "layer count")
       Test.assert_true(near(CubeForge.Texture.layer_for(C.glow_cap()), 20.0), "layer 20")
     end
   end
@@ -613,4 +613,26 @@ mod CubeForge.Test.Light do
     end
   end
 
+
+  describe "block light carries a colour" do
+    -- The high nibble of a block-light byte is the emitter's colour index, swept
+    -- along with the level; skylight bytes have it zero, so nothing there moved.
+    test "a crystal lights cold and a glow cap lights warm, each as far as it reaches" do
+      let w0 = CubeForge.World.generate(8, 3, 1)
+      let w1 = CubeForge.World.set_block(CubeForge.World.set_block(w0, 40, 120, 40, CubeForge.Chunk.crystal_beam()), 80, 120, 80, CubeForge.Chunk.glow_cap())
+      let lb = L.flood_block(w1)
+      Test.assert_true(L.get(lb, 41, 120, 40) > 0, "the crystal lights its neighbour")
+      Test.assert_eq_int(L.colour(lb, 41, 120, 40), L.colour_cold(), "cold beside the crystal")
+      Test.assert_eq_int(L.colour(lb, 44, 120, 40), L.colour_cold(), "still cold four blocks out")
+      Test.assert_true(L.get(lb, 44, 120, 40) < L.get(lb, 41, 120, 40), "and dimmer, as a level should be")
+      Test.assert_true(L.get(lb, 81, 120, 80) > 0, "the glow cap lights its neighbour")
+      Test.assert_eq_int(L.colour(lb, 81, 120, 80), L.colour_warm(), "warm beside the cap")
+      Test.assert_true(L.get(lb, 41, 120, 40) <= 15, "a level is still a level with the colour stripped")
+    end
+    test "the packing round-trips and skylight has no colour" do
+      Test.assert_eq_int(L.bl_level(L.pack_bl(9, L.colour_cold())), 9, "level")
+      Test.assert_eq_int(L.bl_colour(L.pack_bl(9, L.colour_cold())), L.colour_cold(), "colour")
+      Test.assert_eq_int(L.pack_bl(9, L.colour_warm()), 9, "warm is the bare level, so every skylight byte is what it was")
+    end
+  end
 end
