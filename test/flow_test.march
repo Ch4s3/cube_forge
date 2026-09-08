@@ -464,4 +464,115 @@ mod CubeForge.Test.Flow do
     end
   end
 
+  -- ── An upland lake, mined ────────────────────────────────────────────────
+  -- A pool of sources at y = 71, which is above sea level (62), with the lake
+  -- surface for those columns declared at 71 -- what Lakes.level_at gives for
+  -- a real one. Mining a block out of it must fill back in; the same hole in a
+  -- sim that knows of no lake must not, and neither must a cell beside the
+  -- pool that the basin does not reach.
+  pfn pool_go(c : CubeForge.Chunk.Chunk, i : Int) : CubeForge.Chunk.Chunk do
+    if i >= 36 do c else pool_go(C.set(c, 5 + i % 6, 71, 5 + i / 6, C.water()), i + 1) end
+  end
+  pfn lake_levels_go(a : NativeU8Arr, i : Int) : NativeU8Arr do
+    if i >= 36 do a
+    else lake_levels_go(NativeArray.set_u8(a, (5 + i % 6) + 16 * (5 + i / 6), 71), i + 1) end
+  end
+  pfn pooled() : CubeForge.Water.Sim do
+    Water.new_sim(pool_go(floored(), 0), Water.empty_edges())
+  end
+  pfn lake_of_pool() : NativeU8Arr do lake_levels_go(NativeArray.make_u8(256, 0), 0) end
+
+  describe "an upland lake refills what is mined out of it" do
+    test "a hole mined in the pool fills back in" do
+      let s0 = Water.with_lake_levels(pooled(), lake_of_pool())
+      -- mine one source out of the middle of the pool
+      let s1 = Water.edited(s0, Water.idx(7, 71, 7), 0)
+      let s2 = run_ticks(s1, 4)
+      Test.assert_true(C.is_source(C.get(Water.sim_chunk(s2), 7, 71, 7)), "the hole is lake again")
+    end
+    test "a two-wide hole fills too" do
+      let s0 = Water.with_lake_levels(pooled(), lake_of_pool())
+      let s1 = Water.edited(Water.edited(s0, Water.idx(7, 71, 7), 0), Water.idx(8, 71, 7), 0)
+      let s2 = run_ticks(s1, 6)
+      Test.assert_true(C.is_source(C.get(Water.sim_chunk(s2), 7, 71, 7))
+                    && C.is_source(C.get(Water.sim_chunk(s2), 8, 71, 7)), "both cells are lake again")
+    end
+    test "without the lake levels the hole stays -- the old behaviour above sea level" do
+      let s1 = Water.edited(pooled(), Water.idx(7, 71, 7), 0)
+      let s2 = run_ticks(s1, 4)
+      Test.assert_true(!C.is_source(C.get(Water.sim_chunk(s2), 7, 71, 7)), "nothing refilled it")
+    end
+    test "a trench outside the basin does not become lake" do
+      -- (11, 71, 7) is beside the pool's east wall and outside every column the
+      -- basin covers: the lake may spill INTO it as flowing water, but it must
+      -- never become a source, or the lake would drain along the trench for ever.
+      let s0 = Water.with_lake_levels(pooled(), lake_of_pool())
+      let s2 = run_ticks(s0, 8)
+      Test.assert_true(!C.is_source(C.get(Water.sim_chunk(s2), 11, 71, 7)), "the trench is not a source")
+    end
+  end
+
+  -- ── A canal dug out of standing water ────────────────────────────────────
+  -- Dug, not laid: the cells are cleared through the edit path, which is what
+  -- marks them, and is what a player's pick does. A canal from the OCEAN fills
+  -- as source and never stops (the on-demand rule below sea level); one from a
+  -- LAKE is carried by the lake, which pours where a lone spring trickles.
+  pfn dig_row(s : CubeForge.Water.Sim, y : Int, x : Int) : CubeForge.Water.Sim do
+    if x >= 16 do s else dig_row(Water.edited(s, Water.idx(x, y, 8), 0), y, x + 1) end
+  end
+  pfn rock_row(c : CubeForge.Chunk.Chunk, y : Int, x : Int) : CubeForge.Chunk.Chunk do
+    if x >= 16 do c else rock_row(C.set(c, x, y, 8, 3), y, x + 1) end
+  end
+  pfn banks(c : CubeForge.Chunk.Chunk, y : Int, i : Int) : CubeForge.Chunk.Chunk do
+    if i >= 16 do c else banks(C.set(C.set(c, i, y, 7, 3), i, y, 9, 3), y, i + 1) end
+  end
+  pfn bed(c : CubeForge.Chunk.Chunk, y : Int, i : Int) : CubeForge.Chunk.Chunk do
+    if i >= 256 do c else bed(C.set(c, i % 16, y - 1, i / 16, 3), y, i + 1) end
+  end
+  -- a 3 x 5 pool: a body of water, not a single source block
+  pfn pool_body(c : CubeForge.Chunk.Chunk, y : Int, i : Int) : CubeForge.Chunk.Chunk do
+    if i >= 15 do c else pool_body(C.set(c, i % 3, y, 6 + i / 3, C.water()), y, i + 1) end
+  end
+  pfn wet_to(c : CubeForge.Chunk.Chunk, y : Int, x : Int, acc : Int) : Int do
+    if x >= 16 do acc
+    else wet_to(c, y, x + 1, if C.is_water(C.get(c, x, y, 8)) do x else acc end) end
+  end
+  -- The reach that HOLDS: the least far the water gets over [n] more ticks. A
+  -- snapshot catches a canal mid-slosh; one that is really running keeps its
+  -- far end wet every tick.
+  pfn held_reach(s : CubeForge.Water.Sim, y : Int, n : Int, acc : Int) : Int do
+    if n <= 0 do acc
+    else
+      let s1 = Water.step_sim(Water.tick(s))
+      let r = wet_to(Water.sim_chunk(s1), y, 0, 0)
+      held_reach(s1, y, n - 1, if r < acc do r else acc end)
+    end
+  end
+
+  describe "a canal dug out of standing water" do
+    test "from the ocean at sea level it runs the whole channel and stays" do
+      let y = C.sea_level()
+      let c = C.set(rock_row(banks(bed(C.new(), y, 0), y, 0), y, 1), 0, y, 8, C.water())
+      let s = run_ticks(dig_row(Water.new_sim(c, Water.empty_edges()), y, 1), 200)
+      Test.assert_eq_int(held_reach(s, y, 20, 15), 15, "the ocean canal holds to the far wall")
+    end
+    test "from an upland lake it is carried the length of the channel" do
+      let y = 71
+      let c = pool_body(rock_row(banks(bed(C.new(), y, 0), y, 0), y, 3), y, 0)
+      let s = run_ticks(dig_row(Water.new_sim(c, Water.empty_edges()), y, 3), 400)
+      -- It ends SOMEWHERE -- that is what evaporation is for -- but a lake
+      -- carries it across the chunk, where the spring rate died within a dozen
+      -- blocks. CF_BODY_RATE tunes it.
+      Test.assert_true(held_reach(s, y, 20, 15) >= 14, "the lake canal holds nearly to the far wall")
+    end
+    test "a lone spring is still a trickle" do
+      let y = 71
+      -- one source block, no body behind it: body_source is false and it gives
+      -- at spring_rate, so its brook is short. This is the case the cap is for.
+      let c = C.set(rock_row(banks(bed(C.new(), y, 0), y, 0), y, 1), 0, y, 8, C.water())
+      let s = run_ticks(dig_row(Water.new_sim(c, Water.empty_edges()), y, 1), 200)
+      Test.assert_true(held_reach(s, y, 20, 15) < 14, "a spring does not run a canal the way a lake does")
+    end
+  end
+
 end

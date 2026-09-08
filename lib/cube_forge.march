@@ -99,19 +99,16 @@ mod CubeForge do
   -- + the ground readout's buffer and the text it was last built from
   -- + the food effects (see CubeForge.Effects)
   -- + the last effects summary, kept until Effects.stamp moves
-  -- + the key of the ground readout's inputs (column, species, vigour byte), so the string is rebuilt only when one of them moved
-  type Ui = Ui(CubeForge.Inventory.Inv, CubeForge.F32Buf.F32Buf, CubeForge.F32Buf.F32Buf, Int, CubeForge.F32Buf.F32Buf, String, CubeForge.Effects.Effects, String, Int, String)
-  fn ui_inv(u : Ui) : CubeForge.Inventory.Inv do match u do Ui(i, _, _, _, _, _, _, _, _, _) -> i end end
+  type Ui = Ui(CubeForge.Inventory.Inv, CubeForge.F32Buf.F32Buf, CubeForge.F32Buf.F32Buf, Int, CubeForge.F32Buf.F32Buf, String, CubeForge.Effects.Effects, String)
+  fn ui_inv(u : Ui) : CubeForge.Inventory.Inv do match u do Ui(i, _, _, _, _, _, _, _) -> i end end
   @[no_alloc]
-  fn ui_with_inv(u : Ui, i : CubeForge.Inventory.Inv) : Ui do match u do Ui(_, a, b, k, r, t, e, fx, g, gr) -> Ui(i, a, b, k, r, t, e, fx, g, gr) end end
-  fn ui_readout(u : Ui) : String do match u do Ui(_, _, _, _, _, t, _, _, _, _) -> t end end
-  fn ui_gkey(u : Ui) : Int do match u do Ui(_, _, _, _, _, _, _, _, g, _) -> g end end
-  fn ui_ground(u : Ui) : String do match u do Ui(_, _, _, _, _, _, _, _, _, gr) -> gr end end
-  fn ui_effects(u : Ui) : CubeForge.Effects.Effects do match u do Ui(_, _, _, _, _, _, e, _, _, _) -> e end end
-  fn ui_fx(u : Ui) : String do match u do Ui(_, _, _, _, _, _, _, fx, _, _) -> fx end end
-  fn ui_with_effects(u : Ui, e : CubeForge.Effects.Effects) : Ui do match u do Ui(i, a, b, k, r, t, _, fx, g, gr) -> Ui(i, a, b, k, r, t, e, fx, g, gr) end end
-  pfn readout_verts(u : Ui) : Int do match u do Ui(_, _, _, _, r, _, _, _, _, _) -> F32Buf.len(r) / Vx.floats() end end
-  doc "VBO slot of the ground readout line."
+  fn ui_with_inv(u : Ui, i : CubeForge.Inventory.Inv) : Ui do match u do Ui(_, a, b, k, r, t, e, fx) -> Ui(i, a, b, k, r, t, e, fx) end end
+  fn ui_readout(u : Ui) : String do match u do Ui(_, _, _, _, _, t, _, _) -> t end end
+  fn ui_effects(u : Ui) : CubeForge.Effects.Effects do match u do Ui(_, _, _, _, _, _, e, _) -> e end end
+  fn ui_fx(u : Ui) : String do match u do Ui(_, _, _, _, _, _, _, fx) -> fx end end
+  fn ui_with_effects(u : Ui, e : CubeForge.Effects.Effects) : Ui do match u do Ui(i, a, b, k, r, t, _, fx) -> Ui(i, a, b, k, r, t, e, fx) end end
+  pfn readout_verts(u : Ui) : Int do match u do Ui(_, _, _, _, r, _, _, _) -> F32Buf.len(r) / Vx.floats() end end
+  doc "VBO slot of the HUD's one-line readout (the effects summary; the survey panel takes it over while it is open)."
   fn readout_slot() : Int do 501 end
 
   -- Rebuild + upload the hotbar buffers when the inventory's HUD key changed.
@@ -252,9 +249,9 @@ mod CubeForge do
     end
   end
 
-  pfn refresh_hud(u : Ui, open : Bool, drag_from : Int, nx : Float, ny : Float, text : String, lines : List(String), survey : Bool, fx : String, tint : Int, gkey : Int, ground : String) : Ui do
+  pfn refresh_hud(u : Ui, open : Bool, drag_from : Int, nx : Float, ny : Float, text : String, lines : List(String), survey : Bool, fx : String, tint : Int) : Ui do
     match u do
-      Ui(inv, hb, ic, key, rb, last, ef, _, _, _) ->
+      Ui(inv, hb, ic, key, rb, last, ef, _) ->
         -- the readout rebuilds only when its string changed
         -- The survey panel supersedes the one-line readout while it is open: same
         -- buffer, same slot, same guard, more lines. The survey IS the readout,
@@ -266,13 +263,13 @@ mod CubeForge do
                     b
                   end
         let k = (Inv.hud_key(inv) * 4 + (if open do 2 else 0 end) + (if drag_from >= 0 do 1 else 0 end)) * 8 + tint
-        if k == key && !open do Ui(inv, hb, ic, key, rb1, text, ef, fx, gkey, ground)
+        if k == key && !open do Ui(inv, hb, ic, key, rb1, text, ef, fx)
         else
           let hb1 = Hud.build_hotbar(hb, inv, Inv.progress(inv), open, drag_from, tint)
           Win.gfx_upload(hotbar_slot(), F32Buf.storage(hb1), F32Buf.len(hb1))
           let ic1 = Hud.build_icons(ic, inv, open, drag_from, nx, ny)
           Win.gfx_upload(icon_slot(), F32Buf.storage(ic1), F32Buf.len(ic1))
-          Ui(inv, hb1, ic1, k, rb1, text, ef, fx, gkey, ground)
+          Ui(inv, hb1, ic1, k, rb1, text, ef, fx)
         end
     end
   end
@@ -284,8 +281,8 @@ mod CubeForge do
     else if Chunk.is_myc(id) do World.shown_at(w, x, z)
     else 0 end end
   end
-  pfn hud_verts(u : Ui) : Int do match u do Ui(_, hb, _, _, _, _, _, _, _, _) -> F32Buf.len(hb) / Vx.floats() end end
-  pfn icon_verts(u : Ui) : Int do match u do Ui(_, _, ic, _, _, _, _, _, _, _) -> F32Buf.len(ic) / Vx.floats() end end
+  pfn hud_verts(u : Ui) : Int do match u do Ui(_, hb, _, _, _, _, _, _) -> F32Buf.len(hb) / Vx.floats() end end
+  pfn icon_verts(u : Ui) : Int do match u do Ui(_, _, ic, _, _, _, _, _) -> F32Buf.len(ic) / Vx.floats() end end
   -- VBO slot map, for a window of World.size() = 12 chunks a side (144 of them).
   -- 0..143 opaque chunks, 144..287 water, 288..431 foliage, then the named slots
   -- below. They are all one array in the shim (CF_MAX_MESHES = 512), so a slot
@@ -3231,30 +3228,18 @@ mod CubeForge do
           else () end
           let fps1 = tick_fps(fps, now)
           Win.gfx_draw_hud(fps_slot(), fps_hud_verts(fps1), false)
-          -- The ground readout: what the looked-at column holds, or what would grow there.
           let hit_now = scene_hit(sc1)
-          -- The ground readout is a string; building one every frame was the last
-          -- per-frame allocator on the HUD path. Its inputs are the target column,
-          -- that column's species and its vigour to the byte (the climate under it
-          -- moves far slower than vigour does), so they make a key, and the string
-          -- is rebuilt only when the key moves. -1 is "no target".
-          let gcols = World.side(scene_world(sc1)) * 16
-          let gkey = if Ray.is_hit(hit_now) && !map_mode1 do
-              Ray.bx(hit_now) + 192 * Ray.bz(hit_now) + 36864 * (Myc.species_of(scene_myc(sc1), gcols, Ray.bx(hit_now), Ray.bz(hit_now))
-              + 8 * float_to_int(Myc.vigour_of(scene_myc(sc1), gcols, Ray.bx(hit_now), Ray.bz(hit_now)) *. 255.0 +. 0.5))
-            else 0 - 1 end
-          let ground = if gkey == ui_gkey(scene_ui(sc1)) do ui_ground(scene_ui(sc1))
-            else if gkey < 0 do ""
-            else
-              Myc.readout(scene_myc(sc1), gcols, Ray.bx(hit_now), Ray.bz(hit_now),
-                          Biome.temp_of(scene_biome(sc1), Ray.bx(hit_now), Ray.bz(hit_now)), Biome.moist_of(scene_biome(sc1), Ray.bx(hit_now), Ray.bz(hit_now)))
-            end end
-          -- the active effects follow the ground readout on the same line
-          -- rebuilt only when the whole seconds on some effect moved since the
+          -- The HUD's one line is the active effects and nothing else. It used
+          -- to lead with a ground readout -- the species and vigour of whatever
+          -- column the reticle touched, or what would grow there -- which meant
+          -- text appeared at the top left whenever the crosshair crossed a
+          -- block, which is most of the time. The survey panel (Q) says the
+          -- same thing and more, on demand.
+          -- Rebuilt only when the whole seconds on some effect moved since the
           -- last frame (a bite this frame counts: its timer was longer a frame ago)
           let ef = ui_effects(scene_ui(sc1))
           let fx_line = if Effects.stamp(ef, now) != Effects.stamp(ef, last_t) do Effects.summary(ef, now) else ui_fx(scene_ui(sc1)) end
-          let readout = if fx_line == "" do ground else if ground == "" do fx_line else ground ++ "   " ++ fx_line end end
+          let readout = fx_line
           -- the species under the crosshair: a fruit block's own, a mycelium block's column
           let tint = if Ray.is_hit(hit_now) && !map_mode1 do target_species(scene_world(sc1), Ray.bx(hit_now), Ray.by_(hit_now), Ray.bz(hit_now)) else 0 end
           -- X scans the specimen under the reticle -- not E, which main bound to
@@ -3302,7 +3287,7 @@ mod CubeForge do
           else Nil end
           let panel_on = if survey1 do !map_mode1 else false end
           let hud_text = if panel_on do join_lines(slines, "") else readout end
-          let sc2 = scene_with_ui(sc1, refresh_hud(scene_ui(sc1), inv_open2, drag2, ndc_x, ndc_y, hud_text, slines, panel_on, fx_line, tint, gkey, ground))
+          let sc2 = scene_with_ui(sc1, refresh_hud(scene_ui(sc1), inv_open2, drag2, ndc_x, ndc_y, hud_text, slines, panel_on, fx_line, tint))
           Win.gfx_draw_hud(hotbar_slot(), hud_verts(scene_ui(sc2)), false)
           Win.gfx_draw_hud(icon_slot(), icon_verts(scene_ui(sc2)), true)
           if hud_text != "" do Win.gfx_draw_hud(readout_slot(), readout_verts(scene_ui(sc2)), false) else () end
@@ -4249,7 +4234,7 @@ mod CubeForge do
       if is_loaded(loaded) do reload_water_slot(pids, n * n - 1, n, seed, Save.dir(), start_slot(start), World.origin_x(world), World.origin_z(world))
       else reload_water(pids, n * n - 1, n, seed) end
       println("reloaded " ++ int_to_string(n * n) ++ " water actors in " ++ ms(Win.time() -. tw0) ++ " (loads run asynchronously)")
-      let scene = Scene(world, counts, F32Buf.new(256), Ray.miss(), Ui(inv0, F32Buf.new(2048), F32Buf.new(256), -1, F32Buf.new(2048), "", Effects.new(), "", -1, ""), pids, spring_flags(world, biome0, 0, n, NativeArray.make_int(n * n, 0), true), Array.from_list(meshes), biome0, CubeForge.Light.marks_new(), myc0)
+      let scene = Scene(world, counts, F32Buf.new(256), Ray.miss(), Ui(inv0, F32Buf.new(2048), F32Buf.new(256), -1, F32Buf.new(2048), "", Effects.new(), ""), pids, spring_flags(world, biome0, 0, n, NativeArray.make_int(n * n, 0), true), Array.from_list(meshes), biome0, CubeForge.Light.marks_new(), myc0)
       let fps0 = Fps(t4, 0, 0, F32Buf.new(4096))
       -- Seed first, then the saved phase, so a fresh phase never overwrites it.
       Weather.send_seed(wxpid, seed)

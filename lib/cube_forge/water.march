@@ -27,7 +27,10 @@ mod CubeForge.Water do
   -- reply entries queued outside a tick (overflow bounced back by accept_spill), drained by the next tick,
   -- springs: idx of every source ABOVE sea level, marked once per tick so a spring gives exactly spring_rate() a tick
   -- wake: cells to mark at the start of the next tick -- thin cells that survived their evaporation draw
-  type Sim = Sim(CubeForge.Chunk.Chunk, NativeU8Arr, NativeIntArr, Int, Int, NativeU8Arr, List(Int), List(Int), List(Int))
+  -- lake: this chunk's lake surface per column (256 bytes, 0 = no lake), from
+  --   the Lakes tile at load. It is what tells a hole mined in an upland lake
+  --   from a trench dug out of one: see source_neighbour.
+  type Sim = Sim(CubeForge.Chunk.Chunk, NativeU8Arr, NativeIntArr, Int, Int, NativeU8Arr, List(Int), List(Int), List(Int), NativeU8Arr)
 
   fn kind_cell() : Int do 0 end
   fn kind_edge() : Int do 4294967296 end
@@ -36,14 +39,33 @@ mod CubeForge.Water do
   doc "kind 4: water landed in a cell with air beneath it -- a drop's foot, for spray. payload = idx."
   fn kind_drop() : Int do 17179869184 end
   fn max_cells_per_tick() : Int do 250 end
-  doc "Units a source may give per processing, summed over its neighbours. A source is a spring, and a spring is a trickle: uncapped it gives 8-16 a tick and no evaporation rate balances that. CF_SPRING_RATE."
+  doc "Units a LONE source gives per processing, summed over its neighbours: a spring is a trickle. Uncapped a source gives 8-16 a tick and no evaporation rate balances that. CF_SPRING_RATE."
   fn spring_rate() : Int do Env.get_int("CF_SPRING_RATE", 1) end
+  doc "Units a source that is part of a BODY gives per processing -- a lake or the ocean, as against a lone spring. A body has water to give: a canal cut from a lake should run down it, and it was running at the spring's one unit a tick, which evaporation ate within a dozen blocks. It still ends somewhere, which is what `as far as the lake will carry it` means. CF_BODY_RATE."
+  fn body_rate() : Int do Env.get_int("CF_BODY_RATE", 4) end
   doc "One in this many processings of a thin, sky-exposed cell evaporates it. CF_EVAP."
   fn evap() : Int do Env.get_int("CF_EVAP", 16) end
 
   fn new_sim(c : CubeForge.Chunk.Chunk, edges : NativeU8Arr) : Sim do
-    Sim(c, edges, NativeArray.make_int(65536, 0), 0, 0, NativeArray.make_u8(65536, 0), Nil, springs_in(c, edges, 0, Nil), Nil)
+    Sim(c, edges, NativeArray.make_int(65536, 0), 0, 0, NativeArray.make_u8(65536, 0), Nil, springs_in(c, edges, 0, Nil), Nil, NativeArray.make_u8(256, 0))
   end
+
+  doc "The sim with this chunk's lake surface levels, read off the Lakes tile it was generated against. A sim without them -- any chunk with no lake in it -- behaves as it did: only the sea refills."
+  fn with_lake(s : Sim, lk : CubeForge.Lakes.Tile, cx : Int, cz : Int) : Sim do
+    with_lake_levels(s, lake_levels(lk, cx, cz, NativeArray.make_u8(256, 0), 0))
+  end
+  doc "The sim with a lake surface per column given directly (256 bytes, 0 = no lake): what [with_lake] reduces to, and what a test can set without pouring a tile."
+  fn with_lake_levels(s : Sim, lkl : NativeU8Arr) : Sim do
+    match s do
+      Sim(c, e, q, qh, qn, bm, po, sp, wk, _) -> Sim(c, e, q, qh, qn, bm, po, sp, wk, lkl)
+    end
+  end
+  pfn lake_levels(lk : CubeForge.Lakes.Tile, cx : Int, cz : Int, a : NativeU8Arr, i : Int) : NativeU8Arr do
+    if i >= 256 do a
+    else lake_levels(lk, cx, cz, NativeArray.set_u8(a, i, CubeForge.Lakes.level_at(lk, 16 * cx + i % 16, 16 * cz + i / 16)), i + 1) end
+  end
+  @[no_alloc]
+  pfn lake_at(lkl : NativeU8Arr, x : Int, z : Int) : Int do NativeArray.get_u8(lkl, x + 16 * z) end
 
   fn empty_edges() : NativeU8Arr do NativeArray.make_u8(4 * 4096, 0) end
 
@@ -112,12 +134,12 @@ mod CubeForge.Water do
     end
   end
 
-  fn sim_chunk(s : Sim) : CubeForge.Chunk.Chunk do match s do Sim(c, _, _, _, _, _, _, _, _) -> c end end
+  fn sim_chunk(s : Sim) : CubeForge.Chunk.Chunk do match s do Sim(c, _, _, _, _, _, _, _, _, _) -> c end end
 
   doc "Units of water in the chunk: level_of summed over every non-source water cell. Sources are infinite and do not count; this is the conservation invariant."
   fn volume(s : Sim) : Int do volume_go(sim_chunk(s), 0, 0) end
   doc "How many springs the sim knows (test helper)."
-  fn spring_count(s : Sim) : Int do match s do Sim(_, _, _, _, _, _, _, sp, _) -> List.length(sp) end end
+  fn spring_count(s : Sim) : Int do match s do Sim(_, _, _, _, _, _, _, sp, _, _) -> List.length(sp) end end
   pfn volume_go(c : CubeForge.Chunk.Chunk, i : Int, acc : Int) : Int do
     if i >= 65536 do acc
     else
@@ -125,7 +147,7 @@ mod CubeForge.Water do
       volume_go(c, i + 1, if C.is_water(id) && !C.is_source(id) do acc + C.level_of(id) else acc end)
     end
   end
-  fn pending(s : Sim) : Int do match s do Sim(_, _, _, _, n, _, _, _, _) -> n end end
+  fn pending(s : Sim) : Int do match s do Sim(_, _, _, _, n, _, _, _, _, _) -> n end end
 
   -- ── Edge mirrors ─────────────────────────────────────────────────────────────
   fn edge_slot(dir : Int, x : Int, y : Int, z : Int) : Int do
@@ -167,11 +189,11 @@ mod CubeForge.Water do
     if x < 0 || x >= 16 || y < 0 || y >= 256 || z < 0 || z >= 16 do s
     else
       match s do
-        Sim(c, e, q, qh, qn, bm, po, sp, wk) ->
+        Sim(c, e, q, qh, qn, bm, po, sp, wk, lkl) ->
           let i = idx(x, y, z)
-          if NativeArray.get_u8(bm, i) == 1 || qn >= 65536 do Sim(c, e, q, qh, qn, bm, po, sp, wk)
-          else if y > C.sea_level() && C.is_source(C.get_idx(c, i)) do Sim(c, e, q, qh, qn, bm, po, sp, wk)   -- springs: only mark_force, once a tick
-          else Sim(c, e, NativeArray.set_int(q, (qh + qn) % 65536, i), qh, qn + 1, NativeArray.set_u8(bm, i, 1), po, sp, wk) end end
+          if NativeArray.get_u8(bm, i) == 1 || qn >= 65536 do Sim(c, e, q, qh, qn, bm, po, sp, wk, lkl)
+          else if y > C.sea_level() && C.is_source(C.get_idx(c, i)) do Sim(c, e, q, qh, qn, bm, po, sp, wk, lkl)   -- springs: only mark_force, once a tick
+          else Sim(c, e, NativeArray.set_int(q, (qh + qn) % 65536, i), qh, qn + 1, NativeArray.set_u8(bm, i, 1), po, sp, wk, lkl) end end
       end
     end
   end
@@ -179,9 +201,9 @@ mod CubeForge.Water do
   -- The queue push without the spring guard: for mark_springs and the wake list.
   pfn mark_force(s : Sim, i : Int) : Sim do
     match s do
-      Sim(c, e, q, qh, qn, bm, po, sp, wk) ->
+      Sim(c, e, q, qh, qn, bm, po, sp, wk, lkl) ->
         if NativeArray.get_u8(bm, i) == 1 || qn >= 65536 do s
-        else Sim(c, e, NativeArray.set_int(q, (qh + qn) % 65536, i), qh, qn + 1, NativeArray.set_u8(bm, i, 1), po, sp, wk) end
+        else Sim(c, e, NativeArray.set_int(q, (qh + qn) % 65536, i), qh, qn + 1, NativeArray.set_u8(bm, i, 1), po, sp, wk, lkl) end
     end
   end
   pfn mark_list(s : Sim, l : List(Int)) : Sim do
@@ -205,11 +227,11 @@ mod CubeForge.Water do
     match st do
       Step(s, out) ->
         match s do
-          Sim(c, e, q, qh, qn, bm, po, sp, wk) ->
+          Sim(c, e, q, qh, qn, bm, po, sp, wk, lkl) ->
             let i = idx(x, y, z)
             let old = C.get_idx(c, i)
             let c1 = C.set_idx(c, i, id)
-            let s1 = mark_neighbors(Sim(c1, e, q, qh, qn, bm, po, springs_after(sp, c1, e, i, old, id), wk), x, y, z)
+            let s1 = mark_neighbors(Sim(c1, e, q, qh, qn, bm, po, springs_after(sp, c1, e, i, old, id), wk, lkl), x, y, z)
             let out1 = Cons(kind_cell() + i * 256 + id, out)
             let out2 = if z == 0 do Cons(kind_edge() + 0 * 1048576 + edge_slot(0, x, y, z) * 256 + id, out1) else out1 end
             let out3 = if z == 15 do Cons(kind_edge() + 1 * 1048576 + edge_slot(1, x, y, z) * 256 + id, out2) else out2 end
@@ -284,7 +306,7 @@ mod CubeForge.Water do
       + (if cell(c, e, x, y, z + 1) == 0 do 1 else 0 end) + (if cell(c, e, x, y, z - 1) == 0 do 1 else 0 end)
   end
   pfn defer(s : Sim, i : Int) : Sim do
-    match s do Sim(c, e, q, qh, qn, bm, po, sp, wk) -> Sim(c, e, q, qh, qn, bm, po, sp, Cons(i, wk)) end
+    match s do Sim(c, e, q, qh, qn, bm, po, sp, wk, lkl) -> Sim(c, e, q, qh, qn, bm, po, sp, Cons(i, wk), lkl) end
   end
 
   pfn side_level(c : CubeForge.Chunk.Chunk, e : NativeU8Arr, x : Int, y : Int, z : Int) : Int do
@@ -337,7 +359,7 @@ mod CubeForge.Water do
       let dx = if k == 0 do 1 else if k == 1 do 0 - 1 else 0 end end
       let dz = if k == 2 do 1 else if k == 3 do 0 - 1 else 0 end end
       let c = step_sim_chunk(st)
-      let e = match step_sim(st) do Sim(_, ed, _, _, _, _, _, _, _) -> ed end
+      let e = match step_sim(st) do Sim(_, ed, _, _, _, _, _, _, _, _) -> ed end
       let n = side_level(c, e, x + dx, y, z + dz)
       let u0 = if n < 0 do 0
                else if pass == 0 do (if n < l - 1 do (l - n) / 2 else 0 end)
@@ -350,21 +372,42 @@ mod CubeForge.Water do
     end end
   end
 
-  -- Lakes are infinite: at or below sea level, a cell touching a source (beside it, or
-  -- under one) becomes a source itself, so a dug pit connected to a lake fills to the
-  -- lake's level. Above sea level only the conserving rule applies.
-  pfn source_neighbour(c : CubeForge.Chunk.Chunk, e : NativeU8Arr, x : Int, y : Int, z : Int) : Bool do
-    y <= C.sea_level() && (C.is_source(cell(c, e, x + 1, y, z)) || C.is_source(cell(c, e, x - 1, y, z))
+  -- Lakes are infinite: a cell touching a source (beside it, or under one)
+  -- becomes a source itself, so a dug pit connected to a lake fills to the
+  -- lake's level.
+  --
+  -- "Infinite" used to mean AT OR BELOW SEA LEVEL only, and an upland lake is
+  -- sources above it: mining one block out of such a lake left a hole in its
+  -- surface that nothing ever filled, because the conserving rule has no units
+  -- to conserve where the block simply went away. The basin is what tells the
+  -- two apart. A cell at or under its column's lake surface is INSIDE the lake
+  -- and refills; one above it, or in a column the lake never reached -- a
+  -- trench dug out of the bank, which is the case the sea-level gate was
+  -- really protecting -- does not, and keeps the conserving rule, so a canal
+  -- carries a brook instead of draining the lake along itself.
+  pfn source_neighbour(c : CubeForge.Chunk.Chunk, e : NativeU8Arr, lkl : NativeU8Arr, x : Int, y : Int, z : Int) : Bool do
+    (y <= C.sea_level() || y <= lake_at(lkl, x, z)) && (C.is_source(cell(c, e, x + 1, y, z)) || C.is_source(cell(c, e, x - 1, y, z))
       || C.is_source(cell(c, e, x, y, z + 1)) || C.is_source(cell(c, e, x, y, z - 1)) || C.is_source(cell(c, e, x, y + 1, z)))
+  end
+
+  -- Is this source part of a BODY -- a lake or the ocean -- rather than a lone
+  -- spring? Another source beside it or above it is what says so: a lake's
+  -- outlet has the lake behind it, and a spring seeping out of a hillside has
+  -- nothing but rock.
+  @[no_alloc]
+  pfn body_source(c : CubeForge.Chunk.Chunk, e : NativeU8Arr, x : Int, y : Int, z : Int) : Bool do
+    C.is_source(cell(c, e, x + 1, y, z)) || C.is_source(cell(c, e, x - 1, y, z))
+      || C.is_source(cell(c, e, x, y, z + 1)) || C.is_source(cell(c, e, x, y, z - 1))
+      || C.is_source(cell(c, e, x, y + 1, z))
   end
 
   -- Process one dirty cell: push its units down, then sideways.
   pfn process(st : Step, x : Int, y : Int, z : Int, salt : Int) : Step do
     let c = step_sim_chunk(st)
-    let e = match step_sim(st) do Sim(_, ed, _, _, _, _, _, _, _) -> ed end
+    let e = match step_sim(st) do Sim(_, ed, _, _, _, _, _, _, _, _) -> ed end
     let id = C.get(c, x, y, z)
     if id != 0 && !C.is_water(id) do st
-    else if !C.is_source(id) && source_neighbour(c, e, x, y, z) do set_cell(st, x, y, z, C.water())
+    else if !C.is_source(id) && source_neighbour(c, e, sim_lake(step_sim(st)), x, y, z) do set_cell(st, x, y, z, C.water())
     else if id == 0 do st
     else
       let src = C.is_source(id)
@@ -384,7 +427,8 @@ mod CubeForge.Water do
       -- draw per tick is the rate the knob promises.
       let st = if thin do (match st do Step(s0, o0) -> Step(defer(s0, idx(x, y, z)), o0) end) else st end
       -- fall first
-      let cap = if src do spring_rate() else 99 end
+      -- A lone spring trickles; a lake or the ocean pours (see body_rate).
+      let cap = if src do (if body_source(c, e, x, y, z) do body_rate() else spring_rate() end) else 99 end
       let b = cell(c, e, x, y - 1, z)
       let fell = if b == 0 do (if l > 7 do 7 else l end)
                  else if C.is_source(b) do (if src do 0 else l end)
@@ -404,11 +448,11 @@ mod CubeForge.Water do
     match st do
       Step(s, out) ->
         match s do
-          Sim(c, e, q, qh, qn, bm, po, sp, wk) ->
-            if budget == 0 || qn == 0 do Step(Sim(c, e, q, qh, qn, bm, po, sp, wk), out)
+          Sim(c, e, q, qh, qn, bm, po, sp, wk, lkl) ->
+            if budget == 0 || qn == 0 do Step(Sim(c, e, q, qh, qn, bm, po, sp, wk, lkl), out)
             else
               let i = NativeArray.get_int(q, qh)
-              let s1 = Sim(c, e, q, (qh + 1) % 65536, qn - 1, NativeArray.set_u8(bm, i, 0), po, sp, wk)
+              let s1 = Sim(c, e, q, (qh + 1) % 65536, qn - 1, NativeArray.set_u8(bm, i, 0), po, sp, wk, lkl)
               let x = i % 16
               let y = i / 256
               let z = (i / 16) % 16
@@ -422,9 +466,9 @@ mod CubeForge.Water do
   fn tick(s : Sim) : Step do
     -- Entries queued outside a tick (bounced overflow) go out first; accepted
     -- units changed a cell the frame loop has not seen, so report those too.
-    let queued = match s do Sim(_, _, _, _, _, _, po, _, _) -> po end
+    let queued = match s do Sim(_, _, _, _, _, _, po, _, _, _) -> po end
     let sp = springs(s)
-    let s0 = match s do Sim(c, e, q, qh, qn, bm, _, _, wk) -> mark_list(mark_springs(Sim(c, e, q, qh, qn, bm, Nil, sp, Nil), sp), wk) end
+    let s0 = match s do Sim(c, e, q, qh, qn, bm, _, _, wk, lkl) -> mark_list(mark_springs(Sim(c, e, q, qh, qn, bm, Nil, sp, Nil, lkl), sp), wk) end
     match run(Step(s0, queued), max_cells_per_tick()) do
       Step(s1, out) ->
         -- Springs give again next tick and woken cells draw again next tick, so
@@ -434,9 +478,11 @@ mod CubeForge.Water do
         Step(s1, if live > 0 do Cons(kind_pending() + live, out) else out end)
     end
   end
-  pfn wake_count(s : Sim) : Int do match s do Sim(_, _, _, _, _, _, _, _, wk) -> List.length(wk) end end
+  pfn wake_count(s : Sim) : Int do match s do Sim(_, _, _, _, _, _, _, _, wk, _) -> List.length(wk) end end
   doc "Springs above sea level in this chunk, for the frame loop and tests."
-  fn springs(s : Sim) : List(Int) do match s do Sim(_, _, _, _, _, _, _, sp, _) -> sp end end
+  @[no_alloc]
+  pfn sim_lake(s : Sim) : NativeU8Arr do match s do Sim(_, _, _, _, _, _, _, _, _, lkl) -> lkl end end
+  fn springs(s : Sim) : List(Int) do match s do Sim(_, _, _, _, _, _, _, sp, _, _) -> sp end end
 
   doc "A neighbour pushed [u] units across the edge facing [dir] into our cell at [slot]. Add them, capped at 7; any overflow goes straight back as a spill the other way, queued for our next reply, so no unit is ever lost to a stale mirror."
   fn accept_spill(s : Sim, dir : Int, slot : Int, u : Int) : Sim do
@@ -445,19 +491,19 @@ mod CubeForge.Water do
     let x = if dir == 2 do 15 else if dir == 3 do 0 else a end end
     let z = if dir == 0 do 0 else if dir == 1 do 15 else a end end
     match s do
-      Sim(c, e, q, qh, qn, bm, po, sp, wk) ->
+      Sim(c, e, q, qh, qn, bm, po, sp, wk, lkl) ->
         let id = C.get(c, x, y, z)
         if C.is_source(id) do s                                   -- the sea absorbs it
         else if id != 0 && !C.is_water(id) do
           -- solid on our side (the giver's mirror was stale): send it all back
-          Sim(c, e, q, qh, qn, bm, Cons(kind_spill() + dir * 1048576 + slot * 256 + u, po), sp, wk)
+          Sim(c, e, q, qh, qn, bm, Cons(kind_spill() + dir * 1048576 + slot * 256 + u, po), sp, wk, lkl)
         else
           let have = if id == 0 do 0 else C.level_of(id) end
           let room = 7 - have
           let take = if u < room do u else room end
           let po1 = if u > take do Cons(kind_spill() + dir * 1048576 + slot * 256 + (u - take), po) else po end
           let c1 = if take > 0 do C.set(c, x, y, z, C.id_of_level(have + take)) else c end
-          mark(mark_neighbors(Sim(c1, e, q, qh, qn, bm, po1, sp, wk), x, y, z), x, y, z)
+          mark(mark_neighbors(Sim(c1, e, q, qh, qn, bm, po1, sp, wk, lkl), x, y, z), x, y, z)
         end end
     end
   end
@@ -465,12 +511,12 @@ mod CubeForge.Water do
   doc "A neighbour's edge cell changed: update the mirror for [dir] and mark our adjacent cell dirty."
   fn edge_changed(s : Sim, dir : Int, slot : Int, id : Int) : Sim do
     match s do
-      Sim(c, e, q, qh, qn, bm, po, sp, wk) ->
+      Sim(c, e, q, qh, qn, bm, po, sp, wk, lkl) ->
         let a = slot % 16
         let y = slot / 16
         let x = if dir == 2 do 15 else if dir == 3 do 0 else a end end
         let z = if dir == 0 do 0 else if dir == 1 do 15 else a end end
-        mark(Sim(c, NativeArray.set_u8(e, dir * 4096 + slot, id), q, qh, qn, bm, po, sp, wk), x, y, z)
+        mark(Sim(c, NativeArray.set_u8(e, dir * 4096 + slot, id), q, qh, qn, bm, po, sp, wk, lkl), x, y, z)
     end
   end
 
@@ -480,10 +526,10 @@ mod CubeForge.Water do
     let y = i / 256
     let z = (i / 16) % 16
     match s do
-      Sim(c, e, q, qh, qn, bm, po, sp, wk) ->
+      Sim(c, e, q, qh, qn, bm, po, sp, wk, lkl) ->
         let old = C.get_idx(c, i)
         let c1 = C.set_idx(c, i, id)
-        mark(mark_neighbors(Sim(c1, e, q, qh, qn, bm, po, springs_after(sp, c1, e, i, old, id), wk), x, y, z), x, y, z)
+        mark(mark_neighbors(Sim(c1, e, q, qh, qn, bm, po, springs_after(sp, c1, e, i, old, id), wk, lkl), x, y, z), x, y, z)
     end
   end
 
@@ -530,7 +576,7 @@ mod CubeForge.Water do
     let e0 = load_edge(empty_edges(), 0, nb(cx, cz - 1))
     let e1 = load_edge(e0, 1, nb(cx, cz + 1))
     let e2 = load_edge(e1, 2, nb(cx + 1, cz))
-    let r = new_sim(c, load_edge(e2, 3, nb(cx - 1, cz)))
+    let r = with_lake(new_sim(c, load_edge(e2, 3, nb(cx - 1, cz))), lk, cx, cz)
     if Env.get_int("CF_WATER_LOG", 0) == 1 do
       println("  wload " ++ int_to_string(cx) ++ "," ++ int_to_string(cz)
               ++ ": tile " ++ float_to_string(1000.0 *. (t1 -. t0))
@@ -569,7 +615,7 @@ mod CubeForge.Water do
         let e0 = load_edge(empty_edges(), 0, slot_neighbour(d, slot, cx, cz - 1, seed, cx, cz, lk))
         let e1 = load_edge(e0, 1, slot_neighbour(d, slot, cx, cz + 1, seed, cx, cz, lk))
         let e2 = load_edge(e1, 2, slot_neighbour(d, slot, cx + 1, cz, seed, cx, cz, lk))
-        Ok(new_sim(c, load_edge(e2, 3, slot_neighbour(d, slot, cx - 1, cz, seed, cx, cz, lk))))
+        Ok(with_lake(new_sim(c, load_edge(e2, 3, slot_neighbour(d, slot, cx - 1, cz, seed, cx, cz, lk))), lk, cx, cz))
     end
   end
 

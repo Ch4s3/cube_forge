@@ -4777,3 +4777,61 @@ wider than any gap between them, and against the 7.0 ms this file records for
 local `main` on an idle box. The script warns about exactly this. It wants a
 re-run somewhere quiet before any number here means anything. The drained mesh
 equals the full rebuild (703923462).
+
+## Water that stops where it should not, and a readout nobody asked for (2026-09-08)
+
+Three reports: mining a spring leaves a hole in the water; a dug canal runs a
+few blocks and stops; and the hover text at the top left every time the reticle
+touches a block.
+
+**The hole.** `source_neighbour` -- the rule that makes a cell touching a source
+into a source, so a dug pit fills to the lake's level -- was gated on `y <=
+sea_level()`. An upland lake is sources ABOVE sea level, so nothing there ever
+refilled: mine one block out of such a lake and the hole stays, because the
+conserving rule has no units to conserve where the block simply went away.
+
+The gate was protecting a real case, though -- a trench cut out of a bank must
+not turn into source and drain the lake along itself for ever. The basin is
+what tells the two apart, and the actor can know it: `Lakes.level_at` gives the
+lake surface per column, and the sim now carries its chunk's 256 of them, read
+off the tile it already computes at load. A cell at or under its column's lake
+surface is inside the lake and refills; one above it, or in a column the lake
+never reached, does not.
+
+**The canal.** Every source gave `spring_rate()` -- one unit a processing --
+because "uncapped it gives 8-16 a tick and no evaporation rate balances that".
+That is right for a spring seeping out of a hillside and wrong for a lake: a
+canal cut from standing water was fed a trickle, and evaporation ate it within
+a dozen blocks. A source with another source beside or above it is a BODY, not
+a spring, and gives `body_rate()` (`CF_BODY_RATE`, 4) instead. Evaporation only
+takes cells that are down to their last unit, so a canal that is actually being
+fed is not thin and does not dry -- it still ends somewhere, which is what "as
+far as the lake will carry it" means.
+
+Measured on a 15-block channel dug through rock -- dug, through the edit path,
+because that is what marks the cells and what a pick does; laying water in is a
+different code path:
+
+| canal fed by | holds to |
+|---|---|
+| the ocean, cut at sea level | x = 15 of 15 (source, as before) |
+| an upland lake, before | x = 13, and a single source block died at x = 10 |
+| an upland lake, now | **x = 15** |
+| a lone spring (no body behind it) | short, deliberately |
+
+"Holds" is the least far the water gets over twenty further ticks: a snapshot
+catches a canal mid-slosh, and a canal that is really running keeps its far end
+wet every tick. The rate wants judging in a real world rather than a 16-block
+chunk -- 4 measured best here, 6 and 8 no better -- so it is a knob.
+
+**The readout.** The one HUD line led with the species and vigour of whatever
+column the reticle touched, which is most of the time. It is gone, with the two
+`Ui` fields that cached it; the line is the active effects now, and the survey
+panel (Q) says the same thing and more, on demand.
+
+551 tests, lint --strict clean. The light oracle's sky count goes 73 -> 100 on
+the pinned scenario, and it is the same pre-existing hole the entry above
+describes: water that moves does not invalidate the light box, the GPU flood
+only ever raises, so light already spread through what is now water stays.
+More water moving makes more of it. The fix is still to lower light locally
+rather than re-seed a box.
