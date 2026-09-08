@@ -1110,6 +1110,16 @@ void cf_gfx_set_gpulight(int64_t on) { if (g_u_gpulight >= 0) glUniform1i(g_u_gp
  * once before drawing, the way the mesh drain batches its work. */
 static int64_t g_ld[6];
 static int     g_ld_any = 0;
+/* CF_LIGHT_FLUSH_LOG=1: what the union cost. How many relights merged into the
+ * box, the sum of their own volumes against the union's, and the flush split
+ * into the staging transpose and the upload -- the three numbers that say
+ * whether a short LIST of boxes would help or whether the cost is the transpose
+ * and would survive any batching policy. */
+static int64_t g_ld_n = 0, g_ld_vol = 0, g_ld_max = 0;
+static int g_lfl = -1;
+static int lfl_on(void) { if (g_lfl < 0) { const char *e = getenv("CF_LIGHT_FLUSH_LOG"); g_lfl = (e && *e == '1') ? 1 : 0; } return g_lfl; }
+static double now_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1000.0 + t.tv_nsec / 1e6; }
+static double g_stage_ms = 0, g_upload_ms = 0, g_flood_gpu_ms = 0;
 /* Passes the flood still owes. A dirty box sets it to a full convergence and
  * the frame spends a few passes at a time: sixteen at once is 7.55 ms, four is
  * under two, and light changes gradually enough that a frame or two of partial
@@ -1118,6 +1128,12 @@ static int64_t g_lf_todo = 0;
 int64_t cf_light_flood(int64_t passes);
 void cf_gfx_light_dirty(int64_t x0, int64_t y0, int64_t z0, int64_t x1, int64_t y1, int64_t z1) {
     if (x1 < x0 || y1 < y0 || z1 < z0) return;
+    g_ld_n++;
+    {
+        int64_t v = (x1 - x0 + 1) * (y1 - y0 + 1) * (z1 - z0 + 1);
+        g_ld_vol += v;
+        if (v > g_ld_max) g_ld_max = v;
+    }
     if (!g_ld_any) { g_ld[0] = x0; g_ld[1] = y0; g_ld[2] = z0; g_ld[3] = x1; g_ld[4] = y1; g_ld[5] = z1; g_ld_any = 1; return; }
     if (x0 < g_ld[0]) g_ld[0] = x0;
     if (y0 < g_ld[1]) g_ld[1] = y0;
@@ -1132,12 +1148,29 @@ void cf_gfx_sync_light_box(void *la, void *lb, int64_t x0, int64_t y0, int64_t z
 void cf_gfx_flush_light(void *la, void *lb) {
     if (g_ld_any) {
         g_ld_any = 0;
+        double t0 = lfl_on() ? now_ms() : 0;
+        int64_t uv = (g_ld[3] - g_ld[0] + 1) * (g_ld[4] - g_ld[1] + 1) * (g_ld[5] - g_ld[2] + 1);
+        g_stage_ms = g_upload_ms = 0;
         cf_gfx_sync_light_box(la, lb, g_ld[0], g_ld[1], g_ld[2], g_ld[3], g_ld[4], g_ld[5]);
+        if (lfl_on()) {
+            double tot = now_ms() - t0;
+            if (tot > 0.5)
+                fprintf(stderr, "light flush %.2f ms: %lld relights, own %lld (largest %lld), union %lld (%.1fx), stage %.2f upload %.2f\n",
+                        tot, (long long)g_ld_n, (long long)g_ld_vol, (long long)g_ld_max, (long long)uv,
+                        g_ld_vol ? (double)uv / (double)g_ld_vol : 0.0, g_stage_ms, g_upload_ms);
+        }
+        g_ld_n = 0; g_ld_vol = 0; g_ld_max = 0;
         g_lf_todo = 16;   /* the seed moved: converge again from here */
     }
     if (g_lf_todo > 0) {
         int64_t n = g_lf_todo < CF_LIGHT_STEP ? g_lf_todo : CF_LIGHT_STEP;
+        double t1 = lfl_on() ? now_ms() : 0;
         g_lf_todo -= cf_light_flood(n);
+        if (lfl_on()) {
+            double fd = now_ms() - t1;
+            if (fd > 4.0) fprintf(stderr, "light flood %lld passes: wall %.2f ms, GPU %.2f ms (sync before it: stage %.2f upload %.2f)\n",
+                                  (long long)n, fd, g_flood_gpu_ms, g_stage_ms, g_upload_ms);
+        }
         if (g_lf_todo < 0) g_lf_todo = 0;
     }
 }
@@ -1148,6 +1181,7 @@ void cf_gfx_sync_light_box(void *la, void *lb, int64_t x0, int64_t y0, int64_t z
     if (x0 < 0) x0 = 0; if (y0 < 0) y0 = 0; if (z0 < 0) z0 = 0;
     if (x1 >= g_occ_w) x1 = g_occ_w - 1; if (y1 >= g_occ_h) y1 = g_occ_h - 1; if (z1 >= g_occ_d) z1 = g_occ_d - 1;
     if (x0 > x1 || y0 > y1 || z0 > z1) return;
+    double g_t_stage0 = lfl_on() ? now_ms() : 0;
     const unsigned char *a = (const unsigned char *)narr_data(la);
     const unsigned char *b = (const unsigned char *)narr_data(lb);
     int64_t bw = x1 - x0 + 1, bh = y1 - y0 + 1, bd = z1 - z0 + 1;
@@ -1161,6 +1195,8 @@ void cf_gfx_sync_light_box(void *la, void *lb, int64_t x0, int64_t y0, int64_t z
                 stage[dst] = (unsigned char)(a[src] * 17);
                 stage[dst + 1] = (unsigned char)(b[src] * 17);
             }
+    if (lfl_on()) g_stage_ms = now_ms() - g_t_stage0;
+    double tu0 = lfl_on() ? now_ms() : 0;
     glActiveTexture(GL_TEXTURE3);
     glBindTexture(GL_TEXTURE_3D, g_lt[0]);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
@@ -1184,6 +1220,7 @@ void cf_gfx_sync_light_box(void *la, void *lb, int64_t x0, int64_t y0, int64_t z
     glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
     glPixelStorei(GL_UNPACK_SKIP_IMAGES, 0);
     free(stage);
+    if (lfl_on()) g_upload_ms = now_ms() - tu0;
     glActiveTexture(GL_TEXTURE0);
 }
 
@@ -1432,11 +1469,19 @@ int64_t cf_light_flood(int64_t passes) {
     glBindFramebuffer(GL_FRAMEBUFFER, g_lf_fbo);
     glViewport(0, 0, (GLsizei)g_occ_w, (GLsizei)g_occ_h);
     glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE); glDisable(GL_BLEND);
+    static GLuint lf_q = 0;
+    if (lfl_on() && !lf_q) glGenQueries(1, &lf_q);
+    if (lfl_on()) glBeginQuery(GL_TIME_ELAPSED, lf_q);
     for (int64_t k = 0; k < passes; k++) {
         int src = (int)(k & 1), dst = 1 - src;
         glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_3D, g_lt[src]);
         glFramebufferTexture(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, g_lt[dst], 0);
         glDrawArraysInstanced(GL_TRIANGLES, 0, 3, (GLsizei)g_occ_d);
+    }
+    if (lfl_on()) {
+        glEndQuery(GL_TIME_ELAPSED);
+        GLuint64 ns = 0; glGetQueryObjectui64v(lf_q, GL_QUERY_RESULT, &ns);   /* blocks: diagnostic only */
+        g_flood_gpu_ms = ns / 1e6;
     }
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glEnable(GL_DEPTH_TEST); glEnable(GL_CULL_FACE);
