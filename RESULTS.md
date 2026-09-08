@@ -3515,3 +3515,31 @@ is four floor-level views of the seed 18 chamber.
 The `World` carries its seed now (`World.seed`; `from_chunks` takes it from
 the save header), because the mesher needs the beams and the beams come from
 the seed.
+
+### The shift into a cavern, and the whole block in the shim (2026-09-07, later)
+
+Measured with `CF_AUTOWALK=1 CF_AUTOJUMP=1 CF_STREAM_LOG=1` walking west from
+(330, 118) at seed 18 across the cavern, which shifts the window through the
+cavern's chunks. A shift is synchronous and already costs 50-90 ms with
+`CF_POI=0` (`world`, the band's chunk generation, is 40-80 of it). With the
+cavern in the band the mesh part was **107, 446 and 348 ms** on three
+successive shifts -- the first cut of the beam sections, three or four to a
+cavern chunk at 143 ms each, serial inside one worker's `CM.build`.
+
+So the whole block went into the shim: `cf_beam_block` finds the beams within
+a block's half-diagonal, fills the margin grid, greedy-meshes the inner cube
+per direction the way `Model.template_inner` does, and writes the block's
+vertices in place, unlit, with the block index in the light slot. A section of
+beams: **143 -> 16 ms**. The three shifts: **86, 128 and 116 ms**, of which
+60-63 is `world`; the mesh part is 20-50 ms now. Worst frame on the walk 94 ms,
+which is a shift, and the baseline's shifts are 80-90.
+
+The March path is kept as `Mesher.beam_block_ref` and `poi_test` holds the
+kernel to it float for float on a real block, having first found a block the
+reference draws anything for -- the first beam block of that chunk was a
+corner sliver with an empty cut, and "the same floats" held vacuously until
+"and some" caught it. `poi_test` was silently dropped once more on the way
+(G85: a missing `end`, 538 tests became 513 with 0 failures); the count is the
+check. Three of four floor-level views are pixel-identical to the previous
+build (the fourth had the camera in the floor). 538 tests; `CF_POI=0` still
+31924079.

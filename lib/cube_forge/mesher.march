@@ -615,18 +615,23 @@ mod CubeForge.Mesher do
   end
 
   -- One crystal beam block, cut into 8x8x8 sub-cubes against the exact prisms
-  -- of the beams that pass through it (Poi.beam_grid, with a margin from the
-  -- blocks around it), greedy-meshed like any model grid, and stamped into
-  -- place UNLIT: its light slot carries the block's local index (2 * i packs
-  -- as a block level of i, which stamp writes as i / 255), for cf_f32_relight
-  -- to look the light up at every remesh. A block no beam reaches (a sliver
-  -- the skin let through, or a block placed by hand) draws nothing.
+  -- of the beams that pass through it (with a margin from the blocks around
+  -- it), greedy-meshed like any model grid, and written UNLIT: its light slot
+  -- carries the block's local index as i / 255, for cf_f32_relight to look
+  -- the light up at every remesh. A block no beam reaches (a sliver the skin
+  -- let through, or a block placed by hand) draws nothing. The shim does the
+  -- whole block (cf_beam_block); beam_block_ref is the same in March.
   pfn beam_block(b : CubeForge.F32Buf.F32Buf, beams : NativeF32Arr, i : Int, fx : Float, fy : Float, fz : Float) : CubeForge.F32Buf.F32Buf do
+    let k = CubeForge.Model.c_crystal()
+    B.push_beam_block(b, beams, fx, fy, fz, i, CubeForge.Model.palette_u(k), CubeForge.Model.palette_v(k), CubeForge.Model.palette_layer(), Vx.selflit())
+  end
+  doc "beam_block in March -- Poi.beam_near, beam_grid_ref, Model.template_inner, F32Buf.stamp_xf -- the reference the shim's cf_beam_block is held to (poi_test)."
+  fn beam_block_ref(b : CubeForge.F32Buf.F32Buf, beams : NativeF32Arr, i : Int, fx : Float, fy : Float, fz : Float) : CubeForge.F32Buf.F32Buf do
     let near = CubeForge.Poi.beam_near(beams, fx, fy, fz)
     if CubeForge.Poi.beam_count(near) == 0 do b
     else
       let gn = CubeForge.Poi.beam_grid_n()
-      let t = CubeForge.Model.template_inner(CubeForge.Poi.beam_grid(near, fx, fy, fz), gn, 1)
+      let t = CubeForge.Model.template_inner(CubeForge.Poi.beam_grid_ref(near, fx, fy, fz), gn, 1)
       -- the template spans the whole margin grid over [0, 1]; scaled about its
       -- centre so the inner 8 cells land on the block
       B.stamp_xf(b, B.storage(t), 0, B.len(t), fx +. 0.5, fy +. 0.5, fz +. 0.5, 2.0 *. int_to_float(i), 1.0, 0.0, int_to_float(gn) /. int_to_float(gn - 2))
@@ -646,7 +651,8 @@ mod CubeForge.Mesher do
   """
   fn beam_geometry(c : CubeForge.Chunk.Chunk, sy : Int, ox : Float, oz : Float, beams : NativeF32Arr) : CubeForge.F32Buf.F32Buf do
     if CubeForge.Poi.beam_count(beams) == 0 do no_beam_geo()
-    else beam_geometry_go(B.new(4096), beams, c, ox, oz, sy * 4096, (sy + 1) * 4096) end
+    -- room for a block's worst case from the start, so the first block does not grow it
+    else beam_geometry_go(B.new(CubeForge.Ffi.Window.beam_block_floats() + 4096), beams, c, ox, oz, sy * 4096, (sy + 1) * 4096) end
   end
 
   pfn water_section_go(b : CubeForge.F32Buf.F32Buf, c : CubeForge.Chunk.Chunk, n : CubeForge.Chunk.Chunk, s : CubeForge.Chunk.Chunk,

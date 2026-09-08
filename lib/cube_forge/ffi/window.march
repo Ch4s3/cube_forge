@@ -63,6 +63,7 @@ mod CubeForge.Ffi.Window do
     fn x_f32_stamp_xf(consume dst: NativeF32Arr, di: Int, src: NativeF32Arr, si: Int, n: Int, dx: Float, dy: Float, dz: Float, shade: Float, cosv: Float, sinv: Float, scale: Float): NativeF32Arr = "cf_f32_stamp_xf"
     fn x_beam_min_sd(tbl: NativeF32Arr, x: Float, y: Float, z: Float): Float = "cf_beam_min_sd"
     fn x_beam_grid(consume g: NativeU8Arr, tbl: NativeF32Arr, x0: Float, y0: Float, z0: Float, gn: Int, colour: Int): NativeU8Arr = "cf_beam_grid"
+    fn x_beam_block(consume dst: NativeF32Arr, at: Int, tbl: NativeF32Arr, x0: Float, y0: Float, z0: Float, bi: Int, pu: Float, pv: Float, layer: Float, fx: Float): NativeF32Arr = "cf_beam_block"
     fn x_f32_relight(consume dst: NativeF32Arr, di: Int, src: NativeF32Arr, si: Int, n: Int, la: NativeU8Arr, lb: NativeU8Arr, oxi: Int, ozi: Int): NativeF32Arr = "cf_f32_relight"
     fn x_mesh_slice(consume dst: NativeF32Arr, at: Int, mask: NativeIntArr, base: Int, d: Int, sy: Int, a: Int, ox: Float, oz: Float, layers: NativeF32Arr): NativeF32Arr = "cf_mesh_slice"
     fn x_mesh_quad(consume dst: NativeF32Arr, at: Int, d: Int, sy: Int, a: Int, u: Int, v: Int, wd: Int, h: Int, key: Int, ox: Float, oz: Float, layers: NativeF32Arr): NativeF32Arr = "cf_mesh_quad"
@@ -186,6 +187,12 @@ mod CubeForge.Ffi.Window do
   fn beam_min_sd(tbl : NativeF32Arr, x : Float, y : Float, z : Float) : Float do x_beam_min_sd(tbl, x, y, z) end
   doc "Fill a Model grid [gn] a side for the block at min corner (x0, y0, z0): [colour] where a sub-cube's centre is inside a beam of the table, with the outer ring a margin from the neighbouring blocks. See cf_beam_grid; Poi.beam_grid_ref is the March reference."
   fn beam_grid(g : NativeU8Arr, tbl : NativeF32Arr, x0 : Float, y0 : Float, z0 : Float, gn : Int, colour : Int) : NativeU8Arr do x_beam_grid(g, tbl, x0, y0, z0, gn, colour) end
+  doc "Cut and greedy-mesh one crystal beam block at min corner (x0, y0, z0) against a Poi beam table, writing unlit vertices (block index [bi] in the block-light slot) at dst[at..], which must have beam_block_floats() + 1 floats of room; the count written lands in the last. See cf_beam_block; Mesher.beam_block_ref is the March reference."
+  fn beam_block(dst : NativeF32Arr, at : Int, tbl : NativeF32Arr, x0 : Float, y0 : Float, z0 : Float, bi : Int, pu : Float, pv : Float, layer : Float, fx : Float) : NativeF32Arr do
+    x_beam_block(dst, at, tbl, x0, y0, z0, bi, pu, pv, layer, fx)
+  end
+  doc "The room cf_beam_block needs past [at]: every exposed face of a checkerboard, 3 x 512 x 2 quads of 60 floats."
+  fn beam_block_floats() : Int do 3 * 512 * 2 * 60 end
   doc "Copy [n] floats of vertices from src[si..] to dst[di..], re-lighting each from the light fields [la] / [lb] at the block whose local index its block-light slot carries (Mesher.beam_geometry): see cf_f32_relight."
   fn f32_relight(dst : NativeF32Arr, di : Int, src : NativeF32Arr, si : Int, n : Int, la : NativeU8Arr, lb : NativeU8Arr, oxi : Int, ozi : Int) : NativeF32Arr do x_f32_relight(dst, di, src, si, n, la, lb, oxi, ozi) end
   doc "f32_stamp with a yaw and a uniform scale: the template's unit cell is a body centred on (0.5, 0.5, 0.5), scaled, turned about +y by the angle with cosine [cosv] and sine [sinv], and placed with its centre at (dx, dy, dz). Face indices move by the nearest quarter turn so a turned body is lit as it faces. See cf_f32_stamp_xf."

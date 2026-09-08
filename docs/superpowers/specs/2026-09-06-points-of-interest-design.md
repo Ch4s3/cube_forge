@@ -424,5 +424,7 @@ built from smaller voxels").
 - **The light.** Self-lit faces are shaded by direction and by a rim term;
   `GLOW_COLD` is warm white-gold.
 
-Costs and hashes are in RESULTS. Open: the first cut of a cavern chunk on a
-window shift (143 ms a section, in a worker) has not been measured in a frame.
+Costs and hashes are in RESULTS. The whole block cut is a shim kernel too
+(`cf_beam_block`, 16 ms a section); a window shift into the cavern is 86-128
+ms against the 50-90 ms every shift costs, and the remaining cost is the
+band's chunk generation, not the beams.

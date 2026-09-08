@@ -1631,6 +1631,109 @@ void *cf_beam_grid(void *grid, void *tbl, double x0, double y0, double z0, int64
     return grid;
 }
 
+/* A whole beam block, cut and greedy-meshed: the beams of the table within a
+ * block's half-diagonal are found, the 10-cube margin grid is filled from
+ * them, and the inner cube's faces are merged per direction the way
+ * Model.template_inner merges them (a face where a cell is filled and its
+ * neighbour in that direction -- possibly a margin cell -- is not), each
+ * rectangle wound as Model.emit winds it, in block coordinates (grid cell c
+ * is at (c - 1) / 8 from the block's min corner). Vertices are UNLIT: sky 0,
+ * and the block's local index [bi] in the block-light slot as bi / 255, for
+ * cf_f32_relight. The caller reserves CF_BEAM_BLOCK_FLOATS + 1 floats at
+ * dst[at..]; the count written lands in the last of them, as cf_mesh_slice
+ * does. The March path -- Poi.beam_near, beam_grid_ref, Model.template_inner,
+ * F32Buf.stamp_xf -- is the reference (Mesher.beam_block_ref), and a test
+ * holds this to it. It is here because the March path took 130 microseconds
+ * a block and a section of beams has a thousand of them. */
+#define CF_BEAM_GN 10
+#define CF_BEAM_BLOCK_FLOATS (3 * 512 * 2 * 6 * CF_VERT_FLOATS)   /* every exposed face of a checkerboard: the bound */
+static void cf_beam_vert(float *o, double x, double y, double z, double pu, double pv, double layer, double d, double fx, double blk) {
+    o[0] = (float)x; o[1] = (float)y; o[2] = (float)z; o[3] = (float)pu; o[4] = (float)pv; o[5] = (float)layer;
+    o[6] = 0.0f; o[7] = (float)d; o[8] = (float)fx; o[9] = (float)blk;
+}
+void *cf_beam_block(void *dst, int64_t at, void *tbl, double x0, double y0, double z0, int64_t bi,
+                    double pu, double pv, double layer, double fx) {
+    int64_t rc = *(int64_t *)dst;
+    if (rc != 1) { fprintf(stderr, "cf_beam_block: destination is shared (rc=%lld); refusing to write in place\n", (long long)rc); abort(); }
+    if (at < 0 || at + CF_BEAM_BLOCK_FLOATS + 1 > narr_len(dst)) {
+        fprintf(stderr, "cf_beam_block: out of range (at=%lld dst=%lld)\n", (long long)at, (long long)narr_len(dst));
+        abort();
+    }
+    float *o = (float *)narr_data(dst) + at;
+    const float *t = (const float *)narr_data(tbl);
+    int64_t n = narr_len(tbl) / 8;
+    /* the beams that reach this block */
+    const float *near[256]; int64_t nn = 0;
+    for (int64_t i = 0; i < n && nn < 256; i++)
+        if (cf_beam_sd1(t + 8 * i, x0 + 0.5, y0 + 0.5, z0 + 0.5) < 0.9) near[nn++] = t + 8 * i;
+    int64_t written = 0;
+    if (nn > 0) {
+        const int gn = CF_BEAM_GN;
+        unsigned char g[CF_BEAM_GN * CF_BEAM_GN * CF_BEAM_GN];
+        memset(g, 0, sizeof g);
+        for (int y = 0; y < gn; y++) {
+            int my = (y == 0 || y == gn - 1);
+            for (int z = 0; z < gn; z++) {
+                int mz = (z == 0 || z == gn - 1);
+                if (my + mz >= 2) continue;
+                for (int x = 0; x < gn; x++) {
+                    int mx = (x == 0 || x == gn - 1);
+                    if (mx + my + mz >= 2) continue;
+                    double px = x0 + ((double)(x - 1) + 0.5) / 8.0;
+                    double py = y0 + ((double)(y - 1) + 0.5) / 8.0;
+                    double pz = z0 + ((double)(z - 1) + 0.5) / 8.0;
+                    for (int64_t i = 0; i < nn; i++)
+                        if (cf_beam_sd1(near[i], px, py, pz) < 0.0) { g[x + gn * (z + gn * y)] = 1; break; }
+                }
+            }
+        }
+        #define G(x, y, z) g[(x) + gn * ((z) + gn * (y))]
+        double blk = (double)bi / 255.0;
+        static const int dox[6] = {0, 0, 1, -1, 0, 0}, doy[6] = {1, -1, 0, 0, 0, 0}, doz[6] = {0, 0, 0, 0, 1, -1};
+        unsigned char mask[CF_BEAM_GN * CF_BEAM_GN];
+        for (int d = 0; d < 6; d++) {
+            for (int a = 1; a <= 8; a++) {
+                /* the slice's mask over (u, v) in 1..8: gx/gy/gz of Model */
+                for (int v = 1; v <= 8; v++) for (int u = 1; u <= 8; u++) {
+                    int x = (d <= 1) ? u : (d <= 3 ? a : u);
+                    int y = (d <= 1) ? a : v;
+                    int z = (d <= 1) ? v : (d <= 3 ? u : a);
+                    int k = G(x, y, z);
+                    mask[u + gn * v] = (k != 0 && G(x + dox[d], y + doy[d], z + doz[d]) == 0) ? 1 : 0;
+                }
+                for (int v = 1; v <= 8; v++) for (int u = 1; u <= 8; u++) {
+                    if (!mask[u + gn * v]) continue;
+                    int wd = 1; while (u + wd <= 8 && mask[u + wd + gn * v]) wd++;
+                    int h = 1;
+                    for (; v + h <= 8; h++) { int ok = 1; for (int j = 0; j < wd; j++) if (!mask[u + j + gn * (v + h)]) { ok = 0; break; } if (!ok) break; }
+                    for (int jv = 0; jv < h; jv++) for (int ju = 0; ju < wd; ju++) mask[u + ju + gn * (v + jv)] = 0;
+                    double fa = (a - 1) / 8.0, fa1 = fa + 1.0 / 8.0;
+                    double fu = (u - 1) / 8.0, fu1 = fu + wd / 8.0;
+                    double fv = (v - 1) / 8.0, fv1 = fv + h / 8.0;
+                    double q[4][3];
+                    switch (d) {
+                    case 0: q[0][0]=fu; q[0][1]=fa1; q[0][2]=fv;  q[1][0]=fu; q[1][1]=fa1; q[1][2]=fv1; q[2][0]=fu1; q[2][1]=fa1; q[2][2]=fv1; q[3][0]=fu1; q[3][1]=fa1; q[3][2]=fv;  break;
+                    case 1: q[0][0]=fu; q[0][1]=fa;  q[0][2]=fv;  q[1][0]=fu1; q[1][1]=fa; q[1][2]=fv;  q[2][0]=fu1; q[2][1]=fa;  q[2][2]=fv1; q[3][0]=fu; q[3][1]=fa;   q[3][2]=fv1; break;
+                    case 2: q[0][0]=fa1; q[0][1]=fv; q[0][2]=fu;  q[1][0]=fa1; q[1][1]=fv1; q[1][2]=fu; q[2][0]=fa1; q[2][1]=fv1; q[2][2]=fu1; q[3][0]=fa1; q[3][1]=fv; q[3][2]=fu1; break;
+                    case 3: q[0][0]=fa; q[0][1]=fv;  q[0][2]=fu1; q[1][0]=fa; q[1][1]=fv1; q[1][2]=fu1; q[2][0]=fa; q[2][1]=fv1; q[2][2]=fu;  q[3][0]=fa; q[3][1]=fv;   q[3][2]=fu;  break;
+                    case 4: q[0][0]=fu1; q[0][1]=fv; q[0][2]=fa1; q[1][0]=fu1; q[1][1]=fv1; q[1][2]=fa1; q[2][0]=fu; q[2][1]=fv1; q[2][2]=fa1; q[3][0]=fu; q[3][1]=fv; q[3][2]=fa1; break;
+                    default: q[0][0]=fu; q[0][1]=fv; q[0][2]=fa;  q[1][0]=fu; q[1][1]=fv1; q[1][2]=fa;  q[2][0]=fu1; q[2][1]=fv1; q[2][2]=fa; q[3][0]=fu1; q[3][1]=fv; q[3][2]=fa;  break;
+                    }
+                    static const int order[6] = {0, 1, 2, 0, 2, 3};
+                    for (int k = 0; k < 6; k++) {
+                        const double *p = q[order[k]];
+                        cf_beam_vert(o + written, x0 + p[0], y0 + p[1], z0 + p[2], pu, pv, layer, (double)d, fx, blk);
+                        written += CF_VERT_FLOATS;
+                    }
+                }
+            }
+        }
+        #undef G
+    }
+    o[CF_BEAM_BLOCK_FLOATS] = (float)written;
+    return dst;
+}
+
 /* Copy n floats of vertices from src[si..] to dst[di..], re-lighting each from
  * the light fields: the cached geometry of a chunk section's crystal beams
  * (Mesher.beam_geometry) carries, in its block-light slot, the LOCAL INDEX of
