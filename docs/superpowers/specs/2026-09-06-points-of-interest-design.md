@@ -396,3 +396,33 @@ nothing there changes. `Light.get` still returns a level; `Light.colour` reads
 the index. The face key carries it in bits 56-57, the fx word in bits 16 and up,
 and the shader picks a cold glow for colour 1. The limit is a hard seam where
 two colours meet, not a blend -- one index is not three channels. RESULTS.
+
+## 16. As built: the beams at sub-block resolution (2026-09-07)
+
+The crystal cavern's beams are drawn at eight sub-cubes to the block, cut
+from the exact prisms rather than from a template, after seven rounds of
+tuning cubes failed to look like anything but cubes (RESULTS, "The crystals,
+built from smaller voxels").
+
+- **Two frames, one table.** `Poi.cell_aux` gives the generator an instance's
+  beams as segments once per chunk, threaded through `vol_block`; `Poi.beam_table`
+  gives the mesher the same beams in its window-local frame, shifted by the
+  half block that separates corner sampling from centre sampling. `poi_test`
+  holds the frames to each other.
+- **The cut.** `Poi.beam_near` -> `Poi.beam_grid` (a 10-cube grid: the block's
+  8 and a margin of the neighbours' nearest sub-cubes) -> `Model.template_inner`
+  (faces of the inner cube only, culled against the margin) -> `F32Buf.stamp_xf`.
+  The distance and the cut are shim kernels; the March versions are the
+  references the tests hold them to.
+- **Cached.** `ChunkMesh` keeps each section's cut, unlit, keyed by which
+  blocks are beams (`Mesher.beam_key`); a remesh re-lights it (`cf_f32_relight`)
+  instead of cutting again. `World` carries its seed so the mesher can build
+  the table.
+- **The block.** `crystal_beam` is a cutout: see-through, a model to the mesher,
+  opacity 6 to light. Sixteen beams a chamber, chisel-ended, centred anywhere
+  in 0.9 of the chamber's radius. No blade models in a cavern.
+- **The light.** Self-lit faces are shaded by direction and by a rim term;
+  `GLOW_COLD` is warm white-gold.
+
+Costs and hashes are in RESULTS. Open: the first cut of a cavern chunk on a
+window shift (143 ms a section, in a worker) has not been measured in a frame.

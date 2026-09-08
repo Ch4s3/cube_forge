@@ -151,8 +151,8 @@ mod CubeForge.Chunk do
   fn is_fruit(id : Int) : Bool do id >= 47 && id <= 64 end
   doc "The species of a fruit block, or 0."
   fn fruit_species(id : Int) : Int do if is_fruit(id) do (id - 47) % 6 + 1 else 0 end end
-  doc "Alpha-cutout blocks: leaves and small mushrooms. Meshed in the cutout pass and see-through for face culling and light."
-  fn is_cutout(id : Int) : Bool do is_foliage(id) || is_fruit_small(id) || id == crystal() end
+  doc "Alpha-cutout blocks: leaves, small mushrooms, and the crystal beam (drawn as sub-block prisms, Poi.beam_grid, not as a cube). Meshed in the cutout pass and see-through for face culling and light."
+  fn is_cutout(id : Int) : Bool do is_foliage(id) || is_fruit_small(id) || id == crystal() || id == crystal_beam() end
   fn is_log(id : Int) : Bool do id == oak_log() || id == pine_log() || id == palm_log() end
   fn is_foliage(id : Int) : Bool do id == oak_leaves() || id == pine_leaves() || id == palm_frond() end
 

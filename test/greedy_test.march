@@ -65,7 +65,7 @@ mod CubeForge.Test.Greedy do
   end
   pfn foliage_of(c : CubeForge.Chunk.Chunk, models : CubeForge.Model.Templates) : CubeForge.F32Buf.F32Buf do
     let e = C.new()
-    Mesher.mesh_section_foliage(c, e, e, e, e, CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.World.shown_new(8), CubeForge.Light.new(), 0, 0.0, 0.0, models)
+    Mesher.mesh_section_foliage(c, e, e, e, e, CubeForge.Light.new(), CubeForge.Light.new(), CubeForge.World.shown_new(8), CubeForge.Light.new(), 0, 0.0, 0.0, models, CubeForge.Mesher.no_beam_geo())
   end
   pfn nverts(b : CubeForge.F32Buf.F32Buf) : Int do B.len(b) / CubeForge.Vertex.floats() end
   pfn tverts(m : CubeForge.Model.Templates, k : Int) : Int do CubeForge.Model.floats(m, k) / CubeForge.Vertex.floats() end
@@ -112,7 +112,7 @@ mod CubeForge.Test.Greedy do
       -- and the stamp of a whole palm crown uses no cube faces
       let w = grass_top16_world()
       let w2 = CubeForge.Veg.plant(w, 8, 8, 69, 6, CubeForge.Trees.palm())
-      let b = Mesher.mesh_section_foliage(CubeForge.World.chunk_at(w2, 0, 0), e, e, e, e, CubeForge.World.light(w2), CubeForge.World.block_light(w2), CubeForge.World.shown(w2), CubeForge.World.occupancy(w2), 4, 0.0, 0.0, m)
+      let b = Mesher.mesh_section_foliage(CubeForge.World.chunk_at(w2, 0, 0), e, e, e, e, CubeForge.World.light(w2), CubeForge.World.block_light(w2), CubeForge.World.shown(w2), CubeForge.World.occupancy(w2), 4, 0.0, 0.0, m, CubeForge.Mesher.no_beam_geo())
       Test.assert_true(nverts(b) > 17 * 36, "seventeen fronds stamped as templates outweigh seventeen cubes")
     end
   end

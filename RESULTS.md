@@ -3413,3 +3413,105 @@ three channels, and it will show.
 
 534 tests. Worst frame 7.90 ms against 16; the drained mesh equals the rebuild.
 `docs/poi-crystal-cavern.png` is the seed 18 chamber under its own light.
+
+## The crystals, built from smaller voxels (2026-09-07)
+
+"Those crystals look awful. They should resemble the crystal caves in Mexico."
+Then, after two more rounds: "Those are just blocks." They were. A beam one or
+two blocks thick drawn as cubes IS a staircase of cubes, and no radius, count,
+angle, texture or light had changed that in seven rounds of tuning. The user's
+original instruction -- "make the crystals out of smaller voxels" -- was the
+answer, and the blade models had been a half-measure: a fixed 8-cube template
+per block cannot follow a beam that crosses blocks at an angle.
+
+**What was built.** A beam block is no longer a cube. The mesher cuts each
+one into 8x8x8 sub-cubes against the exact prisms of the beams that pass
+through it, and greedy-meshes the cut like a mushroom template:
+
+- `Poi.beam_table(seed, wx0, wz0, lx, lz)`: every cavern beam that can reach
+  a chunk, as segments (both ends, radius) in the mesher's window-local frame.
+  `Poi.cell_aux` is the same table in the generator's frame, built once per
+  instance per chunk and threaded through `vol_block` -- the generator no
+  longer re-derives thirty beams from the hashes at every voxel.
+- `Poi.beam_near` (the beams within a block's half-diagonal), `Poi.beam_grid`
+  (the cut, with a one-sub-cube MARGIN from the neighbouring blocks),
+  `Model.template_inner` (greedy over the inner cube only; the margin's cells
+  cull faces and emit none), `F32Buf.stamp_xf` at scale 10/8 about the
+  block's centre to place it. Without the margin a section of beams carried
+  1.65 million floats and a quarter of them were faces buried inside the beam
+  between two of its own blocks; with it, 1.25 million.
+- `crystal_beam` is a cutout: see-through to its neighbours' faces, a model to
+  the mesher (no cube faces), opacity 6 to light. `is_model` says so.
+- The shape: `beam_taper` is a straight prism over the middle 72% and a
+  straight line to a point over the rest -- a chisel end. The quartic taper
+  had made every beam a tusk, and a curved outline is the one thing a crystal
+  never has. Sixteen beams a chamber (the user: "more of them"), centred
+  anywhere in 0.9 of the chamber's radius rather than within 0.5, where ten of
+  them had all passed through one hub and the room read as a starburst.
+- The light: a self-lit face is shaded by direction (top 1.0, sides 0.80 /
+  0.68, bottom 0.52) and by a Fresnel-ish rim, and its glow is a flat 1.10
+  rather than the texel squared -- squared, cream came out grey, and unshaded,
+  a chamber of beams was a wall of white with no edges. `GLOW_COLD` is a warm
+  white-gold now (1.00, 0.97, 0.90): the blue read as an ice cave. No blade
+  models anywhere in a cavern; Naica is the beams and the rock.
+
+**Three findings on the way.**
+
+*The generator and the mesher disagreed by half a block.* The generator
+samples a block at its integer corner (`u_of` takes wx, wz, y); the mesher
+samples sub-cubes outward from the block's min corner. Same beams, two
+frames: 148 of one chunk's 1008 beam blocks held no beam by the mesher's
+reckoning and were see-through holes. The half is folded into `beam_table`'s
+shift once, and `poi_test` now holds the two frames to each other: every
+beam block holds a beam, no air block is inside one.
+
+*A discarded array result is a lost write.* `NativeArray.set_f32` returns the
+array to use from then on; the first table builder wrote through `let _ =`
+and every beam came back as zeros. Both fill passes thread the array now.
+
+*The blue hole that was not a hole.* A sky-coloured wedge below the chamber
+floor survived every fix, a queue-lag frame 200 test, and a transect, until a
+level shot from the chamber's middle showed no hole at all: the camera had
+been standing inside the wall, seeing out through back faces. The chamber is
+narrower at y 36 than at y 42.
+
+**Cost, and where it went.** Timed in a release test on the seed 18 cavern
+chunk at (240, 112):
+
+| | before | after |
+|---|---|---|
+| generate the cavern chunk (plain chunk: 2 ms) | 137 ms | **16 ms** |
+| cut one section of beams (`beam_geometry`, 1.66 M floats) | 391 ms | **143 ms** |
+| remesh that section (re-light from the cache) | 424 ms | **4 ms** |
+| worst frame standing in the chamber, 400 frames | 986 ms | **9.6 ms** |
+
+The 986 ms frames were the mesh drain re-cutting beam sections after the
+light flood: four sections a frame at ~250 ms each. The cut depends only on
+the blocks and the beams, so `ChunkMesh` now keeps it per section
+(`beam_sections`, keyed by `Mesher.beam_key`, a hash of which blocks are
+beams), stamped UNLIT with each vertex's block index in its light slot, and
+every remesh re-lights it through `cf_f32_relight` -- one pass over the
+vertices looking the light up per block. The generator's 137 ms was
+`beam_min_sd`: 864 thousand calls at 320 ns each in March. The distance and
+the grid cut are shim kernels now (`cf_beam_min_sd`, `cf_beam_grid`), and the
+March versions stay as `beam_min_sd_ref` / `beam_grid_ref`, held to the
+kernels by a test at 4000 points and cell for cell on a real block.
+
+What is still paid: the first cut of a cavern chunk's sections, in the
+workers at startup and on a window shift -- 143 ms a section, three or four
+sections a cavern chunk. Not in a frame yet; a shift into a cavern is the
+next thing to measure.
+
+**Held.** `CF_POI=0` is bit-identical to the previous commit, checked by
+building 19a21b2 in a scratch worktree and running both recipes: frames 30 /
+dump 20 gives mesh **31924079**, frames 400 / dump 390 (the frame budget
+script's) gives **33247928**, before and after. (The values pinned at the
+merge were taken with a recipe this entry did not record; these two are the
+recipes from now on.) POIs on at frames 400 / 390: **629446512**, unchanged by
+everything here, so seed 7's window holds no cavern in view. Frame budget 7.48
+ms; the drained mesh equals the rebuild. 538 tests. `docs/poi-crystal-cavern.png`
+is four floor-level views of the seed 18 chamber.
+
+The `World` carries its seed now (`World.seed`; `from_chunks` takes it from
+the save header), because the mesher needs the beams and the beams come from
+the seed.

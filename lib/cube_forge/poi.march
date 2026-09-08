@@ -58,6 +58,8 @@ mod CubeForge.Poi do
 
   needs IO.Process   -- CF_POI, CF_POI_DENSITY
   needs IO.Console   -- CF_POI_PREVIEW
+  needs IO.Foreign   -- the beam kernels in the shim (cf_beam_min_sd, cf_beam_grid)
+  needs Window
 
   alias CubeForge.Noise as N
   alias CubeForge.Chunk as C
@@ -736,6 +738,13 @@ mod CubeForge.Poi do
   fn cham_v(k : Int, cx : Int, cz : Int, seed : Int, j : Int) : Float do
     (hash(k, cx, cz, seed, 41 + 3 * j) -. 0.5) *. 2.0 *. int_to_float(param(k, cx, cz, seed, p_len()))
   end
+  doc "Chamber [j]'s centre in world x / z: cham_u / cham_v through the instance's bearing."
+  fn cham_wx(k : Int, cx : Int, cz : Int, seed : Int, j : Int) : Int do
+    float_to_int(uv_wx(k, cx, cz, seed, cham_u(k, cx, cz, seed, j), cham_v(k, cx, cz, seed, j)))
+  end
+  fn cham_wz(k : Int, cx : Int, cz : Int, seed : Int, j : Int) : Int do
+    float_to_int(uv_wz(k, cx, cz, seed, cham_u(k, cx, cz, seed, j), cham_v(k, cx, cz, seed, j)))
+  end
   fn cham_y(k : Int, cx : Int, cz : Int, seed : Int, j : Int, g : Int) : Float do
     int_to_float(g - param(k, cx, cz, seed, p_depth())) +. (hash(k, cx, cz, seed, 42 + 3 * j) -. 0.5) *. 10.0
   end
@@ -775,7 +784,9 @@ mod CubeForge.Poi do
   -- once when the beam count changed, and a collision here is invisible -- two
   -- draws that should be independent quietly agree.
   doc "Beams crossing each chamber."
-  fn beams() : Int do 6 end
+  -- Sixteen a chamber. Naica is packed: the beams are most of what you see,
+  -- and at ten the room still read as a room with some beams in it.
+  fn beams() : Int do 16 end
 
   -- Beam [b] of chamber [j]: a segment through the chamber at a hashed
   -- attitude, longer than the chamber is wide so it drives into both walls.
@@ -788,7 +799,7 @@ mod CubeForge.Poi do
     int_to_float(b) *. 6.2831853 /. int_to_float(beams()) +. (hash(k, cx, cz, seed, 110 + 4 * (7 * j + b)) -. 0.5) *. 0.6 +. int_to_float(j) *. 0.7
   end
   pfn beam_el(k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int) : Float do
-    hash(k, cx, cz, seed, 111 + 4 * (7 * j + b)) *. 1.6 -. 0.8
+    hash(k, cx, cz, seed, 111 + 4 * (7 * j + b)) *. 1.2 -. 0.6
   end
   pfn beam_dx(k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int) : Float do Math.cos(beam_az(k, cx, cz, seed, j, b)) *. Math.cos(beam_el(k, cx, cz, seed, j, b)) end
   pfn beam_dy(k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int) : Float do Math.sin(beam_el(k, cx, cz, seed, j, b)) end
@@ -807,8 +818,8 @@ mod CubeForge.Poi do
   doc "Half the beam's length, in blocks. A long one overshoots the chamber's radius, so it is embedded in the rock at both ends; a short one is a stub a third of the way across."
   fn beam_half(k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int) : Float do
     let h = hash(k, cx, cz, seed, 112 + 4 * (7 * j + b))
-    if beam_long(k, cx, cz, seed, j, b) do cham_r(k, cx, cz, seed, j) *. (0.90 +. 0.45 *. h)
-    else cham_r(k, cx, cz, seed, j) *. (0.30 +. 0.25 *. h) end
+    if beam_long(k, cx, cz, seed, j, b) do cham_r(k, cx, cz, seed, j) *. (1.10 +. 0.55 *. h)
+    else cham_r(k, cx, cz, seed, j) *. (0.35 +. 0.30 *. h) end
   end
   doc """
   The beam's radius at its thickest, in blocks. That thickness against its
@@ -825,56 +836,288 @@ mod CubeForge.Poi do
     -- were a third of the room each and fused into slabs
     if beam_long(k, cx, cz, seed, j, b) do 1.0 +. 0.6 *. h else 0.6 +. 0.4 *. h end
   end
-  doc "How thick the beam is at position [t] along it, as a fraction of beam_rad: full over the middle and drawn to a point at both ends, the way a crystal terminates."
+  doc """
+  How thick the beam is at position [t] along it, as a fraction of beam_rad:
+  FULL over the middle 72% and then a straight line to a point, a pyramid on
+  the end of a prism. A smooth quartic taper made every beam a tusk: a curved
+  outline, and a curved outline is the one thing a crystal never has. A
+  selenite beam is a bar with flat sides and a chisel end.
+  """
   fn beam_taper(t : Float) : Float do
     let e = Math.abs(2.0 *. t -. 1.0)
-    1.0 -. 0.92 *. e *. e *. e *. e
+    if e <= 0.72 do 1.0 else (1.0 -. e) /. 0.28 end
   end
 
-  -- Nearest beam of chamber [j], as a fraction of its own radius.
-  pfn beam_d(k : Int, cx : Int, cz : Int, seed : Int, u : Float, v : Float, y : Float, g : Int, j : Int, b : Int, best : Float) : Float do
-    if b >= beams() do best
+
+  doc "How far outside a beam's surface a block's centre may be and the block still be crystal_beam. The half-diagonal of a block is 0.87; a little under, so a block holding only a corner sliver is left out."
+  fn beam_skin() : Float do 0.75 end
+
+  -- ── The beam field: the beams at sub-block resolution ────────────────────
+  doc """
+  A beam is a prism one or two blocks across, and a block is one block across,
+  so drawn as cubes a beam is a staircase of cubes, and every crystal picture
+  in this branch's history was that staircase. So beam blocks are not drawn as
+  cubes. The mesher asks for the cavern's beams as a table of segments
+  (beam_table), cuts each beam block into 8x8x8 sub-cubes against the exact
+  prisms (beam_grid), and stamps the result the way it stamps a mushroom. The
+  block grid still holds crystal_beam wherever a beam passes -- for light,
+  collision and the slice diagnostic -- and the LOOK comes from here.
+
+  Eight floats per beam: both ends (x, y, z), the radius, one spare. The table
+  is in the MESHER's coordinates (window-local), shifted y0 the caller's
+  (wx0 - lx): the mesher never learns a world coordinate.
+  """
+  fn beam_stride() : Int do 8 end
+  fn no_beams() : NativeF32Arr do NativeArray.make_f32(1, 0.0) end
+  fn beam_count(t : NativeF32Arr) : Int do NativeArray.length_f32(t) / beam_stride() end
+
+  -- (u, v) in the instance's frame back to world x / z: the inverse of u_of / v_of.
+  pfn uv_wx(k : Int, cx : Int, cz : Int, seed : Int, u : Float, v : Float) : Float do
+    let a = bearing(k, cx, cz, seed)
+    int_to_float(sx(k, cx, cz, seed)) +. u *. Math.cos(a) -. v *. Math.sin(a)
+  end
+  pfn uv_wz(k : Int, cx : Int, cz : Int, seed : Int, u : Float, v : Float) : Float do
+    let a = bearing(k, cx, cz, seed)
+    int_to_float(sz(k, cx, cz, seed)) +. u *. Math.sin(a) +. v *. Math.cos(a)
+  end
+  -- One beam's eight floats at slot [i]. The centre and axis are exactly beam_d's.
+  pfn beam_put(t : NativeF32Arr, i : Int, k : Int, cx : Int, cz : Int, seed : Int, j : Int, b : Int, g : Int, shx : Float, shy : Float, shz : Float) : NativeF32Arr do
+    let l = beam_half(k, cx, cz, seed, j, b)
+    let r = cham_r(k, cx, cz, seed, j)
+    let ou = cham_u(k, cx, cz, seed, j) +. (hash(k, cx, cz, seed, 200 + 7 * j + b) -. 0.5) *. 1.0 *. r
+    let ov = cham_v(k, cx, cz, seed, j) +. (hash(k, cx, cz, seed, 230 + 7 * j + b) -. 0.5) *. 1.0 *. r
+    let oy = cham_y(k, cx, cz, seed, j, g) +. (hash(k, cx, cz, seed, 260 + 7 * j + b) -. 0.5) *. r *. 0.9
+    let du = beam_dx(k, cx, cz, seed, j, b) *. l
+    let dy = beam_dy(k, cx, cz, seed, j, b) *. l
+    let dv = beam_dz(k, cx, cz, seed, j, b) *. l
+    let o = i * beam_stride()
+    t |> (fn a -> NativeArray.set_f32(a, o, uv_wx(k, cx, cz, seed, ou -. du, ov -. dv) -. shx))
+      |> (fn a -> NativeArray.set_f32(a, o + 1, oy -. dy -. shy))
+      |> (fn a -> NativeArray.set_f32(a, o + 2, uv_wz(k, cx, cz, seed, ou -. du, ov -. dv) -. shz))
+      |> (fn a -> NativeArray.set_f32(a, o + 3, uv_wx(k, cx, cz, seed, ou +. du, ov +. dv) -. shx))
+      |> (fn a -> NativeArray.set_f32(a, o + 4, oy +. dy -. shy))
+      |> (fn a -> NativeArray.set_f32(a, o + 5, uv_wz(k, cx, cz, seed, ou +. du, ov +. dv) -. shz))
+      |> (fn a -> NativeArray.set_f32(a, o + 6, beam_rad(k, cx, cz, seed, j, b)))
+  end
+  pfn beam_put_cell(t : NativeF32Arr, i : Int, k : Int, cx : Int, cz : Int, seed : Int, g : Int, shx : Float, shy : Float, shz : Float, jb : Int) : NativeF32Arr do
+    if jb >= chambers() * beams() do t
+    else beam_put_cell(beam_put(t, i + jb, k, cx, cz, seed, jb / beams(), jb % beams(), g, shx, shy, shz), i, k, cx, cz, seed, g, shx, shy, shz, jb + 1) end
+  end
+  doc """
+  The beams of the cavern instance in cell (cx, cz), in the GENERATOR's frame
+  (world coordinates, a block sampled at its integer corner): what vol_block
+  reads, built once per instance per chunk rather than re-derived from the
+  hashes at every voxel -- which cost a cavern chunk 137 ms against 2 ms for
+  a plain one. no_beams() for any other kind.
+  """
+  fn cell_aux(k : Int, cx : Int, cz : Int, seed : Int) : NativeF32Arr do cell_aux_at(k, cx, cz, seed, ground(k, cx, cz, seed)) end
+  doc "cell_aux for an instance standing on ground [g]: the preview draws every kind on flat ground."
+  fn cell_aux_at(k : Int, cx : Int, cz : Int, seed : Int, g : Int) : NativeF32Arr do
+    if k != k_cavern() do no_beams()
+    else beam_put_cell(NativeArray.make_f32(chambers() * beams() * beam_stride(), 0.0), 0, k, cx, cz, seed, g, 0.0, 0.0, 0.0, 0) end
+  end
+  -- Does the cavern instance of cell (cx, cz) reach the chunk at (wx0, wz0)? apply_cell's test.
+  pfn beam_cell_here(k : Int, cx : Int, cz : Int, seed : Int, wx0 : Int, wz0 : Int, scale : Float) : Bool do
+    if !here(k, cx, cz, seed, scale) do false
     else
-      let l = beam_half(k, cx, cz, seed, j, b)
-      -- the beam is offset from the chamber's centre, so the three of them
-      -- cross rather than all passing through one point
-      -- centred INSIDE the chamber (within 0.6 of its radius), so a shaft
-      -- crosses the open air end to end and buries only its tips. Spread to 1.5
-      -- radii, most of each beam was in the wall and what showed was a stub;
-      -- spread to 0.5, five of them merged into one mass. The chamber is big
-      -- enough now for the middle.
-      let ou = cham_u(k, cx, cz, seed, j) +. (hash(k, cx, cz, seed, 200 + 7 * j + b) -. 0.5) *. 1.0 *. cham_r(k, cx, cz, seed, j)
-      let ov = cham_v(k, cx, cz, seed, j) +. (hash(k, cx, cz, seed, 230 + 7 * j + b) -. 0.5) *. 1.0 *. cham_r(k, cx, cz, seed, j)
-      let oy = cham_y(k, cx, cz, seed, j, g) +. (hash(k, cx, cz, seed, 260 + 7 * j + b) -. 0.5) *. cham_r(k, cx, cz, seed, j) *. 0.9
-      let dx = beam_dx(k, cx, cz, seed, j, b) *. l
-      let dy = beam_dy(k, cx, cz, seed, j, b) *. l
-      let dz = beam_dz(k, cx, cz, seed, j, b) *. l
-      let t = seg_t(u, y, v, ou -. dx, oy -. dy, ov -. dz, ou +. dx, oy +. dy, ov +. dz)
-      let d = prism_d(u, y, v, ou -. dx, oy -. dy, ov -. dz, ou +. dx, oy +. dy, ov +. dz)
-              /. (beam_rad(k, cx, cz, seed, j, b) *. beam_taper(t))
-      beam_d(k, cx, cz, seed, u, v, y, g, j, b + 1, Math.min_float(best, d))
+      let dx = wx0 + 8 - sx(k, cx, cz, seed)
+      let dz = wz0 + 8 - sz(k, cx, cz, seed)
+      let r = reach(k) + 12
+      !(dx > r || dx < 0 - r || dz > r || dz < 0 - r)
     end
   end
-  pfn beams_d(k : Int, cx : Int, cz : Int, seed : Int, u : Float, v : Float, y : Float, g : Int, j : Int, best : Float) : Float do
-    if j >= chambers() do best
-    else beams_d(k, cx, cz, seed, u, v, y, g, j + 1, Math.min_float(best, beam_d(k, cx, cz, seed, u, v, y, g, j, 0, 9.0))) end
+  -- Two passes over the cells the chunk can see: count the instances, then
+  -- fill. The array is threaded through the fill (NativeArray.set_f32 returns
+  -- the array to use from then on; a discarded result is a lost write).
+  pfn beam_cells_count(k : Int, wx0 : Int, wz0 : Int, seed : Int, scale : Float, i : Int, cx0 : Int, cz0 : Int, nx : Int, nz : Int, n : Int) : Int do
+    if i >= nx * nz do n
+    else beam_cells_count(k, wx0, wz0, seed, scale, i + 1, cx0, cz0, nx, nz,
+                          if beam_cell_here(k, cx0 + i % nx, cz0 + i / nx, seed, wx0, wz0, scale) do n + 1 else n end) end
+  end
+  pfn beam_cells_fill(t : NativeF32Arr, n : Int, k : Int, wx0 : Int, wz0 : Int, seed : Int, shx : Float, shz : Float, scale : Float,
+                      i : Int, cx0 : Int, cz0 : Int, nx : Int, nz : Int) : NativeF32Arr do
+    if i >= nx * nz do t
+    else
+      let cx = cx0 + i % nx
+      let cz = cz0 + i / nx
+      if !beam_cell_here(k, cx, cz, seed, wx0, wz0, scale) do beam_cells_fill(t, n, k, wx0, wz0, seed, shx, shz, scale, i + 1, cx0, cz0, nx, nz)
+      else beam_cells_fill(beam_put_cell(t, n * chambers() * beams(), k, cx, cz, seed, ground(k, cx, cz, seed), shx, 0.0 -. 0.5, shz, 0),
+                           n + 1, k, wx0, wz0, seed, shx, shz, scale, i + 1, cx0, cz0, nx, nz) end
+    end
+  end
+  doc """
+  Every cavern beam that can touch the chunk whose world origin is (wx0, wz0),
+  in the MESHER's frame: a point at world (wx, y, wz) is at (wx - wx0 + lx, y,
+  wz - wz0 + lz), plus a half on every axis. The generator samples a block at
+  its integer corner and the mesher samples sub-cubes outward from the block's
+  min corner, so the generator's point (wx, y, wz) IS the mesher's (wx + 0.5,
+  y + 0.5, wz + 0.5); the half is folded into the shift here, once, so both
+  see the same beam. Without it 148 of a chunk's 1008 beam blocks had no beam
+  in them by the mesher's reckoning and were see-through holes. no_beams()
+  when there is none, which is nearly every chunk.
+  """
+  fn beam_table(seed : Int, wx0 : Int, wz0 : Int, lx : Float, lz : Float) : NativeF32Arr do
+    let scale = poi_scale()
+    let k = k_cavern()
+    if scale <= 0.0 do no_beams()
+    else
+      let r = reach(k)
+      let a = cell(k)
+      let cx0 = floor_div(wx0 - r, a)
+      let cz0 = floor_div(wz0 - r, a)
+      let nx = floor_div(wx0 + 15 + r, a) - cx0 + 1
+      let nz = floor_div(wz0 + 15 + r, a) - cz0 + 1
+      let shx = int_to_float(wx0) -. lx -. 0.5
+      let shz = int_to_float(wz0) -. lz -. 0.5
+      let n = beam_cells_count(k, wx0, wz0, seed, scale, 0, cx0, cz0, nx, nz, 0)
+      if n == 0 do no_beams()
+      else beam_cells_fill(NativeArray.make_f32(n * chambers() * beams() * beam_stride(), 0.0), 0, k, wx0, wz0, seed, shx, shz, scale, 0, cx0, cz0, nx, nz) end
+    end
   end
 
-  pfn vol_cavern(k : Int, cx : Int, cz : Int, seed : Int, wx : Int, wz : Int, y : Int, g : Int) : Int do
+  -- Signed distance from (x, y, z) to the surface of beam [i] of table [t], in blocks.
+  pfn beam_sd(t : NativeF32Arr, i : Int, x : Float, y : Float, z : Float) : Float do
+    let o = i * beam_stride()
+    let ax = NativeArray.get_f32(t, o)
+    let ay = NativeArray.get_f32(t, o + 1)
+    let az = NativeArray.get_f32(t, o + 2)
+    let ex = NativeArray.get_f32(t, o + 3)
+    let ey = NativeArray.get_f32(t, o + 4)
+    let ez = NativeArray.get_f32(t, o + 5)
+    prism_d(x, y, z, ax, ay, az, ex, ey, ez) -. NativeArray.get_f32(t, o + 6) *. beam_taper(seg_t(x, y, z, ax, ay, az, ex, ey, ez))
+  end
+  pfn beam_inside_go(t : NativeF32Arr, n : Int, x : Float, y : Float, z : Float, i : Int) : Bool do
+    if i >= n do false
+    else if beam_sd(t, i, x, y, z) < 0.0 do true
+    else beam_inside_go(t, n, x, y, z, i + 1) end end
+  end
+  pfn beam_min_go(t : NativeF32Arr, n : Int, x : Float, y : Float, z : Float, i : Int, best : Float) : Float do
+    if i >= n do best else beam_min_go(t, n, x, y, z, i + 1, Math.min_float(best, beam_sd(t, i, x, y, z))) end
+  end
+  doc "beam_min_sd in March: the reference the shim's kernel is held to (poi_test)."
+  fn beam_min_sd_ref(t : NativeF32Arr, x : Float, y : Float, z : Float) : Float do beam_min_go(t, beam_count(t), x, y, z, 0, 9.0) end
+  doc """
+  Signed distance, in blocks, from (x, y, z) to the nearest beam surface of
+  [t]; 9 when the table is empty. The shim's kernel (cf_beam_min_sd): a cavern
+  chunk asks this 864 thousand times, and at 320 ns a call in March that was
+  the whole of its 132 ms.
+  """
+  fn beam_min_sd(t : NativeF32Arr, x : Float, y : Float, z : Float) : Float do CubeForge.Ffi.Window.beam_min_sd(t, x, y, z) end
+  doc "Is the point (x, y, z), in the table's frame, inside any beam of [t]?"
+  fn beam_inside(t : NativeF32Arr, x : Float, y : Float, z : Float) : Bool do beam_inside_go(t, beam_count(t), x, y, z, 0) end
+
+  -- The beams of [t] whose surface comes within a block's half-diagonal of the
+  -- centre of the block at (x0, y0, z0): the only ones its 512 sub-cubes need
+  -- to ask. Two passes: count, then copy.
+  pfn beam_near_count(t : NativeF32Arr, n : Int, x : Float, y : Float, z : Float, i : Int, m : Int) : Int do
+    if i >= n do m
+    else beam_near_count(t, n, x, y, z, i + 1, if beam_sd(t, i, x, y, z) < 0.9 do m + 1 else m end) end
+  end
+  pfn beam_near_fill(t : NativeF32Arr, n : Int, out : NativeF32Arr, m : Int, x : Float, y : Float, z : Float, i : Int) : NativeF32Arr do
+    if i >= n do out
+    else if beam_sd(t, i, x, y, z) >= 0.9 do beam_near_fill(t, n, out, m, x, y, z, i + 1)
+    else beam_near_fill(t, n, copy8_go(t, i * beam_stride(), out, m * beam_stride(), 0), m + 1, x, y, z, i + 1) end end
+  end
+  pfn copy8_go(src : NativeF32Arr, si : Int, dst : NativeF32Arr, di : Int, j : Int) : NativeF32Arr do
+    if j >= beam_stride() do dst else copy8_go(src, si, NativeArray.set_f32(dst, di + j, NativeArray.get_f32(src, si + j)), di, j + 1) end
+  end
+  doc "The beams of [t] that reach the block whose min corner is (x0, y0, z0): no_beams() when none does."
+  fn beam_near(t : NativeF32Arr, x0 : Float, y0 : Float, z0 : Float) : NativeF32Arr do
+    let n = beam_count(t)
+    let m = beam_near_count(t, n, x0 +. 0.5, y0 +. 0.5, z0 +. 0.5, 0, 0)
+    if m == 0 do no_beams()
+    else beam_near_fill(t, n, NativeArray.make_f32(m * beam_stride(), 0.0), 0, x0 +. 0.5, y0 +. 0.5, z0 +. 0.5, 0) end
+  end
+
+  doc "The beam grid's side: 8 sub-cubes of the block and a margin of 1 on every side, the neighbouring blocks' nearest sub-cubes."
+  fn beam_grid_n() : Int do 10 end
+  -- Is grid cell coordinate [c] in the margin?
+  pfn in_margin(c : Int) : Bool do c == 0 || c == beam_grid_n() - 1 end
+  -- One beam's constants, hoisted once per block rather than read seven
+  -- times per sub-cube: the segment (ax, ay, az) -> (ex, ey, ez), its
+  -- squared length, the horizontal length that builds the cross-section
+  -- basis, and the radius. The 896 sub-cubes that matter (the 8-cube plus
+  -- the six face layers of the margin) are walked per beam.
+  pfn beam_grid_beam(g : NativeU8Arr, x0 : Float, y0 : Float, z0 : Float,
+                     ax : Float, ay : Float, az : Float, dx : Float, dy : Float, dz : Float, len2 : Float, h : Float, rad : Float, i : Int) : NativeU8Arr do
+    let gn = beam_grid_n()
+    if i >= gn * gn * gn do g
+    else
+      let x = i % gn
+      let y = i / (gn * gn)
+      let z = (i / gn) % gn
+      let margins = (if in_margin(x) do 1 else 0 end) + (if in_margin(y) do 1 else 0 end) + (if in_margin(z) do 1 else 0 end)
+      if margins >= 2 do beam_grid_beam(g, x0, y0, z0, ax, ay, az, dx, dy, dz, len2, h, rad, i + 1)
+      else if NativeArray.get_u8(g, CubeForge.Model.idx_n(gn, x, y, z)) != 0 do beam_grid_beam(g, x0, y0, z0, ax, ay, az, dx, dy, dz, len2, h, rad, i + 1)
+      else
+        let px = x0 +. (int_to_float(x - 1) +. 0.5) /. 8.0
+        let py = y0 +. (int_to_float(y - 1) +. 0.5) /. 8.0
+        let pz = z0 +. (int_to_float(z - 1) +. 0.5) /. 8.0
+        let t = N.clamp01(((px -. ax) *. dx +. (py -. ay) *. dy +. (pz -. az) *. dz) /. len2)
+        let ox = px -. (ax +. dx *. t)
+        let oy = py -. (ay +. dy *. t)
+        let oz = pz -. (az +. dz *. t)
+        let r2 = ox *. ox +. oy *. oy +. oz *. oz
+        let fa = Math.abs(if h < 0.0001 do ox else (ox *. dz -. oz *. dx) /. h end)
+        let b2 = r2 -. fa *. fa
+        let fb = if b2 <= 0.0 do 0.0 else Math.sqrt(b2) end
+        let d = Math.max_float(Math.max_float(fa, fb), (fa +. fb) *. 0.7071)
+        beam_grid_beam(if d < rad *. beam_taper(t) do NativeArray.set_u8(g, CubeForge.Model.idx_n(gn, x, y, z), CubeForge.Model.c_crystal()) else g end,
+                       x0, y0, z0, ax, ay, az, dx, dy, dz, len2, h, rad, i + 1)
+      end end
+    end
+  end
+  pfn beam_grid_go(g : NativeU8Arr, t : NativeF32Arr, n : Int, x0 : Float, y0 : Float, z0 : Float, bi : Int) : NativeU8Arr do
+    if bi >= n do g
+    else
+      let o = bi * beam_stride()
+      let ax = NativeArray.get_f32(t, o)
+      let ay = NativeArray.get_f32(t, o + 1)
+      let az = NativeArray.get_f32(t, o + 2)
+      let dx = NativeArray.get_f32(t, o + 3) -. ax
+      let dy = NativeArray.get_f32(t, o + 4) -. ay
+      let dz = NativeArray.get_f32(t, o + 5) -. az
+      let len2 = dx *. dx +. dy *. dy +. dz *. dz
+      beam_grid_go(beam_grid_beam(g, x0, y0, z0, ax, ay, az, dx, dy, dz, if len2 <= 0.0001 do 0.0001 else len2 end, Math.sqrt(dx *. dx +. dz *. dz), NativeArray.get_f32(t, o + 6), 0),
+                   t, n, x0, y0, z0, bi + 1)
+    end
+  end
+  doc """
+  The block at min corner (x0, y0, z0) cut into 8x8x8 sub-cubes against the
+  beams of [t] (use beam_near's table), with a one-sub-cube margin from the
+  blocks around it: a Model grid beam_grid_n() a side, selenite where a
+  sub-cube's centre is inside a beam. Model.template_inner turns it into the
+  block's faces, and only those the neighbours do not cover: without the
+  margin a section of beams carried 1.6 million floats, most of them faces
+  buried inside the beam between two of its own blocks. The cut is the
+  shim's kernel (cf_beam_grid); beam_grid_ref is the same in March.
+  """
+  fn beam_grid(t : NativeF32Arr, x0 : Float, y0 : Float, z0 : Float) : NativeU8Arr do
+    CubeForge.Ffi.Window.beam_grid(CubeForge.Model.empty_n(beam_grid_n()), t, x0, y0, z0, beam_grid_n(), CubeForge.Model.c_crystal())
+  end
+  doc "beam_grid in March: the reference the shim's kernel is held to (poi_test)."
+  fn beam_grid_ref(t : NativeF32Arr, x0 : Float, y0 : Float, z0 : Float) : NativeU8Arr do
+    beam_grid_go(CubeForge.Model.empty_n(beam_grid_n()), t, beam_count(t), x0, y0, z0, 0)
+  end
+
+  pfn vol_cavern(k : Int, cx : Int, cz : Int, seed : Int, aux : NativeF32Arr, wx : Int, wz : Int, y : Int, g : Int) : Int do
     let u = u_of(k, cx, cz, seed, wx, wz)
     let v = v_of(k, cx, cz, seed, wx, wz)
     let d = cav_d(k, cx, cz, seed, u, v, int_to_float(y), g, 0, 9.0)
     -- a little past the shell, so a beam is driven into the rock at both ends
     -- rather than stopping neatly at the wall
     if d >= 1.45 do 0 - 1
-    else if beams_d(k, cx, cz, seed, u, v, int_to_float(y), g, 0, 9.0) < 1.0 do C.crystal_beam()
+    -- a block holds crystal_beam when the beam's surface passes within
+    -- beam_skin of its centre: every block that holds any of the prism, so
+    -- the mesher's sub-block cut (beam_grid) has somewhere to put each sliver
+    else if beam_min_sd(aux, int_to_float(wx), int_to_float(y), int_to_float(wz)) < beam_skin() do C.crystal_beam()
     else if d >= 1.0 do 0 - 1
-    -- the fine growth, now only broken pieces on the FLOOR, and few. Blades on
-    -- every surface read as white popcorn and stole the scene from the shafts:
-    -- Naica has no fine growth like that, it has the beams and the rock
-    else if d > 0.90 && int_to_float(y) < cham_y(k, cx, cz, seed, 0, g) -. 2.0
-            && N.hash2(wx * 31 + y, wz * 17 - y, seed + 909) < 0.03 do C.crystal()
-    else 0 end end end end
+    -- No fine growth. The blade models on the shell read as white mushrooms
+    -- stuck to the rock, first everywhere, then as floor rubble, and in every
+    -- picture they were the thing the eye went to and the thing Naica has none
+    -- of. Naica is the beams and the rock, nothing else. The blade block stays
+    -- for the item and for anywhere else that wants a small crystal.
+    else 0 end end end
   end
 
   -- ── The giant tree ───────────────────────────────────────────────────────
@@ -964,12 +1207,13 @@ mod CubeForge.Poi do
 
   doc """
   What kind [k]'s instance in cell (cx, cz) does to the voxel (wx, y, wz), given
-  the ground [g] its site stands on: -1 leave alone, 0 clear, or a block id to
+  the ground [g] its site stands on and [aux], the instance's cell_aux (built
+  once per instance, not per voxel): -1 leave alone, 0 clear, or a block id to
   write into air. The generator and the preview both go through here.
   """
-  fn vol_block(k : Int, cx : Int, cz : Int, seed : Int, wx : Int, wz : Int, y : Int, g : Int) : Int do
+  fn vol_block(k : Int, cx : Int, cz : Int, seed : Int, aux : NativeF32Arr, wx : Int, wz : Int, y : Int, g : Int) : Int do
     if k == k_arch() do vol_arch(k, cx, cz, seed, wx, wz, y, g)
-    else if k == k_cavern() do vol_cavern(k, cx, cz, seed, wx, wz, y, g)
+    else if k == k_cavern() do vol_cavern(k, cx, cz, seed, aux, wx, wz, y, g)
     else if k == k_tree() do vol_tree(k, cx, cz, seed, wx, wz, y, g)
     else 0 - 1 end end end
   end
@@ -988,13 +1232,13 @@ mod CubeForge.Poi do
 
   -- ── Applying it to a chunk ───────────────────────────────────────────────
 
-  pfn apply_y_go(c : CubeForge.Chunk.Chunk, k : Int, cx : Int, cz : Int, seed : Int,
+  pfn apply_y_go(c : CubeForge.Chunk.Chunk, k : Int, cx : Int, cz : Int, seed : Int, aux : NativeF32Arr,
                  wx : Int, wz : Int, x : Int, z : Int, y : Int, y1 : Int, g : Int) : CubeForge.Chunk.Chunk do
     if y > y1 do c
     else
       let c1 = if y < 1 || y >= 256 do c
                else
-                 let b = vol_block(k, cx, cz, seed, wx, wz, y, g)
+                 let b = vol_block(k, cx, cz, seed, aux, wx, wz, y, g)
                  let had = C.get(c, x, y, z)
                  if b < 0 do c
                  else if b == 0 do (if carvable(had) do C.set(c, x, y, z, 0) else c end)
@@ -1007,13 +1251,13 @@ mod CubeForge.Poi do
                  else if vol_of(k) == vol_stamp() do (if had == 0 do C.set(c, x, y, z, b) else c end)
                  else (if carvable(had) || had == 0 do C.set(c, x, y, z, b) else c end) end end end
                end
-      apply_y_go(c1, k, cx, cz, seed, wx, wz, x, z, y + 1, y1, g)
+      apply_y_go(c1, k, cx, cz, seed, aux, wx, wz, x, z, y + 1, y1, g)
     end
   end
 
   -- Every column of the chunk against one instance: 256 columns is cheaper to
   -- walk than the instance's own footprint, and it needs no clipping.
-  pfn apply_col_go(c : CubeForge.Chunk.Chunk, k : Int, wx0 : Int, wz0 : Int, seed : Int,
+  pfn apply_col_go(c : CubeForge.Chunk.Chunk, k : Int, wx0 : Int, wz0 : Int, seed : Int, aux : NativeF32Arr,
                    cx : Int, cz : Int, i : Int, g : Int) : CubeForge.Chunk.Chunk do
     if i >= 256 do c
     else
@@ -1024,11 +1268,11 @@ mod CubeForge.Poi do
       let dx = wx0 + x - sx(k, cx, cz, seed)
       let dz = wz0 + z - sz(k, cx, cz, seed)
       let r = reach(k)
-      if dx * dx + dz * dz > r * r do apply_col_go(c, k, wx0, wz0, seed, cx, cz, i + 1, g)
+      if dx * dx + dz * dz > r * r do apply_col_go(c, k, wx0, wz0, seed, aux, cx, cz, i + 1, g)
       else
-        apply_col_go(apply_y_go(c, k, cx, cz, seed, wx0 + x, wz0 + z, x, z,
+        apply_col_go(apply_y_go(c, k, cx, cz, seed, aux, wx0 + x, wz0 + z, x, z,
                                 vol_y0(k, cx, cz, seed, g), vol_y1(k, cx, cz, seed, g), g),
-                     k, wx0, wz0, seed, cx, cz, i + 1, g)
+                     k, wx0, wz0, seed, aux, cx, cz, i + 1, g)
       end
     end
   end
@@ -1042,7 +1286,7 @@ mod CubeForge.Poi do
       let dz = wz0 + 8 - sz(k, cx, cz, seed)
       let r = reach(k) + 12
       if dx > r || dx < 0 - r || dz > r || dz < 0 - r do c
-      else apply_col_go(c, k, wx0, wz0, seed, cx, cz, 0, ground(k, cx, cz, seed)) end
+      else apply_col_go(c, k, wx0, wz0, seed, cell_aux(k, cx, cz, seed), cx, cz, 0, ground(k, cx, cz, seed)) end
     end
   end
 
@@ -1155,7 +1399,7 @@ mod CubeForge.Poi do
     let wx = pv_wx(k, cx, cz, seed, u, v)
     let wz = pv_wz(k, cx, cz, seed, u, v)
     let raised = if class_of(k) == cls_field() do pv_field(k, v, g) else shape_at(k, cx, cz, wx, wz, seed, int_to_float(g)) end
-    let b = vol_block(k, cx, cz, seed, wx, wz, y, g)
+    let b = vol_block(k, cx, cz, seed, cell_aux_at(k, cx, cz, seed, g), wx, wz, y, g)
     if b > 0 do (if b == C.crystal() do "*" else if b == C.crystal_beam() do "X" else if b == C.oak_log() do "T" else "o" end end end)
     else if b == 0 do (if y <= g + raised do "." else " " end)
     else if y <= g + raised do (if raised < 0 do "#" else if y <= g do "#" else ":" end end)

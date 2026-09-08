@@ -76,7 +76,7 @@ mod CubeForge.Model do
     else if k == 20 do 62 else if k == 21 do 90 else if k == 22 do 90
     else if k == 23 do 150 else if k == 24 do 118 else if k == 25 do 226 else if k == 26 do 54
     else if k == 27 do 226 else if k == 28 do 236 else if k == 29 do 240 else if k == 30 do 24
-    else if k == 86 do 228 else if k == 87 do 248
+    else if k == 86 do 244 else if k == 87 do 248
     else 0 end end end end end end end end end end end end end end end end end end end end end end
   end
   fn colour_g(k : Int) : Int do
@@ -87,7 +87,7 @@ mod CubeForge.Model do
     else if k == 20 do 128 else if k == 21 do 160 else if k == 22 do 64
     else if k == 23 do 112 else if k == 24 do 86 else if k == 25 do 214 else if k == 26 do 44
     else if k == 27 do 134 else if k == 28 do 146 else if k == 29 do 236 else if k == 30 do 20
-    else if k == 86 do 230 else if k == 87 do 250
+    else if k == 86 do 240 else if k == 87 do 250
     else 0 end end end end end end end end end end end end end end end end end end end end end end
   end
   fn colour_b(k : Int) : Int do
@@ -98,7 +98,7 @@ mod CubeForge.Model do
     else if k == 20 do 54 else if k == 21 do 70 else if k == 22 do 40
     else if k == 23 do 72 else if k == 24 do 56 else if k == 25 do 196 else if k == 26 do 36
     else if k == 27 do 62 else if k == 28 do 52 else if k == 29 do 226 else if k == 30 do 18
-    else if k == 86 do 222 else if k == 87 do 244
+    else if k == 86 do 226 else if k == 87 do 244
     else 0 end end end end end end end end end end end end end end end end end end end end end end
   end
 
@@ -457,19 +457,44 @@ mod CubeForge.Model do
       end
     end
   end
-  pfn dirs_go(g : Greedy, grid : NativeU8Arr, n : Int, bb : Box, d : Int) : Greedy do
+  -- Slices are walked within [m, n - 1 - m]: the cells of a margin (see
+  -- template_inner) are neighbours, read by face_at and never emitting.
+  pfn dirs_go(g : Greedy, grid : NativeU8Arr, n : Int, bb : Box, d : Int, m : Int) : Greedy do
     if d >= 6 do g
     else
       -- A face can sit one slice OUTSIDE the filled box, on the far side of the
       -- outermost cell, so each axis is walked one past its bound.
       let alo = axis_lo(bb, slice_axis(d)) - 1
       let ahi = axis_hi(bb, slice_axis(d)) + 1
-      dirs_go(slices_go(g, grid, n, bb, d, if alo < 0 do 0 else alo end, if ahi >= n do n - 1 else ahi end), grid, n, bb, d + 1)
+      dirs_go(slices_go(g, grid, n, bb, d, if alo < m do m else alo end, if ahi >= n - m do n - 1 - m else ahi end), grid, n, bb, d + 1, m)
     end
   end
   doc "Greedy-mesh a grid [n] a side into a template: vertices in the 10-float layout, positions in [0, 1], shade 1."
   fn template_n(grid : NativeU8Arr, n : Int) : CubeForge.F32Buf.F32Buf do
-    match dirs_go(Greedy(B.new(1024), NativeArray.make_int(n * n, 0)), grid, n, bbox(grid, n), 0) do
+    match dirs_go(Greedy(B.new(1024), NativeArray.make_int(n * n, 0)), grid, n, bbox(grid, n), 0, 0) do
+      Greedy(b, _) -> b
+    end
+  end
+  pfn clamp_box(bb : Box, lo : Int, hi : Int) : Box do
+    match bb do
+      Box(x0, x1, y0, y1, z0, z1) ->
+        Box(if x0 < lo do lo else x0 end, if x1 > hi do hi else x1 end,
+            if y0 < lo do lo else y0 end, if y1 > hi do hi else y1 end,
+            if z0 < lo do lo else z0 end, if z1 > hi do hi else z1 end)
+    end
+  end
+  doc """
+  Greedy-mesh the INNER cells of a grid [n] a side, those at least [m] in from
+  every side; the outer [m] cells are the neighbours of the inner ones and
+  only cull faces. This is how a crystal beam block is cut against the beam
+  blocks around it (Poi.beam_grid): a face on the block's boundary that the
+  next block's sub-cubes cover is not emitted, where a plain template would
+  emit both blocks' faces there, back to back. Positions are still over the
+  whole grid, [0, 1]: place with F32Buf.stamp_xf at scale n / (n - 2m) about
+  the grid's centre, which is the inner cube's centre too.
+  """
+  fn template_inner(grid : NativeU8Arr, n : Int, m : Int) : CubeForge.F32Buf.F32Buf do
+    match dirs_go(Greedy(B.new(1024), NativeArray.make_int(n * n, 0)), grid, n, clamp_box(bbox(grid, n), m, n - 1 - m), 0, m) do
       Greedy(b, _) -> b
     end
   end

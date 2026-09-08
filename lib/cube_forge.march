@@ -2223,7 +2223,7 @@ mod CubeForge do
             println("load slot " ++ int_to_string(slot) ++ " failed: " ++ e ++ "; generating instead")
             NoLoad
           Ok(cs) ->
-            println("loaded slot " ++ int_to_string(slot) ++ " (seed " ++ int_to_string(Save.h_seed(h)) ++ ") in " ++ int_to_string(System.monotonic_time() - tl0) ++ " ms, world hash " ++ int_to_string(World.state_hash(World.from_chunks(cs, CubeForge.Noise.size_of(Save.h_seed(h))))))
+            println("loaded slot " ++ int_to_string(slot) ++ " (seed " ++ int_to_string(Save.h_seed(h)) ++ ") in " ++ int_to_string(System.monotonic_time() - tl0) ++ " ms, world hash " ++ int_to_string(World.state_hash(World.from_chunks(cs, CubeForge.Noise.size_of(Save.h_seed(h)), Save.h_seed(h)))))
             Loaded(h, cs, Save.read_cache(Save.dir(), slot, Save.h_cached(h)))
         end
     end
@@ -3292,7 +3292,7 @@ mod CubeForge do
   -- draws a hypothetical cell on flat ground; this draws the one the camera is
   -- standing in.  '#' rock  '.' air  'X' beam  '*' blade
   pfn slice_ch(k : Int, cx : Int, cz : Int, seed : Int, wx : Int, y : Int, wz : Int, g : Int) : String do
-    let b = CubeForge.Poi.vol_block(k, cx, cz, seed, wx, wz, y, g)
+    let b = CubeForge.Poi.vol_block(k, cx, cz, seed, CubeForge.Poi.cell_aux(k, cx, cz, seed), wx, wz, y, g)
     if b == CubeForge.Chunk.crystal_beam() do "X" else if b == CubeForge.Chunk.crystal() do "*"
     else if b == 0 do "." else (if y <= CubeForge.Noise.height_base(wx, wz, seed) do "#" else " " end) end end end
   end
@@ -3606,7 +3606,7 @@ mod CubeForge do
     end
     let t1 = System.monotonic_time()
     let world_dark = match loaded do
-      Loaded(h, cs, ca) -> World.with_hashes(World.with_cache(World.with_origin(World.from_chunks(cs, n), Save.h_origin_x(h), Save.h_origin_z(h)), ca, NativeArray.make_u8(n * n, 1)), Save.h_hashes(h))
+      Loaded(h, cs, ca) -> World.with_hashes(World.with_cache(World.with_origin(World.from_chunks(cs, n, seed), Save.h_origin_x(h), Save.h_origin_z(h)), ca, NativeArray.make_u8(n * n, 1)), Save.h_hashes(h))
       NoLoad -> World.generate(n, seed, workers)
     end
     -- stage 1a: the climate and the wild fungus. The biome field is pure over

@@ -81,15 +81,18 @@ mod CubeForge.Texture do
   -- and a cream crystal in a sandstone chamber is one beige mass. What separates
   -- selenite from its host in every photograph is that it is PALER than
   -- anything around it.
+  -- Nearly uniform, on purpose. The greedy mesher merges a beam's coplanar faces
+  -- into long quads, and any per-block banding in the texel repeats every block
+  -- along that quad -- which made every beam read as stacked masonry. A face
+  -- that varies by a few counts across the whole texel reads as one selenite
+  -- plane. The variation that remains is a soft wash, not a stripe.
   pfn beam_go(a : NativeU8Arr, i : Int) : NativeU8Arr do
     if i >= 256 do a
     else
       let x = i % 16
       let y = i / 16
-      let band = ((y + x / 7) % 6) * 5 - 12
-      let grain = ((x * 5 + y * 3) % 4) * 3
-      let d = band + grain
-      beam_go(put_rgba(a, 93 * 1024 + i * 4, 240 + d, 242 + d, 236 + d, 255), i + 1)
+      let wash = ((x + y) % 5) - 2
+      beam_go(put_rgba(a, 93 * 1024 + i * 4, 246 + wash, 244 + wash, 236 + wash, 255), i + 1)
     end
   end
 

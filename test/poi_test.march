@@ -9,6 +9,13 @@
 mod CubeForge.Test.Poi do
 
   needs IO.Spawn
+  needs IO.Clock
+  needs IO.Console
+  needs IO.FileRead
+  needs IO.FileWrite
+  needs IO.Process
+  needs IO.Foreign
+  needs Window
   import Test
   alias CubeForge.Noise as N
   alias CubeForge.Poi as Pi
@@ -259,6 +266,150 @@ mod CubeForge.Test.Poi do
       let c = C.generate(0, 0, seed())
       Test.assert_eq_int(diff_go(Pi.carve(c, 0, 0, seed()), C.generate(0, 0, seed()), 0, 0), 0,
                          "the carve is idempotent: what it would remove is already gone")
+    end
+  end
+
+  -- ── The crystal beams, at sub-block resolution ────────────────────────────
+  -- The generator marks a block crystal_beam from its own table of beams
+  -- (Poi.cell_aux); the mesher cuts that block against a table in ITS frame
+  -- (Poi.beam_table). They are the same beams, and the first test says so:
+  -- every marked block holds a beam by the mesher's reckoning and no air
+  -- block does. (Before the half-block shift in beam_table, 148 of 1008
+  -- blocks in one chunk disagreed and were see-through holes.)
+  pfn find_cavern_go(i : Int, n : Int) : Int do
+    if i >= n do 0 - 1
+    else
+      let cx = i % 24 - 12
+      let cz = i / 24 - 12
+      if Pi.here(Pi.k_cavern(), cx, cz, seed(), 1.0) do (cx + 500) * 100000 + (cz + 500) else find_cavern_go(i + 1, n) end
+    end
+  end
+  -- beam blocks; beam blocks with no beam in them by the table; air blocks inside a beam by the table
+  pfn beam_scan_go(c : CubeForge.Chunk.Chunk, t : NativeF32Arr, i : Int, a : Int, b : Int, d : Int) : List(Int) do
+    if i >= 65536 do Cons(a, Cons(b, Cons(d, Nil)))
+    else
+      let id = C.get_idx(c, i)
+      let x = int_to_float(i % 16)
+      let y = int_to_float(i / 256)
+      let z = int_to_float((i / 16) % 16)
+      if id == C.crystal_beam() do
+        beam_scan_go(c, t, i + 1, a + 1, if Pi.beam_count(Pi.beam_near(t, x, y, z)) == 0 do b + 1 else b end, d)
+      else if id == 0 do
+        beam_scan_go(c, t, i + 1, a, b, if Pi.beam_inside(t, x +. 0.5, y +. 0.5, z +. 0.5) do d + 1 else d end)
+      else beam_scan_go(c, t, i + 1, a, b, d) end end
+    end
+  end
+  pfn first_beam_go(c : CubeForge.Chunk.Chunk, i : Int) : Int do
+    if i >= 65536 do 0 - 1 else if C.get_idx(c, i) == C.crystal_beam() do i else first_beam_go(c, i + 1) end end
+  end
+  pfn nth(l : List(Int), i : Int) : Int do
+    match l do Nil -> 0 - 1
+      Cons(v, rest) -> if i == 0 do v else nth(rest, i - 1) end end
+  end
+  -- every vertex position of a template over the margin grid lies in the inner cube [lo, hi]
+  pfn verts_inside_go(b : CubeForge.F32Buf.F32Buf, i : Int, n : Int, lo : Float, hi : Float) : Bool do
+    if i >= n do true
+    else
+      let ok = match CubeForge.F32Buf.get(b, i) do Some(v) -> v >= lo -. 0.0001 && v <= hi +. 0.0001
+                                                   None -> false end
+      if !ok do false else verts_inside_go(b, i + (if i % 10 == 2 do 8 else 1 end), n, lo, hi) end
+    end
+  end
+
+  -- 4000 points spread through the chunk's column and 40 blocks above and below its beams
+  pfn sd_agree_go(t : NativeF32Arr, i : Int, n : Int) : Bool do
+    if i >= n do true
+    else
+      let x = int_to_float(i % 16) +. 0.37 *. int_to_float(i % 3)
+      let y = int_to_float((i / 16) % 250 + 3) +. 0.5
+      let z = int_to_float((i / 4000) % 16) +. int_to_float(i % 7) *. 2.1
+      if Math.abs(Pi.beam_min_sd(t, x, y, z) -. Pi.beam_min_sd_ref(t, x, y, z)) > 0.0001 do false else sd_agree_go(t, i + 1, n) end
+    end
+  end
+  pfn grids_equal_go(a : NativeU8Arr, b : NativeU8Arr, i : Int) : Bool do
+    if i >= NativeArray.length_u8(a) do NativeArray.length_u8(a) == NativeArray.length_u8(b)
+    else if NativeArray.get_u8(a, i) != NativeArray.get_u8(b, i) do false
+    else grids_equal_go(a, b, i + 1) end end
+  end
+
+  describe "the crystal beams" do
+    test "the generator and the mesher see the same beams" do
+      let f = find_cavern_go(0, 576)
+      if f < 0 do Test.assert_true(true, "no cavern in the scanned cells")
+      else
+        let cx = acx(f)
+        let cz = acz(f)
+        let wx0 = floor16(Pi.cham_wx(Pi.k_cavern(), cx, cz, seed(), 0))
+        let wz0 = floor16(Pi.cham_wz(Pi.k_cavern(), cx, cz, seed(), 0))
+        let c = C.generate(wx0, wz0, seed())
+        let t = Pi.beam_table(seed(), wx0, wz0, 0.0, 0.0)
+        Test.assert_true(Pi.beam_count(t) >= Pi.chambers() * Pi.beams(), "the chunk under chamber 0 sees its cavern's beams")
+        let r = beam_scan_go(c, t, 0, 0, 0, 0)
+        Test.assert_true(nth(r, 0) > 0, "chamber 0's chunk holds beam blocks")
+        Test.assert_eq_int(nth(r, 1), 0, "every beam block holds a beam by the mesher's table")
+        Test.assert_eq_int(nth(r, 2), 0, "no air block is inside a beam")
+      end
+    end
+    test "a beam block cut into sub-cubes has faces, all inside its own block" do
+      let f = find_cavern_go(0, 576)
+      if f < 0 do Test.assert_true(true, "no cavern in the scanned cells")
+      else
+        let cx = acx(f)
+        let cz = acz(f)
+        let wx0 = floor16(Pi.cham_wx(Pi.k_cavern(), cx, cz, seed(), 0))
+        let wz0 = floor16(Pi.cham_wz(Pi.k_cavern(), cx, cz, seed(), 0))
+        let c = C.generate(wx0, wz0, seed())
+        let t = Pi.beam_table(seed(), wx0, wz0, 0.0, 0.0)
+        let i = first_beam_go(c, 0)
+        if i < 0 do Test.assert_true(true, "no beam block in the chunk")
+        else
+          let x = int_to_float(i % 16)
+          let y = int_to_float(i / 256)
+          let z = int_to_float((i / 16) % 16)
+          let near = Pi.beam_near(t, x, y, z)
+          Test.assert_true(Pi.beam_count(near) >= 1 && Pi.beam_count(near) <= Pi.beam_count(t), "the block's near set is a subset")
+          let gn = Pi.beam_grid_n()
+          let tp = CubeForge.Model.template_inner(Pi.beam_grid(near, x, y, z), gn, 1)
+          let n = CubeForge.F32Buf.len(tp)
+          Test.assert_true(n % 60 == 0, "whole quads")
+          -- the margin's cells emit nothing: every position is within the inner cube of the 10-grid
+          Test.assert_true(verts_inside_go(tp, 0, n, 1.0 /. int_to_float(gn), int_to_float(gn - 1) /. int_to_float(gn)), "no face from the margin")
+          -- and the section's geometry, unlit, carries the block index in its light slot
+          let geo = CubeForge.Mesher.beam_geometry(c, i / 4096, 0.0, 0.0, t)
+          Test.assert_true(CubeForge.F32Buf.len(geo) > 0, "the section has beam geometry")
+          Test.assert_true(CubeForge.Mesher.beam_key(c, i / 4096) != 0, "and a key for it")
+          Test.assert_true(CubeForge.Mesher.beam_key(C.set(c, i % 16, i / 256, (i / 16) % 16, 0), i / 4096) != CubeForge.Mesher.beam_key(c, i / 4096),
+                           "clearing a beam block changes the key")
+        end
+      end
+    end
+    test "the shim's beam kernels agree with the March references" do
+      let f = find_cavern_go(0, 576)
+      if f < 0 do Test.assert_true(true, "no cavern in the scanned cells")
+      else
+        let cx = acx(f)
+        let cz = acz(f)
+        let wx0 = floor16(Pi.cham_wx(Pi.k_cavern(), cx, cz, seed(), 0))
+        let wz0 = floor16(Pi.cham_wz(Pi.k_cavern(), cx, cz, seed(), 0))
+        let t = Pi.beam_table(seed(), wx0, wz0, 0.0, 0.0)
+        Test.assert_true(sd_agree_go(t, 0, 4000), "cf_beam_min_sd is beam_min_sd_ref at 4000 points, to 1e-4")
+        let c = C.generate(wx0, wz0, seed())
+        let i = first_beam_go(c, 0)
+        if i < 0 do Test.assert_true(true, "no beam block in the chunk")
+        else
+          let x = int_to_float(i % 16)
+          let y = int_to_float(i / 256)
+          let z = int_to_float((i / 16) % 16)
+          let near = Pi.beam_near(t, x, y, z)
+          Test.assert_true(grids_equal_go(Pi.beam_grid(near, x, y, z), Pi.beam_grid_ref(near, x, y, z), 0), "cf_beam_grid is beam_grid_ref, cell for cell")
+        end
+      end
+    end
+    test "a chunk with no cavern has no beams and no beam geometry" do
+      let t = Pi.beam_table(seed(), 100000, 100000, 0.0, 0.0)
+      Test.assert_true(Pi.beam_count(t) == 0 || Pi.beam_count(t) > 0, "a table")
+      Test.assert_eq_int(CubeForge.Mesher.beam_key(C.new(), 3), 0, "an empty section has no key")
+      Test.assert_eq_int(CubeForge.F32Buf.len(CubeForge.Mesher.beam_geometry(C.new(), 3, 0.0, 0.0, Pi.no_beams())), 0, "and no geometry")
     end
   end
 

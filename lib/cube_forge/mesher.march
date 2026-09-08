@@ -482,7 +482,7 @@ mod CubeForge.Mesher do
 
   -- Greedy-meshed faces of one category in section [sy] of chunk [c] (with its 4 neighbours).
   fn mesh_section_cat(c : CubeForge.Chunk.Chunk, n : CubeForge.Chunk.Chunk, s : CubeForge.Chunk.Chunk, e : CubeForge.Chunk.Chunk, w : CubeForge.Chunk.Chunk,
-                      la : NativeU8Arr, lb : NativeU8Arr, sps : NativeU8Arr, occ : NativeU8Arr, sy : Int, ox : Float, oz : Float, cat : Int, models : CubeForge.Model.Templates) : CubeForge.F32Buf.F32Buf do
+                      la : NativeU8Arr, lb : NativeU8Arr, sps : NativeU8Arr, occ : NativeU8Arr, sy : Int, ox : Float, oz : Float, cat : Int, models : CubeForge.Model.Templates, beam_geo : CubeForge.F32Buf.F32Buf) : CubeForge.F32Buf.F32Buf do
     if !section_has(c, sy * 4096, (sy + 1) * 4096, cat) do B.new(1)
     else
       let oxi = float_to_int(ox)
@@ -491,20 +491,25 @@ mod CubeForge.Mesher do
       -- room for a slice's worst case from the start, so a typical section never grows
       let b = dirs_go(B.new(16384), masks, 0, sy, ox, oz, CubeForge.Model.layers(models))
       -- the foliage pass carries the models: each model block stamped after the cubes
-      if cat == cat_foliage() do stamp_go(b, models, c, n, s, e, w, la, lb, oxi, ozi, ox, oz, sy * 4096, (sy + 1) * 4096) else b end
+      -- the foliage pass carries the models, and the crystal beams: cut once
+      -- (beam_geometry, cached by ChunkMesh) and re-lit here
+      if cat == cat_foliage() do
+        let b1 = stamp_go(b, models, c, n, s, e, w, la, lb, oxi, ozi, ox, oz, sy * 4096, (sy + 1) * 4096)
+        if B.len(beam_geo) == 0 do b1 else B.relight(b1, B.storage(beam_geo), 0, B.len(beam_geo), la, lb, oxi, ozi) end
+      else b end
     end
   end
 
   doc "Greedy-meshed opaque faces of section [sy]."
   fn mesh_section_opaque(c : CubeForge.Chunk.Chunk, n : CubeForge.Chunk.Chunk, s : CubeForge.Chunk.Chunk, e : CubeForge.Chunk.Chunk, w : CubeForge.Chunk.Chunk,
                          la : NativeU8Arr, lb : NativeU8Arr, sps : NativeU8Arr, occ : NativeU8Arr, sy : Int, ox : Float, oz : Float, models : CubeForge.Model.Templates) : CubeForge.F32Buf.F32Buf do
-    mesh_section_cat(c, n, s, e, w, la, lb, sps, occ, sy, ox, oz, cat_opaque(), models)
+    mesh_section_cat(c, n, s, e, w, la, lb, sps, occ, sy, ox, oz, cat_opaque(), models, no_beam_geo())
   end
 
-  doc "Greedy-meshed alpha-cutout foliage faces of section [sy], plus the stamped models."
+  doc "Greedy-meshed alpha-cutout foliage faces of section [sy], plus the stamped models, plus [beam_geo] -- the section's cached crystal-beam geometry (beam_geometry), re-lit; no_beam_geo() when it has none."
   fn mesh_section_foliage(c : CubeForge.Chunk.Chunk, n : CubeForge.Chunk.Chunk, s : CubeForge.Chunk.Chunk, e : CubeForge.Chunk.Chunk, w : CubeForge.Chunk.Chunk,
-                          la : NativeU8Arr, lb : NativeU8Arr, sps : NativeU8Arr, occ : NativeU8Arr, sy : Int, ox : Float, oz : Float, models : CubeForge.Model.Templates) : CubeForge.F32Buf.F32Buf do
-    mesh_section_cat(c, n, s, e, w, la, lb, sps, occ, sy, ox, oz, cat_foliage(), models)
+                          la : NativeU8Arr, lb : NativeU8Arr, sps : NativeU8Arr, occ : NativeU8Arr, sy : Int, ox : Float, oz : Float, models : CubeForge.Model.Templates, beam_geo : CubeForge.F32Buf.F32Buf) : CubeForge.F32Buf.F32Buf do
+    mesh_section_cat(c, n, s, e, w, la, lb, sps, occ, sy, ox, oz, cat_foliage(), models, beam_geo)
   end
 
   -- ── Models: small things stamped as templates ───────────────────────────
@@ -518,11 +523,12 @@ mod CubeForge.Mesher do
               x : Int, y : Int, z : Int, id : Int) : Bool do
     if C.is_fruit_small(id) do true
     else if id == C.crystal() do true
+    else if id == C.crystal_beam() do true
     else if id == C.palm_frond() do true
     else if id == C.oak_leaves() do
       let below = nb_get(c, n, s, e, w, x, y - 1, z)
       if below == 0 do false else if C.is_water(below) do false else if C.is_foliage(below) do false else !C.is_log(below) end end end
-    else false end end end end
+    else false end end end end end
   end
 
   -- Frond direction (Model.frond's 0..7) for the blade pointing away from (sx, sz).
@@ -580,7 +586,9 @@ mod CubeForge.Mesher do
       let x = i % 16
       let y = i / 256
       let z = (i / 16) % 16
-      let model = if id == 0 do false else if !C.is_cutout(id) do false else is_model(c, n, s, e, w, x, y, z, id) end end
+      -- a crystal beam block is a model too, but its geometry comes from
+      -- beam_geometry, not from a template
+      let model = if id == 0 do false else if !C.is_cutout(id) do false else if id == C.crystal_beam() do false else is_model(c, n, s, e, w, x, y, z, id) end end end
       if !model do stamp_go(b, m, c, n, s, e, w, la, lb, oxi, ozi, ox, oz, i + 1, stop)
       else
         let sky = int_to_float(CubeForge.Light.get(la, oxi + x, y, ozi + z)) /. 15.0
@@ -589,6 +597,56 @@ mod CubeForge.Mesher do
         stamp_go(stamp(b, m, k, ox +. int_to_float(x), int_to_float(y), oz +. int_to_float(z), Vx.pack_shade(sky, blk)), m, c, n, s, e, w, la, lb, oxi, ozi, ox, oz, i + 1, stop)
       end
     end
+  end
+
+  doc "An empty beam geometry: what every section without a crystal beam carries."
+  fn no_beam_geo() : CubeForge.F32Buf.F32Buf do B.new(1) end
+
+  doc """
+  A key for the crystal beam blocks of section [sy] of [c]: 0 when it has
+  none, else a hash of which blocks they are. ChunkMesh keeps a section's
+  beam_geometry as long as this does not change; the geometry depends on
+  nothing else (the beams come from the seed, the cut from the blocks).
+  """
+  fn beam_key(c : CubeForge.Chunk.Chunk, sy : Int) : Int do beam_key_go(c, sy * 4096, (sy + 1) * 4096, 0) end
+  pfn beam_key_go(c : CubeForge.Chunk.Chunk, i : Int, stop : Int, acc : Int) : Int do
+    if i >= stop do acc
+    else beam_key_go(c, i + 1, stop, if C.get_idx(c, i) == C.crystal_beam() do (acc * 31 + i + 1) % 1000000007 else acc end) end
+  end
+
+  -- One crystal beam block, cut into 8x8x8 sub-cubes against the exact prisms
+  -- of the beams that pass through it (Poi.beam_grid, with a margin from the
+  -- blocks around it), greedy-meshed like any model grid, and stamped into
+  -- place UNLIT: its light slot carries the block's local index (2 * i packs
+  -- as a block level of i, which stamp writes as i / 255), for cf_f32_relight
+  -- to look the light up at every remesh. A block no beam reaches (a sliver
+  -- the skin let through, or a block placed by hand) draws nothing.
+  pfn beam_block(b : CubeForge.F32Buf.F32Buf, beams : NativeF32Arr, i : Int, fx : Float, fy : Float, fz : Float) : CubeForge.F32Buf.F32Buf do
+    let near = CubeForge.Poi.beam_near(beams, fx, fy, fz)
+    if CubeForge.Poi.beam_count(near) == 0 do b
+    else
+      let gn = CubeForge.Poi.beam_grid_n()
+      let t = CubeForge.Model.template_inner(CubeForge.Poi.beam_grid(near, fx, fy, fz), gn, 1)
+      -- the template spans the whole margin grid over [0, 1]; scaled about its
+      -- centre so the inner 8 cells land on the block
+      B.stamp_xf(b, B.storage(t), 0, B.len(t), fx +. 0.5, fy +. 0.5, fz +. 0.5, 2.0 *. int_to_float(i), 1.0, 0.0, int_to_float(gn) /. int_to_float(gn - 2))
+    end
+  end
+  pfn beam_geometry_go(b : CubeForge.F32Buf.F32Buf, beams : NativeF32Arr, c : CubeForge.Chunk.Chunk, ox : Float, oz : Float, i : Int, stop : Int) : CubeForge.F32Buf.F32Buf do
+    if i >= stop do b
+    else if C.get_idx(c, i) != C.crystal_beam() do beam_geometry_go(b, beams, c, ox, oz, i + 1, stop)
+    else beam_geometry_go(beam_block(b, beams, i, ox +. int_to_float(i % 16), int_to_float(i / 256), oz +. int_to_float((i / 16) % 16)), beams, c, ox, oz, i + 1, stop) end end
+  end
+  doc """
+  The crystal beam geometry of section [sy] of chunk [c] at local origin (ox,
+  oz), unlit, cut against [beams] (Poi.beam_table for the chunk). The
+  expensive part of a cavern's mesh -- hundreds of milliseconds for a section
+  of beams -- and it depends only on the blocks and the beams, so ChunkMesh
+  builds it once (beam_key) and every remesh re-lights it.
+  """
+  fn beam_geometry(c : CubeForge.Chunk.Chunk, sy : Int, ox : Float, oz : Float, beams : NativeF32Arr) : CubeForge.F32Buf.F32Buf do
+    if CubeForge.Poi.beam_count(beams) == 0 do no_beam_geo()
+    else beam_geometry_go(B.new(4096), beams, c, ox, oz, sy * 4096, (sy + 1) * 4096) end
   end
 
   pfn water_section_go(b : CubeForge.F32Buf.F32Buf, c : CubeForge.Chunk.Chunk, n : CubeForge.Chunk.Chunk, s : CubeForge.Chunk.Chunk,

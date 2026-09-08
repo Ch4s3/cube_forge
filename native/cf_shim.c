@@ -312,10 +312,11 @@ static const char *FS =
     /* Block light (glowing fungus, later any emissive block): warm, and its own
      * source rather than a sun term. */
     "const vec3  GLOW = vec3(1.00, 0.90, 0.70);\n"
-    /* Block light carries a colour index (Light.colour_cold): the cold, near-white
-     * cast of selenite, so a crystal cavern's walls are lit by what is in it
-     * rather than by the same orange as a glowing mushroom. */
-    "const vec3  GLOW_COLD = vec3(0.82, 0.94, 1.00);\n"
+    /* Block light carries a colour index (Light.colour_cold, a name now slightly
+     * wrong): selenite's light. Naica under lamps is a warm white-gold, brighter
+     * and far whiter than the orange a glowing mushroom throws -- a blue tint,
+     * the first choice here, read as an ice cave. */
+    "const vec3  GLOW_COLD = vec3(1.00, 0.97, 0.90);\n"
     /* Deep water. A water fragment has no idea how much water is under it --
      * its colour is a texture times the light -- so a 24-block lagoon rendered
      * exactly like a puddle. Still water (effect 10) carries its depth in
@@ -575,7 +576,19 @@ static const char *FS =
      * glowing mushroom. This fixes the emitter's own faces; the light it casts
      * on the rock around it is still warm, and fixing that needs three
      * block-light fields. */
-    "  vec3  glow = (fe == 12) ? t.rgb * 1.15 : ((lci == 1) ? GLOW_COLD : GLOW);\n"
+    /* A self-lit face is also SHADED by its direction, a fixed top-bright,
+     * bottom-dark factor, because without it every face of a beam came out the
+     * same clipped white and a chamber of beams was a wall of white cubes with
+     * no edges. Selenite is not a light source; it is a pale solid under lamps,
+     * and a solid reads as a solid by its faces differing. The glow is a flat
+     * 1.18 so the texel's own colour is applied once (t.rgb * glow), not
+     * squared: squared, cream came out grey. */
+    "  float sdir = (v_normal.y > 0.5) ? 1.00 : ((v_normal.y < -0.5) ? 0.52 : (abs(v_normal.x) > 0.5 ? 0.80 : 0.68));\n"
+    /* And a glassy rim: a face seen edge-on is brighter than one seen square,
+     * the way light comes back off the sides of anything translucent. Cheap
+     * Fresnel, one dot with the eye vector the flashlight already has. */
+    "  float rim  = 1.0 - abs(dot(v_normal, normalize(u_eye - v_world)));\n"
+    "  vec3  glow = (fe == 12) ? vec3(1.10 * sdir * (0.80 + 0.55 * rim * rim)) : ((lci == 1) ? GLOW_COLD : GLOW);\n"
     "  vec3  world = max(baked, bl * glow) + vec3(flash);\n"
     /* Overlays (HUD, outline, map marker) share this program but are not part of
      * the world: they keep their own vertex shade and skip lighting entirely. */
@@ -1535,6 +1548,126 @@ void *cf_f32_stamp(void *dst, int64_t di, void *src, int64_t si, int64_t n, doub
         d[i + 6] = (float)(shade - 2.0 * blk);
         d[i + 7] = s[i + 7]; d[i + 8] = s[i + 8];
         d[i + 9] = (float)(blk / 255.0);
+    }
+    return dst;
+}
+
+/* ── Crystal beams (CubeForge.Poi's beam field) ─────────────────────────────
+ * A beam table is eight floats a beam (Poi.beam_stride): both ends of the
+ * axis, the radius, one spare. The signed distance of a point to a beam's
+ * surface is the March function Poi.beam_sd, transcribed: the nearest point
+ * on the axis, the offset from it, the offset split into a horizontal
+ * cross-section basis (e1 = (dz, 0, -dx), and the rest by Pythagoras), an
+ * OCTAGONAL norm, minus the radius tapered to a chisel point over the last
+ * 28% at each end (Poi.beam_taper). The March versions stay as the reference
+ * and a test holds these to them; they are here because a cavern chunk asks
+ * the distance 864 thousand times and March took 320 ns a call. */
+static double cf_beam_sd1(const float *b, double px, double py, double pz) {
+    double ax = b[0], ay = b[1], az = b[2];
+    double dx = b[3] - ax, dy = b[4] - ay, dz = b[5] - az;
+    double rad = b[6];
+    double len2 = dx * dx + dy * dy + dz * dz;
+    double t = 0.0;
+    if (len2 > 0.0001) {
+        t = ((px - ax) * dx + (py - ay) * dy + (pz - az) * dz) / len2;
+        if (t < 0.0) t = 0.0; else if (t > 1.0) t = 1.0;
+    }
+    double ox = px - (ax + dx * t), oy = py - (ay + dy * t), oz = pz - (az + dz * t);
+    double r2 = ox * ox + oy * oy + oz * oz;
+    double h = sqrt(dx * dx + dz * dz);
+    double a = (h < 0.0001) ? ox : (ox * dz - oz * dx) / h;
+    double b2 = r2 - a * a;
+    double bb = (b2 <= 0.0) ? 0.0 : sqrt(b2);
+    double fa = fabs(a);
+    double d = fa > bb ? fa : bb;
+    double oct = (fa + bb) * 0.7071;
+    if (oct > d) d = oct;
+    double e = fabs(2.0 * t - 1.0);
+    double taper = (e <= 0.72) ? 1.0 : (1.0 - e) / 0.28;
+    return d - rad * taper;
+}
+/* Signed distance, in blocks, from (x, y, z) to the nearest beam surface of the table; 9 when the table is empty. */
+double cf_beam_min_sd(void *tbl, double x, double y, double z) {
+    const float *t = (const float *)narr_data(tbl);
+    int64_t n = narr_len(tbl) / 8;
+    double best = 9.0;
+    for (int64_t i = 0; i < n; i++) {
+        double d = cf_beam_sd1(t + 8 * i, x, y, z);
+        if (d < best) best = d;
+    }
+    return best;
+}
+/* Fill a Model grid gn a side for the block whose min corner is (x0, y0, z0):
+ * cell (gx, gy, gz) is the sub-cube at ((g - 1) + 0.5) / 8 from the corner,
+ * so the outer ring is a one-sub-cube margin from the neighbouring blocks,
+ * and a cell is set to [colour] when its centre is inside any beam. Cells
+ * with two or more margin coordinates (the margin's edges and corners) touch
+ * no face of the inner cube and are skipped. Poi.beam_grid_ref is the same
+ * in March. Same rc == 1 contract as cf_f32_blit. */
+void *cf_beam_grid(void *grid, void *tbl, double x0, double y0, double z0, int64_t gn, int64_t colour) {
+    int64_t rc = *(int64_t *)grid;
+    if (rc != 1) { fprintf(stderr, "cf_beam_grid: grid is shared (rc=%lld); refusing to write in place\n", (long long)rc); abort(); }
+    if (gn < 3 || narr_len(grid) < gn * gn * gn) { fprintf(stderr, "cf_beam_grid: grid too small\n"); abort(); }
+    unsigned char *g = (unsigned char *)narr_data(grid);
+    const float *t = (const float *)narr_data(tbl);
+    int64_t n = narr_len(tbl) / 8;
+    for (int64_t y = 0; y < gn; y++) {
+        int my = (y == 0 || y == gn - 1);
+        for (int64_t z = 0; z < gn; z++) {
+            int mz = (z == 0 || z == gn - 1);
+            if (my + mz >= 2) continue;
+            for (int64_t x = 0; x < gn; x++) {
+                int mx = (x == 0 || x == gn - 1);
+                if (mx + my + mz >= 2) continue;
+                double px = x0 + ((double)(x - 1) + 0.5) / 8.0;
+                double py = y0 + ((double)(y - 1) + 0.5) / 8.0;
+                double pz = z0 + ((double)(z - 1) + 0.5) / 8.0;
+                for (int64_t i = 0; i < n; i++) {
+                    if (cf_beam_sd1(t + 8 * i, px, py, pz) < 0.0) { g[x + gn * (z + gn * y)] = (unsigned char)colour; break; }
+                }
+            }
+        }
+    }
+    return grid;
+}
+
+/* Copy n floats of vertices from src[si..] to dst[di..], re-lighting each from
+ * the light fields: the cached geometry of a chunk section's crystal beams
+ * (Mesher.beam_geometry) carries, in its block-light slot, the LOCAL INDEX of
+ * the block it was cut from (as index / 255, exact on the way back), and this
+ * looks that block's sky and block light up in [la] / [lb] at the section's
+ * window origin (oxi, ozi). The cut is the expensive part -- 400 ms for a
+ * section of beams -- and it depends only on the beams; the light is what a
+ * remesh changes, so the light is all a remesh recomputes. Same rc == 1
+ * contract as cf_f32_blit. */
+void *cf_f32_relight(void *dst, int64_t di, void *src, int64_t si, int64_t n, void *la, void *lb, int64_t oxi, int64_t ozi) {
+    int64_t rc = *(int64_t *)dst;
+    if (rc != 1) { fprintf(stderr, "cf_f32_relight: destination is shared (rc=%lld); refusing to write in place\n", (long long)rc); abort(); }
+    if (n <= 0) return dst;
+    if (di < 0 || si < 0 || di + n > narr_len(dst) || si + n > narr_len(src) || n % CF_VERT_FLOATS != 0) {
+        fprintf(stderr, "cf_f32_relight: out of range (di=%lld si=%lld n=%lld dst=%lld src=%lld)\n",
+                (long long)di, (long long)si, (long long)n, (long long)narr_len(dst), (long long)narr_len(src));
+        abort();
+    }
+    float *d = (float *)narr_data(dst) + di;
+    const float *s = (const float *)narr_data(src) + si;
+    const unsigned char *A = (const unsigned char *)narr_data(la);
+    const unsigned char *B = (const unsigned char *)narr_data(lb);
+    int64_t la_n = narr_len(la), lb_n = narr_len(lb);
+    for (int64_t i = 0; i < n; i += CF_VERT_FLOATS) {
+        int64_t bi = (int64_t)(s[i + 9] * 255.0f + 0.5f);
+        int64_t x = oxi + bi % 16, y = bi / 256, z = ozi + (bi / 16) % 16;
+        double sky = 0.0, blk = 0.0;
+        if (x >= 0 && x < 128 && y >= 0 && y < 256 && z >= 0 && z < 128) {
+            int64_t idx = x + 128 * (z + 128 * y);
+            if (idx < la_n) sky = (A[idx] & 15) / 15.0;
+            if (idx < lb_n) blk = (B[idx] & 15) / 15.0;
+        }
+        d[i + 0] = s[i + 0]; d[i + 1] = s[i + 1]; d[i + 2] = s[i + 2];
+        d[i + 3] = s[i + 3]; d[i + 4] = s[i + 4]; d[i + 5] = s[i + 5];
+        d[i + 6] = (float)sky;
+        d[i + 7] = s[i + 7]; d[i + 8] = s[i + 8];
+        d[i + 9] = (float)blk;
     }
     return dst;
 }
