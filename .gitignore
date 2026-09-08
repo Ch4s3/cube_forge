@@ -5,3 +5,8 @@ test_saves_tmp/
 
 # every forge build dir, the probes included
 **/.march/
+
+# scratch/shot.sh writes here when it is run without -o
+/shot.png
+/shot.bmp
+/shot.log
