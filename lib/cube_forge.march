@@ -2445,6 +2445,13 @@ mod CubeForge do
     else 0 end end end end end end end end end
   end
 
+  doc "The yaw CF_AUTOROAM adds this frame: none for the straight run, a steady turn for the last sixty frames of the period. 0 when the knob is off."
+  pfn roam_yaw(period : Int, frame : Int) : Float do
+    if period <= 60 do 0.0
+    else if frame % period >= period - 60 do 0.3 /. CubeForge.Player.mouse_sens()
+    else 0.0 end end
+  end
+
   @[no_alloc(assume)]
   pfn read_input(autowalk : Bool, autospin : Float, autoswim : Bool, autodive : Bool) : CubeForge.Player.Input do
     -- CF_AUTOWALK=1: scripted forward walk for headless collision verification.
@@ -2795,10 +2802,18 @@ mod CubeForge do
                            Win.gfx_upload(menu_slot(), F32Buf.storage(mb), F32Buf.len(mb))
                            mb
                          else menubuf end
+          let roam = Env.get_int("CF_AUTOROAM", 0)
           let player1 = if ui_open do player
                         else
                       let ef = ui_effects(scene_ui(sc_drag))
-                      Player.update_with(player, read_input(autowalk, autospin, (autoswim && frame >= 320) || Env.get_int("CF_AUTOJUMP", 0) == 1, autodive && frame >= 320), scene_world(sc_drag), dt,
+                      -- CF_AUTOROAM=<period>: a scripted walk that goes somewhere.
+                      -- CF_AUTOWALK alone holds forward, so it leans on the first
+                      -- hill it meets and the window never slides again -- every
+                      -- seed tried stopped within fifteen blocks of its spawn.
+                      -- This turns for the last sixty frames of every period, so
+                      -- the walk is a series of straight runs on different
+                      -- headings and streams chunks for as long as it is given.
+                      Player.update_with(player, read_input(autowalk, autospin +. roam_yaw(roam, frame), (autoswim && frame >= 320) || Env.get_int("CF_AUTOJUMP", 0) == 1, autodive && frame >= 320), scene_world(sc_drag), dt,
                                          Effects.speed_mult(ef, now), Effects.jump_mult(ef, now), Effects.swim_mult(ef, now))
                     end
           let view1 = write_view(player1, view)
@@ -3135,7 +3150,15 @@ mod CubeForge do
             fields_bench(bw, 1, 0, workers, "x2  ")
           else () end
           -- Everything this frame's relights made dirty, in one upload.
+          -- The dirty light box is a single union that only ever widens, so two
+          -- relights at opposite corners of a frame make one box over most of
+          -- the window and the flush stages and uploads ~19 MB. Eight frames in
+          -- eight thousand, but they are the worst frames the game has -- 51 to
+          -- 56 ms inside a 63 to 69 ms frame. Under CF_AUTOFLOW a slow flush
+          -- names itself, so the next one does not have to be hunted again.
+          let fl0 = Win.time()
           Win.gfx_flush_light(World.light(scene_world(sc1)), World.block_light(scene_world(sc1)))
+          if autoflow >= 0 && Win.time() -. fl0 > 0.004 do println("slow light flush " ++ int_to_string(frame) ++ " phase " ++ int_to_string(frame % tick_period()) ++ ": " ++ ms(Win.time() -. fl0)) else () end
           let cull = Env.get_int("CF_CULL", 1) == 1 && !map_mode1
           let cside = World.side(scene_world(sc1))
           let ndrawn = draw_chunks(scene_counts(sc1), 0, nchunks, render_vp, cull, cside, 0)
